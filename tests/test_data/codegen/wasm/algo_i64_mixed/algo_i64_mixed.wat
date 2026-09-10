@@ -15,7 +15,7 @@
   (export "is_odd" (func $is_odd))
   (export "sum_range_i64" (func $sum_range_i64))
   (func $factorial_i64 (;0;) (type 0) (param $n i64) (result i64)
-    (local $one i64) (local $result i64) (local $i i64)
+    (local $one i64) (local $result i64) (local $i i64) (local i64 i64 i64)
     i64.const 1
     local.set $one
     local.get $n
@@ -38,11 +38,55 @@
         br_if 1 (;@1;)
         local.get $result
         local.get $i
+        local.set 5
+        local.tee 4
+        local.get 5
         i64.mul
+        local.set 6
+        local.get 5
+        i64.const 0
+        i64.ne
+        if ;; label = @3
+          local.get 5
+          i64.const -1
+          i64.eq
+          if ;; label = @4
+            local.get 4
+            i64.const -9223372036854775808
+            i64.eq
+            if ;; label = @5
+              unreachable
+            end
+          else
+            local.get 6
+            local.get 5
+            i64.div_s
+            local.get 4
+            i64.ne
+            if ;; label = @5
+              unreachable
+            end
+          end
+        end
+        local.get 6
         local.set $result
         local.get $i
         local.get $one
+        local.set 5
+        local.tee 4
+        local.get 5
         i64.add
+        local.tee 6
+        local.get 4
+        i64.lt_s
+        local.get 5
+        i64.const 0
+        i64.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 6
         local.set $i
         br 0 (;@2;)
       end
@@ -52,7 +96,7 @@
     unreachable
   )
   (func $fibonacci_i64 (;1;) (type 1) (param $n i64) (result i64)
-    (local $zero i64) (local $one i64) (local $a i64) (local $b i64) (local $i i64) (local $next i64)
+    (local $zero i64) (local $one i64) (local $a i64) (local $b i64) (local $i i64) (local $next i64) (local i64 i64 i64)
     i64.const 0
     local.set $zero
     i64.const 1
@@ -86,7 +130,21 @@
         br_if 1 (;@1;)
         local.get $a
         local.get $b
+        local.set 8
+        local.tee 7
+        local.get 8
         i64.add
+        local.tee 9
+        local.get 7
+        i64.lt_s
+        local.get 8
+        i64.const 0
+        i64.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 9
         local.set $next
         local.get $b
         local.set $a
@@ -94,7 +152,21 @@
         local.set $b
         local.get $i
         local.get $one
+        local.set 8
+        local.tee 7
+        local.get 8
         i64.add
+        local.tee 9
+        local.get 7
+        i64.lt_s
+        local.get 8
+        i64.const 0
+        i64.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 9
         local.set $i
         br 0 (;@2;)
       end
@@ -104,7 +176,7 @@
     unreachable
   )
   (func $gcd_i64 (;2;) (type 2) (param $a i64) (param $b i64) (result i64)
-    (local $zero i64) (local $x i64) (local $y i64) (local $t i64)
+    (local $zero i64) (local $x i64) (local $y i64) (local $t i64) (local i64 i64 i64)
     i64.const 0
     local.set $zero
     local.get $a
@@ -117,7 +189,21 @@
     if ;; label = @1
       local.get $zero
       local.get $x
+      local.set 7
+      local.tee 6
+      local.get 7
       i64.sub
+      local.tee 8
+      local.get 6
+      i64.lt_s
+      local.get 7
+      i64.const 0
+      i64.gt_s
+      i32.ne
+      if ;; label = @2
+        unreachable
+      end
+      local.get 8
       local.set $x
     end
     local.get $y
@@ -126,7 +212,21 @@
     if ;; label = @1
       local.get $zero
       local.get $y
+      local.set 7
+      local.tee 6
+      local.get 7
       i64.sub
+      local.tee 8
+      local.get 6
+      i64.lt_s
+      local.get 7
+      i64.const 0
+      i64.gt_s
+      i32.ne
+      if ;; label = @2
+        unreachable
+      end
+      local.get 8
       local.set $y
     end
     block ;; label = @1
@@ -152,7 +252,7 @@
     unreachable
   )
   (func $lcm_i64 (;3;) (type 3) (param $a i64) (param $b i64) (result i64)
-    (local $zero i64) (local $g i64)
+    (local $zero i64) (local $g i64) (local i64 i64 i64)
     i64.const 0
     local.set $zero
     local.get $a
@@ -177,7 +277,37 @@
     local.get $g
     i64.div_s
     local.get $b
+    local.set 5
+    local.tee 4
+    local.get 5
     i64.mul
+    local.set 6
+    local.get 5
+    i64.const 0
+    i64.ne
+    if ;; label = @1
+      local.get 5
+      i64.const -1
+      i64.eq
+      if ;; label = @2
+        local.get 4
+        i64.const -9223372036854775808
+        i64.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 6
+        local.get 5
+        i64.div_s
+        local.get 4
+        i64.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 6
     return
     unreachable
   )
@@ -200,7 +330,7 @@
     unreachable
   )
   (func $abs_i64 (;6;) (type 6) (param $x i64) (result i64)
-    (local $zero i64)
+    (local $zero i64) (local i64 i64 i64)
     i64.const 0
     local.set $zero
     local.get $x
@@ -210,6 +340,13 @@
       i64.const 0
       local.get $x
       i64.sub
+      local.tee 4
+      i64.const -9223372036854775808
+      i64.eq
+      if ;; label = @2
+        unreachable
+      end
+      local.get 4
       return
     end
     local.get $x
@@ -217,7 +354,7 @@
     unreachable
   )
   (func $sum_range_i64 (;7;) (type 7) (param $n i64) (result i64)
-    (local $zero i64) (local $one i64) (local $result i64) (local $i i64)
+    (local $zero i64) (local $one i64) (local $result i64) (local $i i64) (local i64 i64 i64)
     i64.const 0
     local.set $zero
     i64.const 1
@@ -239,11 +376,39 @@
     if ;; label = @1
       local.get $result
       local.get $i
+      local.set 6
+      local.tee 5
+      local.get 6
       i64.add
+      local.tee 7
+      local.get 5
+      i64.lt_s
+      local.get 6
+      i64.const 0
+      i64.lt_s
+      i32.ne
+      if ;; label = @2
+        unreachable
+      end
+      local.get 7
       local.set $result
       local.get $i
       local.get $one
+      local.set 6
+      local.tee 5
+      local.get 6
       i64.add
+      local.tee 7
+      local.get 5
+      i64.lt_s
+      local.get 6
+      i64.const 0
+      i64.lt_s
+      i32.ne
+      if ;; label = @2
+        unreachable
+      end
+      local.get 7
       local.set $i
       local.get $i
       local.get $n
@@ -251,11 +416,39 @@
       if ;; label = @2
         local.get $result
         local.get $i
+        local.set 6
+        local.tee 5
+        local.get 6
         i64.add
+        local.tee 7
+        local.get 5
+        i64.lt_s
+        local.get 6
+        i64.const 0
+        i64.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 7
         local.set $result
         local.get $i
         local.get $one
+        local.set 6
+        local.tee 5
+        local.get 6
         i64.add
+        local.tee 7
+        local.get 5
+        i64.lt_s
+        local.get 6
+        i64.const 0
+        i64.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 7
         local.set $i
         local.get $i
         local.get $n
@@ -263,11 +456,39 @@
         if ;; label = @3
           local.get $result
           local.get $i
+          local.set 6
+          local.tee 5
+          local.get 6
           i64.add
+          local.tee 7
+          local.get 5
+          i64.lt_s
+          local.get 6
+          i64.const 0
+          i64.lt_s
+          i32.ne
+          if ;; label = @4
+            unreachable
+          end
+          local.get 7
           local.set $result
           local.get $i
           local.get $one
+          local.set 6
+          local.tee 5
+          local.get 6
           i64.add
+          local.tee 7
+          local.get 5
+          i64.lt_s
+          local.get 6
+          i64.const 0
+          i64.lt_s
+          i32.ne
+          if ;; label = @4
+            unreachable
+          end
+          local.get 7
           local.set $i
           local.get $i
           local.get $n
@@ -275,11 +496,39 @@
           if ;; label = @4
             local.get $result
             local.get $i
+            local.set 6
+            local.tee 5
+            local.get 6
             i64.add
+            local.tee 7
+            local.get 5
+            i64.lt_s
+            local.get 6
+            i64.const 0
+            i64.lt_s
+            i32.ne
+            if ;; label = @5
+              unreachable
+            end
+            local.get 7
             local.set $result
             local.get $i
             local.get $one
+            local.set 6
+            local.tee 5
+            local.get 6
             i64.add
+            local.tee 7
+            local.get 5
+            i64.lt_s
+            local.get 6
+            i64.const 0
+            i64.lt_s
+            i32.ne
+            if ;; label = @5
+              unreachable
+            end
+            local.get 7
             local.set $i
             local.get $i
             local.get $n
@@ -287,7 +536,21 @@
             if ;; label = @5
               local.get $result
               local.get $i
+              local.set 6
+              local.tee 5
+              local.get 6
               i64.add
+              local.tee 7
+              local.get 5
+              i64.lt_s
+              local.get 6
+              i64.const 0
+              i64.lt_s
+              i32.ne
+              if ;; label = @6
+                unreachable
+              end
+              local.get 7
               local.set $result
             end
           end
@@ -298,4 +561,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\06\00\01\02\03\06\07")
 )

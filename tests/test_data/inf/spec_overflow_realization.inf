@@ -1,11 +1,11 @@
 // Arithmetic that traps on overflow, and the obligation that makes the trap
 // mean something.
 //
-// `checked(...)` puts an overflow guard on the operator inside it: the
-// multiply is followed by a division that reproduces one operand, and a
-// mismatch reaches `unreachable`. Nothing in the module record says that trap
-// is unreachable — `ValidModule` is the structural typing judgment, which
-// reduces no instruction and could not carry such a clause.
+// `+`, `-`, `*` and unary `-` carry an overflow guard: the multiply below is
+// followed by a division that reproduces one operand, and a mismatch reaches
+// `unreachable`. Nothing in the module record says that trap is unreachable —
+// `ValidModule` is the structural typing judgment, which reduces no instruction
+// and could not carry such a clause.
 //
 // What carries it is `HA_app_ok`, the atom a bare statement call in a
 // specification body emits. Downstream it denotes that the application is
@@ -17,11 +17,11 @@
 //
 // The guard is the whole of what makes these obligations about overflow. An
 // obligation's own arithmetic is the wrapping machine operator and always
-// will be, so the emitted `hspec` of the same specification over an unmarked
-// `fixmul` is byte-for-byte the text below and is unconditionally true: with
-// no trap in the callee, every argument pair reduces to a value and the
-// envelope constrains nothing. The annotation is what puts a trap in the body
-// the claim is about; the envelope is what rules it out.
+// will be, so the emitted `hspec` of the same specification over a `fixmul`
+// written `wrapping(a * b)` is byte-for-byte the text below and is
+// unconditionally true: with no trap in the callee, every argument pair reduces
+// to a value and the envelope constrains nothing. The guard is what puts a trap
+// in the body the claim is about; the envelope is what rules it out.
 //
 // A note on what the Rocq type-check gate can and cannot say about this file.
 // It establishes that the emitted `.v` elaborates. It cannot establish that
@@ -38,7 +38,7 @@
 // narrowing check at i8 and i16.
 pub fn fixmul(a: i64, b: i64) -> i64 {
   const ONE: i64 = 1048576;
-  return checked(a * b) / ONE;
+  return a * b / ONE;
 }
 
 // The narrow row. An `i8` operator is performed at `i32` and narrowed back, so
@@ -46,7 +46,7 @@ pub fn fixmul(a: i64, b: i64) -> i64 {
 // different shape from the full-width rows above, and the cheapest one to
 // discharge.
 pub fn bump(x: i8) -> i8 {
-  return checked(x + 1);
+  return x + 1;
 }
 
 spec OverflowRealization {

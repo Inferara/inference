@@ -50,9 +50,40 @@
   (export "narrow_div_left" (func $narrow_div_left))
   (export "narrow_wrap_const" (func $narrow_wrap_const))
   (func $scale (;0;) (type 0) (param $v i64) (param $factor i64) (result i64)
+    (local i64 i64 i64)
     local.get $v
     local.get $factor
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.mul
+    local.set 4
+    local.get 3
+    i64.const 0
+    i64.ne
+    if ;; label = @1
+      local.get 3
+      i64.const -1
+      i64.eq
+      if ;; label = @2
+        local.get 2
+        i64.const -9223372036854775808
+        i64.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 4
+        local.get 3
+        i64.div_s
+        local.get 2
+        i64.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 4
     return
     unreachable
   )
@@ -69,9 +100,24 @@
     unreachable
   )
   (func $add_literal (;3;) (type 3) (param $a i64) (result i64)
+    (local i64 i64 i64)
     local.get $a
     i64.const 65536
+    local.set 2
+    local.tee 1
+    local.get 2
     i64.add
+    local.tee 3
+    local.get 1
+    i64.lt_s
+    local.get 2
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -105,9 +151,17 @@
     unreachable
   )
   (func $return_parenthesized_negation (;8;) (type 8) (result i64)
+    (local i64 i64 i64)
     i64.const 0
     i64.const 42
     i64.sub
+    local.tee 2
+    i64.const -9223372036854775808
+    i64.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 2
     return
     unreachable
   )
@@ -131,13 +185,35 @@
     unreachable
   )
   (func $nested_literal_expression (;12;) (type 12) (result i64)
+    (local i64 i64 i64)
     i64.const 0
     i64.const 65536
     i64.const 1
     i64.const 40
     i64.shl
+    local.set 1
+    local.tee 0
+    local.get 1
     i64.add
+    local.tee 2
+    local.get 0
+    i64.lt_s
+    local.get 1
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 2
     i64.sub
+    local.tee 2
+    i64.const -9223372036854775808
+    i64.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 2
     return
     unreachable
   )
@@ -148,6 +224,7 @@
     unreachable
   )
   (func $narrow_peer (;14;) (type 14) (param $x i32) (result i32)
+    (local i32 i32 i32)
     local.get $x
     i32.const 255
     i32.and
@@ -155,8 +232,16 @@
     local.get $x
     i32.const 1
     i32.add
+    local.tee 1
     i32.const 255
     i32.and
+    local.tee 2
+    local.get 1
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 2
     return
     unreachable
   )
@@ -175,9 +260,40 @@
     unreachable
   )
   (func $fixed_mul (;17;) (type 17) (param $a i64) (param $b i64) (result i64)
+    (local i64 i64 i64)
     local.get $a
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.mul
+    local.set 4
+    local.get 3
+    i64.const 0
+    i64.ne
+    if ;; label = @1
+      local.get 3
+      i64.const -1
+      i64.eq
+      if ;; label = @2
+        local.get 2
+        i64.const -9223372036854775808
+        i64.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 4
+        local.get 3
+        i64.div_s
+        local.get 2
+        i64.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 4
     i64.const 16
     i64.shr_s
     return
@@ -193,9 +309,24 @@
     unreachable
   )
   (func $fixed_round_to_int (;19;) (type 19) (param $x i64) (result i64)
+    (local i64 i64 i64)
     local.get $x
     i64.const 32768
+    local.set 2
+    local.tee 1
+    local.get 2
     i64.add
+    local.tee 3
+    local.get 1
+    i64.lt_s
+    local.get 2
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     i64.const 16
     i64.shr_s
     return
@@ -254,4 +385,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\07\00\03\08\0c\0e\11\13")
 )

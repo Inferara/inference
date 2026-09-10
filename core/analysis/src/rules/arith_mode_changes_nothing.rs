@@ -23,9 +23,9 @@
 //! ## What counts as changing something
 //!
 //! The comparison is against the *enclosing* effective mode, never against the
-//! default alone. `checked(a * wrapping(b + c))` is redundant nowhere under a
-//! wrapping default: the outer annotation changes the `*`, and the inner one
-//! restores wrapping inside a region the outer had made checked.
+//! default alone. `wrapping(a * checked(b + c))` is redundant nowhere under the
+//! checked default: the outer annotation changes the `*`, and the inner one
+//! restores the trapping mode inside a region the outer had made modular.
 //!
 //! ## One finding per stack
 //!

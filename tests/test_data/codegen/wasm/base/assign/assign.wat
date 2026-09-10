@@ -39,12 +39,26 @@
     unreachable
   )
   (func $assign_from_expr (;2;) (type 2) (result i32)
-    (local $x i32)
+    (local $x i32) (local i32 i32 i32)
     i32.const 0
     local.set $x
     i32.const 1
     i32.const 2
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.add
+    local.tee 3
+    local.get 1
+    i32.lt_s
+    local.get 2
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     local.set $x
     local.get $x
     return
@@ -119,4 +133,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\01\02")
 )

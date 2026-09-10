@@ -74,7 +74,7 @@
     unreachable
   )
   (func $test_both_get_y (;2;) (type 2) (result i32)
-    (local $p i32) (local $s i32) (local $__frame_ptr i32)
+    (local $p i32) (local $s i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -112,7 +112,21 @@
     call $Point.get_y
     local.get $s
     call $Size.get_y
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -148,4 +162,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\01\02")
 )

@@ -317,6 +317,15 @@ pub(super) const CASES: &[CaseSpec] = &[
         2,
         0,
     ),
+    CaseSpec::new(
+        "overflow",
+        "spec_overflow_realization.inf",
+        "spec_overflow_realization",
+        Linkage::SingleFile,
+        "tests/test_data/rocq/spec_overflow_realization.v",
+        2,
+        0,
+    ),
 ];
 
 #[cfg(test)]
@@ -402,13 +411,22 @@ mod tests {
                     2,
                     0,
                 ),
+                (
+                    "overflow",
+                    "spec_overflow_realization.inf",
+                    "spec_overflow_realization",
+                    vec![],
+                    "spec_overflow_realization.v",
+                    2,
+                    0,
+                ),
             ]
         );
     }
 
     #[test]
     fn selected_case_ids_and_basenames_are_unique_and_safe() {
-        assert_eq!(CASES.len(), 6, "the uniqueness checks must cover six cases");
+        assert_eq!(CASES.len(), 7, "the uniqueness checks must cover seven cases");
         let mut ids = BTreeSet::new();
         let mut basenames = BTreeSet::new();
 
@@ -437,14 +455,14 @@ mod tests {
     }
 
     #[test]
-    fn selected_case_floor_is_six_cases_thirteen_proved_one_refuted() {
-        assert_eq!(CASES.len(), 6);
+    fn selected_case_floor_is_seven_cases_fifteen_proved_one_refuted() {
+        assert_eq!(CASES.len(), 7);
         assert_eq!(
             CASES
                 .iter()
                 .map(|case| case.expected_proved())
                 .sum::<usize>(),
-            13
+            15
         );
         assert_eq!(
             CASES
@@ -541,7 +559,7 @@ mod tests {
 
     #[test]
     fn selected_case_counts_agree_with_committed_golden_theorems() {
-        assert_eq!(CASES.len(), 6, "the golden checks must cover six cases");
+        assert_eq!(CASES.len(), 7, "the golden checks must cover seven cases");
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("tests crate has a repository parent");

@@ -93,6 +93,45 @@ mod checked_arith_tests {
         assert_wasms_modules_equivalence(compile.wasm(), proof.wasm());
     }
 
+    /// The issue's own reproducer, written the way a program that means to wrap
+    /// writes it: it returns the number the language returned for it before any
+    /// of this existed.
+    ///
+    /// The trapping half is the fixture's `run`, which is unannotated like every
+    /// other row of the catalogue. This half is inline rather than a second pair
+    /// of functions in that fixture so the catalogue's golden stays exactly the
+    /// module it was: those bytes were produced when each row was written
+    /// `checked(...)` under a modular default, and they are still what the
+    /// fixture compiles to now that each row is written plainly under a checked
+    /// one — which is the whole of what removing the annotations was allowed to
+    /// do.
+    #[test]
+    fn the_modular_spelling_of_the_reproducer_returns_the_wrapped_product() {
+        let wasm = wasm_codegen(
+            "pub fn fixmul(a: i64, b: i64) -> i64 { \
+               const ONE: i64 = 1048576; \
+               return wrapping(a * b) / ONE; \
+             } \
+             pub fn run() -> i64 { \
+               const H: i64 = 4194304000; \
+               return fixmul(H, H); \
+             }",
+        );
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm).unwrap_or_else(|e| panic!("module build: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance =
+            Instance::new(&mut store, &module, &[]).unwrap_or_else(|e| panic!("instantiate: {e}"));
+        let run: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "run")
+            .expect("the module exports `run`");
+        // The true product `H * H` is 17592186044416000000, which sixty-four
+        // bits do not hold; wrapped and scaled back by `ONE` it is this. The
+        // value the fixed-point multiply is reaching for, 16777216000000, sits
+        // well inside `i64` — the overflow is in the intermediate.
+        assert_eq!(run.call(&mut store, ()).expect("call"), -814_970_044_416);
+    }
+
     #[test]
     fn a_same_kind_nesting_emits_one_guard_per_operator() {
         // Two additions under two annotations produce two guards in one

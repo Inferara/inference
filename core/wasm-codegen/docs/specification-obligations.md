@@ -330,14 +330,15 @@ So no-overflow reaches a proof the same way bounds do: the executable function g
 trap, and the obligation says the trap is not taken on the arguments the specification
 admits.
 
-`checked(e)` is what puts the trap there. Written around an operator, it emits a guard
-that traps through `unreachable` when the result leaves the operand type; without it the
-operator wraps and there is no trap site at all.
+The guard is what puts the trap there. `+`, `-`, `*` and unary `-` carry one wherever
+the source has not written `wrapping(...)` around them: it traps through `unreachable`
+when the result leaves the operand type. Inside a `wrapping(...)` the operator is the
+bare machine instruction and there is no trap site at all.
 
 ```inference
 pub fn fixmul(a: i64, b: i64) -> i64 {
   const ONE: i64 = 1048576;
-  return checked(a * b) / ONE;
+  return a * b / ONE;
 }
 
 spec OverflowRealization {
@@ -382,12 +383,13 @@ did not yield false.
 
 ### The guard is what makes the claim informative
 
-Compile the same specification against an unmarked `fixmul` and the emitted payload is
-**byte-for-byte the text above** — and unconditionally true. The unguarded body multiplies
-and then divides by `ONE`, which is neither zero nor `-1`, so nothing in it can trap for
-any `(a, b)`, the application is realized everywhere, and a proof may
-discharge the claim while ignoring every conjunct the author wrote. **P010** does not
-catch this: it tests for the exactly vacuous `HA_true`, and this obligation is not that.
+Compile the same specification against a `fixmul` whose multiply is written
+`wrapping(a * b)` and the emitted payload is **byte-for-byte the text above** — and
+unconditionally true. That body multiplies and then divides by `ONE`, which is neither
+zero nor `-1`, so nothing in it can trap for any `(a, b)`, the application is realized
+everywhere, and a proof may discharge the claim while ignoring every conjunct the author
+wrote. **P010** does not catch this: it tests for the exactly vacuous `HA_true`, and this
+obligation is not that.
 
 So the reading to avoid is that an envelope plus a bare call proves no-overflow. It
 proves no-overflow only where the callee has a trap for the envelope to rule out. An
@@ -407,7 +409,7 @@ that the application is realized becomes **false** rather than weaker. That asym
 worth knowing before reading a failing goal: a proof that stops closing after a one-bound
 edit failed for some other reason.
 
-A narrow operand needs less. `bump(x: i8) -> i8 { return checked(x + 1); }` under
+A narrow operand needs less. `bump(x: i8) -> i8 { return x + 1; }` under
 `assume { assert(x < 127); }` closes with one bound, because a drawn `i8` slot carries its
 declared value domain into the obligation already: the translator states `-128 <= x < 128`
 from the declaration, so the only value the envelope has to exclude is the one whose

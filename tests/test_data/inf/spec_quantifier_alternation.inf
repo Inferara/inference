@@ -15,12 +15,22 @@
 // because a `T_lvar` names nothing outside the quantifier that introduced it.
 // The claims are chosen to be true, so the emitted obligations are dischargeable
 // rather than merely well-typed.
+//
+// Both callees are spelled modular because of where one of them is applied.
+// `filtered_by_a_universal` applies `twice` inside an `assume`, and an
+// application that trapped there would not make the obligation false — it would
+// make the antecedent unsatisfiable, so the implication would hold for a reason
+// the source never states, which is worse than a refuted proof and which no
+// check on the payload's shape can see. `twice` would trap at `x = 1073741824`;
+// spelling it modular is what keeps that filter satisfiable and the obligation
+// about the alternation this fixture produces. `zero_of` can never leave its
+// type, and is spelled the same way so the pair reads as one decision.
 fn twice(n: i32) -> i32 {
-    return n + n;
+    return wrapping(n + n);
 }
 
 fn zero_of(n: i32) -> i32 {
-    return n - n;
+    return wrapping(n - n);
 }
 
 spec QuantifierAlternation {

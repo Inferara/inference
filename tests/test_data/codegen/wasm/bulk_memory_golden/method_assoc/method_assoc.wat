@@ -85,7 +85,7 @@
     unreachable
   )
   (func $test_origin (;2;) (type 2) (result i32)
-    (local $p i32) (local $__frame_ptr i32)
+    (local $p i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -103,7 +103,21 @@
     call $Point.get_x
     local.get $p
     call $Point.get_y
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -119,7 +133,7 @@
     unreachable
   )
   (func $test_mixed (;4;) (type 4) (result i32)
-    (local $p i32) (local $__frame_ptr i32)
+    (local $p i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -140,7 +154,21 @@
     i32.const 1
     i32.const 2
     call $Point.sum_of
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -322,9 +350,24 @@
     unreachable
   )
   (func $Point.sum_of (;14;) (type 14) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
@@ -342,4 +385,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\03\02\04\0e")
 )

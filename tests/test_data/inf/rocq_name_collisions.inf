@@ -11,8 +11,17 @@
 // corpus entry is translated under a name matching its own file stem while its
 // entry function is `main`, so a module name and a function name never coincide,
 // and no amount of corpus growth in that shape can ever produce the collision.
+//
+// The arithmetic below is modular by construction — a bump by one and a cube of
+// a value an `assume` pins to {-1, 0, 1} — and the `wrapping(...)` spelling is
+// what keeps that true of the program that ships. Two of the specification
+// functions here have retained bodies, which a reachability judgment reduces as
+// written and along with everything they call: an operator that could leave its
+// type in one of them would empty that body's observation set rather than
+// narrow its claim, and would make the three universal specs false at
+// `2147483647` as well.
 fn Me(x: i32) -> i32 {
-    return x + 1;
+    return wrapping(x + 1);
 }
 
 fn rocq_name_collisions(x: i32) -> i32 {
@@ -57,7 +66,7 @@ spec ReachEx {
         assume {
             assert(n >= lo);
         }
-        assert(rocq_name_collisions(n) == n + 1);
+        assert(rocq_name_collisions(n) == wrapping(n + 1));
     }
 }
 
@@ -74,7 +83,7 @@ spec ReachUq {
         assume {
             assert(bit == seed % 2);
         }
-        assert(bit * bit * bit == bit);
+        assert(wrapping(bit * bit * bit) == bit);
     }
 }
 

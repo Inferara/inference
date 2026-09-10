@@ -1,7 +1,11 @@
 // The canonical wasm-verifier PrimeExample, expressed in Inference: a faithful
 // executable `is_prime` (the `T_app` target of the spec obligation) paired with
 // the `forall` spec whose obligation reproduces `prime_hspec1`
-// (from wasm-verifier's `theories/examples/PrimeExample.v`) node-for-node.
+// (from wasm-verifier's `theories/examples/PrimeExample.v`) node for node under
+// one added antecedent, the upper bound on `n` below.
+// `rocq_prime_bounded_example.inf` states the same two antecedents in the same
+// order and differs from this fixture only in that bound's constant, which is
+// what keeps the two a controlled pair.
 //
 // `is_prime` is written without a return inside the loop (analysis rule A003):
 // it seeds a `result` flag, then clears it on finding any divisor. The loop's
@@ -32,6 +36,13 @@ fn is_prime(n: i32) -> bool {
 spec prime_properties {
     fn prime_spec() forall {
         let n: i32 = @;
+        // Trial division squares every `i` up to `floor(sqrt(n)) + 1`, so
+        // 2147395599 is the largest argument whose test stays inside `i32`:
+        // there `i` reaches 46340 and `46340 * 46340` is 2147395600. At
+        // 2147395600 the loop reaches 46341 and `46341 * 46341` is 2147488281,
+        // past the type — the concrete argument at which the claim below is
+        // false without this bound. `i + 1` cannot leave the type under it.
+        assume { assert(n <= 2147395599); }
         assume { assert(n > 1); }
         if is_prime(n) {
             let m: i32 = @;

@@ -203,7 +203,6 @@ mod regenerate {
             .join("codegen")
             .join("wasm")
             .join("binops_shift_edge")
-            .join("binops_shift_edge")
     }
 
     #[test]

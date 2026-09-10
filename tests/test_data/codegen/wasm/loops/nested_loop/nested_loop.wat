@@ -4,7 +4,7 @@
   (export "nested_count" (func $nested_count))
   (export "nested_break" (func $nested_break))
   (func $nested_count (;0;) (type 0) (result i32)
-    (local $total i32) (local $i i32) (local $j i32)
+    (local $total i32) (local $i i32) (local $j i32) (local i32 i32 i32)
     i32.const 0
     local.set $total
     i32.const 0
@@ -27,18 +27,60 @@
             br_if 1 (;@3;)
             local.get $total
             i32.const 1
+            local.set 4
+            local.tee 3
+            local.get 4
             i32.add
+            local.tee 5
+            local.get 3
+            i32.lt_s
+            local.get 4
+            i32.const 0
+            i32.lt_s
+            i32.ne
+            if ;; label = @5
+              unreachable
+            end
+            local.get 5
             local.set $total
             local.get $j
             i32.const 1
+            local.set 4
+            local.tee 3
+            local.get 4
             i32.add
+            local.tee 5
+            local.get 3
+            i32.lt_s
+            local.get 4
+            i32.const 0
+            i32.lt_s
+            i32.ne
+            if ;; label = @5
+              unreachable
+            end
+            local.get 5
             local.set $j
             br 0 (;@4;)
           end
         end
         local.get $i
         i32.const 1
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.add
+        local.tee 5
+        local.get 3
+        i32.lt_s
+        local.get 4
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 5
         local.set $i
         br 0 (;@2;)
       end
@@ -48,7 +90,7 @@
     unreachable
   )
   (func $nested_break (;1;) (type 1) (result i32)
-    (local $result i32) (local $i i32) (local $j i32)
+    (local $result i32) (local $i i32) (local $j i32) (local i32 i32 i32)
     i32.const 0
     local.set $result
     i32.const 0
@@ -72,18 +114,60 @@
             end
             local.get $result
             i32.const 1
+            local.set 4
+            local.tee 3
+            local.get 4
             i32.add
+            local.tee 5
+            local.get 3
+            i32.lt_s
+            local.get 4
+            i32.const 0
+            i32.lt_s
+            i32.ne
+            if ;; label = @5
+              unreachable
+            end
+            local.get 5
             local.set $result
             local.get $j
             i32.const 1
+            local.set 4
+            local.tee 3
+            local.get 4
             i32.add
+            local.tee 5
+            local.get 3
+            i32.lt_s
+            local.get 4
+            i32.const 0
+            i32.lt_s
+            i32.ne
+            if ;; label = @5
+              unreachable
+            end
+            local.get 5
             local.set $j
             br 0 (;@4;)
           end
         end
         local.get $i
         i32.const 1
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.add
+        local.tee 5
+        local.get 3
+        i32.lt_s
+        local.get 4
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 5
         local.set $i
         br 0 (;@2;)
       end
@@ -92,4 +176,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\02\00\01")
 )

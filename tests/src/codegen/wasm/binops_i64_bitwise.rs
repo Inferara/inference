@@ -171,7 +171,6 @@ mod binops_i64_bitwise_tests {
         let dir = get_test_data_path()
             .join("codegen")
             .join("wasm")
-            .join("binops_i64_bitwise")
             .join("binops_i64_bitwise");
         let source_code = std::fs::read_to_string(dir.join("binops_i64_bitwise.inf"))
             .expect("Failed to read binops_i64_bitwise.inf");

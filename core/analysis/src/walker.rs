@@ -8,7 +8,7 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, NodeId, StmtId};
 use inference_ast::nodes::{ArithMode, BlockKind, Def, Expr, GuardedOp, Stmt, UnaryOperatorKind};
 use inference_type_checker::StructInfo;
-use inference_type_checker::type_info::TypeInfoKind;
+use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::errors::NonDetBlockKind;
@@ -158,12 +158,43 @@ pub(crate) fn expr_children(
 /// arithmetic for an annotation to reach, and a node whose type was never
 /// recorded is not one this rule can speak about.
 pub(crate) fn governed_operator(ctx: &TypedContext, expr_id: ExprId) -> Option<GuardedOp> {
+    governed_operator_at(ctx, expr_id).map(|(op, _)| op)
+}
+
+/// [`governed_operator`] with the numeric type the operator is performed at.
+///
+/// One type serves the operands and the result — this language has no widening
+/// and no operator whose result is wider than what it consumed — so the type
+/// read off the operand is also the type a result has to fit, which is what the
+/// rule about a constant result leaving its type measures against.
+pub(crate) fn governed_operator_at(
+    ctx: &TypedContext,
+    expr_id: ExprId,
+) -> Option<(GuardedOp, NumberType)> {
     let (op, operand) = ctx.arena().guarded_operator(expr_id)?;
     let type_info = ctx.get_node_typeinfo(NodeId::Expr(operand))?;
     let TypeInfoKind::Number(number) = type_info.kind else {
         return None;
     };
-    number.has_operator(op).then_some(op)
+    number.has_operator(op).then_some((op, number))
+}
+
+/// Whether the literal text `value` names a number outside `number`'s range.
+///
+/// A022's whole condition, and the handoff A052 makes to it: an operation one of
+/// whose operands is a literal this answers `true` for is already reported, on
+/// that literal, so the operation says nothing further about it. Both rules read
+/// it here rather than restating the comparison, so the one that steps aside
+/// cannot start stepping aside for a shape the other has stopped covering.
+///
+/// A literal too large for `i128` is out of range at every width, which is the
+/// same reading the range comparison would give if the number could be held to
+/// make it.
+pub(crate) fn literal_leaves_range(value: &str, number: NumberType) -> bool {
+    match value.parse::<i128>() {
+        Ok(parsed) => !number.range().contains(&parsed),
+        Err(_) => true,
+    }
 }
 
 /// Whether any operator an arithmetic-mode annotation could govern is written
@@ -539,28 +570,93 @@ fn walk_stmt_recursive(
     }
 }
 
-/// Recursively walks all `Def` variants and calls `callback` for each
-/// function body found. Handles struct methods, spec definitions (recursive),
-/// and module definitions (recursive).
+/// Where a function body was declared, which decides whether code generation
+/// ever lowers it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BodyScope {
+    /// Declared outside every `spec` block.
+    Executable,
+    /// Declared inside a `spec` block, directly or as a method of a struct
+    /// declared there.
+    Specification,
+}
+
+/// Calls `callback` once for every function body in `def_ids`, wherever it was
+/// declared.
+///
+/// A free function, a struct method and anything a `spec` block encloses all
+/// reach the callback; the descent into a `spec` is recursive, so a struct
+/// declared there carries its methods along. The scope each body was found in
+/// is discarded, which is the whole difference from
+/// [`for_each_lowered_function_body`]: a rule reaching for this one is asking
+/// about every body the source declares, not about the ones that run.
 pub(crate) fn for_each_function_body(
     arena: &AstArena,
     def_ids: &[DefId],
     callback: &mut dyn FnMut(BlockId),
 ) {
+    for_each_function_body_in_scope(arena, def_ids, BodyScope::Executable, &mut |body, _| {
+        callback(body);
+    });
+}
+
+/// [`for_each_function_body`], restricted to the bodies code generation lowers.
+///
+/// A specification function's body reaches WebAssembly only when its quantifier
+/// is `exists` or `unique`: those are compiled and reduced by their own
+/// obligation. A `forall`-quantified body and an unquantified one become
+/// *terms* — the translator turns each into an obligation and emits no
+/// instruction for it, in either compilation mode — so nothing written there
+/// ever runs, and a rule whose finding is about what happens at run time has
+/// nothing to say about them.
+///
+/// The distinction is the body's own quantifier, the way the proof-mode rules
+/// key theirs, rather than lexical containment in `spec { }`: a struct declared
+/// inside a `spec` carries its methods into the same scope, and each is judged
+/// by its own body.
+pub(crate) fn for_each_lowered_function_body(
+    arena: &AstArena,
+    def_ids: &[DefId],
+    callback: &mut dyn FnMut(BlockId),
+) {
+    for_each_function_body_in_scope(arena, def_ids, BodyScope::Executable, &mut |body, scope| {
+        let lowered = scope == BodyScope::Executable
+            || matches!(
+                arena[body].block_kind,
+                BlockKind::Exists | BlockKind::Unique
+            );
+        if lowered {
+            callback(body);
+        }
+    });
+}
+
+/// The one descent over definitions, carrying the scope each body was found in.
+fn for_each_function_body_in_scope(
+    arena: &AstArena,
+    def_ids: &[DefId],
+    scope: BodyScope,
+    callback: &mut dyn FnMut(BlockId, BodyScope),
+) {
     for &def_id in def_ids {
         match &arena[def_id].kind {
             Def::Function { body, .. } => {
-                callback(*body);
+                callback(*body, scope);
             }
             Def::Struct { methods, .. } => {
                 for &method_id in methods {
                     if let Def::Function { body, .. } = &arena[method_id].kind {
-                        callback(*body);
+                        callback(*body, scope);
                     }
                 }
             }
             Def::Spec { defs, .. } => {
-                for_each_function_body(arena, defs, callback);
+                for_each_function_body_in_scope(
+                    arena,
+                    defs,
+                    BodyScope::Specification,
+                    callback,
+                );
             }
             Def::Enum { .. }
             | Def::Constant { .. }

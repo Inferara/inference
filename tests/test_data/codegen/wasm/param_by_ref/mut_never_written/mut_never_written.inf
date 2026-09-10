@@ -12,8 +12,12 @@ struct Pair {
     b: i32;
 }
 
+// Modular for the same reason the readers in `read_only_params` are: the probe
+// that shows this parameter is read in place passes an arbitrary bit pattern,
+// and scaling one of its fields by ten leaves `i32`. Where the fields are read
+// from is the property; the arithmetic is what makes the answer recognisable.
 pub fn peek_struct(mut p: Pair) -> i32 {
-    return p.a * 10 + p.b;
+    return wrapping(p.a * 10 + p.b);
 }
 
 pub fn peek_array(mut data: [i32; 8], i: i32) -> i32 {

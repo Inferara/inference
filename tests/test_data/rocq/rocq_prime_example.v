@@ -26,7 +26,7 @@ Definition Ma ofs al := {|memarg_offset := ofs; memarg_align := al|}.
 
 Definition is_prime : module_func := {|
   modfunc_type := 0%N;
-  modfunc_locals := T_num T_i32 :: T_num T_i32 :: nil;
+  modfunc_locals := T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil;
   modfunc_body :=
     BI_local_get 0%N (*n*) ::
     BI_const_num (Vi32 2) ::
@@ -44,7 +44,40 @@ Definition is_prime : module_func := {|
       BI_loop (BT_valtype None) (
         BI_local_get 2%N ::
         BI_local_get 2%N ::
+        BI_local_set 4%N ::
+        BI_local_tee 3%N ::
+        BI_local_get 4%N ::
         BI_binop T_i32 (Binop_i BOI_mul) ::
+        BI_local_set 5%N ::
+        BI_local_get 4%N ::
+        BI_const_num (Vi32 0) ::
+        BI_relop T_i32 (Relop_i ROI_ne) ::
+        BI_if (BT_valtype None) (
+          BI_local_get 4%N ::
+          BI_const_num (Vi32 (-1)) ::
+          BI_relop T_i32 (Relop_i ROI_eq) ::
+          BI_if (BT_valtype None) (
+            BI_local_get 3%N ::
+            BI_const_num (Vi32 (-2147483648)) ::
+            BI_relop T_i32 (Relop_i ROI_eq) ::
+            BI_if (BT_valtype None) (
+              BI_unreachable ::
+              nil) (
+              nil) ::
+            nil) (
+            BI_local_get 5%N ::
+            BI_local_get 4%N ::
+            BI_binop T_i32 (Binop_i (BOI_div SX_S)) ::
+            BI_local_get 3%N ::
+            BI_relop T_i32 (Relop_i ROI_ne) ::
+            BI_if (BT_valtype None) (
+              BI_unreachable ::
+              nil) (
+              nil) ::
+            nil) ::
+          nil) (
+          nil) ::
+        BI_local_get 5%N ::
         BI_local_get 0%N ::
         BI_relop T_i32 (Relop_i (ROI_le SX_S)) ::
         BI_testop T_i32 TO_eqz ::
@@ -61,7 +94,22 @@ Definition is_prime : module_func := {|
           nil) ::
         BI_local_get 2%N ::
         BI_const_num (Vi32 1) ::
+        BI_local_set 4%N ::
+        BI_local_tee 3%N ::
+        BI_local_get 4%N ::
         BI_binop T_i32 (Binop_i BOI_add) ::
+        BI_local_tee 5%N ::
+        BI_local_get 3%N ::
+        BI_relop T_i32 (Relop_i (ROI_lt SX_S)) ::
+        BI_local_get 4%N ::
+        BI_const_num (Vi32 0) ::
+        BI_relop T_i32 (Relop_i (ROI_lt SX_S)) ::
+        BI_relop T_i32 (Relop_i ROI_ne) ::
+        BI_if (BT_valtype None) (
+          BI_unreachable ::
+          nil) (
+          nil) ::
+        BI_local_get 5%N ::
         BI_local_set 2%N ::
         BI_br 0%N ::
         nil) ::
@@ -98,7 +146,7 @@ Definition rocq_prime_example : module := {|
 |}.
 
 Definition rocq_prime_example__prime_properties_hspec1 : hassert :=
-  Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 1))) (T_const (Vi32 0))))) (HA_and (Himpl (HA_not (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0)))) (Himpl (HA_and (HA_has_type (T_local 1%N) T_i32) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_local 1%N)) (T_const (Vi32 0))) (T_const (Vi32 0)))))) (Himpl (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0))) (HA_ex (HA_and (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_lvar 0) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_lvar 0) (T_local 0%N)) (T_const (Vi32 0))))) (term_eq (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_lvar 0)) (T_const (Vi32 0))))))).
+  Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_local 0%N) (T_const (Vi32 2147395599))) (T_const (Vi32 0))))) (Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_and (Himpl (HA_not (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0)))) (Himpl (HA_and (HA_has_type (T_local 1%N) T_i32) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_local 1%N)) (T_const (Vi32 0))) (T_const (Vi32 0)))))) (Himpl (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0))) (HA_ex (HA_and (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_lvar 0) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_lvar 0) (T_local 0%N)) (T_const (Vi32 0))))) (term_eq (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_lvar 0)) (T_const (Vi32 0)))))))).
 Definition rocq_prime_example__prime_properties_specs : list hassert := (rocq_prime_example__prime_properties_hspec1 :: nil).
 
 Section Host.

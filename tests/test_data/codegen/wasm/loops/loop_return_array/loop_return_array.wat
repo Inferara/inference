@@ -6,7 +6,7 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $loop_return_array (;0;) (type 0) (param $n i32) (result i32)
-    (local $arr i32) (local $result i32) (local $i i32) (local $__frame_ptr i32) (local i32)
+    (local $arr i32) (local $result i32) (local $i i32) (local $__frame_ptr i32) (local i32 i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -85,7 +85,21 @@
         end
         local.get $i
         i32.const 1
+        local.set 7
+        local.tee 6
+        local.get 7
         i32.add
+        local.tee 8
+        local.get 6
+        i32.lt_s
+        local.get 7
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 8
         local.set $i
         br 0 (;@2;)
       end
@@ -98,4 +112,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\01\00")
 )

@@ -259,11 +259,28 @@ Function types (`fn(i32) -> i32`) are refused for their own reason, with or with
 
 Only the declaration half is a gate on an unimplemented feature, and it is deleted the day monomorphization lands, which is tracked in issue #76. **The type-application and expression-position halves survive that day** and must not be deleted with it: no type declaration accepts type arguments whether or not functions can be monomorphized. The architecturally correct home for that half is the type checker's own validation of a written type; A051 is the gate until it moves there.
 
+### Constant Arithmetic Overflow
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A052 | `ConstantArithmeticOverflow` | error | an operation whose operands fold to constants and whose result leaves the type it is performed at |
+
+`+`, `-`, `*` and unary `-` trap when their result leaves the operand type, so an operation whose operands are known before the program runs and whose result does not fit is not a value at all: it is a trap taken on every run that reaches it, and no `assume`, envelope or specification can recover a result the type cannot hold. Reporting it here is the difference between a diagnostic naming the expression and a program that stops at a machine instruction.
+
+What folds: literals, the `const` bindings of the same function body, parentheses, arithmetic-mode annotations, and nested arithmetic. A `let` binding does not — it names a variable, and a rule that folded one would report a value the language does not promise stays put — and neither does a call, which the annotation does not reach into either. A body's `const` bindings are collected into one flat map because they share one flat namespace: A041 rejects a body declaring a name twice, in disjoint blocks included, and the type checker rejects a body local that shadows a parameter, so a name in that map names exactly one binding wherever it is read.
+
+An operator inside a `wrapping(...)` is exempt, and its region folds **modularly** rather than not at all: after this rule `wrapping(2147483647 + 1)` is the only way to write a constant that wraps, so the fold looks *through* the annotation and hands the wrapped value to whatever encloses it. Under a checked region the opposite holds — an operation whose result leaves the type folds to nothing, because there is no such value for an enclosing operation to use, which is also what makes a chain report its innermost overflow once instead of at every level above it.
+
+A022 owns a literal that does not fit the type it is measured at, and this rule folds nothing that contains one, so `let x: u8 = 300 + 1;` is one finding, A022's, about `300`. The handoff reads `walker::literal_leaves_range` rather than restating the comparison, the convention A044 and A046 already use. Everything the fold does produce is therefore in range, which is what lets the message tell a reader that both operands fit the type and the operation does not — the clause that keeps it from reading as a second complaint about an operand. The expression is rendered from the arena, so `const max: i32 = 2147483647; return max + 1;` is reported as `max + 1` with `2147483647` and `1` given as the folded operand values; rendering only the folded form would show an expression nobody wrote. The wrapped result appears only in the remedy: under a default that traps, saying the type "holds" it would be false.
+
+A `forall`-quantified specification function's body, and an unquantified one's, are turned into obligation **terms** and never lowered — code generation emits no instruction for either, in either mode, and a term's `+` is the machine's modular operator with no trap in it. The finding this rule states is false of them, so they are skipped. The line is the body's own quantifier, keyed the way the proof-mode rules key theirs and never lexical containment in `spec { }`: an `exists`/`unique` body *is* compiled and reduced, so it is examined like any other, and so is a function outside the `spec` block that a specification merely calls. Marking a retained body's arithmetic `wrapping(...)`, which the reachability rules require of it anyway, folds it modularly and silences this rule for the same reason it does everywhere else.
+
+The overflow the checked-arithmetic work opened with — a fixed-point multiply whose product leaves `i64` — is **not** one of this rule's findings. Its operands are parameters, nothing folds, and that overflow is the emitted guard's to catch at run time.
+
 ### Arithmetic-Mode Annotations
 
 | ID | Struct | Severity | What it checks |
 |----|--------|----------|----------------|
-| A052 | *(unassigned)* | — | *(no rule holds this id)* |
 | A053 | `ArithModeGovernsNothing` | error | a `checked(...)` or `wrapping(...)` with no `+`, `-`, `*` or unary `-` at an overflowable type inside it |
 | A054 | `ArithModeChangesNothing` | warning | an annotation naming the mode already in force where it is written |
 
@@ -396,6 +413,7 @@ Test files are organized by rule group:
 | `rules_a049.rs` | A049 (unit values) |
 | `rules_a050.rs` | A050 (unnamed parameter on a defined function) |
 | `rules_a051.rs` | A051 (generic declarations and type applications) |
+| `rules_a052.rs` | A052 (constant arithmetic that overflows its type) |
 | `rules_a053.rs` | A053 (arithmetic-mode annotation with nothing to govern) |
 | `rules_a054.rs` | A054 (arithmetic-mode annotation that changes nothing) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |

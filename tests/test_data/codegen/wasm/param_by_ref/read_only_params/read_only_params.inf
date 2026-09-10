@@ -15,12 +15,18 @@ struct Vec3 {
     z: i64;
 }
 
+// Both readers are modular on purpose. Their operands are whatever the caller's
+// memory holds at the pointer it passed, and the probes that establish where the
+// bytes come from pass a pattern chosen to be unmistakable rather than small —
+// so a sum of four of them leaves `i64` and a guard would stop the read before
+// its provenance could be observed. What these two functions are for is where
+// they read, not what they compute.
 pub fn dot(a: Vec3, b: Vec3) -> i64 {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
+    return wrapping(a.x * b.x + a.y * b.y + a.z * b.z);
 }
 
 pub fn sum4(v: [i64; 4]) -> i64 {
-    return v[0] + v[1] + v[2] + v[3];
+    return wrapping(v[0] + v[1] + v[2] + v[3]);
 }
 
 // A dynamic index keeps the read from folding, so the value observed comes from

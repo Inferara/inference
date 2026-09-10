@@ -35,8 +35,12 @@ spec LiteralPositions {
     fn scaled_grows() forall {
         let n: i64 = @;
         // Peer position: `n` is `i64`, so the operand it is compared against is.
+        // The upper bound is what keeps `scaled(n)` inside `i64`:
+        // `2 * 4611686018427387903` is 9223372036854775806, and doubling one
+        // more than that is 2^63 — the concrete argument at which the claim
+        // below is false without the bound.
         assume {
-            assert(n > 4294967296);
+            assert(n > 4294967296 && n <= 4611686018427387903);
         }
         // Operand position under `i64` arithmetic, and argument position at a
         // `u64` parameter, which is what makes `u64::MAX` expressible.

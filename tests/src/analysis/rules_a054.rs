@@ -8,7 +8,7 @@
 /// case here is written against that default rather than against a hard-coded
 /// spelling: the same source is redundant under one default and meaningful under
 /// the other, and a suite that named the spelling would have to be rewritten
-/// rather than re-measured when the default moves.
+/// rather than re-measured whenever the default moves.
 #[cfg(test)]
 mod analysis_rules_tests {
     use crate::utils::{AnalysisMode, CodegenAttempt, build_ast, codegen_attempt};
@@ -96,8 +96,8 @@ mod analysis_rules_tests {
 
     #[test]
     fn an_inner_annotation_that_restores_the_enclosing_mode_changes_something() {
-        // `checked(a * wrapping(b + c))` under a wrapping default, and its
-        // mirror after the flip: the outer changes the `*`, and the inner
+        // `wrapping(a * checked(b + c))` under the checked default, and its
+        // mirror under the other one: the outer changes the `*`, and the inner
         // restores the enclosing mode inside a region the outer had left.
         let source = format!(
             "pub fn f(a: i32, b: i32, c: i32) -> i32 {{ return {}(a * {}(b + c)); }}",

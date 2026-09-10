@@ -271,6 +271,7 @@ use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
 
 use crate::compiler::{CalleeScope, Compiler};
+use crate::overflow_guard::ModeSource;
 
 use super::CalleeIndex;
 use super::diag::{HassertDiagnostic, PCode};
@@ -3151,16 +3152,16 @@ impl<'a> SpecFnTranslator<'a> {
             }
             return;
         }
-        let mut sites: Vec<ExprId> = Vec::new();
+        let mut sites: Vec<(ExprId, ModeSource)> = Vec::new();
         Compiler::visit_body_guarded_operators(
             arena,
             self.ctx,
             body,
             self.default_arith_mode,
-            &mut |expr_id, _| sites.push(expr_id),
+            &mut |expr_id, _, source| sites.push((expr_id, source)),
         );
-        for expr_id in sites {
-            let message = self.trapping_arithmetic_in_reach_message(expr_id);
+        for (expr_id, source) in sites {
+            let message = self.trapping_arithmetic_in_reach_message(expr_id, source);
             self.error(PCode::P017, arena[expr_id].location, message);
         }
         self.reject_reachable_overflow_guards(body);
@@ -3169,10 +3170,21 @@ impl<'a> SpecFnTranslator<'a> {
     /// The [`PCode::P017`] message for a trapping operator written inline in a
     /// reachability body.
     ///
-    /// The clause that says what unmarked arithmetic does elsewhere is produced
-    /// from the mode this module is compiled at, so the sentence stays true when
-    /// the language's default moves and only the expected strings have to.
-    fn trapping_arithmetic_in_reach_message(&self, expr_id: ExprId) -> String {
+    /// Two clauses vary, and they vary independently. The opening names the
+    /// operator the way the author wrote it, so it follows the innermost
+    /// annotation governing it rather than the module's default: an operator
+    /// under an explicit `checked(...)` is not unmarked, and telling its author
+    /// to mark it would be describing a different program. The clause that says
+    /// what arithmetic does elsewhere is the default's, so the sentence stays
+    /// true when the language's default moves and only the expected strings have
+    /// to. Under a wrapping default an unmarked operator carries no guard and
+    /// never reaches here, so the unmarked opening belongs to a checked default
+    /// alone.
+    fn trapping_arithmetic_in_reach_message(
+        &self,
+        expr_id: ExprId,
+        source: ModeSource,
+    ) -> String {
         let kind = self.reach_kind();
         let article = quantifier_article(kind);
         let (op, type_node) = match &self.arena[expr_id].kind {
@@ -3184,16 +3196,14 @@ impl<'a> SpecFnTranslator<'a> {
             .get_node_typeinfo(node_expr(type_node))
             .map_or_else(|| "an integer type".to_string(), |info| info.to_string());
         let rendered = render_expr(self.arena, expr_id);
-        let (opening, elsewhere) = if self.default_arith_mode == ArithMode::Checked {
-            (
-                "has no place unmarked in the body of",
-                "arithmetic traps on overflow everywhere else in the language",
-            )
+        let opening = match source {
+            ModeSource::AnAnnotation => "inside a `checked(...)` has no place in the body of",
+            ModeSource::TheDefault => "has no place unmarked in the body of",
+        };
+        let elsewhere = if self.default_arith_mode == ArithMode::Checked {
+            "arithmetic traps on overflow everywhere else in the language"
         } else {
-            (
-                "inside a `checked(...)` has no place in the body of",
-                "a `checked(...)` here would emit a trap",
-            )
+            "a `checked(...)` here would emit a trap"
         };
         format!(
             "a `{op}` at `{ty}` {opening} {article} `{kind}`-quantified spec function: \
@@ -5047,12 +5057,6 @@ mod tests {
         // was never recorded, where it reads signed.
         assert!(!kind_is_unsigned(None));
     }
-}
-
-#[cfg(test)]
-mod width_tests {
-    use super::width_names;
-    use inference_type_checker::type_info::NumberType;
 
     /// The values this pass will name at a width are exactly the values that
     /// width holds.

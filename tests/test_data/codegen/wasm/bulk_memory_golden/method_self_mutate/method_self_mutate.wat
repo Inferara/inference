@@ -165,7 +165,7 @@
     unreachable
   )
   (func $Counter.increment (;6;) (type 6) (param $self i32)
-    (local $__frame_ptr i32)
+    (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -185,7 +185,21 @@
     local.get $self
     i32.load
     i32.const 1
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     i32.store
     local.get $__frame_ptr
     i32.const 16
@@ -193,7 +207,7 @@
     global.set 0
   )
   (func $Counter.add (;7;) (type 7) (param $self i32) (param $n i32)
-    (local $__frame_ptr i32)
+    (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -213,7 +227,21 @@
     local.get $self
     i32.load
     local.get $n
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     i32.store
     local.get $__frame_ptr
     i32.const 16
@@ -227,4 +255,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\02\06\07")
 )

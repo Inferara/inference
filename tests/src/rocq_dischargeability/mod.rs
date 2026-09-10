@@ -8,7 +8,7 @@ mod direct;
 mod pin;
 mod protocol;
 
-const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=6 proved=13 refuted=1";
+const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=7 proved=15 refuted=1";
 
 pub fn export_cli(exchange: &Path) -> Result<()> {
     export(exchange)?;
@@ -746,6 +746,8 @@ mod tests {
             "d5f3645b4c20e48375138001923b8a9e1cd5c6b6e461b39fea0268bfc2f95400",
             "ae92490a10f79700630fcd06f5d4e483e2792c6ec18271e3d4714312a330c611",
             "2889e852f5e99df59f58cd72d6242f2252f3de586e14b80bf6ce46b78906b978",
+            "5c3ffda731a4051c88eee2670aefddd40fbf5ba2c82ae21af328a8809c55d6d3",
+            "6c8bb675c1ec5ce4fa254d1b7dcc01d23dfa0ef424865d7c1f49859b62651639",
         ];
 
         let entries = exchange_names(exchange.path());
@@ -783,7 +785,7 @@ mod tests {
             std::fs::read_dir(exchange.path().join("raw"))
                 .expect("read raw directory")
                 .count(),
-            6
+            CASES.len()
         );
     }
 

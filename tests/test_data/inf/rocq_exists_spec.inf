@@ -28,6 +28,15 @@
 // over an entry parameter alone can never carve out entries — it can only
 // falsify the spec at the entries it rejects.
 //
+// The same law covers traps and not only filters: a reachability filter must
+// admit, at every entry, at least one choice vector on which the body does not
+// trap. A trapping choice reaches no exit state, so a body whose arithmetic
+// could leave its type would empty the observation set at exactly the entries
+// where it does — at `lo = 2^30` every `n` the filter admits doubles past
+// `i32`, so nothing survives. The doubling here is modular by construction,
+// and the `wrapping(...)` spelling is what keeps the theorem about the program
+// that ships rather than about a program that traps where this one wraps.
+//
 // The three `@`s span the choice surface: a named i32 choice (source-visible,
 // so it joins `reach_visible_locs` after the entry parameter), a named i64
 // choice (the other WASM scalar class, a distinct parameter type in the type
@@ -35,7 +44,7 @@
 // where hiding it from `reach_visible_locs` cannot change whether the
 // observation set is non-empty; a `unique` body must name every choice).
 fn double(n: i32) -> i32 {
-    return n + n;
+    return wrapping(n + n);
 }
 
 spec ReachableDouble {
@@ -48,7 +57,7 @@ spec ReachableDouble {
         assume {
             assert(wide >= 0);
         }
-        assert(double(n) == n + n);
+        assert(double(n) == wrapping(n + n));
         assert(double(@) == 0);
     }
 }

@@ -218,6 +218,20 @@
 //!   language and survives monomorphization. See
 //!   [`rules::generic_not_supported`].
 //!
+//! ### Arithmetic Overflow Known Before the Program Runs (A052)
+//!
+//! - A052: an operation whose operands fold to constants and whose result leaves
+//!   the type it is performed at is rejected, because `+`, `-`, `*` and unary
+//!   `-` trap on such a result: it is not a value the program computes but a
+//!   trap it takes on every run that reaches it, and no envelope or
+//!   specification recovers it. Literals, function-body `const` bindings,
+//!   parentheses, annotations and nested arithmetic fold; a `let` binding and a
+//!   call do not. An operator inside a `wrapping(...)` is exempt and folds
+//!   modularly, that spelling being the only way left to write a constant that
+//!   wraps. An operation with an operand A022 owns is skipped, so a literal out
+//!   of range is one finding rather than two. See
+//!   [`rules::constant_arithmetic_overflow`].
+//!
 //! ### Arithmetic-Mode Annotations (A053, A054)
 //!
 //! - A053: `checked(e)` and `wrapping(e)` must contain an operator to govern.
@@ -416,6 +430,7 @@ mod tests {
             AnalysisDiagnostic::UnitAsValue { position: "a value", location: dummy_location() },
             AnalysisDiagnostic::UnnamedParameter { function: "f".to_string(), index: 0, ty: "i32".to_string(), location: dummy_location() },
             AnalysisDiagnostic::GenericNotSupported { site: errors::GenericSite::Declaration { function: "f".to_string(), params: "T'".to_string() }, location: dummy_location() },
+            AnalysisDiagnostic::ConstantArithmeticOverflow { expression: "max + 1".to_string(), operands: errors::FoldedOperands::Binary(2_147_483_647, 1), op: inference_ast::nodes::GuardedOp::Add, number: inference_type_checker::type_info::NumberType::I32, exact: 2_147_483_648, wrapped: -2_147_483_648, location: dummy_location() },
             AnalysisDiagnostic::ArithModeGovernsNothing { mode: inference_ast::nodes::ArithMode::Wrapping, location: dummy_location() },
             AnalysisDiagnostic::ArithModeChangesNothing { mode: inference_ast::nodes::ArithMode::Wrapping, enclosure: errors::RedundantArithMode::AgainstTheDefault, location: dummy_location() },
         ];

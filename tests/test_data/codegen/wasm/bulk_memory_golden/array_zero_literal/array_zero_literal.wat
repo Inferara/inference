@@ -164,7 +164,7 @@
     unreachable
   )
   (func $negated_zeros (;6;) (type 6) (param $sret i32)
-    (local $arr i32) (local $__frame_ptr i32)
+    (local $arr i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -245,4 +245,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\01\06")
 )

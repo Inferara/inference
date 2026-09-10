@@ -323,7 +323,7 @@
     unreachable
   )
   (func $test_return_translated (;8;) (type 8) (result i32)
-    (local $p i32) (local $p2 i32) (local $__frame_ptr i32)
+    (local $p i32) (local $p2 i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -358,7 +358,21 @@
     call $Point.get_x
     local.get $p2
     call $Point.get_y
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -367,11 +381,26 @@
     unreachable
   )
   (func $Point.translate (;9;) (type 9) (param $sret i32) (param $self i32) (param $dx i32) (param $dy i32)
+    (local i32 i32 i32)
     local.get $sret
     local.get $self
     i32.load
     local.get $dx
+    local.set 5
+    local.tee 4
+    local.get 5
     i32.add
+    local.tee 6
+    local.get 4
+    i32.lt_s
+    local.get 5
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 6
     i32.store
     local.get $sret
     i32.const 4
@@ -381,17 +410,62 @@
     i32.add
     i32.load
     local.get $dy
+    local.set 5
+    local.tee 4
+    local.get 5
     i32.add
+    local.tee 6
+    local.get 4
+    i32.lt_s
+    local.get 5
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 6
     i32.store
     return
     unreachable
   )
   (func $Point.scale (;10;) (type 10) (param $sret i32) (param $self i32) (param $f i32)
+    (local i32 i32 i32)
     local.get $sret
     local.get $self
     i32.load
     local.get $f
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.mul
+    local.set 5
+    local.get 4
+    i32.const 0
+    i32.ne
+    if ;; label = @1
+      local.get 4
+      i32.const -1
+      i32.eq
+      if ;; label = @2
+        local.get 3
+        i32.const -2147483648
+        i32.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 5
+        local.get 4
+        i32.div_s
+        local.get 3
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 5
     i32.store
     local.get $sret
     i32.const 4
@@ -401,7 +475,37 @@
     i32.add
     i32.load
     local.get $f
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.mul
+    local.set 5
+    local.get 4
+    i32.const 0
+    i32.ne
+    if ;; label = @1
+      local.get 4
+      i32.const -1
+      i32.eq
+      if ;; label = @2
+        local.get 3
+        i32.const -2147483648
+        i32.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 5
+        local.get 4
+        i32.div_s
+        local.get 3
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 5
     i32.store
     return
     unreachable
@@ -432,4 +536,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\03\08\09\0a")
 )

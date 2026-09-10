@@ -22,8 +22,9 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use inference_ast::nodes::{ArithMode, BlockKind, Location};
+use inference_ast::nodes::{ArithMode, BlockKind, GuardedOp, Location};
 use inference_type_checker::errors::TypeMismatchContext;
+use inference_type_checker::type_info::NumberType;
 use thiserror::Error;
 
 /// The note line appended to a range error, explaining where the literal's type
@@ -128,6 +129,73 @@ pub enum RedundantArithMode {
     AgainstTheDefault,
     /// An annotation of the same mode encloses the finding.
     InsideTheSameAnnotation,
+}
+
+/// The constants the operands of an [`AnalysisDiagnostic::ConstantArithmeticOverflow`]
+/// operation folded to.
+///
+/// Which arm it is decides whether the message speaks of one constant or two,
+/// and that is not cosmetic: the reader has to be told that each operand fits
+/// the type and the operation does not, and a sentence about two operands
+/// written over a negation describes an expression nobody wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldedOperands {
+    /// A unary `-`, whose single operand folded to this value.
+    Unary(i128),
+    /// A binary `+`, `-` or `*`, whose operands folded to these values.
+    Binary(i128, i128),
+}
+
+/// The message of [`AnalysisDiagnostic::ConstantArithmeticOverflow`].
+///
+/// Everything it states is derived from the fold, so the message cannot claim
+/// something the rule did not establish. The clause naming the operand values
+/// and asserting that each is in range is the one that keeps this readable as
+/// what it is rather than as a complaint about an operand: a reader of
+/// `let x: u8 = 200 + 100;` is told, in the message, that `200` and `100` are
+/// both `u8`s and that the addition is not. A literal that is itself out of
+/// range never reaches here — that finding belongs to A022, which owns it — so
+/// the claim holds by construction.
+///
+/// The wrapped value is quoted only in the remedy. Under a default that traps,
+/// stating it as what the type "holds" would be false: nothing holds anything,
+/// the program stops.
+fn constant_arithmetic_overflow_message(
+    expression: &str,
+    operands: FoldedOperands,
+    op: GuardedOp,
+    number: NumberType,
+    exact: i128,
+    wrapped: i128,
+) -> String {
+    let range = number.range();
+    let (min, max) = (range.start(), range.end());
+    let ty = number.as_str();
+    let spelling = op.spelling();
+    let (folds, repair) = match operands {
+        FoldedOperands::Binary(lhs, rhs) => (
+            format!(
+                "its operands fold to the constants `{lhs}` and `{rhs}`, each of which is itself \
+                 within `{min}..={max}`, and it is their `{spelling}` that is not"
+            ),
+            "the operands or the declared type have to change",
+        ),
+        FoldedOperands::Unary(value) => (
+            format!(
+                "its operand folds to the constant `{value}`, which is itself within \
+                 `{min}..={max}`, and it is the `{spelling}` applied to it that is not"
+            ),
+            "the operand or the declared type has to change",
+        ),
+    };
+    format!(
+        "`{expression}` overflows `{ty}` before the program runs; {folds} — the true result \
+         `{exact}` is outside that range — so this is not a value the program computes but a \
+         trap it takes on every run that reaches it, and no `assume`, envelope or specification \
+         can recover a result the type cannot hold: if the wrap is what you meant, write \
+         `wrapping({expression})`, which computes `{wrapped}` and does not trap, and otherwise \
+         {repair}"
+    )
 }
 
 /// The message of [`AnalysisDiagnostic::ArithModeGovernsNothing`].
@@ -616,6 +684,28 @@ pub enum AnalysisDiagnostic {
         location: Location,
     },
 
+    /// An operation whose operands are constants and whose result leaves the
+    /// type it is performed at. Every field is what the fold established: the
+    /// expression as written, the values its operands folded to, the operator,
+    /// the type, and the two results the two spellings would give.
+    #[error(
+        "{message}",
+        message = constant_arithmetic_overflow_message(
+            .expression, *.operands, *.op, *.number, *.exact, *.wrapped
+        )
+    )]
+    ConstantArithmeticOverflow {
+        /// The operation as the source spells it. Named for what it is rather
+        /// than `source`, which `thiserror` reserves for a wrapped error.
+        expression: String,
+        operands: FoldedOperands,
+        op: GuardedOp,
+        number: NumberType,
+        exact: i128,
+        wrapped: i128,
+        location: Location,
+    },
+
     /// An arithmetic-mode annotation with no operator inside it to govern. The
     /// mode selects the whole message: a `wrapping(...)` that governs nothing is
     /// inert, a `checked(...)` that governs nothing reads as a guarantee nothing
@@ -693,6 +783,7 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UnitAsValue { location, .. }
             | AnalysisDiagnostic::UnnamedParameter { location, .. }
             | AnalysisDiagnostic::GenericNotSupported { location, .. }
+            | AnalysisDiagnostic::ConstantArithmeticOverflow { location, .. }
             | AnalysisDiagnostic::ArithModeGovernsNothing { location, .. }
             | AnalysisDiagnostic::ArithModeChangesNothing { location, .. } => location,
         }
@@ -753,6 +844,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::UnitAsValue { .. } => "A049",
             AnalysisDiagnostic::UnnamedParameter { .. } => "A050",
             AnalysisDiagnostic::GenericNotSupported { .. } => "A051",
+            AnalysisDiagnostic::ConstantArithmeticOverflow { .. } => "A052",
             AnalysisDiagnostic::ArithModeGovernsNothing { .. } => "A053",
             AnalysisDiagnostic::ArithModeChangesNothing { .. } => "A054",
         }
@@ -2376,6 +2468,80 @@ mod tests {
                 "A050 must quote the offending spelling of `{ty}`, got: {text}"
             );
         }
+    }
+
+    /// `A052` speaks of one constant or two, and which it is comes from the
+    /// fold rather than from the operator: a negation has one operand, and a
+    /// sentence about two written over one describes an expression nobody
+    /// wrote. The in-range claim about the operands is the load-bearing half —
+    /// it is what separates this finding from `A022`, which owns an operand
+    /// that is itself out of range — so each arm is held to it.
+    #[test]
+    fn display_constant_arithmetic_overflow() {
+        let err = AnalysisDiagnostic::ConstantArithmeticOverflow {
+            expression: "max + 1".to_string(),
+            operands: FoldedOperands::Binary(2_147_483_647, 1),
+            op: GuardedOp::Add,
+            number: NumberType::I32,
+            exact: 2_147_483_648,
+            wrapped: -2_147_483_648,
+            location: test_location(),
+        };
+        assert_eq!(err.rule_id(), "A052");
+        let text = err.to_string();
+        assert!(
+            text.contains("`max + 1` overflows `i32` before the program runs"),
+            "A052 must open on the expression the source wrote, got: {text}"
+        );
+        assert!(
+            text.contains(
+                "its operands fold to the constants `2147483647` and `1`, each of which is \
+                 itself within `-2147483648..=2147483647`, and it is their `+` that is not"
+            ),
+            "the binary arm must name both constants and claim each is in range, got: {text}"
+        );
+        assert!(
+            text.contains("the true result `2147483648` is outside that range"),
+            "A052 must state the result that does not fit, got: {text}"
+        );
+        assert!(
+            text.contains("write `wrapping(max + 1)`, which computes `-2147483648`"),
+            "the remedy must quote the wrapped value, got: {text}"
+        );
+        assert!(
+            text.contains("the operands or the declared type have to change"),
+            "the binary arm's fallback repair must speak of operands, got: {text}"
+        );
+    }
+
+    #[test]
+    fn display_constant_arithmetic_overflow_unary_arm() {
+        let err = AnalysisDiagnostic::ConstantArithmeticOverflow {
+            expression: "-min".to_string(),
+            operands: FoldedOperands::Unary(-128),
+            op: GuardedOp::Neg,
+            number: NumberType::I8,
+            exact: 128,
+            wrapped: -128,
+            location: test_location(),
+        };
+        assert_eq!(err.rule_id(), "A052");
+        let text = err.to_string();
+        assert!(
+            text.contains(
+                "its operand folds to the constant `-128`, which is itself within \
+                 `-128..=127`, and it is the `-` applied to it that is not"
+            ),
+            "the unary arm must speak of one operand, got: {text}"
+        );
+        assert!(
+            !text.contains("its operands fold to the constants"),
+            "the unary arm must not describe two operands, got: {text}"
+        );
+        assert!(
+            text.contains("the operand or the declared type has to change"),
+            "the unary arm's fallback repair must be singular, got: {text}"
+        );
     }
 
     /// The two `A053` wordings answer two different mistakes, so each is held to

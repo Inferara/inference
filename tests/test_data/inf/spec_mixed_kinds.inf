@@ -15,8 +15,15 @@
 // Kept analysis-clean for the corpus (no extern calls, every obligation
 // non-vacuous, no `return` in any reachability body); the callee `bump` is a
 // defined executable function.
+//
+// A bump by one is modular by construction, and the `wrapping(...)` spelling is
+// what keeps that true of the program that ships: four of the reachability
+// bodies here call `bump`, and a reachability judgment reduces a callee's
+// activation along with the body that calls it, so an operator that could leave
+// its type in `bump` would empty those observation sets at the entries where it
+// would — and would make `all_bump` false at `2147483647` besides.
 fn bump(n: i32) -> i32 {
-    return n + 1;
+    return wrapping(n + 1);
 }
 
 spec MixedKinds {
@@ -26,7 +33,7 @@ spec MixedKinds {
     }
     fn some_bump() exists {
         let b: i32 = @;
-        assert(bump(b) == b + 1);
+        assert(bump(b) == wrapping(b + 1));
     }
     fn one_bump() unique {
         let c: i32 = @;

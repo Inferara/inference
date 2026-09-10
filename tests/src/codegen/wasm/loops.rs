@@ -788,7 +788,9 @@ mod loops_tests {
 /// Test data regeneration helper.
 #[cfg(test)]
 mod regenerate {
-    use crate::utils::{get_test_data_path, regenerate_wat, wasm_codegen};
+    use crate::utils::{
+        get_test_data_path, regenerate_wat, wasm_codegen, wasm_codegen_no_analysis,
+    };
 
     fn test_dir(name: &str) -> std::path::PathBuf {
         get_test_data_path()
@@ -1015,7 +1017,7 @@ mod regenerate {
         let dir = test_dir(name);
         let source_code =
             std::fs::read_to_string(dir.join(format!("{name}.inf"))).expect("Failed to read .inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join(format!("{name}.wasm"));
@@ -1035,7 +1037,7 @@ mod regenerate {
         let dir = test_dir(name);
         let source_code =
             std::fs::read_to_string(dir.join(format!("{name}.inf"))).expect("Failed to read .inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join(format!("{name}.wasm"));

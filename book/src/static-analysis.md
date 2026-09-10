@@ -297,10 +297,10 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-Fifty rules are registered in `all_rules()`. Forty-four are
+Fifty-one rules are registered in `all_rules()`. Forty-five are
 error-severity — they block compilation — and six are warnings; no
-info-severity rule has been defined yet. Four ids in the numbering range
-(A013, A021, A030, A052) are currently unassigned, so the assigned ids run from
+info-severity rule has been defined yet. Three ids in the numbering range
+(A013, A021, A030) are currently unassigned, so the assigned ids run from
 A001 to A054. The tables below group the rules by the invariant family they
 protect; the descriptions are condensed from the rules' own doc comments.
 
@@ -385,13 +385,13 @@ as a pure method namespace, stays legal.
 | A022 | a numeric literal must fit the valid range of its target type |
 | A037 | a constant array index must be within the array's bounds |
 | A044 | a literal shift count must fit the operand type's bit width |
+| A052 | arithmetic whose operands are constants must fit the type it is performed at |
 | A053 | a `checked(...)` or `wrapping(...)` must contain an operator it can govern |
 | A054 | an annotation naming the mode already in force is redundant *(warning)* |
 
-A022 exists because an unannotated `+`, `-`, `*` or unary `-` wraps silently, as
-the WebAssembly operator it lowers to does — the rule closes
-the front door on values that could never round-trip through their declared
-type (see [Arithmetic Overflow](arithmetic-overflow-in-wasm-codegen.md)). Its
+A022 exists because a value that could never round-trip through its declared
+type is a mistake wherever it is written, whatever the operators around it do —
+the rule closes the front door on it (see [Arithmetic Overflow](arithmetic-overflow-in-wasm-codegen.md)). Its
 premise is unaffected by `checked(...)`, which changes what an *operator* does
 with a result and never what a literal means: a literal outside its type's range
 is out of range under either annotation and under none.
@@ -403,6 +403,24 @@ runtime shift already takes the count modulo the operand's bit width, so `x <<
 literal count outside `0..width` as a program error instead of letting it fold
 to a value the source never wrote. Dynamic and const-declared counts are out
 of its scope, the same statically-known-literal boundary A022 draws.
+
+A052 is the compile-time half of the overflow trap. `+`, `-`, `*` and unary `-`
+trap when their result leaves the operand type, so an operation whose operands
+are known before the program runs and whose result does not fit is not a value at
+all: it is a trap taken on every run that reaches it, and no envelope or
+specification recovers it. Literals, function-body `const` bindings, parentheses,
+annotations and nested arithmetic fold; a `let` binding and a call do not, since
+neither carries a value this rule may assume. An operator inside a
+`wrapping(...)` is exempt and folds modularly — after this rule that spelling is
+the only way left to write a constant that wraps. An operation with an operand
+A022 already owns is skipped, through the shared predicate both rules read, so
+`let x: u8 = 300 + 1;` is one finding about one literal rather than two about the
+same mistake. A `forall`-quantified specification body and an unquantified one are turned into
+obligation *terms* and never lowered, so nothing written in them ever runs and
+the rule skips them; an `exists`/`unique` body is compiled and reduced, so it is
+examined like any other. The overflow the issue this rule came from opened with —
+a fixed-point multiply whose product leaves `i64` — is *not* one of its findings:
+those operands are parameters, and nothing folds.
 
 A053 and A054 are the two ways to write an arithmetic-mode annotation that does
 nothing, split by severity because they are different mistakes. A053 is a typo:

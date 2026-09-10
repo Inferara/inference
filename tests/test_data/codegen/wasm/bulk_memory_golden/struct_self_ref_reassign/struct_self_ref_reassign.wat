@@ -70,7 +70,7 @@
     unreachable
   )
   (func $expr_x (;1;) (type 1) (result i64)
-    (local $p i32) (local $__frame_ptr i32)
+    (local $p i32) (local $__frame_ptr i32) (local i64 i64 i64)
     global.get 0
     i32.const 32
     i32.sub
@@ -99,7 +99,21 @@
     i32.const 8
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     i64.store
     local.get $__frame_ptr
     i32.const 24
@@ -110,7 +124,21 @@
     i32.const 8
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.sub
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.gt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     i64.store
     local.get $p
     local.get $__frame_ptr
@@ -128,7 +156,7 @@
     unreachable
   )
   (func $expr_y (;2;) (type 2) (result i64)
-    (local $p i32) (local $__frame_ptr i32)
+    (local $p i32) (local $__frame_ptr i32) (local i64 i64 i64)
     global.get 0
     i32.const 32
     i32.sub
@@ -157,7 +185,21 @@
     i32.const 8
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     i64.store
     local.get $__frame_ptr
     i32.const 24
@@ -168,7 +210,21 @@
     i32.const 8
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.sub
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.gt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     i64.store
     local.get $p
     local.get $__frame_ptr
@@ -442,4 +498,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\02\01\02")
 )

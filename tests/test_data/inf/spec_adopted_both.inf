@@ -13,12 +13,21 @@
 // Kept corpus-clean: no data segment, every obligation states a real property so
 // none can collapse to a vacuous assertion, and no frame is needed, so the
 // merged memory stays within what the corpus compiles.
+//
+// `scaled_sum` is spelled modular because `sums_the_scaled` claims it equals the
+// same expression written inline for every pair, and an obligation's term is the
+// machine operator: a body that trapped instead would make the claim false at
+// `b = 69273667`, where `b * 31` leaves `i32`, and, through the callee the
+// linker splices in, at `a = 214599`, where `scale`'s own product leaves `i32`.
+// No envelope states the alternative — each product can sit just inside the type
+// while their sum does not, so the bound would have to be a joint one on `a` and
+// `b` with no constant to name it.
 
 external fn scale(x: i32) -> i32;
 use { scale } from mathlib;
 
 pub fn scaled_sum(a: i32, b: i32) -> i32 {
-  return scale(a) + b * 31;
+  return wrapping(scale(a) + b * 31);
 }
 
 spec SumSpec {

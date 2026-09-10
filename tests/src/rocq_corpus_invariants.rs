@@ -47,9 +47,10 @@ use crate::rocq_typecheck::gate::CORPUS;
 /// Each entry has to claim the obligation is *true*, never that the violation
 /// is small or expected: the whole point of the audit is that a false theorem
 /// is invisible downstream, so "we know about it" is not a reason. The list is
-/// empty because the one corpus fixture whose bodies carry a guard bounds every
-/// argument it applies; an entry added here has to survive being read by whoever
-/// next changes the language's default.
+/// empty, and was still empty after the language's default became the checked
+/// one and every unmarked operator in the corpus started carrying a guard: each
+/// universal obligation applying a guarded callee either bounds every variable
+/// it applies or applies constants only.
 const OBLIGATIONS_WITHOUT_A_BOUNDING_ANTECEDENT: &[(&str, &str)] = &[];
 
 /// One application of a guarded callee found inside a universal obligation.
@@ -70,12 +71,11 @@ struct Application {
 ///
 /// The audit would be vacuous over a corpus with nothing guarded in it — no
 /// application found, no assertion executed — so it also counts what it looked
-/// at and fails if that count is zero. `spec_overflow_realization.inf` is what
-/// keeps it above zero today: its two executable bodies carry an explicit
-/// `checked(...)`, and its two specification functions apply them under
-/// envelopes. A corpus that stopped carrying such a fixture would leave this
-/// test green while measuring nothing, which is the state the count exists to
-/// refuse.
+/// at and fails if that count is zero. Every corpus fixture whose executable
+/// bodies do arithmetic now keeps it above zero, because the operators that
+/// carry a guard are the unmarked ones; a corpus in which every such body was
+/// marked modular would leave this test green while measuring nothing, which is
+/// the state the count exists to refuse.
 #[test]
 fn no_universal_obligation_applies_an_unbounded_guarded_callee() {
     let mut violations: Vec<String> = Vec::new();

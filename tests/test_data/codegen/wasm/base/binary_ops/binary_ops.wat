@@ -52,23 +52,84 @@
   (export "paren_add" (func $paren_add))
   (export "binop_as_let" (func $binop_as_let))
   (func $add_i32 (;0;) (type 0) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
   (func $sub_i32 (;1;) (type 1) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.sub
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.gt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
   (func $mul_i32 (;2;) (type 2) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.mul
+    local.set 4
+    local.get 3
+    i32.const 0
+    i32.ne
+    if ;; label = @1
+      local.get 3
+      i32.const -1
+      i32.eq
+      if ;; label = @2
+        local.get 2
+        i32.const -2147483648
+        i32.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 4
+        local.get 3
+        i32.div_s
+        local.get 2
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 4
     return
     unreachable
   )
@@ -87,9 +148,24 @@
     unreachable
   )
   (func $add_i64 (;5;) (type 5) (param $a i64) (param $b i64) (result i64)
+    (local i64 i64 i64)
     local.get $a
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
@@ -221,9 +297,17 @@
     unreachable
   )
   (func $neg_i32 (;21;) (type 21) (param $a i32) (result i32)
+    (local i32 i32 i32)
     i32.const 0
     local.get $a
     i32.sub
+    local.tee 3
+    i32.const -2147483648
+    i32.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -245,20 +329,50 @@
     unreachable
   )
   (func $paren_add (;24;) (type 24) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
   (func $binop_as_let (;25;) (type 25) (param $a i32) (param $b i32) (result i32)
-    (local $r i32)
+    (local $r i32) (local i32 i32 i32)
     local.get $a
     local.get $b
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.set $r
     local.get $r
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\07\00\01\02\05\15\18\19")
 )

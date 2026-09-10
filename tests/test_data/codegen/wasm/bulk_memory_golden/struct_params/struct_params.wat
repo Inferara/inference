@@ -20,13 +20,28 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $sum_point (;0;) (type 0) (param $p i32) (result i32)
+    (local i32 i32 i32)
     local.get $p
     i32.load
     local.get $p
     i32.const 4
     i32.add
     i32.load
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.add
+    local.tee 3
+    local.get 1
+    i32.lt_s
+    local.get 2
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -161,21 +176,64 @@
     unreachable
   )
   (func $two_struct_params (;6;) (type 6) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     i32.load
     local.get $a
     i32.const 4
     i32.add
     i32.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $b
     i32.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $b
     i32.const 4
     i32.add
     i32.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
@@ -224,4 +282,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\02\00\06")
 )

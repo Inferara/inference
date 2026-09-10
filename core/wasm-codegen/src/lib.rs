@@ -57,6 +57,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::compiler::{Compiler, FunctionOrigin};
 use crate::errors::CodegenError;
 
+#[cfg(test)]
+mod arith_polarity_tests;
 mod checked_section;
 mod choice;
 #[cfg(test)]

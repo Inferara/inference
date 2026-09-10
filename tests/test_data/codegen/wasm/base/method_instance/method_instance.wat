@@ -221,7 +221,7 @@
     unreachable
   )
   (func $test_binary_op (;6;) (type 6) (result i32)
-    (local $p i32) (local $__frame_ptr i32)
+    (local $p i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -247,7 +247,21 @@
     call $Point.get_x
     local.get $p
     call $Point.get_y
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -276,27 +290,72 @@
     unreachable
   )
   (func $Point.sum (;10;) (type 10) (param $self i32) (result i32)
+    (local i32 i32 i32)
     local.get $self
     i32.load
     local.get $self
     i32.const 4
     i32.add
     i32.load
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.add
+    local.tee 3
+    local.get 1
+    i32.lt_s
+    local.get 2
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
   (func $Point.sum_with (;11;) (type 11) (param $self i32) (param $extra i32) (result i32)
+    (local i32 i32 i32)
     local.get $self
     i32.load
     local.get $self
     i32.const 4
     i32.add
     i32.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $extra
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\03\06\0a\0b")
 )

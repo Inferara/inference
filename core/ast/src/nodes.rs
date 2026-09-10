@@ -388,7 +388,9 @@ pub enum ArithMode {
 
 impl ArithMode {
     /// The mode every `+`, `-`, `*` and unary `-` written outside an annotation
-    /// has.
+    /// has: [`ArithMode::Checked`], so a result that does not fit its type traps
+    /// rather than silently becoming a different number, and `wrapping(e)` is
+    /// how a program asks for the wrap.
     ///
     /// One value for the whole toolchain. Code generation reads it to decide
     /// what to emit and the analysis rules read it to decide what an annotation
@@ -396,7 +398,12 @@ impl ArithMode {
     /// against arithmetic it does not have. It is deliberately not a build
     /// option: which operator `a + b` denotes is a property of the language, so
     /// one source cannot compile to two different programs.
-    pub const DEFAULT: ArithMode = ArithMode::Wrapping;
+    ///
+    /// The guard is emitted in compile and proof builds alike, which is what
+    /// lets a specification claim the absence of overflow: the trap is a real
+    /// trap in the shipped module, and the obligation that says the module runs
+    /// to completion is therefore a claim that no operand pair reaches it.
+    pub const DEFAULT: ArithMode = ArithMode::Checked;
 
     /// The source spelling of this mode, for a diagnostic that quotes back what
     /// the author wrote.
@@ -479,6 +486,20 @@ impl GuardedOp {
         match op {
             UnaryOperatorKind::Neg => Some(GuardedOp::Neg),
             UnaryOperatorKind::Not | UnaryOperatorKind::BitNot => None,
+        }
+    }
+
+    /// The glyph the source writes this operator with.
+    ///
+    /// `Sub` and `Neg` share `-`: one glyph in two positions. A diagnostic that
+    /// quotes the operator back therefore has to say which position it means in
+    /// its own sentence, because the glyph does not.
+    #[must_use]
+    pub const fn spelling(&self) -> &'static str {
+        match self {
+            GuardedOp::Add => "+",
+            GuardedOp::Sub | GuardedOp::Neg => "-",
+            GuardedOp::Mul => "*",
         }
     }
 }

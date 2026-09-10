@@ -75,6 +75,28 @@ mod binops_u32_tests {
             }};
         }
 
+        // A pair whose exact result leaves `u32`. Unannotated arithmetic traps
+        // on overflow, so the call fails and the trap is the guard's own
+        // `unreachable` rather than anything the machine raises: `i32.add` and
+        // `i32.mul` cannot trap by themselves at any operands at all.
+        macro_rules! traps {
+            ($name:expr, $args:expr) => {{
+                let f: TypedFunc<_, i32> = instance
+                    .get_typed_func(&mut store, $name)
+                    .unwrap_or_else(|e| panic!("Failed to get '{}': {e}", $name));
+                let error = f
+                    .call(&mut store, $args)
+                    .expect_err(concat!($name, " must trap on overflow"));
+                assert_eq!(
+                    error.downcast_ref::<wasmtime::Trap>(),
+                    Some(&wasmtime::Trap::UnreachableCodeReached),
+                    "{}({:?}) must trap through the guard",
+                    $name,
+                    $args
+                );
+            }};
+        }
+
         // --- Division (i32.div_u) ---
 
         // Normal unsigned division
@@ -170,14 +192,18 @@ mod binops_u32_tests {
 
         call!("add_u32", (1_i32, 2_i32), 3_i32);
         call!("add_u32", (0_i32, 0_i32), 0_i32);
-        call!("add_u32", (-1_i32, 1_i32), 0_i32);
+        // 2147483647 + 1 is 2147483648, which fits `u32` and only looks like an
+        // overflow through the `i32` the ABI carries it in.
         call!("add_u32", (i32::MAX, 1_i32), i32::MIN);
+        // u32::MAX + 1 leaves the type.
+        traps!("add_u32", (-1_i32, 1_i32));
 
         // --- Multiplication (i32.mul, same for signed/unsigned) ---
 
         call!("mul_u32", (6_i32, 7_i32), 42_i32);
         call!("mul_u32", (0_i32, 100_i32), 0_i32);
-        call!("mul_u32", (-1_i32, 2_i32), -2_i32);
+        // u32::MAX * 2 leaves the type.
+        traps!("mul_u32", (-1_i32, 2_i32));
 
         // --- Equality (i32.eq, no sign distinction) ---
 
@@ -220,7 +246,6 @@ mod regenerate {
         get_test_data_path()
             .join("codegen")
             .join("wasm")
-            .join("binops_u32")
             .join("binops_u32")
     }
 

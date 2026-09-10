@@ -11,19 +11,26 @@
 // Each spec function pairs a call to the executable function with the same
 // expression written inline, so every operator appears on both sides of the
 // contract: the module record's instruction and the obligation's term.
+//
+// That pairing is why the subtractions and the negation are spelled modular. An
+// obligation's term is the machine operator and admits no other reading, so
+// `diff_i32(a, b) == a - b` for every pair says the executable body wraps too;
+// a body that trapped instead would make the three claims false at
+// `(-2147483648, 1)`, at the `i64` pair `(-9223372036854775808, 1)`, and at
+// `-2147483648`, which is the one operand a negation cannot return.
 
 pub fn diff_i32(a: i32, b: i32) -> i32 {
-    return a - b;
+    return wrapping(a - b);
 }
 
 pub fn diff_i64(a: i64, b: i64) -> i64 {
-    return a - b;
+    return wrapping(a - b);
 }
 
 // Unary negation lowers to a constant zero minus the operand, a second
 // `BOI_sub` whose left operand is a literal rather than a local.
 pub fn negate_i32(a: i32) -> i32 {
-    return -a;
+    return wrapping(-a);
 }
 
 // Bitwise complement lowers to an exclusive-or against all-ones, a `BOI_xor`

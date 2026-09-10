@@ -24,7 +24,7 @@
   (export "pow_u16" (func $pow_u16))
   (export "is_prime_bool" (func $is_prime_bool))
   (func $fibonacci_iter (;0;) (type 0) (param $n i32) (result i32)
-    (local $a i32) (local $b i32) (local $i i32) (local $next i32)
+    (local $a i32) (local $b i32) (local $i i32) (local $next i32) (local i32 i32 i32)
     local.get $n
     i32.const 0
     i32.le_s
@@ -54,7 +54,21 @@
         br_if 1 (;@1;)
         local.get $a
         local.get $b
+        local.set 6
+        local.tee 5
+        local.get 6
         i32.add
+        local.tee 7
+        local.get 5
+        i32.lt_s
+        local.get 6
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 7
         local.set $next
         local.get $b
         local.set $a
@@ -62,7 +76,21 @@
         local.set $b
         local.get $i
         i32.const 1
+        local.set 6
+        local.tee 5
+        local.get 6
         i32.add
+        local.tee 7
+        local.get 5
+        i32.lt_s
+        local.get 6
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 7
         local.set $i
         br 0 (;@2;)
       end
@@ -72,7 +100,7 @@
     unreachable
   )
   (func $gcd_iter (;1;) (type 1) (param $a i32) (param $b i32) (result i32)
-    (local $x i32) (local $y i32) (local $t i32)
+    (local $x i32) (local $y i32) (local $t i32) (local i32 i32 i32)
     local.get $a
     local.set $x
     local.get $b
@@ -83,7 +111,21 @@
     if ;; label = @1
       i32.const 0
       local.get $x
+      local.set 6
+      local.tee 5
+      local.get 6
       i32.sub
+      local.tee 7
+      local.get 5
+      i32.lt_s
+      local.get 6
+      i32.const 0
+      i32.gt_s
+      i32.ne
+      if ;; label = @2
+        unreachable
+      end
+      local.get 7
       local.set $x
     end
     local.get $y
@@ -92,7 +134,21 @@
     if ;; label = @1
       i32.const 0
       local.get $y
+      local.set 6
+      local.tee 5
+      local.get 6
       i32.sub
+      local.tee 7
+      local.get 5
+      i32.lt_s
+      local.get 6
+      i32.const 0
+      i32.gt_s
+      i32.ne
+      if ;; label = @2
+        unreachable
+      end
+      local.get 7
       local.set $y
     end
     block ;; label = @1
@@ -118,7 +174,7 @@
     unreachable
   )
   (func $is_prime_iter (;2;) (type 2) (param $n i32) (result i32)
-    (local $result i32) (local $d i32)
+    (local $result i32) (local $d i32) (local i32 i32 i32)
     local.get $n
     i32.const 1
     i32.le_s
@@ -150,7 +206,37 @@
       loop ;; label = @2
         local.get $d
         local.get $d
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.mul
+        local.set 5
+        local.get 4
+        i32.const 0
+        i32.ne
+        if ;; label = @3
+          local.get 4
+          i32.const -1
+          i32.eq
+          if ;; label = @4
+            local.get 3
+            i32.const -2147483648
+            i32.eq
+            if ;; label = @5
+              unreachable
+            end
+          else
+            local.get 5
+            local.get 4
+            i32.div_s
+            local.get 3
+            i32.ne
+            if ;; label = @5
+              unreachable
+            end
+          end
+        end
+        local.get 5
         local.get $n
         i32.le_s
         i32.eqz
@@ -167,7 +253,21 @@
         end
         local.get $d
         i32.const 2
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.add
+        local.tee 5
+        local.get 3
+        i32.lt_s
+        local.get 4
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 5
         local.set $d
         br 0 (;@2;)
       end
@@ -177,7 +277,7 @@
     unreachable
   )
   (func $isqrt (;3;) (type 3) (param $n i32) (result i32)
-    (local $x i32) (local $y i32)
+    (local $x i32) (local $y i32) (local i32 i32 i32)
     local.get $n
     i32.const 0
     i32.le_s
@@ -189,7 +289,21 @@
     local.set $x
     local.get $x
     i32.const 1
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     i32.const 2
     i32.div_s
     local.set $y
@@ -206,7 +320,21 @@
         local.get $n
         local.get $x
         i32.div_s
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.add
+        local.tee 5
+        local.get 3
+        i32.lt_s
+        local.get 4
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 5
         i32.const 2
         i32.div_s
         local.set $y
@@ -218,7 +346,7 @@
     unreachable
   )
   (func $pow_iter (;4;) (type 4) (param $base i32) (param $exp i32) (result i32)
-    (local $result i32) (local $b i32) (local $e i32)
+    (local $result i32) (local $b i32) (local $e i32) (local i32 i32 i32)
     i32.const 1
     local.set $result
     local.get $base
@@ -240,7 +368,37 @@
         if ;; label = @3
           local.get $result
           local.get $b
+          local.set 6
+          local.tee 5
+          local.get 6
           i32.mul
+          local.set 7
+          local.get 6
+          i32.const 0
+          i32.ne
+          if ;; label = @4
+            local.get 6
+            i32.const -1
+            i32.eq
+            if ;; label = @5
+              local.get 5
+              i32.const -2147483648
+              i32.eq
+              if ;; label = @6
+                unreachable
+              end
+            else
+              local.get 7
+              local.get 6
+              i32.div_s
+              local.get 5
+              i32.ne
+              if ;; label = @6
+                unreachable
+              end
+            end
+          end
+          local.get 7
           local.set $result
         end
         local.get $b
@@ -259,7 +417,7 @@
     unreachable
   )
   (func $fibonacci_iter_i64 (;5;) (type 5) (param $n i64) (result i64)
-    (local $zero i64) (local $one i64) (local $a i64) (local $b i64) (local $i i64) (local $next i64)
+    (local $zero i64) (local $one i64) (local $a i64) (local $b i64) (local $i i64) (local $next i64) (local i64 i64 i64)
     i64.const 0
     local.set $zero
     i64.const 1
@@ -293,7 +451,21 @@
         br_if 1 (;@1;)
         local.get $a
         local.get $b
+        local.set 8
+        local.tee 7
+        local.get 8
         i64.add
+        local.tee 9
+        local.get 7
+        i64.lt_s
+        local.get 8
+        i64.const 0
+        i64.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 9
         local.set $next
         local.get $b
         local.set $a
@@ -301,7 +473,21 @@
         local.set $b
         local.get $i
         local.get $one
+        local.set 8
+        local.tee 7
+        local.get 8
         i64.add
+        local.tee 9
+        local.get 7
+        i64.lt_s
+        local.get 8
+        i64.const 0
+        i64.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 9
         local.set $i
         br 0 (;@2;)
       end
@@ -311,7 +497,7 @@
     unreachable
   )
   (func $gcd_iter_i64 (;6;) (type 6) (param $a i64) (param $b i64) (result i64)
-    (local $zero i64) (local $x i64) (local $y i64) (local $t i64)
+    (local $zero i64) (local $x i64) (local $y i64) (local $t i64) (local i64 i64 i64)
     i64.const 0
     local.set $zero
     local.get $a
@@ -324,7 +510,21 @@
     if ;; label = @1
       local.get $zero
       local.get $x
+      local.set 7
+      local.tee 6
+      local.get 7
       i64.sub
+      local.tee 8
+      local.get 6
+      i64.lt_s
+      local.get 7
+      i64.const 0
+      i64.gt_s
+      i32.ne
+      if ;; label = @2
+        unreachable
+      end
+      local.get 8
       local.set $x
     end
     local.get $y
@@ -333,7 +533,21 @@
     if ;; label = @1
       local.get $zero
       local.get $y
+      local.set 7
+      local.tee 6
+      local.get 7
       i64.sub
+      local.tee 8
+      local.get 6
+      i64.lt_s
+      local.get 7
+      i64.const 0
+      i64.gt_s
+      i32.ne
+      if ;; label = @2
+        unreachable
+      end
+      local.get 8
       local.set $y
     end
     block ;; label = @1
@@ -359,7 +573,7 @@
     unreachable
   )
   (func $pow_iter_i64 (;7;) (type 7) (param $base i64) (param $exp i64) (result i64)
-    (local $zero i64) (local $one i64) (local $result i64) (local $b i64) (local $e i64)
+    (local $zero i64) (local $one i64) (local $result i64) (local $b i64) (local $e i64) (local i64 i64 i64)
     i64.const 0
     local.set $zero
     i64.const 1
@@ -385,7 +599,37 @@
         if ;; label = @3
           local.get $result
           local.get $b
+          local.set 8
+          local.tee 7
+          local.get 8
           i64.mul
+          local.set 9
+          local.get 8
+          i64.const 0
+          i64.ne
+          if ;; label = @4
+            local.get 8
+            i64.const -1
+            i64.eq
+            if ;; label = @5
+              local.get 7
+              i64.const -9223372036854775808
+              i64.eq
+              if ;; label = @6
+                unreachable
+              end
+            else
+              local.get 9
+              local.get 8
+              i64.div_s
+              local.get 7
+              i64.ne
+              if ;; label = @6
+                unreachable
+              end
+            end
+          end
+          local.get 9
           local.set $result
         end
         local.get $b
@@ -442,7 +686,7 @@
     unreachable
   )
   (func $fibonacci_i16 (;9;) (type 9) (param $n i32) (result i32)
-    (local $zero i32) (local $one i32) (local $a i32) (local $b i32) (local $i i32) (local $next i32)
+    (local $zero i32) (local $one i32) (local $a i32) (local $b i32) (local $i i32) (local $next i32) (local i32 i32 i32)
     local.get $n
     i32.const 16
     i32.shl
@@ -483,10 +727,18 @@
         local.get $a
         local.get $b
         i32.add
+        local.tee 7
         i32.const 16
         i32.shl
         i32.const 16
         i32.shr_s
+        local.tee 8
+        local.get 7
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 8
         local.set $next
         local.get $b
         local.set $a
@@ -495,10 +747,18 @@
         local.get $i
         local.get $one
         i32.add
+        local.tee 7
         i32.const 16
         i32.shl
         i32.const 16
         i32.shr_s
+        local.tee 8
+        local.get 7
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 8
         local.set $i
         br 0 (;@2;)
       end
@@ -508,7 +768,7 @@
     unreachable
   )
   (func $pow_u16 (;10;) (type 10) (param $base i32) (param $exp i32) (result i32)
-    (local $zero i32) (local $one i32) (local $result i32) (local $b i32) (local $e i32)
+    (local $zero i32) (local $one i32) (local $result i32) (local $b i32) (local $e i32) (local i32 i32 i32)
     local.get $base
     i32.const 65535
     i32.and
@@ -545,8 +805,16 @@
           local.get $result
           local.get $b
           i32.mul
+          local.tee 7
           i32.const 65535
           i32.and
+          local.tee 8
+          local.get 7
+          i32.ne
+          if ;; label = @4
+            unreachable
+          end
+          local.get 8
           local.set $result
         end
         local.get $b
@@ -569,7 +837,7 @@
     unreachable
   )
   (func $is_prime_bool (;11;) (type 11) (param $n i32) (result i32)
-    (local $result i32) (local $d i32)
+    (local $result i32) (local $d i32) (local i32 i32 i32)
     local.get $n
     i32.const 1
     i32.le_s
@@ -601,7 +869,37 @@
       loop ;; label = @2
         local.get $d
         local.get $d
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.mul
+        local.set 5
+        local.get 4
+        i32.const 0
+        i32.ne
+        if ;; label = @3
+          local.get 4
+          i32.const -1
+          i32.eq
+          if ;; label = @4
+            local.get 3
+            i32.const -2147483648
+            i32.eq
+            if ;; label = @5
+              unreachable
+            end
+          else
+            local.get 5
+            local.get 4
+            i32.div_s
+            local.get 3
+            i32.ne
+            if ;; label = @5
+              unreachable
+            end
+          end
+        end
+        local.get 5
         local.get $n
         i32.le_s
         i32.eqz
@@ -618,7 +916,21 @@
         end
         local.get $d
         i32.const 2
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.add
+        local.tee 5
+        local.get 3
+        i32.lt_s
+        local.get 4
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 5
         local.set $d
         br 0 (;@2;)
       end
@@ -627,4 +939,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\0b\00\01\02\03\04\05\06\07\09\0a\0b")
 )

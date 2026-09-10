@@ -63,4 +63,7 @@ pub fn ushr_max(a: u64) -> u64 { return 18446744073709551615 >> a; }
 
 pub fn narrow_div_left(x: u8) -> u8 { return 200 / x; }
 
-pub fn narrow_wrap_const() -> u8 { let x: u8 = 200 + 100; return x; }
+// The sum is written modular because 300 is not a `u8`: what this function
+// covers is that a literal pair takes its width from the annotation on the
+// binding and narrows there, which is a property of the wrapped value.
+pub fn narrow_wrap_const() -> u8 { let x: u8 = wrapping(200 + 100); return x; }

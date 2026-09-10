@@ -27,6 +27,16 @@
 //! and is measured as the negative number it is. Parenthesized negation
 //! (`-(128)`) is not part of the handoff — A046 does not claim it and this rule
 //! still measures `128`.
+//!
+//! ## Rule ownership: the arithmetic around the literal belongs to A052
+//!
+//! A052 rejects an operation whose operands fold to constants and whose result
+//! leaves the type it is performed at. It folds nothing containing a literal
+//! this rule reports, so `let x: u8 = 300 + 1;` is one finding about one
+//! literal rather than two about the same mistake. The condition it hands over
+//! for is [`walker::literal_leaves_range`], which this rule reads as its own
+//! verdict, so the rule that steps aside cannot start stepping aside for a shape
+//! this one has stopped covering.
 
 use inference_ast::ids::{ExprId, NodeId};
 use inference_ast::nodes::Expr;
@@ -105,11 +115,7 @@ fn validate_literal_range(
         return;
     };
     let range = number_type.range();
-    let out_of_range = match value.parse::<i128>() {
-        Ok(parsed) => !range.contains(&parsed),
-        Err(_) => true,
-    };
-    if out_of_range {
+    if walker::literal_leaves_range(value, *number_type) {
         errors.push(LabeledDiagnostic::new(
             module_path.to_vec(),
             AnalysisDiagnostic::LiteralOutOfRange {

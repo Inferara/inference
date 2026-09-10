@@ -104,7 +104,7 @@
     unreachable
   )
   (func $grid_sum (;2;) (type 2) (result i64)
-    (local $g i32) (local $__frame_ptr i32)
+    (local $g i32) (local $__frame_ptr i32) (local i64 i64 i64)
     global.get 0
     i32.const 32
     i32.sub
@@ -142,19 +142,61 @@
     i32.const 8
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $g
     i32.const 16
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $g
     i32.const 16
     i32.add
     i32.const 8
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -163,7 +205,7 @@
     unreachable
   )
   (func $grid_of_expressions (;3;) (type 3) (result i64)
-    (local $g i32) (local $__frame_ptr i32)
+    (local $g i32) (local $__frame_ptr i32) (local i64 i64 i64)
     global.get 0
     i32.const 32
     i32.sub
@@ -194,7 +236,21 @@
     i64.const 40
     i64.shl
     i64.const 1
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     i64.store
     local.get $__frame_ptr
     i32.const 24
@@ -217,7 +273,7 @@
     unreachable
   )
   (func $grid_complement_element (;4;) (type 4) (result i64)
-    (local $g i32) (local $__frame_ptr i32)
+    (local $g i32) (local $__frame_ptr i32) (local i64 i64 i64)
     global.get 0
     i32.const 32
     i32.sub
@@ -248,7 +304,21 @@
     i64.const 40
     i64.shl
     i64.const 1
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     i64.store
     local.get $__frame_ptr
     i32.const 24
@@ -313,4 +383,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\03\02\03\04")
 )

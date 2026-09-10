@@ -186,19 +186,49 @@
     unreachable
   )
   (func $Vec3.sum (;7;) (type 7) (param $self i32) (result i32)
+    (local i32 i32 i32)
     local.get $self
     i32.load
     local.get $self
     i32.const 4
     i32.add
     i32.load
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.add
+    local.tee 3
+    local.get 1
+    i32.lt_s
+    local.get 2
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     local.get $self
     i32.const 8
     i32.add
     i32.load
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.add
+    local.tee 3
+    local.get 1
+    i32.lt_s
+    local.get 2
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\01\07")
 )

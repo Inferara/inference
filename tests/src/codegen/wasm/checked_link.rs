@@ -41,16 +41,16 @@ mod checked_link_tests {
     const CHECKED_SECTION_VERSION_BYTE: u8 = CHECKED_SECTION_VERSION as u8;
 
     /// A library whose exported function traps on overflow.
-    const GUARDED_LIB: &str = "pub fn double(x: i32) -> i32 { return checked(x + x); }";
+    const GUARDED_LIB: &str = "pub fn double(x: i32) -> i32 { return x + x; }";
 
-    /// The same library with the annotation removed: the emitted arithmetic
-    /// wraps, so nothing is guarded and the module carries no section at all.
-    const WRAPPING_LIB: &str = "pub fn double(x: i32) -> i32 { return x + x; }";
+    /// The same library with the arithmetic marked modular: nothing is guarded
+    /// and the module carries no section at all.
+    const WRAPPING_LIB: &str = "pub fn double(x: i32) -> i32 { return wrapping(x + x); }";
 
     /// A library whose *exported* function is unguarded and whose private
     /// callee is not, so a walk that stopped one hop past the specification
     /// would find nothing.
-    const TWO_HOP_LIB: &str = "fn helper(x: i32) -> i32 { return checked(x + x); } \
+    const TWO_HOP_LIB: &str = "fn helper(x: i32) -> i32 { return x + x; } \
                                pub fn entry(x: i32) -> i32 { return helper(x); }";
 
     /// A program whose `exists`-bodied specification calls the linked function
@@ -469,7 +469,7 @@ mod checked_link_tests {
         assert_eq!(
             guarded_names(&compile_library(TWO_HOP_LIB)),
             vec!["helper"],
-            "the exported entry point wraps; only its private callee traps"
+            "the exported entry point has no arithmetic of its own; only its private callee traps"
         );
     }
 
@@ -641,7 +641,7 @@ mod checked_link_tests {
 
     #[test]
     fn an_exists_specification_over_an_unguarded_library_links() {
-        // The same program and the same library, with the annotation removed.
+        // The same program and the same library, with the arithmetic marked modular.
         // Without this pair the rejection above could be a rejection of linking
         // a reachability specification against anything at all.
         //
@@ -716,7 +716,7 @@ mod checked_link_tests {
         assert_eq!(
             checked_payload(&main),
             None,
-            "the program writes no `checked(...)`, so codegen emits no section"
+            "the program's own arithmetic is modular, so codegen emits no section"
         );
         let guarded = function_index_named(&main, "twice");
         let spliced = with_custom_section(
@@ -973,7 +973,7 @@ mod checked_link_tests {
         // rebuilt the module and dropped the custom sections it did not name
         // would leave a guarded artifact claiming nothing — and the next link
         // to bind it as a library would read that as "no guard here".
-        let source = "pub fn double(x: i32) -> i32 { return checked(x + x); }";
+        let source = "pub fn double(x: i32) -> i32 { return x + x; }";
         let arena = parse(source).expect("the program parses");
         let typed = type_check(arena).expect("the program type-checks");
         let main = compile(&typed, "main", CompilationMode::Compile);
@@ -996,7 +996,7 @@ mod checked_link_tests {
         // move the discharge protocol's hash of every guarded module for no
         // proof value, so the claim is stated as an equality rather than left
         // to the translator happening not to look.
-        let source = "pub fn twice(x: i32) -> i32 { return checked(x + x); }
+        let source = "pub fn twice(x: i32) -> i32 { return x + x; }
                       spec Doubling {
                         fn doubling_is_doubling() forall {
                           let n: i32 = @;

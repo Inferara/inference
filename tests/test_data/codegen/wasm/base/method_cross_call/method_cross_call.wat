@@ -15,9 +15,40 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $double (;0;) (type 0) (param $n i32) (result i32)
+    (local i32 i32 i32)
     local.get $n
     i32.const 2
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.mul
+    local.set 3
+    local.get 2
+    i32.const 0
+    i32.ne
+    if ;; label = @1
+      local.get 2
+      i32.const -1
+      i32.eq
+      if ;; label = @2
+        local.get 1
+        i32.const -2147483648
+        i32.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 3
+        local.get 2
+        i32.div_s
+        local.get 1
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 3
     return
     unreachable
   )
@@ -125,11 +156,26 @@
     unreachable
   )
   (func $Vec2.sum (;6;) (type 6) (param $self i32) (result i32)
+    (local i32 i32 i32)
     local.get $self
     call $Vec2.get_x
     local.get $self
     call $Vec2.get_y
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.add
+    local.tee 3
+    local.get 1
+    i32.lt_s
+    local.get 2
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -145,4 +191,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\02\00\06")
 )

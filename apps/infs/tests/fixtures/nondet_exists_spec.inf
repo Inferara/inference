@@ -5,12 +5,18 @@
 // `reachability_spec` record consumed by a `ValidExistsSpec` theorem — the
 // spec function itself is RETAINED in the emitted module record. A
 // compile-mode build strips the proof-only spec; `main` is the only export.
+//
+// The doubling is modular by construction and spelled `wrapping(...)` to keep
+// it so in the program that ships: a retained body is reduced by the judgment
+// as written and along with everything it calls, so an operator that could
+// leave its type would empty this body's observation set at the entries where
+// it does rather than narrow its claim.
 pub fn main() -> i32 {
     return 0;
 }
 
 fn twice(n: i32) -> i32 {
-    return n + n;
+    return wrapping(n + n);
 }
 
 spec ExDemo {
@@ -19,6 +25,6 @@ spec ExDemo {
         assume {
             assert(n > 0);
         }
-        assert(twice(n) == n + n);
+        assert(twice(n) == wrapping(n + n));
     }
 }

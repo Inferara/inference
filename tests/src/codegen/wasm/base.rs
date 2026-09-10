@@ -2819,73 +2819,128 @@ mod base_codegen_tests {
 
     // -- C1: Sub-i32 narrowing after arithmetic --
 
+    /// Compiles inline source and instantiates it, for the narrow-width tests
+    /// below that call one exported function.
+    ///
+    /// They come in pairs — one spelling that traps on overflow and one that
+    /// wraps — so the boilerplate is shared rather than written out twice per
+    /// property.
+    fn instantiate_inline(source: &str) -> (wasmtime::Store<()>, wasmtime::Instance) {
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        (store, instance)
+    }
+
+    /// Asserts that calling `name` with `args` trapped through an overflow
+    /// guard rather than through anything the machine raises on its own.
+    fn assert_overflow_trap<Args>(source: &str, name: &str, args: Args)
+    where
+        Args: wasmtime::WasmParams,
+    {
+        let (mut store, instance) = instantiate_inline(source);
+        let func: wasmtime::TypedFunc<Args, i32> = instance
+            .get_typed_func(&mut store, name)
+            .expect("get func");
+        let error = func
+            .call(&mut store, args)
+            .expect_err("the guarded spelling must trap on overflow");
+        assert_eq!(
+            error.downcast_ref::<wasmtime::Trap>(),
+            Some(&wasmtime::Trap::UnreachableCodeReached),
+            "{name} must trap through the guard's own `unreachable`"
+        );
+    }
+
+    /// Asserts that calling `name` with `args` returned `expected`.
+    fn assert_call_returns<Args>(source: &str, name: &str, args: Args, expected: i32)
+    where
+        Args: wasmtime::WasmParams,
+    {
+        let (mut store, instance) = instantiate_inline(source);
+        let func: wasmtime::TypedFunc<Args, i32> = instance
+            .get_typed_func(&mut store, name)
+            .expect("get func");
+        assert_eq!(func.call(&mut store, args).expect("call"), expected);
+    }
+
     #[test]
     fn sub_i32_truncation_i8_overflow() {
-        use wasmtime::{Engine, Module, Store, TypedFunc};
-
-        let source = r#"
+        // A narrow operator is performed at i32 and re-narrowed, so its guard
+        // asks whether the re-narrowing changed the promoted result. i8:
+        // 127 + 1 is 128, which does not survive the narrowing.
+        assert_overflow_trap(
+            r#"
             pub fn add_i8_overflow(a: i8, b: i8) -> i8 {
                 return a + b;
             }
-        "#;
-        let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
-        let engine = Engine::default();
-        let module = Module::new(&engine, &wasm_bytes).expect("compile");
-        let mut store = Store::new(&engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
-        let func: TypedFunc<(i32, i32), i32> = instance
-            .get_typed_func(&mut store, "add_i8_overflow")
-            .expect("get func");
-        // i8: 127 + 1 overflows to -128 (signed wrap)
-        let result = func.call(&mut store, (127, 1)).expect("call");
-        assert_eq!(result, -128, "i8(127) + i8(1) should wrap to -128");
+        "#,
+            "add_i8_overflow",
+            (127, 1),
+        );
+        // Written modular, the same call yields the wrapped value it always did.
+        assert_call_returns(
+            r#"
+            pub fn add_i8_overflow(a: i8, b: i8) -> i8 {
+                return wrapping(a + b);
+            }
+        "#,
+            "add_i8_overflow",
+            (127, 1),
+            -128,
+        );
     }
 
     #[test]
     fn sub_i32_truncation_u8_overflow() {
-        use wasmtime::{Engine, Module, Store, TypedFunc};
-
-        let source = r#"
+        // u8: 255 + 1 is 256, and masking it back to eight bits gives a
+        // different number, which is the narrow unsigned guard's condition.
+        assert_overflow_trap(
+            r#"
             pub fn add_u8_overflow(a: u8, b: u8) -> u8 {
                 return a + b;
             }
-        "#;
-        let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
-        let engine = Engine::default();
-        let module = Module::new(&engine, &wasm_bytes).expect("compile");
-        let mut store = Store::new(&engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
-        let func: TypedFunc<(i32, i32), i32> = instance
-            .get_typed_func(&mut store, "add_u8_overflow")
-            .expect("get func");
-        // u8: 255 + 1 overflows to 0 (unsigned wrap)
-        let result = func.call(&mut store, (255, 1)).expect("call");
-        assert_eq!(result, 0, "u8(255) + u8(1) should wrap to 0");
+        "#,
+            "add_u8_overflow",
+            (255, 1),
+        );
+        assert_call_returns(
+            r#"
+            pub fn add_u8_overflow(a: u8, b: u8) -> u8 {
+                return wrapping(a + b);
+            }
+        "#,
+            "add_u8_overflow",
+            (255, 1),
+            0,
+        );
     }
 
     #[test]
     fn sub_i32_truncation_neg_i8() {
-        use wasmtime::{Engine, Module, Store, TypedFunc};
-
-        let source = r#"
+        // -(-128) is 128, the one value an i8 cannot negate.
+        assert_overflow_trap(
+            r#"
             pub fn neg_i8(a: i8) -> i8 {
                 return -a;
             }
-        "#;
-        let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
-        let engine = Engine::default();
-        let module = Module::new(&engine, &wasm_bytes).expect("compile");
-        let mut store = Store::new(&engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
-        let func: TypedFunc<i32, i32> = instance
-            .get_typed_func(&mut store, "neg_i8")
-            .expect("get func");
-        // -(-128) overflows i8 range, wraps back to -128
-        let result = func.call(&mut store, -128).expect("call");
-        assert_eq!(result, -128, "-i8(-128) should wrap to -128");
+        "#,
+            "neg_i8",
+            -128,
+        );
+        assert_call_returns(
+            r#"
+            pub fn neg_i8(a: i8) -> i8 {
+                return wrapping(-a);
+            }
+        "#,
+            "neg_i8",
+            -128,
+            -128,
+        );
     }
 
     #[test]
@@ -2913,34 +2968,38 @@ mod base_codegen_tests {
 
     #[test]
     fn sub_i32_truncation_u16_mul() {
-        use wasmtime::{Engine, Module, Store, TypedFunc};
-
-        let source = r#"
+        // u16: 1000 * 100 is 100000, which sixteen bits do not hold.
+        assert_overflow_trap(
+            r#"
             pub fn mul_u16(a: u16, b: u16) -> u16 {
                 return a * b;
             }
-        "#;
-        let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
-        let engine = Engine::default();
-        let module = Module::new(&engine, &wasm_bytes).expect("compile");
-        let mut store = Store::new(&engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
-        let func: TypedFunc<(i32, i32), i32> = instance
-            .get_typed_func(&mut store, "mul_u16")
-            .expect("get func");
-        // u16: 1000 * 100 = 100000, truncated to 16 bits = 100000 & 0xFFFF = 34464
-        let result = func.call(&mut store, (1000, 100)).expect("call");
-        assert_eq!(result, 34464, "u16(1000) * u16(100) should wrap to 34464");
+        "#,
+            "mul_u16",
+            (1000, 100),
+        );
+        // 100000 & 0xFFFF = 34464.
+        assert_call_returns(
+            r#"
+            pub fn mul_u16(a: u16, b: u16) -> u16 {
+                return wrapping(a * b);
+            }
+        "#,
+            "mul_u16",
+            (1000, 100),
+            34464,
+        );
     }
 
     #[test]
     fn sub_i32_truncation_local_memory_consistency() {
-        use wasmtime::{Engine, Module, Store, TypedFunc};
-
-        // Verify that a sub-i32 value narrowed after arithmetic is consistent
-        // when stored in and loaded from an array element.
-        let source = r#"
+        // Unmarked, the same sum is the narrow guard's own condition: 100 + 100
+        // is 200, which an `i8` does not hold, so the round trip below is only
+        // reachable through the modular spelling. The operands are `let`
+        // bindings rather than constants, so nothing folds them before the
+        // program runs and the trap is the one the guard emits.
+        assert_overflow_trap(
+            r#"
             pub fn consistency() -> i32 {
                 let a: i8 = 100;
                 let b: i8 = 100;
@@ -2952,14 +3011,30 @@ mod base_codegen_tests {
                 }
                 return 0;
             }
+        "#,
+            "consistency",
+            (),
+        );
+
+        // Verify that a sub-i32 value narrowed after arithmetic is consistent
+        // when stored in and loaded from an array element. The sum is written
+        // modular because 100 + 100 leaves `i8`, and the value that has to
+        // survive the round trip is the narrowed one.
+        let source = r#"
+            pub fn consistency() -> i32 {
+                let a: i8 = 100;
+                let b: i8 = 100;
+                let sum: i8 = wrapping(a + b);
+                let arr: [i8; 1] = [sum];
+                let loaded: i8 = arr[0];
+                if sum == loaded {
+                    return 1;
+                }
+                return 0;
+            }
         "#;
-        let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
-        let engine = Engine::default();
-        let module = Module::new(&engine, &wasm_bytes).expect("compile");
-        let mut store = Store::new(&engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
-        let func: TypedFunc<(), i32> = instance
+        let (mut store, instance) = instantiate_inline(source);
+        let func: wasmtime::TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "consistency")
             .expect("get func");
         let result = func.call(&mut store, ()).expect("call");
@@ -8083,7 +8158,7 @@ mod regenerate {
         let dir = base_test_dir().join("if_nondet");
         let source_code = std::fs::read_to_string(dir.join("if_nondet.inf"))
             .expect("Failed to read if_nondet.inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("if_nondet.wasm");

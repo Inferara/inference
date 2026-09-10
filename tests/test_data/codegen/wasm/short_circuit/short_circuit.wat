@@ -215,7 +215,7 @@
     unreachable
   )
   (func $loop_guard (;8;) (type 8) (result i32)
-    (local $arr i32) (local $sum i32) (local $i i32) (local $__frame_ptr i32) (local i32)
+    (local $arr i32) (local $sum i32) (local $i i32) (local $__frame_ptr i32) (local i32 i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -293,11 +293,39 @@
         i32.mul
         i32.add
         i32.load
+        local.set 6
+        local.tee 5
+        local.get 6
         i32.add
+        local.tee 7
+        local.get 5
+        i32.lt_s
+        local.get 6
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 7
         local.set $sum
         local.get $i
         i32.const 1
+        local.set 6
+        local.tee 5
+        local.get 6
         i32.add
+        local.tee 7
+        local.get 5
+        i32.lt_s
+        local.get 6
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 7
         local.set $i
         br 0 (;@2;)
       end
@@ -310,4 +338,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\01\08")
 )

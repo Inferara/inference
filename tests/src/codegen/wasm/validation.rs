@@ -1847,6 +1847,19 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
             "every golden must belong to exactly one partition; a path missing from \
              the merged list is gated by neither the Wasm 1.0 nor the opt-in tests"
         );
+
+        // Set equality above says the two partitions agree with each other, not
+        // that the walk they are both built from reached anything in
+        // particular. That walk skips directories by name, so a family laid out
+        // under one of those names would be absent from `all` and from both
+        // partitions at once and the equality would still hold. Naming the
+        // overflow-guard catalogue refuses that for the newest family, and the
+        // one every guard row of the catalogue is read from.
+        assert!(
+            all.iter()
+                .any(|path| path.file_name().is_some_and(|n| n == "checked_arith.wasm")),
+            "the overflow-guard catalogue is not in the walk, so nothing below gates it"
+        );
     }
 
     /// Every artifact in the opt-in family carries a bulk-memory operator.

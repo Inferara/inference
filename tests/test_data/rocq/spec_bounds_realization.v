@@ -26,7 +26,7 @@ Definition Ma ofs al := {|memarg_offset := ofs; memarg_align := al|}.
 
 Definition lookup : module_func := {|
   modfunc_type := 0%N;
-  modfunc_locals := T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil;
+  modfunc_locals := T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil;
   modfunc_body :=
     BI_global_get 0%N ::
     BI_const_num (Vi32 32) ::
@@ -88,7 +88,22 @@ Definition lookup : module_func := {|
     BI_load T_i32 None (Ma 0%N 2%N) ::
     BI_local_get 1%N (*table*) ::
     BI_load T_i32 None (Ma 0%N 2%N) ::
+    BI_local_set 5%N ::
+    BI_local_tee 4%N ::
+    BI_local_get 5%N ::
     BI_binop T_i32 (Binop_i BOI_add) ::
+    BI_local_tee 6%N ::
+    BI_local_get 4%N ::
+    BI_relop T_i32 (Relop_i (ROI_lt SX_S)) ::
+    BI_local_get 5%N ::
+    BI_const_num (Vi32 0) ::
+    BI_relop T_i32 (Relop_i (ROI_lt SX_S)) ::
+    BI_relop T_i32 (Relop_i ROI_ne) ::
+    BI_if (BT_valtype None) (
+      BI_unreachable ::
+      nil) (
+      nil) ::
+    BI_local_get 6%N ::
     BI_local_get 2%N (*__frame_ptr*) ::
     BI_const_num (Vi32 32) ::
     BI_binop T_i32 (Binop_i BOI_add) ::

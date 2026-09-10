@@ -1,5 +1,11 @@
 // Every row of the overflow-guard catalogue, one exported function each.
 //
+// Nothing here is annotated. `+`, `-`, `*` and unary `-` carry a guard by
+// default, so the plain spelling is the guarded one and `wrapping(...)` is what
+// the two functions below that need modular arithmetic say. Writing
+// `checked(...)` over any of these would name the mode already in force and be
+// reported as changing nothing.
+//
 // The operands are parameters rather than literals so that nothing folds them
 // away: a guard over constants would be a guard over a value the compiler could
 // have decided at build time, and what these functions have to show is a check
@@ -11,41 +17,41 @@
 // trap at (MIN, -1) unless the `-1` arm keeps that pair away from the
 // division, and that would be a different trap reported to the host.
 
-pub fn add_i8(a: i8, b: i8) -> i8 { return checked(a + b); }
-pub fn sub_i8(a: i8, b: i8) -> i8 { return checked(a - b); }
-pub fn mul_i8(a: i8, b: i8) -> i8 { return checked(a * b); }
-pub fn neg_i8(a: i8) -> i8 { return checked(-a); }
+pub fn add_i8(a: i8, b: i8) -> i8 { return a + b; }
+pub fn sub_i8(a: i8, b: i8) -> i8 { return a - b; }
+pub fn mul_i8(a: i8, b: i8) -> i8 { return a * b; }
+pub fn neg_i8(a: i8) -> i8 { return -a; }
 
-pub fn add_i16(a: i16, b: i16) -> i16 { return checked(a + b); }
-pub fn sub_i16(a: i16, b: i16) -> i16 { return checked(a - b); }
-pub fn mul_i16(a: i16, b: i16) -> i16 { return checked(a * b); }
-pub fn neg_i16(a: i16) -> i16 { return checked(-a); }
+pub fn add_i16(a: i16, b: i16) -> i16 { return a + b; }
+pub fn sub_i16(a: i16, b: i16) -> i16 { return a - b; }
+pub fn mul_i16(a: i16, b: i16) -> i16 { return a * b; }
+pub fn neg_i16(a: i16) -> i16 { return -a; }
 
-pub fn add_u8(a: u8, b: u8) -> u8 { return checked(a + b); }
-pub fn sub_u8(a: u8, b: u8) -> u8 { return checked(a - b); }
-pub fn mul_u8(a: u8, b: u8) -> u8 { return checked(a * b); }
+pub fn add_u8(a: u8, b: u8) -> u8 { return a + b; }
+pub fn sub_u8(a: u8, b: u8) -> u8 { return a - b; }
+pub fn mul_u8(a: u8, b: u8) -> u8 { return a * b; }
 
-pub fn add_u16(a: u16, b: u16) -> u16 { return checked(a + b); }
-pub fn sub_u16(a: u16, b: u16) -> u16 { return checked(a - b); }
-pub fn mul_u16(a: u16, b: u16) -> u16 { return checked(a * b); }
+pub fn add_u16(a: u16, b: u16) -> u16 { return a + b; }
+pub fn sub_u16(a: u16, b: u16) -> u16 { return a - b; }
+pub fn mul_u16(a: u16, b: u16) -> u16 { return a * b; }
 
-pub fn add_i32(a: i32, b: i32) -> i32 { return checked(a + b); }
-pub fn sub_i32(a: i32, b: i32) -> i32 { return checked(a - b); }
-pub fn mul_i32(a: i32, b: i32) -> i32 { return checked(a * b); }
-pub fn neg_i32(a: i32) -> i32 { return checked(-a); }
+pub fn add_i32(a: i32, b: i32) -> i32 { return a + b; }
+pub fn sub_i32(a: i32, b: i32) -> i32 { return a - b; }
+pub fn mul_i32(a: i32, b: i32) -> i32 { return a * b; }
+pub fn neg_i32(a: i32) -> i32 { return -a; }
 
-pub fn add_u32(a: u32, b: u32) -> u32 { return checked(a + b); }
-pub fn sub_u32(a: u32, b: u32) -> u32 { return checked(a - b); }
-pub fn mul_u32(a: u32, b: u32) -> u32 { return checked(a * b); }
+pub fn add_u32(a: u32, b: u32) -> u32 { return a + b; }
+pub fn sub_u32(a: u32, b: u32) -> u32 { return a - b; }
+pub fn mul_u32(a: u32, b: u32) -> u32 { return a * b; }
 
-pub fn add_i64(a: i64, b: i64) -> i64 { return checked(a + b); }
-pub fn sub_i64(a: i64, b: i64) -> i64 { return checked(a - b); }
-pub fn mul_i64(a: i64, b: i64) -> i64 { return checked(a * b); }
-pub fn neg_i64(a: i64) -> i64 { return checked(-a); }
+pub fn add_i64(a: i64, b: i64) -> i64 { return a + b; }
+pub fn sub_i64(a: i64, b: i64) -> i64 { return a - b; }
+pub fn mul_i64(a: i64, b: i64) -> i64 { return a * b; }
+pub fn neg_i64(a: i64) -> i64 { return -a; }
 
-pub fn add_u64(a: u64, b: u64) -> u64 { return checked(a + b); }
-pub fn sub_u64(a: u64, b: u64) -> u64 { return checked(a - b); }
-pub fn mul_u64(a: u64, b: u64) -> u64 { return checked(a * b); }
+pub fn add_u64(a: u64, b: u64) -> u64 { return a + b; }
+pub fn sub_u64(a: u64, b: u64) -> u64 { return a - b; }
+pub fn mul_u64(a: u64, b: u64) -> u64 { return a * b; }
 
 // The reproducer this whole surface exists for. In Q20.20 fixed point the
 // product of two numbers is their integer product scaled back by ONE, and at
@@ -54,7 +60,7 @@ pub fn mul_u64(a: u64, b: u64) -> u64 { return checked(a * b); }
 // with one it traps.
 pub fn fixmul(a: i64, b: i64) -> i64 {
     const ONE: i64 = 1048576;
-    return checked(a * b) / ONE;
+    return a * b / ONE;
 }
 
 pub fn run() -> i64 {
@@ -62,21 +68,22 @@ pub fn run() -> i64 {
     return fixmul(H, H);
 }
 
-// The inner annotation restores wrapping under an outer `checked`: the sum
-// wraps and the product that consumes it is guarded.
-pub fn mixed_nesting(a: i64, b: i64, c: i64) -> i64 { return checked(a * wrapping(b + c)); }
+// The annotation restores wrapping under the checked default: the sum wraps and
+// the product that consumes it is guarded.
+pub fn mixed_nesting(a: i64, b: i64, c: i64) -> i64 { return a * wrapping(b + c); }
 
-// Two guards of one kind in one function. The inner guard has finished with the
+// Two guards of one kind in one function. The parentheses put the second
+// operator inside the first's operand, so the inner guard has finished with the
 // shared scratch before the outer one's first write, which is why a single pool
 // per function is enough.
-pub fn nested_add_i64(a: i64, b: i64, c: i64) -> i64 { return checked(a + checked(b + c)); }
-pub fn nested_mul_i64(a: i64, b: i64, c: i64) -> i64 { return checked(a * checked(b * c)); }
+pub fn nested_add_i64(a: i64, b: i64, c: i64) -> i64 { return a + (b + c); }
+pub fn nested_mul_i64(a: i64, b: i64, c: i64) -> i64 { return a * (b * c); }
 
 // Both width classes in one function, so both halves of the pool are reserved
 // and each guard reads its own.
 pub fn both_widths(a: i32, b: i32, c: i64, d: i64) -> i32 {
-    let wide: i64 = checked(c + d);
-    let narrow: i32 = checked(a * b);
+    let wide: i64 = c + d;
+    let narrow: i32 = a * b;
     if wide > 0 {
         return narrow;
     }
@@ -93,9 +100,9 @@ pub fn guarded_loop(n: i32, step: i32) -> i32 {
     let mut s: i32 = 1;
     let mut i: i32 = 0;
     loop i < n {
-        s = checked(s * step);
+        s = s * step;
         if i == 3 { break; }
-        i = checked(i + 1);
+        i = i + 1;
     }
     return s;
 }
