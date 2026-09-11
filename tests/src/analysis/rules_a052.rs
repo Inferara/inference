@@ -117,6 +117,61 @@ mod analysis_rules_tests {
     }
 
     #[test]
+    fn a_product_too_large_for_the_folds_own_arithmetic_is_still_an_overflow() {
+        // The widest product the language can write. Both operands are `u64`s,
+        // so both are inside their own type, and their product is above the
+        // `i128` the fold computes in — which makes it an overflow of `u64` by
+        // an enormous margin rather than an operation the rule cannot measure.
+        // The message has to name that product, so it is pinned whole.
+        let max = "18446744073709551615";
+        let messages = a052_messages(&binary("u64", max, "*", max));
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert_eq!(
+            messages[0],
+            "`a * b` overflows `u64` before the program runs; its operands fold to the \
+             constants `18446744073709551615` and `18446744073709551615`, each of which is \
+             itself within `0..=18446744073709551615`, and it is their `*` that is not — the \
+             true result `340282366920938463426481119284349108225` is outside that range — so \
+             this is not a value the program computes but a trap it takes on every run that \
+             reaches it, and no `assume`, envelope or specification can recover a result the \
+             type cannot hold: if the wrap is what you meant, write `wrapping(a * b)`, which \
+             computes `1` and does not trap, and otherwise the operands or the declared type \
+             have to change"
+        );
+    }
+
+    #[test]
+    fn the_widest_products_are_measured_on_both_sides_of_the_folds_own_range() {
+        // `2^64` exactly: one past `u64` and well inside `i128`, so it travels
+        // the ordinary path and must fire like every other overflow.
+        assert_eq!(
+            count_a052(&binary("u64", "9223372036854775808", "*", "2")),
+            1,
+            "u64 2^64"
+        );
+        // The largest product a signed width can reach is `2^126`, which `i128`
+        // holds with a bit to spare — the reason `u64` is the only width whose
+        // product can leave it.
+        assert_eq!(
+            count_a052(&binary(
+                "i64",
+                "-9223372036854775808",
+                "*",
+                "-9223372036854775808"
+            )),
+            1,
+            "i64 2^126"
+        );
+        // And a `u64` product that fits is not an overflow at all: `(2^32 - 1)^2`
+        // is below `u64::MAX`.
+        assert_eq!(
+            count_a052(&binary("u64", "4294967295", "*", "4294967295")),
+            0,
+            "u64 in range"
+        );
+    }
+
+    #[test]
     fn a_runtime_operand_does_not_fold() {
         // The issue's own reproducer: a product that leaves `i64` at some
         // arguments and not at others. Nothing here is known before the program
@@ -184,6 +239,30 @@ mod analysis_rules_tests {
                  return wrapping(a + b) - b; }"
             ),
             1
+        );
+    }
+
+    #[test]
+    fn the_widest_product_wraps_modularly_like_any_other() {
+        let max = "18446744073709551615";
+        let wrapped = format!(
+            "pub fn f() -> u64 {{ const a: u64 = {max}; const b: u64 = {max}; \
+             return wrapping(a * b); }}"
+        );
+        assert_eq!(count_a052(&wrapped), 0);
+        // And the value it wraps to is a constant the enclosing checked operator
+        // computes with: `u64::MAX * u64::MAX` is `1` modulo `2^64`, and
+        // subtracting two from that leaves `u64`. The message names the operand,
+        // which is how the wrapped value itself is observed.
+        let used = format!(
+            "pub fn f() -> u64 {{ const a: u64 = {max}; const b: u64 = {max}; \
+             const c: u64 = 2; return wrapping(a * b) - c; }}"
+        );
+        let messages = a052_messages(&used);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].contains("its operands fold to the constants `1` and `2`"),
+            "{messages:?}"
         );
     }
 
