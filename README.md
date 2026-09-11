@@ -172,7 +172,7 @@ The wrapper composes [`ci/rocq-rust-docker.sh`](ci/rocq-rust-docker.sh), preserv
 
 `--full` first runs the focused dischargeability tests, then the adapter flow, then the complete `inference-tests` crate (not the whole workspace). The clean Docker floor is exactly five Cargo `test result:` lines with at least 3,075 passed tests in aggregate and zero failed or filtered tests. Empty, single-binary, malformed, filtered, and under-floor logs fail closed.
 
-The verifier input must be an absolute canonical, clean `wasm-verifier` checkout whose `HEAD` equals the pinned revision `fb0b2dd56bd451960197cf7e7ccdc513eea47d8b` in [`core/wasm-to-v/wasm-verifier-pin.txt`](core/wasm-to-v/wasm-verifier-pin.txt). That revision supplies the live verifier-side bridge contract. Its `ci/discharge/container-pin.json` is exact canonical eight-line JSON, including field order and commas:
+The verifier input must be an absolute canonical, clean `wasm-verifier` checkout whose `HEAD` equals the pinned revision `8f485f037a270271bf2e1393c24fc0684097163b` in [`core/wasm-to-v/wasm-verifier-pin.txt`](core/wasm-to-v/wasm-verifier-pin.txt). That revision supplies the live verifier-side bridge contract. Its `ci/discharge/container-pin.json` is exact canonical eight-line JSON, including field order and commas:
 
 ```json
 {

@@ -743,7 +743,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    const EXPECTED_TEST_VERIFIER_REVISION: &str = "fb0b2dd56bd451960197cf7e7ccdc513eea47d8b";
+    const EXPECTED_TEST_VERIFIER_REVISION: &str = "8f485f037a270271bf2e1393c24fc0684097163b";
 
     struct HelperBinary {
         _directory: tempfile::TempDir,
