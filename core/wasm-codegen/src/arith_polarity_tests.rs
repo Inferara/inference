@@ -134,6 +134,7 @@ fn compile_under(source: &str, mode: ArithMode) -> Option<Vec<u8>> {
 /// crate that produces it, so a golden nobody wrote a test for cannot go stale
 /// unnoticed.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn every_committed_golden_is_the_default_polarity_module() {
     let mut skipped = Vec::new();
     for fixture in fixtures() {
@@ -164,6 +165,7 @@ fn every_committed_golden_is_the_default_polarity_module() {
 /// that moved, costs the same bytes at both polarities and would survive a size
 /// comparison.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_fixture_without_governed_arithmetic_is_one_module_at_both_polarities() {
     let mut ungoverned = 0usize;
     let mut governed = 0usize;
@@ -202,6 +204,7 @@ fn a_fixture_without_governed_arithmetic_is_one_module_at_both_polarities() {
 /// removal safe is that its arithmetic still reaches the emitter through the
 /// fallback — which is exactly the difference measured here.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_catalogue_fixture_is_guarded_only_at_the_checked_polarity() {
     let fixture = fixtures()
         .into_iter()
