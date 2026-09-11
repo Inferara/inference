@@ -9,7 +9,7 @@ that consumes the generated `.v` files.
 
 The consumer is wasm-verifier (a private Inferara repository; this
 document is the authoritative, in-repo statement of the contract —
-verified against wasm-verifier commit `fb0b2dd`, and the vendored
+verified against wasm-verifier commit `8f485f0`, and the vendored
 signature stub in `rocq-stub/` type-checks the emittable subset of it
 locally), built on **vanilla WasmCert-Coq v2.2.0** at commit `0fd83fa`
 — not the `WasmCert-Coq-Essence` fork this crate previously targeted.
@@ -80,18 +80,14 @@ collapsed:
    other raw byte may be spliced into or rewritten in the proof companion.
 
 Inference pins the independent companions, manifest, discharger, and Docker
-adapters at wasm-verifier B (`fb0b2dd56bd451960197cf7e7ccdc513eea47d8b`), which
-certifies the first six cases: thirteen proved endpoints and the false
-fixture's refuted one. `linked-extern` reached that state through a second
-A -> B -> C round: this repository published the artifact first (A), B proved
-it against those exact bytes and admitted it to its manifest, and the pin bump
-to B is the C that lets the configured lane require the six-case marker and
-pass it. Nothing certified thirteen endpoints before that bump. `overflow` is
-now in that same first position: its artifact is published here, its
-companion is written against these exact bytes in the verifier repository, and
-the configured lane requires the seven-case marker and stays red until its own
-pin bump. Absence of the
-configured executable is reported as
+adapters at wasm-verifier B (`8f485f037a270271bf2e1393c24fc0684097163b`), which
+certifies all seven cases: fifteen proved endpoints and the false fixture's
+refuted one. `overflow` reached that state through a third A -> B -> C round,
+the same one `linked-extern` took before it: this repository published the
+artifact first (A), B proved it against those exact bytes and admitted it to
+its manifest, and the pin bump to B is the C that lets the configured lane
+require the seven-case marker and pass it. Nothing certified fifteen endpoints
+before that bump. Absence of the configured executable is reported as
 `Selected-artifact dischargeability: SKIPPED`, never as proof success.
 
 The initial ordered floor is exact:
