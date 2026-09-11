@@ -13,8 +13,8 @@ name: Rocq real libraries (wasm-to-v)
 #   * the real-library job type-checks every gated module against the real
 #     libraries, including the PRIVATE wasm-verifier one. That needs a runner
 #     carrying those libraries, so it skips loudly where none is configured.
-#   * the selected-artifact job asks pinned verifier B to discharge six exact
-#     fresh artifacts and requires the thirteen-proved/one-refuted result.
+#   * the selected-artifact job asks pinned verifier B to discharge seven exact
+#     fresh artifacts and requires the fifteen-proved/one-refuted result.
 
 on:
   push:
