@@ -6122,6 +6122,7 @@ fn reachability_corpus_sources() -> Vec<(String, String)> {
 /// the same reason the examined count is: a fixture that quietly stopped
 /// reaching the pass would otherwise turn this test green by covering nothing.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn no_reachability_fixture_reaches_an_overflow_guard() {
     let mut findings: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
