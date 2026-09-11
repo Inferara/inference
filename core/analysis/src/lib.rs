@@ -430,7 +430,7 @@ mod tests {
             AnalysisDiagnostic::UnitAsValue { position: "a value", location: dummy_location() },
             AnalysisDiagnostic::UnnamedParameter { function: "f".to_string(), index: 0, ty: "i32".to_string(), location: dummy_location() },
             AnalysisDiagnostic::GenericNotSupported { site: errors::GenericSite::Declaration { function: "f".to_string(), params: "T'".to_string() }, location: dummy_location() },
-            AnalysisDiagnostic::ConstantArithmeticOverflow { expression: "max + 1".to_string(), operands: errors::FoldedOperands::Binary(2_147_483_647, 1), op: inference_ast::nodes::GuardedOp::Add, number: inference_type_checker::type_info::NumberType::I32, exact: 2_147_483_648, wrapped: -2_147_483_648, location: dummy_location() },
+            AnalysisDiagnostic::ConstantArithmeticOverflow { expression: "max + 1".to_string(), operands: errors::FoldedOperands::Binary(2_147_483_647, 1), op: inference_ast::nodes::GuardedOp::Add, number: inference_type_checker::type_info::NumberType::I32, exact: errors::ExactValue::Narrow(2_147_483_648), wrapped: -2_147_483_648, location: dummy_location() },
             AnalysisDiagnostic::ArithModeGovernsNothing { mode: inference_ast::nodes::ArithMode::Wrapping, location: dummy_location() },
             AnalysisDiagnostic::ArithModeChangesNothing { mode: inference_ast::nodes::ArithMode::Wrapping, enclosure: errors::RedundantArithMode::AgainstTheDefault, location: dummy_location() },
         ];

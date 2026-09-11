@@ -70,7 +70,7 @@ use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    errors::{AnalysisDiagnostic, FoldedOperands, LabeledDiagnostic},
+    errors::{AnalysisDiagnostic, ExactValue, FoldedOperands, LabeledDiagnostic},
     walker,
 };
 
@@ -162,10 +162,9 @@ struct Operation {
     number: NumberType,
     operands: FoldedOperands,
     source: String,
-    /// The result in the mathematical integers, which is the point: `i128` holds
-    /// every sum and product of two values of any width this language has, so
-    /// the result is exact and the range question comes afterwards.
-    exact: i128,
+    /// The result in the mathematical integers, which is the point: it is exact
+    /// whatever the width, and the range question comes afterwards.
+    exact: ExactValue,
 }
 
 /// A governed operator whose result leaves its type, with both answers.
@@ -174,7 +173,7 @@ struct Overflow {
     number: NumberType,
     operands: FoldedOperands,
     source: String,
-    exact: i128,
+    exact: ExactValue,
     wrapped: i128,
 }
 
@@ -210,7 +209,7 @@ impl<'a> Folder<'a> {
     fn overflowing_operation(&mut self, expr_id: ExprId) -> Option<Overflow> {
         let operation = self.operation(expr_id, ArithMode::Checked)?;
         let range = operation.number.range();
-        if range.contains(&operation.exact) {
+        if value_in_range(&range, operation.exact).is_some() {
             return None;
         }
         Some(Overflow {
@@ -219,7 +218,7 @@ impl<'a> Folder<'a> {
             operands: operation.operands,
             source: operation.source,
             exact: operation.exact,
-            wrapped: wrap_into(&range, operation.exact),
+            wrapped: wrap_exact_into(&range, operation.exact),
         })
     }
 
@@ -234,9 +233,9 @@ impl<'a> Folder<'a> {
                 let left = self.fold(left, mode)?;
                 let right = self.fold(right, mode)?;
                 let exact = match op {
-                    GuardedOp::Add => left.value.checked_add(right.value),
-                    GuardedOp::Sub => left.value.checked_sub(right.value),
-                    GuardedOp::Mul => left.value.checked_mul(right.value),
+                    GuardedOp::Add => left.value.checked_add(right.value).map(ExactValue::Narrow),
+                    GuardedOp::Sub => left.value.checked_sub(right.value).map(ExactValue::Narrow),
+                    GuardedOp::Mul => Some(exact_product(left.value, right.value)),
                     // The operator was read off this same node, so reaching here
                     // would mean a binary expression writing a unary operator.
                     GuardedOp::Neg => None,
@@ -251,7 +250,7 @@ impl<'a> Folder<'a> {
             }
             Expr::PrefixUnary { expr, .. } => {
                 let operand = self.fold(*expr, mode)?;
-                let exact = operand.value.checked_neg()?;
+                let exact = ExactValue::Narrow(operand.value.checked_neg()?);
                 Some(Operation {
                     op,
                     number,
@@ -322,12 +321,12 @@ impl<'a> Folder<'a> {
             Expr::Binary { .. } | Expr::PrefixUnary { .. } => {
                 let operation = self.operation(expr_id, mode)?;
                 let range = operation.number.range();
-                let value = if range.contains(&operation.exact) {
-                    operation.exact
-                } else if mode == ArithMode::Wrapping {
-                    wrap_into(&range, operation.exact)
-                } else {
-                    return None;
+                let value = match value_in_range(&range, operation.exact) {
+                    Some(value) => value,
+                    None if mode == ArithMode::Wrapping => {
+                        wrap_exact_into(&range, operation.exact)
+                    }
+                    None => return None,
                 };
                 Some(Folded {
                     value,
@@ -335,6 +334,54 @@ impl<'a> Folder<'a> {
                 })
             }
             _ => None,
+        }
+    }
+}
+
+/// The exact product of two folded operands.
+///
+/// A product `i128` cannot hold is not an operation this rule cannot measure: it
+/// is proof of one that overflows every width there is. Both operands are inside
+/// a machine width, so a product that large needs both magnitudes above `2^63`,
+/// and `u64` is the only width that reaches there — which also means both
+/// operands are non-negative, so the `u128` below holds the product exactly and
+/// the message can name it. The same bound is why nothing is lost on the way:
+/// two values under `2^64` have a product under `2^128`, so the multiplication
+/// has nothing to saturate at and there is no sign for the magnitudes to drop.
+fn exact_product(left: i128, right: i128) -> ExactValue {
+    match left.checked_mul(right) {
+        Some(product) => ExactValue::Narrow(product),
+        None => ExactValue::Wide(left.unsigned_abs().saturating_mul(right.unsigned_abs())),
+    }
+}
+
+/// `exact` when `range` holds it, which is this rule's one question about a
+/// result.
+///
+/// A wide result is above `i128::MAX` and the widest range here ends at
+/// `2^64 - 1`, so no range holds one: it is an overflow wherever it is measured,
+/// and there is no value for an enclosing checked operation to fold with.
+fn value_in_range(range: &RangeInclusive<i128>, exact: ExactValue) -> Option<i128> {
+    match exact {
+        ExactValue::Narrow(value) => range.contains(&value).then_some(value),
+        ExactValue::Wide(_) => None,
+    }
+}
+
+/// `exact` reduced into `range` the way the machine's own operator reduces it.
+///
+/// A wide result is reduced modulo the range's span first, which leaves a
+/// non-negative value below `2^64` for [`wrap_into`]: reducing modulo the span
+/// twice is reducing once, so the answer is the representative every other
+/// result gets, and the conversion that follows is exact rather than a
+/// narrowing, which is what lets it be written as an addition that cannot
+/// overflow.
+fn wrap_exact_into(range: &RangeInclusive<i128>, exact: ExactValue) -> i128 {
+    match exact {
+        ExactValue::Narrow(value) => wrap_into(range, value),
+        ExactValue::Wide(value) => {
+            let modulus = range.end().abs_diff(*range.start()) + 1;
+            wrap_into(range, 0_i128.wrapping_add_unsigned(value % modulus))
         }
     }
 }
@@ -350,10 +397,12 @@ impl<'a> Folder<'a> {
 /// signature here would make a width this function cannot reduce look possible,
 /// and the caller would have to decide what to do with a `None` that means
 /// nothing. `range` is one of the eight machine widths, so its span is at most
-/// `2^64` and its minimum at least `-2^63`; `value` is a `checked_*` result over
-/// two operands each already inside such a range, so its magnitude is at most
-/// `2^126`. Every intermediate below therefore stays inside `i128`, and the
-/// modulus is positive, so the remainder cannot divide by zero either.
+/// `2^64` and its minimum at least `-2^63`; `value` arrives from
+/// [`wrap_exact_into`] as either a `checked_*` result over two operands each
+/// already inside such a range, whose magnitude is at most `2^126`, or a
+/// remainder below `2^64`. Every intermediate below therefore stays inside
+/// `i128`, and the modulus is positive, so the remainder cannot divide by zero
+/// either.
 fn wrap_into(range: &RangeInclusive<i128>, value: i128) -> i128 {
     let min = *range.start();
     let modulus = range.end() - min + 1;

@@ -146,6 +146,39 @@ pub enum FoldedOperands {
     Binary(i128, i128),
 }
 
+/// The exact result of an [`AnalysisDiagnostic::ConstantArithmeticOverflow`]
+/// operation, in the mathematical integers.
+///
+/// `i128` holds every result the language's widths can produce but one: two
+/// `u64` operands, each inside `0..=18446744073709551615`, can have a product as
+/// large as `(2^64 - 1)^2`, which is above `i128::MAX`. Nothing else comes near
+/// it — a product that large needs both magnitudes above `2^63`, and `u64` is
+/// the only width that reaches there, while every sum, difference and negation
+/// of two values from any width stays below `2^65` — so one wide arm completes
+/// the type, and a `u64` value being non-negative is what makes that arm a
+/// `u128` rather than something signed.
+///
+/// The wide case is a value rather than an absence because of what it proves: a
+/// product too large for the fold's own arithmetic is an overflow of every width
+/// there is, so the message names it instead of the rule falling silent on the
+/// largest overflow it can be shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactValue {
+    /// A result `i128` holds, which is every result but the product below.
+    Narrow(i128),
+    /// A product of two non-negative operands above `i128::MAX`.
+    Wide(u128),
+}
+
+impl Display for ExactValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            ExactValue::Narrow(value) => Display::fmt(value, f),
+            ExactValue::Wide(value) => Display::fmt(value, f),
+        }
+    }
+}
+
 /// The message of [`AnalysisDiagnostic::ConstantArithmeticOverflow`].
 ///
 /// Everything it states is derived from the fold, so the message cannot claim
@@ -165,7 +198,7 @@ fn constant_arithmetic_overflow_message(
     operands: FoldedOperands,
     op: GuardedOp,
     number: NumberType,
-    exact: i128,
+    exact: ExactValue,
     wrapped: i128,
 ) -> String {
     let range = number.range();
@@ -701,7 +734,11 @@ pub enum AnalysisDiagnostic {
         operands: FoldedOperands,
         op: GuardedOp,
         number: NumberType,
-        exact: i128,
+        exact: ExactValue,
+        /// The result the `wrapping(...)` spelling computes, which every width
+        /// holds by construction — including the one whose exact product does
+        /// not fit `i128`, since reducing it into the range is what makes it a
+        /// value of the type.
         wrapped: i128,
         location: Location,
     },
@@ -2483,7 +2520,7 @@ mod tests {
             operands: FoldedOperands::Binary(2_147_483_647, 1),
             op: GuardedOp::Add,
             number: NumberType::I32,
-            exact: 2_147_483_648,
+            exact: ExactValue::Narrow(2_147_483_648),
             wrapped: -2_147_483_648,
             location: test_location(),
         };
@@ -2521,7 +2558,7 @@ mod tests {
             operands: FoldedOperands::Unary(-128),
             op: GuardedOp::Neg,
             number: NumberType::I8,
-            exact: 128,
+            exact: ExactValue::Narrow(128),
             wrapped: -128,
             location: test_location(),
         };
@@ -2541,6 +2578,40 @@ mod tests {
         assert!(
             text.contains("the operand or the declared type has to change"),
             "the unary arm's fallback repair must be singular, got: {text}"
+        );
+    }
+
+    /// The one result `i128` does not hold still has to be stated, and stated as
+    /// the number it is: a message that rendered `u64::MAX * u64::MAX` as
+    /// anything but its true product would be claiming something the fold did
+    /// not establish, which is the whole reason the field carries a value here
+    /// rather than an absence.
+    #[test]
+    fn display_constant_arithmetic_overflow_wide_product() {
+        let err = AnalysisDiagnostic::ConstantArithmeticOverflow {
+            expression: "a * b".to_string(),
+            operands: FoldedOperands::Binary(
+                i128::from(u64::MAX),
+                i128::from(u64::MAX),
+            ),
+            op: GuardedOp::Mul,
+            number: NumberType::U64,
+            exact: ExactValue::Wide(u128::from(u64::MAX) * u128::from(u64::MAX)),
+            wrapped: 1,
+            location: test_location(),
+        };
+        assert_eq!(err.rule_id(), "A052");
+        let text = err.to_string();
+        assert!(
+            text.contains(
+                "the true result `340282366920938463426481119284349108225` is outside that \
+                 range"
+            ),
+            "A052 must state the product itself, got: {text}"
+        );
+        assert!(
+            text.contains("write `wrapping(a * b)`, which computes `1`"),
+            "the remedy must quote the value the wrap computes, got: {text}"
         );
     }
 
