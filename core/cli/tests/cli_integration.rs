@@ -880,8 +880,8 @@ fn proof_mode_is_refused_at_the_stellar_target_in_both_spellings() {
         let assert = cmd.assert().failure();
         let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
         assert!(
-            stderr.contains("Proof mode requires Wasm32 target")
-                && stderr.contains("Stellar target cannot process these"),
+            stderr.contains("Proof mode requires the `wasm32` target")
+                && stderr.contains("the `stellar` runtime rejects a module carrying them"),
             "{spelling:?}: the refusal must name the mode and the target, got: {stderr}"
         );
         assert!(

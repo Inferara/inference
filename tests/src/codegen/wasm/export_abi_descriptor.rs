@@ -537,43 +537,6 @@ fn private(a: i32) -> i32 {
         assert!(exported_function_names(output.wasm()).is_empty());
     }
 
-    /// Every codegen fixture that compiles as a stand-alone file.
-    ///
-    /// Multi-file fixtures keep their sources under a `src` directory and are
-    /// only meaningful as a tree, so they are excluded; the two multi-file cases
-    /// above cover what they would add here.
-    fn single_file_corpus_sources() -> Vec<(String, String)> {
-        fn collect(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
-            let entries = std::fs::read_dir(dir)
-                .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()));
-            for entry in entries {
-                let path = entry.expect("failed to read a directory entry").path();
-                if path.is_dir() {
-                    if path.file_name().is_some_and(|name| name == "src") {
-                        continue;
-                    }
-                    collect(&path, found);
-                } else if path.extension().is_some_and(|ext| ext == "inf") {
-                    found.push(path);
-                }
-            }
-        }
-        let mut paths = Vec::new();
-        collect(
-            &crate::utils::get_test_data_path().join("codegen"),
-            &mut paths,
-        );
-        paths.sort();
-        paths
-            .into_iter()
-            .map(|path| {
-                let source = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-                (path.display().to_string(), source)
-            })
-            .collect()
-    }
-
     /// The whole corpus, not one fixture at a time: for every module the
     /// compiler produces, the descriptor names exactly the functions the export
     /// section carries, in the same order.
@@ -590,7 +553,7 @@ fn private(a: i32) -> i32 {
     /// compile at all is another test's business.
     #[test]
     fn every_corpus_fixture_describes_exactly_its_exported_functions() {
-        let sources = single_file_corpus_sources();
+        let sources = crate::corpus::single_file_corpus_sources();
         assert!(
             sources.len() >= 100,
             "expected at least 100 single-file fixtures, found {}; a collector \

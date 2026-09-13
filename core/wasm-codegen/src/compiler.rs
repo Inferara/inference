@@ -1009,11 +1009,11 @@ impl Compiler {
 
     /// Enables or disables runtime array bounds-check emission.
     ///
-    /// [`crate::codegen`] enables it for every build it drives — Compile and
-    /// Proof, Debug and Release, Wasm32 and Stellar. A dynamic out-of-range
-    /// access therefore traps cleanly instead of corrupting adjacent frame
-    /// slots, and the artifact a proof is written about is byte-for-byte the
-    /// artifact that ships.
+    /// [`crate::codegen`] enables it for every build it drives, at every target
+    /// — Compile and Proof, Debug and Release alike, and nothing on the emission
+    /// path reads a target. A dynamic out-of-range access therefore traps
+    /// cleanly instead of corrupting adjacent frame slots, and the artifact a
+    /// proof is written about is byte-for-byte the artifact that ships.
     ///
     /// Proof mode used to be the one unguarded build, which made its `.v` weaker
     /// than the deployed module on exactly the property the language exists to

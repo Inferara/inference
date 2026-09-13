@@ -416,10 +416,15 @@ pub fn resolve_wasm_features(
 /// set while a target is being built. `inference-wasm-codegen` carries the
 /// cross-check that maps one onto the other.
 ///
-/// Adding a variant carries three obligations, each of which fails a compile or a
+/// Adding a variant carries four obligations, each of which fails a compile or a
 /// test rather than resting on review: the variant records its own
-/// [`Self::abi_minor`], [`COMPILER_ABI_MINOR`] is bumped to that value, and every
-/// exhaustive match from a name onto an emission target gains an arm.
+/// [`Self::abi_minor`], [`COMPILER_ABI_MINOR`] is bumped to that value, every
+/// exhaustive match from a name onto an emission target gains an arm, and each
+/// predicate below decides the new name explicitly. The predicates are matches
+/// rather than `matches!(self, Self::Wasm32)` for that last reason alone: the
+/// concise form compiles unchanged for a new variant and hands it `false`, so a
+/// name that should have been allowed something would be refused it with nobody
+/// having decided so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TargetName {
     /// General-purpose WebAssembly, for an embedder that imposes no ABI of its
@@ -503,7 +508,10 @@ impl TargetName {
     /// second opinion.
     #[must_use]
     pub fn supports_proof_mode(self) -> bool {
-        matches!(self, Self::Wasm32)
+        match self {
+            Self::Wasm32 => true,
+            Self::Stellar => false,
+        }
     }
 
     /// Whether a build for this target may request a post-MVP instruction
@@ -513,7 +521,10 @@ impl TargetName {
     /// target decides, this copy exists for a front end that has only the name.
     #[must_use]
     pub fn permits_bulk_memory(self) -> bool {
-        matches!(self, Self::Wasm32)
+        match self {
+            Self::Wasm32 => true,
+            Self::Stellar => false,
+        }
     }
 }
 

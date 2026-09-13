@@ -3,10 +3,15 @@
 //! These tests verify:
 //! - `codegen()` produces valid `CodegenOutput` with non-empty WASM bytes
 //! - WASM contains expected content (exported functions, custom opcodes)
-//! - Target validation (proof + Stellar rejection, Stellar + non-det rejection).
-//!   The fourth target gate — the Stellar export admissibility rules — has its
-//!   own module, `stellar_gate`, because it reads the export descriptor rather
-//!   than the configuration and needs a fixture per refusal.
+//! - Target validation, through the `Stellar` target: `proof` mode refused, a
+//!   non-deterministic function refused. Both gates are target-generic and each
+//!   non-default target answers them the same way, so they are pinned here once
+//!   against one target rather than once per target; `spacewasm_gate` carries
+//!   the same two rows for the third target because that module is its whole
+//!   acceptance matrix.
+//!   The remaining target gate — the Stellar export admissibility rules — has
+//!   its own module, `stellar_gate`, because it reads the export descriptor
+//!   rather than the configuration and needs a fixture per refusal.
 //! - Proof mode metadata matches compile mode for non-det-free code
 //! - `has_main` detection
 
@@ -143,9 +148,12 @@ pub fn read_first() -> i32 {
 
     // Target validation tests ---
 
-    /// Pinned whole, not by substring: the refusal renders the target through
-    /// `{target:?}`, so the user-visible text moves whenever the variant is
-    /// renamed while every substring that omits the name keeps passing.
+    /// Pinned whole, not by substring: the refusal renders both target names
+    /// through `Target::as_str()`, the spelling `--target` accepts, so the
+    /// user-visible text moves whenever a name does while every substring that
+    /// omits the names keeps passing. The names are also the actionable half —
+    /// the message tells the reader which target to build at — so a wrong one is
+    /// a wrong instruction rather than a cosmetic slip.
     #[test]
     fn codegen_rejects_proof_with_stellar() {
         cov_mark::check!(wasm_codegen_proof_mode_rejected_non_wasm32);
@@ -154,25 +162,34 @@ pub fn read_first() -> i32 {
             .expect_err("Proof mode with Stellar should be rejected");
         assert_eq!(
             err.to_string(),
-            "Proof mode requires Wasm32 target. Proof mode emits custom 0xfc \
-             non-deterministic instructions that only the Wasm32 target supports; \
-             the Stellar target cannot process these."
+            "Proof mode requires the `wasm32` target. Proof mode emits custom \
+             0xfc non-deterministic instructions that only `wasm32` accepts; the \
+             `stellar` runtime rejects a module carrying them. Build the proof at \
+             `--target wasm32`: code generation is target-blind, so the module a \
+             `stellar` build starts from is the `wasm32` build's."
         );
     }
 
+    /// Pinned whole for the reason above, plus one this message has of its own:
+    /// its last sentence is a remedy — move the code into a `spec` block — and a
+    /// refusal that names no way forward is a different message from one that
+    /// does, however similar the first sentence.
     #[test]
     fn codegen_rejects_stellar_with_nondet() {
-        cov_mark::check!(wasm_codegen_stellar_rejects_nondet_function);
+        cov_mark::check!(wasm_codegen_target_rejects_nondet_function);
         let source = "pub fn with_nondet() -> i32 { return @; }";
         let err =
             codegen_with_target_mode_no_analysis(source, Target::Stellar, CompilationMode::Compile)
                 .expect_err("Stellar target with non-det should be rejected");
         assert_eq!(
             err.to_string(),
-            "Stellar target does not support non-deterministic operations. \
+            "The `stellar` target does not support non-deterministic operations. \
              Function 'with_nondet' contains non-deterministic constructs (uzumaki, \
-             forall, exists, assume, or unique blocks) that produce custom \
-             0xfc WebAssembly instructions incompatible with the Stellar VM."
+             forall, exists, assume, or unique blocks), which compile to custom \
+             0xfc WebAssembly instructions the `stellar` runtime rejects. \
+             Non-deterministic code is specification code: move it into a `spec` \
+             block, which compile mode strips from the artifact, or build this \
+             program with `--target wasm32`."
         );
     }
 
@@ -379,6 +396,11 @@ pub fn read_first() -> i32 {
         assert!(!output.has_main());
     }
 
+    /// Two of the three targets pin their recorded metadata here. The third
+    /// arm is not missing: `spacewasm_gate` is that target's whole acceptance
+    /// matrix and its first row states exactly this content, so the pin lives
+    /// beside the rest of the target's evidence rather than being split across
+    /// two modules.
     #[test]
     fn codegen_stellar_compile_succeeds() {
         let source = "pub fn hello_world() -> i32 { return 42; }";
@@ -1548,107 +1570,6 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
         panic!("{label} carries no bulk-memory operator, so it is not an opt-in artifact");
     }
 
-    /// Root of the opt-in golden family: modules the compiler produced with a
-    /// post-MVP feature requested, so they are deliberately not Wasm 1.0.
-    ///
-    /// Both partitions are defined by this one path — the default gates exclude
-    /// the subtree and the opt-in gates cover exactly it — so the two can only
-    /// disagree about which side a golden belongs to, never leave one ungated.
-    fn bulk_memory_golden_root() -> std::path::PathBuf {
-        crate::utils::get_test_data_path()
-            .join("codegen")
-            .join("wasm")
-            .join("bulk_memory_golden")
-    }
-
-    /// Every golden `.wasm` under `tests/test_data/codegen`, both partitions,
-    /// sorted so failures name the same file across runs.
-    ///
-    /// `out` directories are skipped: they are the gitignored landing place for
-    /// `infs build` run by hand against a fixture tree, so whatever they hold is
-    /// whichever compiler someone last pointed at it, not a golden this suite
-    /// maintains.
-    fn all_golden_wasm_artifacts() -> Vec<std::path::PathBuf> {
-        fn collect(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
-            let entries = std::fs::read_dir(dir)
-                .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()));
-            for entry in entries {
-                let path = entry.expect("failed to read a directory entry").path();
-                if path.is_dir() {
-                    if path.file_name().is_some_and(|name| name == "out") {
-                        continue;
-                    }
-                    collect(&path, found);
-                } else if path.extension().is_some_and(|ext| ext == "wasm") {
-                    found.push(path);
-                }
-            }
-        }
-        let mut found = Vec::new();
-        collect(
-            &crate::utils::get_test_data_path().join("codegen"),
-            &mut found,
-        );
-        found.sort();
-        found
-    }
-
-    /// The goldens the WebAssembly 1.0 invariants below apply to: everything
-    /// except the opt-in family.
-    fn golden_wasm_artifacts() -> Vec<std::path::PathBuf> {
-        let root = bulk_memory_golden_root();
-        all_golden_wasm_artifacts()
-            .into_iter()
-            .filter(|path| !path.starts_with(&root))
-            .collect()
-    }
-
-    /// The opt-in family, which the inverse gates below apply to.
-    fn bulk_memory_golden_artifacts() -> Vec<std::path::PathBuf> {
-        let root = bulk_memory_golden_root();
-        all_golden_wasm_artifacts()
-            .into_iter()
-            .filter(|path| path.starts_with(&root))
-            .collect()
-    }
-
-    /// Every codegen fixture that compiles as a stand-alone file.
-    ///
-    /// Multi-file fixtures keep their sources under a `src` directory and are
-    /// only meaningful as a tree, so they are excluded here; their merged output
-    /// is covered through [`golden_wasm_artifacts`].
-    fn single_file_corpus_sources() -> Vec<(String, String)> {
-        fn collect(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
-            let entries = std::fs::read_dir(dir)
-                .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()));
-            for entry in entries {
-                let path = entry.expect("failed to read a directory entry").path();
-                if path.is_dir() {
-                    if path.file_name().is_some_and(|name| name == "src") {
-                        continue;
-                    }
-                    collect(&path, found);
-                } else if path.extension().is_some_and(|ext| ext == "inf") {
-                    found.push(path);
-                }
-            }
-        }
-        let mut paths = Vec::new();
-        collect(
-            &crate::utils::get_test_data_path().join("codegen"),
-            &mut paths,
-        );
-        paths.sort();
-        paths
-            .into_iter()
-            .map(|path| {
-                let source = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-                (path.display().to_string(), source)
-            })
-            .collect()
-    }
-
     /// No golden artifact in the corpus carries a bulk-memory operator.
     ///
     /// The goldens are the compiler's own output for every shape the suite
@@ -1658,7 +1579,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     /// artifacts alone.
     #[test]
     fn corpus_goldens_contain_no_bulk_memory_operator() {
-        let artifacts = golden_wasm_artifacts();
+        let artifacts = crate::corpus::golden_wasm_artifacts();
         assert!(
             artifacts.len() >= 100,
             "expected the corpus to hold at least 100 golden modules, found {}; \
@@ -1681,7 +1602,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     /// analysis rejects still reach codegen.
     #[test]
     fn proof_mode_corpus_contains_no_bulk_memory_operator() {
-        let sources = single_file_corpus_sources();
+        let sources = crate::corpus::single_file_corpus_sources();
         assert!(
             sources.len() >= 100,
             "expected at least 100 single-file fixtures, found {}",
@@ -1762,7 +1683,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     /// proof toolchain.
     #[test]
     fn compile_mode_goldens_validate_as_wasm_1_0() {
-        let artifacts = golden_wasm_artifacts();
+        let artifacts = crate::corpus::golden_wasm_artifacts();
         let mut validated = 0usize;
         for path in &artifacts {
             let wasm = std::fs::read(path)
@@ -1784,7 +1705,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     /// now and not only for what was checked in.
     #[test]
     fn compile_mode_corpus_validates_as_wasm_1_0() {
-        let sources = single_file_corpus_sources();
+        let sources = crate::corpus::single_file_corpus_sources();
         let mut validated = 0usize;
         for (label, source) in &sources {
             let Ok(output) = codegen_with_full_config_no_analysis(
@@ -1825,9 +1746,9 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     /// silently found nothing from passing vacuously.
     #[test]
     fn golden_partitions_cover_every_artifact() {
-        let all = all_golden_wasm_artifacts();
-        let default_level = golden_wasm_artifacts();
-        let opt_in = bulk_memory_golden_artifacts();
+        let all = crate::corpus::all_golden_wasm_artifacts();
+        let default_level = crate::corpus::golden_wasm_artifacts();
+        let opt_in = crate::corpus::bulk_memory_golden_artifacts();
 
         assert!(
             all.len() >= 180,
@@ -1867,7 +1788,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     /// Every artifact in the opt-in family carries a bulk-memory operator.
     #[test]
     fn bulk_memory_goldens_all_carry_a_bulk_memory_operator() {
-        let artifacts = bulk_memory_golden_artifacts();
+        let artifacts = crate::corpus::bulk_memory_golden_artifacts();
         assert!(
             artifacts.len() >= 50,
             "expected at least 50 opt-in goldens, found {}",
@@ -1887,7 +1808,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     /// WebAssembly at any feature level.
     #[test]
     fn bulk_memory_goldens_validate_at_wasm_1_0_plus_bulk_memory() {
-        let artifacts = bulk_memory_golden_artifacts();
+        let artifacts = crate::corpus::bulk_memory_golden_artifacts();
         let mut validated = 0usize;
         for path in &artifacts {
             let wasm = std::fs::read(path)
@@ -2007,7 +1928,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     /// reading the fixture sources.
     #[test]
     fn every_committed_checked_section_is_one_the_linker_can_read() {
-        let artifacts = all_golden_wasm_artifacts();
+        let artifacts = crate::corpus::all_golden_wasm_artifacts();
         assert!(
             artifacts.len() >= 180,
             "expected at least 180 golden modules, found {}",
@@ -2073,7 +1994,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     /// generation.
     #[test]
     fn a_recompiled_fixture_carries_the_checked_section_only_when_the_compiler_guarded_something() {
-        let sources = single_file_corpus_sources();
+        let sources = crate::corpus::single_file_corpus_sources();
         assert!(
             sources.len() >= 100,
             "expected at least 100 single-file fixtures, found {}",
