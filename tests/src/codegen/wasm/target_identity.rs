@@ -71,8 +71,9 @@ mod target_identity_tests {
     /// targets accept compiles to the same bytes.
     ///
     /// A fixture the non-default target refuses is skipped rather than failed —
-    /// its refusal is that target's own gate doing its job, and which fixtures
-    /// it names is pinned in that target's gate module. A fixture the default
+    /// its refusal is that target's own gate doing its job, and the shapes that
+    /// gate refuses are pinned in the target's gate module, while the size of
+    /// the skip set is held by the comparison floor below. A fixture the default
     /// target cannot compile is another test's business, but it may not drop out
     /// quietly: the baseline loop counts those and fails if there are any, so a
     /// corpus-wide compilation break cannot masquerade as a wide skip set.

@@ -50,3 +50,19 @@ wasm-encoder.workspace = true
 # workspace's, it accepts raw `&[u8]` module bytes, and it never writes test
 # snapshot files into the crate directory.
 soroban-env-host = { version = "=28.0.2", features = ["testutils"] }
+
+# The SpaceWasm flight interpreter, used only by the `spacewasm` integration
+# binary to decode, instantiate and execute compiler output in-process. It is
+# chosen because it *is* the runtime the target names: a `no_std` WebAssembly
+# 1.0 decoder with no post-MVP proposal support, which is what makes it an
+# oracle for the target's bulk-memory refusal rather than a second opinion.
+# The `=`-pin is the point rather than caution — the decoder's acceptance set is
+# what this tier records, so a version bump has to be a reviewed act with the
+# sweeps re-measured. `strict-assertions` is upstream's own dev-dependency
+# setting: it re-checks at run time the bounds the verifier established, so it
+# can only make this tier stricter, never let a module through that the default
+# build would reject.
+# It brings one exact pin of its own, `libm =0.2.16`, and `libm` is shared with
+# cranelift and wasmtime: a future bump that needs a newer `libm` is
+# unresolvable until this pin moves, and that failure surfaces far from here.
+spacewasm = { version = "=0.7.1", features = ["strict-assertions"] }

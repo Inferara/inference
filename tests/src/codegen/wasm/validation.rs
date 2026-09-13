@@ -1504,39 +1504,6 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
         }
     }
 
-    /// Whether a module carries any of the compiler's custom verification
-    /// opcodes, which is what separates a proof-mode or analysis-skipped artifact
-    /// from an ordinary executable one.
-    ///
-    /// Fixture names do not answer this — `nondet` and `array_nondet` are compiled
-    /// in compile mode with analysis skipped, and a proof-mode module need not be
-    /// named for it — so the classification reads the operators themselves.
-    fn contains_verification_operator(wasm: &[u8]) -> bool {
-        for payload in Parser::new(0).parse_all(wasm) {
-            let Ok(Payload::CodeSectionEntry(body)) = payload else {
-                continue;
-            };
-            let Ok(operators) = body.get_operators_reader() else {
-                continue;
-            };
-            for op in operators {
-                let Ok(op) = op else { continue };
-                if matches!(
-                    op,
-                    Operator::Forall { .. }
-                        | Operator::Exists { .. }
-                        | Operator::Assume { .. }
-                        | Operator::Unique { .. }
-                        | Operator::I32Uzumaki { .. }
-                        | Operator::I64Uzumaki { .. }
-                ) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     /// Asserts a module carries at least one bulk-memory operator.
     ///
     /// The inverse of [`assert_no_bulk_memory_operator`], and it earns its keep
@@ -1688,7 +1655,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
         for path in &artifacts {
             let wasm = std::fs::read(path)
                 .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-            if contains_verification_operator(&wasm) {
+            if crate::corpus::carries_verification_operator(&wasm) {
                 continue;
             }
             validate_as_wasm_1_0(&wasm, &path.display().to_string());
@@ -1716,7 +1683,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
             ) else {
                 continue;
             };
-            if contains_verification_operator(output.wasm()) {
+            if crate::corpus::carries_verification_operator(output.wasm()) {
                 continue;
             }
             validate_as_wasm_1_0(output.wasm(), label);
@@ -1813,7 +1780,7 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
         for path in &artifacts {
             let wasm = std::fs::read(path)
                 .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-            if contains_verification_operator(&wasm) {
+            if crate::corpus::carries_verification_operator(&wasm) {
                 continue;
             }
             validate_with_bulk_memory(&wasm, &path.display().to_string());
