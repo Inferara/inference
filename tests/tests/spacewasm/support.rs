@@ -36,18 +36,73 @@
 //! case a bare token would still let a test write.
 //!
 //! The macro is invoked at each **binary root** and never here, so the `static
-//! mut` cannot reach this crate's library or its `rocq-discharge` binaries. A
-//! later example including this file by `#[path]` invokes it at its own root.
+//! mut` cannot reach this crate's library or its `rocq-discharge` binaries.
+//! Three roots invoke it: the corpus-sweep binary this file sits beside, the
+//! `spacewasm-embed` example, and the CLI matrix that drives that example's
+//! entry point in process.
+//!
+//! # The embedder harness
+//!
+//! [`run`] is the whole body of the `spacewasm-embed` example: an embedder
+//! reduced to what a mission integrator does by hand — load an artifact, call
+//! an export, watch it return, trap or run out of fuel, and measure the IR it
+//! compiled to. It lives in this file rather than in the example so the CLI
+//! matrix can drive it in process; shelling out to `cargo run --example` from
+//! inside `cargo test` would contend for the build lock the test run is already
+//! holding.
+//!
+//! ```text
+//! spacewasm-embed <module.wasm> [--invoke NAME [ARG…]] [--fuel N] [--stats [--json]]
+//! ```
+//!
+//! `--stats` reports what the artifact cost the interpreter, and `--json`
+//! prints that measurement as **one line**, always the first line of stdout, so
+//! `head -1` stays a complete reader even when `--invoke` prints beneath it. It
+//! is printed *instead of* the export listing a bare run gives, since asking
+//! for the measurement is asking for it to be the report.
+//! The keys are stable, and this table is their definition:
+//!
+//! | key | meaning |
+//! |---|---|
+//! | `code_pages` | IR pages the code builder filled |
+//! | `ir_words` | sixteen-bit IR words written across them |
+//! | `ir_bytes` | `ir_words` × 2 |
+//! | `wasm_bytes` | the artifact's size on disk |
+//! | `ir_bytes_per_wasm_byte` | `ir_bytes / wasm_bytes`, unrounded |
+//!
+//! `code_pages` and `ir_words` come out of upstream's own two formulas — pages
+//! held, and every page but the last counted full plus the writer's offset into
+//! the last — so they are comparable line for line with what `spacewasm_std`'s
+//! tool prints for the same artifact. The ratio is not, and is deliberately not
+//! spelled the way upstream spells its own. Upstream's *compilation ratio*
+//! divides the live bytes its bounded `PageAllocator` holds — the engine, the
+//! guest memory and the module metadata as much as the IR — by the artifact's
+//! size, and this harness cannot produce that figure, because it runs on the
+//! unbounded [`StdAllocator`] this tier needs and that allocator keeps no
+//! statistics. What is measured here is the compiled IR alone against the
+//! WebAssembly it was compiled from, so it is named for what it is: a number
+//! that is not upstream's must not travel into a log under upstream's name,
+//! and a JSON key travels without the sentence that would have explained it.
+//!
+//! Benchmark *tracking* — a history file the way the raytracer keeps one — is
+//! not here; the JSON line is the hook a tracker would read, which is why it
+//! carries the ratio unrounded. Two decimals is around eight percent of the
+//! figure a small module produces, so a rounded key would hold still across
+//! exactly the regressions a tracker exists to catch. The rendering a person
+//! reads rounds, where a reader is not a series.
 
 use std::alloc::Layout;
+use std::io::Write;
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use spacewasm::{
     AllocError, Allocator, CodeBuilder, CompilerOptions, Engine, ExportDesc, HostModule, InnerVec,
     Interpreter, InterpreterResult, InterpreterRunner, InvokeError, Module, ModuleRef, ParseError,
-    Ref, TrapReason, Value, WasmMemoryAllocator, WasmRef, WasmStream,
+    Ref, TrapReason, ValType, Value, WasmMemoryAllocator, WasmRef, WasmStream,
 };
 
 /// Control frames the reference embedder's verifier admits.
@@ -295,10 +350,14 @@ pub struct LoadedModule<'session> {
 pub struct ExportedFunction {
     /// The name in the export section.
     pub name: String,
-    /// How many values the *WebAssembly* signature takes. A hidden pointer the
+    /// What the *WebAssembly* signature takes, in order. A hidden pointer the
     /// lowering introduced for an aggregate return is one of them, which is why
-    /// this is read here and not off the source-level export descriptor.
-    pub params: usize,
+    /// this is read here and not off the source-level export descriptor — and
+    /// the types rather than a count, because a caller supplying arguments on a
+    /// command line has to know which of them the engine wants 64 bits wide.
+    pub params: Vec<ValType>,
+    /// What it gives back, if anything.
+    pub result: Option<ValType>,
 }
 
 /// What running an exported function did.
@@ -436,7 +495,8 @@ impl LoadedModule<'_> {
                 let function = &owner.functions[local as usize];
                 Some(ExportedFunction {
                     name: export.name.to_string(),
-                    params: owner.types[function.ty.0 as usize].params.len(),
+                    params: owner.types[function.ty.0 as usize].params.iter().copied().collect(),
+                    result: function.return_ty,
                 })
             })
             .collect()
@@ -504,6 +564,31 @@ pub struct IrStats {
     pub wasm_bytes: usize,
 }
 
+impl IrStats {
+    /// The IR as bytes rather than sixteen-bit words.
+    #[must_use]
+    pub fn ir_bytes(self) -> usize {
+        self.ir_words * BYTES_PER_WORD
+    }
+
+    /// Words the pages held could have taken, which is what the words written
+    /// are usefully read against.
+    #[must_use]
+    pub fn ir_words_capacity(self) -> usize {
+        self.code_pages * WORDS_PER_PAGE
+    }
+
+    /// Bytes of IR per byte of WebAssembly.
+    ///
+    /// Only ever computed for a module that decoded, and a module that decoded
+    /// carried at least a magic number and a version, so the divisor is never
+    /// zero.
+    #[must_use]
+    pub fn ir_bytes_per_wasm_byte(self) -> f64 {
+        self.ir_bytes() as f64 / self.wasm_bytes as f64
+    }
+}
+
 /// Measures the IR `module` compiled to, against the `wasm_len` bytes it came
 /// from.
 #[must_use]
@@ -513,4 +598,505 @@ pub fn ir_stats(module: &LoadedModule<'_>, wasm_len: usize) -> IrStats {
     // last one the writer got.
     let filled = pages.saturating_sub(1) * WORDS_PER_PAGE + module.code_builder.offset();
     IrStats { code_pages: pages, ir_words: filled, wasm_bytes: wasm_len }
+}
+
+// ---------------------------------------------------------------------------
+// The embedder harness
+// ---------------------------------------------------------------------------
+
+/// Bytes one sixteen-bit IR word occupies.
+const BYTES_PER_WORD: usize = 2;
+
+/// How to call the harness, printed under every argument-level refusal.
+///
+/// Spelled apart from [`exit::USAGE`], which is the code the same refusal exits
+/// with: one file holding two `USAGE`s would leave a reader to tell a banner
+/// from an exit code by its path.
+const USAGE_LINE: &str =
+    "usage: spacewasm-embed <module.wasm> [--invoke NAME [ARG…]] [--fuel N] [--stats [--json]]";
+
+/// What the harness answers the shell with.
+///
+/// Every way a run the interpreter accepted and started can end badly gets a
+/// code of its own. A module that never loaded, one that loaded and trapped,
+/// and one that was still running when the budget ran out are three different
+/// facts about a mission's artifact, and a single non-zero code would flatten
+/// them into "it did not work" — which is the one thing an integrator already
+/// knows.
+///
+/// A module the harness cannot start at all is outside that guarantee rather
+/// than an eighth code inside it: this compiler declares no start function, so
+/// a foreign module whose start traps is a harness surprise and not a verdict
+/// about an artifact, and it panics — see [`run_with`]'s own `# Panics`.
+pub mod exit {
+    /// The module loaded, and any invocation returned.
+    pub const OK: u8 = 0;
+    /// The command line could not be read.
+    pub const USAGE: u8 = 2;
+    /// The module file could not be read.
+    pub const UNREADABLE: u8 = 3;
+    /// The interpreter refused the bytes.
+    pub const DECODE: u8 = 4;
+    /// The module loaded but exports no such function.
+    pub const NO_SUCH_EXPORT: u8 = 5;
+    /// The invocation trapped.
+    pub const TRAP: u8 = 6;
+    /// The invocation was still running when the fuel ran out.
+    pub const OUT_OF_FUEL: u8 = 7;
+
+    /// Every code above, in one place a collision check can read.
+    ///
+    /// The distinction between these codes is the whole point of having more
+    /// than one, and an equality between two names of a single value is not a
+    /// distinction — so a test asks whether any two collide. Keeping the list
+    /// beside the constants is what makes an eighth code added without a row
+    /// here a visible omission rather than an unguarded one.
+    ///
+    /// The `allow` is the same one [`run`] carries and for the same reason:
+    /// three binaries compile this file, and this list is read by the one that
+    /// drives the command line.
+    #[allow(dead_code)]
+    pub const ALL: [u8; 7] = [OK, USAGE, UNREADABLE, DECODE, NO_SUCH_EXPORT, TRAP, OUT_OF_FUEL];
+}
+
+/// One parsed command line.
+struct Command {
+    module: PathBuf,
+    invoke: Option<Invocation>,
+    fuel: usize,
+    stats: bool,
+    json: bool,
+}
+
+/// The export to call and the arguments to call it with, as written.
+///
+/// The arguments stay text until the module is loaded: what `-1` means depends
+/// on the declared parameter type, which only the artifact knows.
+struct Invocation {
+    export: String,
+    args: Vec<String>,
+}
+
+impl Command {
+    /// Reads `argv`, which excludes the program name.
+    ///
+    /// A token starting with `--` ends `--invoke`'s argument list, which is what
+    /// lets `--invoke f -1 --fuel 10` mean what it looks like: a negative
+    /// argument is one hyphen and an option is two.
+    fn parse(argv: &[String]) -> Result<Self, String> {
+        let Some(first) = argv.first() else {
+            return Err("no module was given".to_string());
+        };
+        if first.starts_with("--") {
+            return Err(format!("expected a module path, found the option `{first}`"));
+        }
+
+        let mut command = Self {
+            module: PathBuf::from(first),
+            invoke: None,
+            fuel: FUEL,
+            stats: false,
+            json: false,
+        };
+
+        let value = |index: usize, option: &str, what: &str| -> Result<&str, String> {
+            argv.get(index)
+                .map(String::as_str)
+                .filter(|token| !token.starts_with("--"))
+                .ok_or_else(|| format!("`{option}` needs {what}"))
+        };
+
+        let mut index = 1;
+        while index < argv.len() {
+            match argv[index].as_str() {
+                "--invoke" => {
+                    if command.invoke.is_some() {
+                        return Err(
+                            "`--invoke` was given twice; the harness calls one export per run"
+                                .to_string(),
+                        );
+                    }
+                    let export = value(index + 1, "--invoke", "the name of an exported function")?;
+                    index += 2;
+                    let mut args = Vec::new();
+                    while let Some(arg) = argv.get(index).filter(|a| !a.starts_with("--")) {
+                        args.push(arg.clone());
+                        index += 1;
+                    }
+                    command.invoke = Some(Invocation { export: export.to_string(), args });
+                }
+                "--fuel" => {
+                    let raw = value(index + 1, "--fuel", "an instruction budget")?;
+                    command.fuel = raw.parse::<usize>().map_err(|_| {
+                        format!("`--fuel` takes a decimal instruction budget, not `{raw}`")
+                    })?;
+                    index += 2;
+                }
+                "--stats" => {
+                    command.stats = true;
+                    index += 1;
+                }
+                "--json" => {
+                    command.json = true;
+                    index += 1;
+                }
+                other => return Err(format!("unknown option `{other}`")),
+            }
+        }
+
+        if command.json && !command.stats {
+            return Err(
+                "`--json` chooses the shape of `--stats`, so it needs `--stats` beside it"
+                    .to_string(),
+            );
+        }
+        Ok(command)
+    }
+}
+
+/// The `spacewasm-embed` example, whole.
+///
+/// `argv` excludes the program name. The return value is the process's, and
+/// [`exit`] is what each code means.
+///
+/// Acquires the interpreter session itself, so a caller already holding one
+/// would deadlock; every caller in this repository is a `main` or a test that
+/// holds nothing.
+///
+/// The `allow` is what keeps this file shared. Three binaries compile it and
+/// only two call a command line: the corpus sweeps next door include it for the
+/// interpreter harness above and reach none of this, and in a binary crate an
+/// item nothing reaches is dead however public it is. Seeding liveness here
+/// covers everything below, which is reachable from this function and from
+/// nowhere else.
+#[allow(dead_code)]
+#[must_use]
+pub fn run(argv: Vec<String>) -> ExitCode {
+    // Locked once for the whole run rather than once per line, so nothing can
+    // interleave between the measurement and the result it belongs to.
+    let (stdout, stderr) = (std::io::stdout(), std::io::stderr());
+    ExitCode::from(run_with(&argv, &mut stdout.lock(), &mut stderr.lock()))
+}
+
+/// [`run`] with both output streams supplied, so a test can read what a run
+/// printed instead of shelling out to see it.
+///
+/// # Panics
+///
+/// Panics for the reasons [`decode_with`] and [`LoadedModule::invoke`] do: an
+/// interpreter that cannot be built at all, or a start function that does not
+/// complete. Neither is a verdict about the artifact.
+#[must_use]
+pub fn run_with(argv: &[String], out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+    let command = match Command::parse(argv) {
+        Ok(command) => command,
+        Err(message) => {
+            line(err, &format!("error: {message}"));
+            line(err, USAGE_LINE);
+            return exit::USAGE;
+        }
+    };
+    execute(&command, out, err)
+}
+
+/// Writes one line, ignoring a failed write.
+///
+/// The exit code is this harness's answer and the stream is a courtesy: a
+/// closed pipe must not turn a program that ran into a program that failed,
+/// and a failure to report has nowhere left to be reported to.
+fn line(sink: &mut dyn Write, text: &str) {
+    let _ = writeln!(sink, "{text}");
+}
+
+/// Loads the module, then does what the command line asked of it.
+fn execute(command: &Command, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+    let wasm = match std::fs::read(&command.module) {
+        Ok(wasm) => wasm,
+        Err(e) => {
+            line(err, &format!("error: cannot read {}: {e}", command.module.display()));
+            return exit::UNREADABLE;
+        }
+    };
+
+    let mut session = SpaceWasmSession::acquire();
+    let mut module = match decode(&mut session, &wasm) {
+        Ok(module) => module,
+        Err(e) => {
+            report_decode_failure(&command.module, &wasm, &e, err);
+            return exit::DECODE;
+        }
+    };
+
+    // Before the invocation, and unconditionally: a trapping call must not take
+    // the measurement of the module it trapped in down with it.
+    if command.stats {
+        let stats = ir_stats(&module, wasm.len());
+        if command.json {
+            line(out, &json_line(&stats));
+        } else {
+            for text in human_lines(&stats) {
+                line(out, &text);
+            }
+        }
+    }
+
+    let functions = module.exported_functions();
+    let Some(invocation) = command.invoke.as_ref() else {
+        if !command.stats {
+            // A run that asked for nothing still says what it found, or a decode
+            // check would be indistinguishable from a harness that did nothing.
+            line(out, &format!("loaded {}", command.module.display()));
+            report_exports(&functions, out);
+        }
+        return exit::OK;
+    };
+
+    let Some(signature) = functions.iter().find(|f| f.name == invocation.export) else {
+        line(
+            err,
+            &format!(
+                "error: {} exports no function `{}`",
+                command.module.display(),
+                invocation.export
+            ),
+        );
+        report_exports(&functions, err);
+        return exit::NO_SUCH_EXPORT;
+    };
+
+    let args = match arguments(signature, &invocation.args) {
+        Ok(args) => args,
+        Err(message) => {
+            line(err, &format!("error: {message}"));
+            line(err, USAGE_LINE);
+            return exit::USAGE;
+        }
+    };
+
+    match module.invoke(&invocation.export, &args, command.fuel) {
+        Outcome::Value(None) => {
+            line(out, &format!("{} = (unit)", invocation.export));
+            exit::OK
+        }
+        Outcome::Value(Some(value)) => {
+            line(out, &format!("{} = {}", invocation.export, render(value)));
+            exit::OK
+        }
+        Outcome::Trap(reason) => {
+            line(err, &format!("error: `{}` trapped: {reason:?}", invocation.export));
+            exit::TRAP
+        }
+        Outcome::OutOfFuel => {
+            line(
+                err,
+                &format!(
+                    "error: `{}` was still running after {} instructions; raise `--fuel` if the \
+                     program is meant to run longer",
+                    invocation.export, command.fuel
+                ),
+            );
+            exit::OUT_OF_FUEL
+        }
+    }
+}
+
+/// Says what the module exports, under a line that has just said it does not
+/// export what was asked for — or that it loaded.
+fn report_exports(functions: &[ExportedFunction], sink: &mut dyn Write) {
+    if functions.is_empty() {
+        line(sink, "  it exports no functions");
+        return;
+    }
+    line(sink, "  it exports:");
+    for function in functions {
+        line(sink, &format!("    {}", describe(function)));
+    }
+}
+
+/// Reports bytes the interpreter refused, naming any import the module carries.
+///
+/// The decoder's own error says only that an import went unresolved; which one
+/// is not in it, because a flight decoder keeps no string it does not have to.
+/// So the module is read a second time for the one thing the verdict is
+/// missing.
+///
+/// Every refused module that declares an import gets the list, not only the one
+/// whose verdict was about an import. Deciding otherwise would mean naming the
+/// variants of the decoder's own error that mean "nothing supplied this", which
+/// is a guess at somebody else's taxonomy that goes quietly wrong when they add
+/// one — and the sentence is true either way, since this harness registers no
+/// host module and an import-bearing module was never going to load under it.
+/// It is worded as a fact about the module rather than as a diagnosis, so a
+/// reader is not told the import caused a failure the line above already
+/// attributed.
+fn report_decode_failure(path: &Path, wasm: &[u8], error: &ParseError, err: &mut dyn Write) {
+    line(
+        err,
+        &format!(
+            "error: {} does not load under the SpaceWasm interpreter: {:?} at byte {}",
+            path.display(),
+            error.err.err,
+            error.offset
+        ),
+    );
+    if let Some(section) = error.err.section {
+        line(err, &format!("  reading the {section:?} section"));
+    }
+    let imports = imports_of(wasm);
+    if imports.is_empty() {
+        return;
+    }
+    line(err, "  it imports these, and this harness registers no host module to supply them:");
+    for import in &imports {
+        line(err, &format!("    {import}"));
+    }
+    line(
+        err,
+        "  binding an `external fn` to something the embedder supplies at run time is tracked \
+         as issue #464",
+    );
+}
+
+/// Every import the module declares, as `module.field`.
+///
+/// Read with the fork for convenience and not for capability: its import reader
+/// yields flat imports carrying `module` and `name`, where stock `wasmparser`
+/// yields encoding groups that each have to be walked to reach the same two
+/// strings. It is also the reader `corpus::has_import_section` uses, so the two
+/// agree about what an import section is by construction.
+///
+/// A parse error ends the walk, so a module malformed before its import section
+/// names nothing. That is the wanted answer rather than a gap: the caller is
+/// reporting bytes the interpreter has already refused, and guessing at what an
+/// unreadable section might have declared would be worse than saying nothing.
+fn imports_of(wasm: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    for payload in inf_wasmparser::Parser::new(0).parse_all(wasm).flatten() {
+        let inf_wasmparser::Payload::ImportSection(section) = payload else {
+            continue;
+        };
+        for import in section.into_iter().flatten() {
+            names.push(format!("{}.{}", import.module, import.name));
+        }
+    }
+    names
+}
+
+/// Coerces the arguments as written to what the export declared.
+fn arguments(signature: &ExportedFunction, raw: &[String]) -> Result<Vec<Value>, String> {
+    if raw.len() != signature.params.len() {
+        return Err(format!(
+            "`{}` takes {}; {} given",
+            signature.name,
+            arguments_phrase(signature.params.len()),
+            arguments_phrase(raw.len())
+        ));
+    }
+    raw.iter()
+        .zip(signature.params.iter())
+        .enumerate()
+        .map(|(index, (text, ty))| match ty {
+            ValType::I32 => text.parse::<i32>().map(Value::I32).map_err(|_| {
+                format!(
+                    "argument {} of `{}` is `i32`, and `{text}` is not one",
+                    index + 1,
+                    signature.name
+                )
+            }),
+            ValType::I64 => text.parse::<i64>().map(Value::I64).map_err(|_| {
+                format!(
+                    "argument {} of `{}` is `i64`, and `{text}` is not one",
+                    index + 1,
+                    signature.name
+                )
+            }),
+            ValType::F32 | ValType::F64 => Err(format!(
+                "argument {} of `{}` is `{}`, and this harness passes decimal integers only: how \
+                 a floating-point argument should be spelled on a command line is a question it \
+                 does not have to settle",
+                index + 1,
+                signature.name,
+                type_name(*ty)
+            )),
+        })
+        .collect()
+}
+
+/// "1 argument" or "3 arguments".
+fn arguments_phrase(count: usize) -> String {
+    if count == 1 {
+        "1 argument".to_string()
+    } else {
+        format!("{count} arguments")
+    }
+}
+
+/// One export as a signature a reader can copy back onto the command line.
+fn describe(function: &ExportedFunction) -> String {
+    let params: Vec<&str> = function.params.iter().map(|ty| type_name(*ty)).collect();
+    let result = match function.result {
+        Some(ty) => format!(" -> {}", type_name(ty)),
+        None => String::new(),
+    };
+    format!("{}({}){result}", function.name, params.join(", "))
+}
+
+/// The WebAssembly spelling of a value type.
+fn type_name(ty: ValType) -> &'static str {
+    match ty {
+        ValType::I32 => "i32",
+        ValType::I64 => "i64",
+        ValType::F32 => "f32",
+        ValType::F64 => "f64",
+    }
+}
+
+/// A returned value as the command line prints it.
+fn render(value: Value) -> String {
+    match value {
+        Value::I32(v) => v.to_string(),
+        Value::I64(v) => v.to_string(),
+        Value::F32(v) => v.to_string(),
+        Value::F64(v) => v.to_string(),
+    }
+}
+
+/// The measurement as a person reads it.
+///
+/// The words line carries the capacity and the percentage as well, which is the
+/// shape `spacewasm_std` prints its code-word usage in.
+fn human_lines(stats: &IrStats) -> Vec<String> {
+    let capacity = stats.ir_words_capacity();
+    let used = if capacity == 0 {
+        0.0
+    } else {
+        100.0 * stats.ir_words as f64 / capacity as f64
+    };
+    vec![
+        format!("code pages: {}", stats.code_pages),
+        format!("IR words (16-bit): {} / {capacity} ({used:.2}%)", stats.ir_words),
+        format!("IR bytes: {}", stats.ir_bytes()),
+        format!("wasm bytes: {}", stats.wasm_bytes),
+        format!("IR bytes per wasm byte: {:.2}", stats.ir_bytes_per_wasm_byte()),
+    ]
+}
+
+/// The measurement as one line of JSON.
+///
+/// Hand-assembled rather than serialized: every value is a number, so there is
+/// nothing to escape and the key order in this function is the documented key
+/// order. The ratio is written at full precision rather than at the two
+/// decimals the human rendering shows, and it is a finite number to write:
+/// only a module that decoded is measured, and such a module carried at least
+/// a magic number and a version, so the divisor is never zero.
+fn json_line(stats: &IrStats) -> String {
+    format!(
+        "{{\"code_pages\":{},\"ir_words\":{},\"ir_bytes\":{},\"wasm_bytes\":{},\
+         \"ir_bytes_per_wasm_byte\":{}}}",
+        stats.code_pages,
+        stats.ir_words,
+        stats.ir_bytes(),
+        stats.wasm_bytes,
+        stats.ir_bytes_per_wasm_byte()
+    )
 }

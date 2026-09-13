@@ -287,7 +287,7 @@ fn the_two_engines_agree_on_every_zero_parameter_export() {
         };
         let zero_parameter: Vec<&str> = functions
             .iter()
-            .filter(|f| f.params == 0)
+            .filter(|f| f.params.is_empty())
             .map(|f| f.name.as_str())
             .collect();
         let mut exported: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
