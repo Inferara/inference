@@ -7753,37 +7753,97 @@ const PROJECT_CONTRACT_SRC: &str = "pub fn add(a: u32, b: u32) -> u32 {\n    ret
 /// setting would be dropped.
 const STELLAR_BUILD_TABLE: &str = "[build]\ntarget = \"stellar\"\n";
 
+/// The same table for any name, for the forwarding tests that run over the
+/// whole vocabulary rather than over the one target their assertions started
+/// with.
+#[cfg(unix)]
+fn build_table_naming(target: inference_compiler_interface::TargetName) -> String {
+    format!("[build]\ntarget = \"{}\"\n", target.as_str())
+}
+
+/// The entry file a project for `target` would really have: a contract exposes
+/// methods and has no `main`, and everything else has `main`.
+///
+/// An exhaustive match rather than a comparison against one name, so a name
+/// added to the vocabulary is given a fixture rather than inheriting one that
+/// would not build for it.
+#[cfg(unix)]
+fn entry_source_for(target: inference_compiler_interface::TargetName) -> &'static str {
+    use inference_compiler_interface::TargetName;
+
+    match target {
+        TargetName::Stellar => PROJECT_CONTRACT_SRC,
+        TargetName::Wasm32 | TargetName::SpaceWasm => PROJECT_MAIN_SRC,
+    }
+}
+
+/// Every name that is forwarded to `infc` — the whole vocabulary less the
+/// default, which is deliberately never forwarded.
+///
+/// Derived rather than listed, so a name added to the vocabulary is covered by
+/// the forwarding tests below on the day it lands instead of on the day someone
+/// remembers them.
+#[cfg(unix)]
+fn forwarded_targets() -> Vec<inference_compiler_interface::TargetName> {
+    use inference_compiler_interface::TargetName;
+
+    let targets: Vec<TargetName> = TargetName::ALL
+        .into_iter()
+        .filter(|target| *target != TargetName::DEFAULT)
+        .collect();
+    assert!(
+        !targets.is_empty(),
+        "the forwarding tests are loops over this list, so an empty one reports \
+         `ok` while asserting nothing"
+    );
+    targets
+}
+
 /// A project naming a target must have that target reach `infc`, and must say so
 /// on stdout.
 ///
 /// The echo matters as much as the flag: the manifest is the only place a target
 /// can be named, so the build log is the only place a user finds out which
 /// runtime the artifact in `out/` was built for.
+///
+/// Run over every forwarded name rather than over one, because the forward is
+/// target-generic and a name that reached it by a different route — a second
+/// call site, say — would show up here as a missing flag for that name alone.
 #[cfg(unix)]
 #[test]
 fn a_project_target_reaches_infc_and_is_echoed() {
-    let temp = assert_fs::TempDir::new().unwrap();
-    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+    for target in forwarded_targets() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(
+            &temp,
+            "demo",
+            entry_source_for(target),
+            &build_table_naming(target),
+        );
 
-    let argv_log = temp.child("argv.log");
-    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+        let argv_log = temp.child("argv.log");
+        let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", &stub)
-        .current_dir(temp.path())
-        .arg("build");
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("target: stellar"));
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &stub)
+            .current_dir(temp.path())
+            .arg("build");
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains(format!(
+                "target: {}",
+                target.as_str()
+            )));
 
-    let logged = logged_argv(argv_log.path());
-    let argv: Vec<&str> = logged.lines().collect();
-    assert_eq!(
-        argv_values_after(&argv, "--target"),
-        vec![Some("stellar")],
-        "`--target` must be forwarded exactly once, with its value adjacent, \
-         got argv: {argv:?}"
-    );
+        let logged = logged_argv(argv_log.path());
+        let argv: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            argv_values_after(&argv, "--target"),
+            vec![Some(target.as_str())],
+            "`--target` must be forwarded exactly once, with its value adjacent, \
+             got argv: {argv:?}"
+        );
+    }
 }
 
 /// A project that names no target forwards no flag.
@@ -7824,28 +7884,38 @@ fn a_project_naming_no_target_forwards_no_target_flag() {
 #[cfg(unix)]
 #[test]
 fn single_file_build_forwards_the_enclosing_project_target() {
-    let temp = assert_fs::TempDir::new().unwrap();
-    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+    for target in forwarded_targets() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(
+            &temp,
+            "demo",
+            entry_source_for(target),
+            &build_table_naming(target),
+        );
 
-    let argv_log = temp.child("argv.log");
-    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+        let argv_log = temp.child("argv.log");
+        let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", &stub)
-        .current_dir(temp.path())
-        .arg("build")
-        .arg(joined(&["src", "main.inf"]));
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("target: stellar"));
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &stub)
+            .current_dir(temp.path())
+            .arg("build")
+            .arg(joined(&["src", "main.inf"]));
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains(format!(
+                "target: {}",
+                target.as_str()
+            )));
 
-    let logged = logged_argv(argv_log.path());
-    let argv: Vec<&str> = logged.lines().collect();
-    assert_eq!(
-        argv_values_after(&argv, "--target"),
-        vec![Some("stellar")],
-        "the enclosing project's target must reach infc, got argv: {argv:?}"
-    );
+        let logged = logged_argv(argv_log.path());
+        let argv: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            argv_values_after(&argv, "--target"),
+            vec![Some(target.as_str())],
+            "the enclosing project's target must reach infc, got argv: {argv:?}"
+        );
+    }
 }
 
 /// An `infc` older than the target it is being asked for is refused with
@@ -7854,40 +7924,59 @@ fn single_file_build_forwards_the_enclosing_project_target() {
 /// The gate is on the *name*, not on `--target` itself: a compiler that parses
 /// the flag but predates this name would accept it and emit a module for the
 /// default runtime, which is a wrong artifact rather than a refusal.
+///
+/// The floor is derived from each name's own entry minor, so the matrix survives
+/// an ABI bump. The refusal must also carry that name's consequence clause: the
+/// obvious response to "your compiler is too old for this name" is to drop the
+/// name, and what dropping it costs is the only part of the message a user
+/// cannot work out from the version arithmetic.
 #[cfg(unix)]
 #[test]
 fn an_infc_predating_the_target_is_refused_with_the_abi_text() {
     use std::os::unix::fs::PermissionsExt;
 
-    let temp = assert_fs::TempDir::new().unwrap();
-    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+    for target in forwarded_targets() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(
+            &temp,
+            "demo",
+            entry_source_for(target),
+            &build_table_naming(target),
+        );
 
-    let minor = inference_compiler_interface::TargetName::Stellar.abi_minor() - 1;
-    let stub = temp.child("infc_stub");
-    stub.write_str(&format!(
-        "#!/bin/sh\n\
-         case \"$1\" in\n\
-           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
-           --abi-version) printf '{}.{minor}\\n'; exit 0 ;;\n\
-           *) exit 0 ;;\n\
-         esac\n",
-        inference_compiler_interface::COMPILER_ABI_MAJOR,
-    ))
-    .unwrap();
-    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(stub.path(), perms).unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", stub.path())
-        .current_dir(temp.path())
-        .arg("build");
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "cannot build for the `stellar` target",
+        let minor = target.abi_minor() - 1;
+        let stub = temp.child("infc_stub");
+        stub.write_str(&format!(
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+               --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+               --abi-version) printf '{}.{minor}\\n'; exit 0 ;;\n\
+               *) exit 0 ;;\n\
+             esac\n",
+            inference_compiler_interface::COMPILER_ABI_MAJOR,
         ))
-        .stderr(predicate::str::contains("[build] target"));
+        .unwrap();
+        let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(stub.path(), perms).unwrap();
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", stub.path())
+            .current_dir(temp.path())
+            .arg("build");
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "cannot build for the `{}` target",
+                target.as_str()
+            )))
+            .stderr(predicate::str::contains("[build] target"))
+            .stderr(predicate::str::contains(
+                target
+                    .unforwarded_consequence()
+                    .expect("a forwarded name states what dropping it would cost"),
+            ));
+    }
 }
 
 /// `infs run` refuses a Stellar project rather than handing the contract to
@@ -8029,4 +8118,262 @@ fn infs_build_on_a_stellar_project_writes_a_contract() {
         wasm.windows(17).any(|w| w == b"contractenvmetav0"),
         "the artifact must be a contract, not merely a module"
     );
+}
+
+// The SpaceWasm target ---
+
+/// The `[build]` table of a project that names the `SpaceWasm` target and nothing
+/// else.
+const SPACEWASM_BUILD_TABLE: &str = "[build]\ntarget = \"spacewasm\"\n";
+
+/// A `SpaceWasm` project builds end to end against the real compiler and lands the
+/// module a default-target build of the same source lands — byte for byte.
+///
+/// This is the target's central claim reached through the whole toolchain:
+/// manifest, forward, and an `infc` that acts on the flag. The two projects are
+/// scaffolded separately so the only difference between them is the manifest
+/// line under test.
+///
+/// Fails if the flag reaches an emitter, or if anything on the write path starts
+/// branching on the target for this name.
+#[test]
+fn infs_build_on_a_spacewasm_project_writes_the_default_targets_module() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let named = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&named, "demo", PROJECT_MAIN_SRC, SPACEWASM_BUILD_TABLE);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(named.path())
+        .arg("build");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("target: spacewasm"));
+
+    let unnamed = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&unnamed, "demo", PROJECT_MAIN_SRC);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(unnamed.path())
+        .arg("build");
+    cmd.assert().success();
+
+    let spacewasm = std::fs::read(named.child("out").child("main.wasm").path())
+        .expect("the SpaceWasm project build must write out/main.wasm");
+    let default = std::fs::read(unnamed.child("out").child("main.wasm").path())
+        .expect("the default project build must write out/main.wasm");
+    assert!(
+        spacewasm.starts_with(b"\0asm"),
+        "two stub files compare equal, so the identity is worth asserting only \
+         over a real WebAssembly module"
+    );
+    assert_eq!(
+        spacewasm, default,
+        "a SpaceWasm project must ship the module a default-target project ships"
+    );
+}
+
+/// `infs run` builds and executes a `SpaceWasm` project, which is the first time
+/// the path past the wasmtime refusal is reachable for a non-default target.
+///
+/// The refusal asks whether the target's artifact can be invoked by a plain
+/// runtime, not whether it is the default, and this is the case that tells the
+/// two questions apart: the artifact is the default's bytes and `main` keeps the
+/// shape wasmtime calls, so wasmtime can invoke it. What that shows is that the
+/// module runs — not that it runs the way the flight interpreter would, which
+/// this executes nothing of.
+///
+/// The returned `42` is the load-bearing assertion. A build that stopped after
+/// compiling, or a wasmtime invocation of the wrong export, would pass an
+/// exit-code-only check.
+///
+/// Fails if `SpaceWasm` stops answering `runs_under_a_plain_wasm_runtime`, or
+/// if the refusal reverts to a comparison against the default target.
+#[test]
+fn infs_run_executes_a_spacewasm_project() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_NONZERO_SRC,
+        SPACEWASM_BUILD_TABLE,
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("target: spacewasm"))
+        .stdout(predicate::str::contains("42"));
+}
+
+/// The same execution on the single-file path, whose call site of the refusal is
+/// a second one: the enclosing manifest decides the target there too.
+///
+/// Both sites are pinned for Stellar, and pinning only one of them here would
+/// leave a positional check reintroduced at the single-file site — refusing a
+/// file inside a `spacewasm` project for being non-default — with nothing to
+/// catch it.
+///
+/// The returned `42` is the load-bearing assertion, for the reason it is above.
+///
+/// Fails if the single-file path reintroduces a comparison against
+/// `TargetName::DEFAULT` in place of asking `runs_under_a_plain_wasm_runtime`, or
+/// if it stops reading the target off the enclosing manifest.
+#[test]
+fn infs_run_executes_a_file_inside_a_spacewasm_project() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_NONZERO_SRC,
+        SPACEWASM_BUILD_TABLE,
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run")
+        .arg(joined(&["src", "main.inf"]));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("target: spacewasm"))
+        .stdout(predicate::str::contains("42"));
+}
+
+/// `mode = "proof"` on a `SpaceWasm` project fails to load, for every command, and
+/// the message names the build that does produce a proof.
+///
+/// Both commands are asserted because the refusal is a load-time one: a
+/// build-time check would let `infs run` past it, and `run` builds in compile
+/// mode regardless of `[build] mode`, so nothing downstream would catch it.
+///
+/// The remediation is asserted because the generic sentence — build for a target
+/// that supports proof mode — reads at this target as "this program cannot be
+/// proved", when the proof is one command away and describes these very bytes.
+///
+/// Fails if the pairing moves to build time, where `run` would slip past it, or
+/// if the per-name remediation is dropped from the assembled message.
+#[test]
+fn a_spacewasm_project_in_proof_mode_fails_to_load_naming_the_wasm32_build() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\ntarget = \"spacewasm\"\nmode = \"proof\"\n",
+    );
+
+    for command in ["build", "run"] {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.current_dir(temp.path()).arg(command);
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "`[build] target = \"spacewasm\"`",
+            ))
+            .stderr(predicate::str::contains(
+                "Prove the program in a `wasm32` build",
+            ));
+    }
+
+    assert!(
+        !temp.child("out").path().exists(),
+        "the refusal must precede the build, so nothing is compiled"
+    );
+}
+
+/// A `wasm-features` request on a `SpaceWasm` project fails to load, for every
+/// command: the interpreter implements no post-MVP proposal, so no entry in the
+/// list can be honored.
+///
+/// Fails if the pairing moves to build time, or if `SpaceWasm` starts permitting
+/// a post-MVP family.
+#[test]
+fn a_spacewasm_project_requesting_a_feature_fails_to_load() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\ntarget = \"spacewasm\"\nwasm-features = [\"bulk-memory\"]\n",
+    );
+
+    for command in ["build", "run"] {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.current_dir(temp.path()).arg(command);
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "`[build] target = \"spacewasm\"`",
+            ))
+            .stderr(predicate::str::contains("`[build] wasm-features`"));
+    }
+}
+
+/// The optimizer table is *not* refused for a `SpaceWasm` project, which is the
+/// deliberate asymmetry with Stellar: what that refusal protects is a contract's
+/// value-ABI wrappers and its metadata section, and this target's module has
+/// neither.
+///
+/// The manifest having loaded is asserted positively, through the `target:`
+/// echo: `forward_target` prints it after the manifest is read and before `infc`
+/// is spawned, so it is reached by a load and by nothing that precedes one. The
+/// outcome of the build itself is deliberately not asserted — completing it
+/// needs an external `wasm-opt`, which is exactly the dependency the Stellar
+/// refusal exists to avoid depending on.
+///
+/// `run` needs a runtime besides, and the echo it is asserted on is printed
+/// after the wasmtime probe rather than before it, so that row runs behind
+/// `require_wasmtime` while `build` needs only `infc`.
+///
+/// The forbidden text is the pairing message's own invariant half, not the half
+/// that names a target, because generalizing the arm to "any non-default target"
+/// leaves the hard-coded `stellar` in its format argument: a predicate naming
+/// `spacewasm` would not match the message that regression produces.
+///
+/// Fails the moment the optimizer arm stops being a name equality, and fails if
+/// the manifest stops loading for this pairing at all.
+#[test]
+fn a_spacewasm_project_declaring_the_optimizer_still_loads() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\ntarget = \"spacewasm\"\n\n[build.wasm-opt]\nlevel = \"s\"\n",
+    );
+
+    for command in ["build", "run"] {
+        if command == "run" && !require_wasmtime() {
+            continue;
+        }
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg(command);
+        cmd.assert()
+            .stdout(predicate::str::contains("target: spacewasm"))
+            .stderr(
+                predicate::str::contains("cannot be combined with a `[build.wasm-opt]` table")
+                    .not(),
+            );
+    }
 }

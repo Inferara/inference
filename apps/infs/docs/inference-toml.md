@@ -69,6 +69,18 @@ compiler ABI gate treats toolchain/manifest skew — an error, never a silent
 downgrade that ships a differently-configured artifact than the manifest asked
 for.
 
+There is one exception among the keys a build acts on, and it is `[build]
+target`. That key was parsed and recorded before it was consumed, so it was
+never protected by the unknown-key refusal above: an `infs` predating target
+forwarding reads `target = "spacewasm"`, discards it, and builds for the default
+runtime with no diagnostic — the silent downgrade this section promises never
+happens. The promise therefore holds for `target` only from the release that
+introduced target forwarding; every `infs` from that release on refuses an
+unrecognized name loudly, and forwards a recognized one or refuses to build.
+Every released `infs` through `v0.0.5` predates it. (`[build] optimize` is
+parsed and unvalidated in the same way, but nothing reads it, so no build can be
+downgraded by it.)
+
 ## Settings Honored in Single-File Mode
 
 `infs build path/to/file.inf` and `infs run path/to/file.inf` compile one named
@@ -168,9 +180,12 @@ The `[build]` section configures compilation settings.
 - **`target`** (string, default: `"wasm32"`): The runtime the module is built
   for. The axis is the runtime, not a compiler back end and not a target triple:
   `"wasm32"` is the generic value, a module for any WebAssembly embedder that
-  imposes no ABI of its own, while a further name stands for one specific runtime
-  with its own calling convention or acceptance rules.
-  - Accepted values: `"wasm32"`, `"stellar"`.
+  imposes no ABI of its own, and every further name stands for one specific
+  runtime. Those come in two kinds, and the difference decides what a build for
+  them produces. One kind imposes an ABI, and its artifact is a rewrite of the
+  default's — `"stellar"`. The other imposes none and only narrows what a build
+  may *contain*, emitting the default's bytes unchanged — `"spacewasm"`.
+  - Accepted values: `"wasm32"`, `"stellar"`, `"spacewasm"`.
   - `"stellar"` builds a Soroban smart contract: every exported method is
     rewritten to take and return the host's 64-bit tagged word, and the module
     carries the environment-metadata section a host will not upload it without.
@@ -183,6 +198,23 @@ The `[build]` section configures compilation settings.
     are. `infs run` also refuses such a project: a contract is invoked by a
     Soroban host, which encodes each argument into that tagged word, and by
     nothing else. See the book's Compilation Targets chapter for the full rule
+    set.
+  - `"spacewasm"` builds for the SpaceWasm flight interpreter, and adds nothing
+    to the module: the artifact is the `"wasm32"` one, byte for byte, with no
+    wrappers, no metadata section and no rewrite. What it narrows is what a
+    build may contain — no `mode = "proof"` and no `wasm-features`, both refused
+    by the manifest on load in a message naming both keys. `[build.wasm-opt]`
+    stays available, unlike at `"stellar"`: what that refusal protects is a
+    contract's wrappers and metadata section, and this target's module has
+    neither. `infs run` is available too, for the same reason — the artifact is
+    plain WebAssembly and `main` keeps the shape a runtime invokes, so `infs run`
+    builds the module and executes it locally under `wasmtime`. That runtime is
+    not the flight interpreter, and running the module here exercises the module
+    rather than the environment it was built for: the interpreter's decode-time
+    maxima (parameter and local word counts, name lengths, host arity) are
+    checked by nothing today, so a module `infs run` executes can still fail to
+    decode on the vehicle. The conformance step that will check them lands in a
+    later change. See the book's Compilation Targets chapter for the full rule
     set.
   - `"soroban"` is the former name of `"stellar"` and is not accepted; it earns a
     message saying so rather than the generic unknown-target one.
@@ -206,8 +238,13 @@ The `[build]` section configures compilation settings.
 
   In project mode (`infs build` with no path), this field determines whether
   `infs` forwards `--mode proof` to `infc` and whether `[verification]
-  output-dir` is consulted. A CLI `--mode` flag always overrides this setting.
-  `infs run` ignores this field entirely and always builds in compile mode.
+  output-dir` is consulted. A CLI `--mode` flag overrides this setting — but
+  only once the manifest has loaded: a `mode` and a `target` that cannot be
+  built together are refused on load, before any command runs, so `infs build
+  --mode compile` on a `mode = "proof"` manifest naming a target with no proof
+  mode is refused until `[build] mode` is edited. `infs run` ignores this field
+  entirely and always builds in compile mode, and the same load error stops it
+  for the same reason — a value `run` would ignore can still stop it.
 
   The value is case-sensitive: `"Proof"` is rejected. `"proof"` is refused
   outright when `[build] target` names a target that has no proof mode: the
@@ -279,7 +316,7 @@ level = "z"
 
 - **Project mode only, for executable artifacts.** Both `infs build` and `infs run` apply `[build.wasm-opt]` to `out/main.wasm` after a successful compile — `run` optimizes exactly the artifact it then executes, so what you run is what `build` would have shipped. Single-file mode (`infs build file.inf`) never runs the optimizer, whether or not a manifest is present.
 - **Proof-mode and `-v` builds are always skipped, silently.** A build counts as proof mode when the effective `[build] mode` is `"proof"`, `--mode proof` is passed, or `-v` is passed at all (even without `--mode`). Their WASM can carry the non-deterministic opcodes (`forall`, `exists`, `assume`, `unique`, `@` uzumaki) that `wasm-opt` cannot parse, and they are a different artifact class from an executable.
-- **`target = "stellar"` refuses the table outright, at load time.** Declaring both is an invalid manifest for every command, not a silently-skipped step: a Stellar contract's value-ABI wrappers and its `contractenvmetav0` metadata section are the layer a host is trusted to decode, and whether an external `wasm-opt` preserves them depends on which Binaryen the machine has — a version nothing in the manifest pins. Remove one of the two keys.
+- **`target = "stellar"` refuses the table outright, at load time.** Declaring both is an invalid manifest for every command, not a silently-skipped step: a Stellar contract's value-ABI wrappers and its `contractenvmetav0` metadata section are the layer a host is trusted to decode, and whether an external `wasm-opt` preserves them depends on which Binaryen the machine has — a version nothing in the manifest pins. Remove one of the two keys. This is a refusal about those two artifacts and not about non-default targets in general: `target = "spacewasm"` keeps the table, because its module is the `"wasm32"` one and has neither of them.
 - **A compile-mode artifact that still contains a non-deterministic opcode is a hard error**, not a silent skip. Compile-mode builds strip `spec` blocks, so a well-formed executable should never carry one of these opcodes — if it does, `infs` scans for it before invoking `wasm-opt` (which would otherwise fail with an opaque parse error) and reports the offending construct by name, with remediation: move it into a `spec` block, or turn optimization off.
 
 #### Disabling optimization for one invocation

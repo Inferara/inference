@@ -364,15 +364,15 @@ fn abi_version_flag_prints_and_exits() {
     assert_eq!(version, expected);
 }
 
-/// Pins the ABI version string to the literal value the `stellar` target became
-/// requestable at. The `abi_version_flag_prints_and_exits` test above checks the
-/// binary against the shared constant; this one additionally asserts the concrete
-/// `1.6` so an accidental constant change is caught here too.
+/// Pins the ABI version string to the literal value the `spacewasm` target
+/// became requestable at. The `abi_version_flag_prints_and_exits` test above
+/// checks the binary against the shared constant; this one additionally asserts
+/// the concrete `1.7` so an accidental constant change is caught here too.
 ///
 /// Uses an exact trimmed equality (not `contains`) so a near-miss such as
-/// "11.6" or "1.60" — which would satisfy a substring match — cannot pass.
+/// "11.7" or "1.70" — which would satisfy a substring match — cannot pass.
 #[test]
-fn abi_version_is_one_dot_six() {
+fn abi_version_is_one_dot_seven() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.arg("--abi-version");
     let assert = cmd.assert().success();
@@ -380,8 +380,8 @@ fn abi_version_is_one_dot_six() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.trim(),
-        "1.6",
-        "ABI version must be exactly 1.6, not merely contain it"
+        "1.7",
+        "ABI version must be exactly 1.7, not merely contain it"
     );
 }
 
@@ -558,6 +558,15 @@ fn an_unknown_target_is_refused_listing_the_supported_set() {
             target.as_str()
         );
     }
+    // The loop above passes on a listing that renders the names in any order.
+    // This is the literal a user copies from, spelled out rather than compared
+    // against the renderer that produced it: an assertion reading
+    // `supported_targets_listing()` would move with any reordering or requoting
+    // of the vocabulary and could not report one.
+    assert!(
+        stderr.contains("`wasm32`, `stellar`, `spacewasm`"),
+        "the rejection must render the listing in the vocabulary's order, got: {stderr}"
+    );
     assert!(
         stderr.contains("`--target`"),
         "the rejection must name the surface, got: {stderr}"
@@ -1175,6 +1184,163 @@ fn the_stellar_branch_leaves_the_default_write_path_untouched() {
         implicit, stellar,
         "the Stellar build must differ — otherwise the comparison above is \
          vacuous because the rewrite never ran"
+    );
+}
+
+// The SpaceWasm target ---
+
+/// Compiles `source` with `args` and returns the Rocq translation written
+/// beside the module.
+///
+/// A second output path with its own helper because the `.wasm` helper reads a
+/// file `-v` builds do write and a `.v` they do not: asserting on the module
+/// would compare the artifact both flags produce rather than the one the flag
+/// under test asked for.
+fn translate_source_with(args: &[&str], source: &str) -> String {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), source).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path()).args(args);
+    cmd.assert().success();
+
+    std::fs::read_to_string(temp.child("out").child("prog.v").path())
+        .expect("infc must have written out/prog.v")
+}
+
+/// The target builds through the CLI and writes a module — and writes the
+/// module a `wasm32` build writes, which is the whole of what selecting it does
+/// to the artifact today.
+///
+/// The corpus-wide identity check lives in the `inference-tests` crate and
+/// drives `codegen()`; this one drives the CLI, where the linking and the write
+/// path are, and those are where a target *could* leak into the bytes.
+///
+/// Fails if `--target spacewasm` stops resolving, if the name reaches a write
+/// path that branches on it, or if the flag reaches an emitter.
+#[test]
+fn the_spacewasm_target_builds_the_module_the_default_target_builds() {
+    let spacewasm = compile_source_with(&["--target", "spacewasm"], COMPOUND_COPY_SOURCE);
+    assert!(
+        spacewasm.starts_with(b"\0asm"),
+        "two empty or stub files compare equal, so the identity below is worth \
+         asserting only over a real WebAssembly module"
+    );
+    assert_eq!(
+        compile_source_with(&[], COMPOUND_COPY_SOURCE),
+        spacewasm,
+        "a SpaceWasm build must be byte-identical to the default build of the \
+         same source"
+    );
+}
+
+/// Proof mode is refused at this target, in both spellings, by code generation:
+/// the interpreter's decoder does not define the custom `0xfc` instructions
+/// proof mode emits.
+///
+/// Both spellings are run because `-v` alone normalizes to proof mode. That
+/// normalization is what makes the `--mode compile -v` test below a statement
+/// about compile mode rather than an accident, so the two tests have to be read
+/// together.
+///
+/// Fails if `Target::SpaceWasm` starts supporting proof mode, or if either
+/// spelling stops reaching the gate.
+#[test]
+fn proof_mode_is_refused_at_the_spacewasm_target_in_both_spellings() {
+    for spelling in [&["--mode", "proof"][..], &["-v"][..]] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let dest = temp.child("prog.inf");
+        std::fs::write(dest.path(), COMPOUND_COPY_SOURCE).unwrap();
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path())
+            .arg(dest.path())
+            .arg("--target")
+            .arg("spacewasm")
+            .args(spelling);
+
+        let assert = cmd.assert().failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains("Proof mode requires the `wasm32` target")
+                && stderr.contains("the `spacewasm` runtime rejects a module carrying them"),
+            "{spelling:?}: the refusal must name the mode and the target, got: {stderr}"
+        );
+        assert!(
+            !temp.child("out").child("prog.wasm").path().exists()
+                && !temp.child("out").child("prog.v").path().exists(),
+            "{spelling:?}: the refusal must leave neither artifact"
+        );
+    }
+}
+
+/// A post-MVP instruction family is refused at this target, naming the entry to
+/// drop rather than the proposal's opcodes: the interpreter has not implemented
+/// bulk memory, so a module using it is refused here rather than on the vehicle.
+///
+/// Fails if `Target::SpaceWasm` starts permitting bulk memory, or if the
+/// refusal stops naming the target in the spelling `--target` accepts.
+#[test]
+fn a_post_mvp_feature_is_refused_at_the_spacewasm_target() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), COMPOUND_COPY_SOURCE).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--target")
+        .arg("spacewasm")
+        .arg("--wasm-features")
+        .arg("bulk-memory");
+
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("The `spacewasm` target does not support the 'bulk-memory' \
+                         WebAssembly feature"),
+        "the refusal must name the target and the feature, got: {stderr}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "the refusal must leave no artifact"
+    );
+}
+
+/// `--mode compile -v` **succeeds** at this target and writes the Rocq
+/// translation a `wasm32` build of the same source writes, character for
+/// character.
+///
+/// This is the one place this target's story is strictly better than the
+/// Stellar one, and it is worth pinning precisely because nothing enforces it:
+/// `proof_artifact_refusal` names one target, and SpaceWasm reaches the
+/// translation by falling through that check. Falling through is the correct
+/// outcome — the translation reads the bytes that ship, because there is no
+/// rewrite for it to read them before — but "correct by falling through" is a
+/// property a later edit can remove without noticing, and a widened refusal
+/// would look like tidying.
+///
+/// Fails the moment that check is generalized from one target to "any
+/// non-default target", and fails if a target ever reaches the emitter.
+#[test]
+fn a_compile_mode_translation_at_the_spacewasm_target_matches_the_default_target() {
+    let spacewasm = translate_source_with(
+        &["--target", "spacewasm", "--mode", "compile", "-v"],
+        COMPOUND_COPY_SOURCE,
+    );
+    let wasm32 = translate_source_with(
+        &["--target", "wasm32", "--mode", "compile", "-v"],
+        COMPOUND_COPY_SOURCE,
+    );
+    assert!(
+        spacewasm.contains("Definition"),
+        "the build must write a Rocq module, not an empty or stub file: {spacewasm}"
+    );
+    assert_eq!(
+        spacewasm, wasm32,
+        "the two targets translate to the same Rocq module, because they are \
+         the same WebAssembly module"
     );
 }
 

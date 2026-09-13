@@ -394,6 +394,19 @@ fn project_wasm_path(ctx: &ProjectContext) -> PathBuf {
 /// different arguments: a contract is invoked by a Soroban host, which encodes
 /// its arguments into that word, and by nothing else.
 ///
+/// The question is asked of [`TargetName::runs_under_a_plain_wasm_runtime`]
+/// rather than compared against one variant, so "non-default" and "not
+/// runnable" stay separate: a target that narrows what a build may contain
+/// while emitting the default's bytes runs here exactly as the default does,
+/// and a name added to the vocabulary has to state which of the two it is
+/// rather than becoming runnable — or unrunnable — because nobody looked.
+///
+/// The message is the one exception to that generality: it explains the tagged
+/// word because Stellar is the only name that answers `false`, and a second
+/// such name would be describing a different convention entirely. It renders
+/// the refused target from the argument, so the name is right the moment one
+/// arrives; the wording around it is what a second `false` arm has to bring.
+///
 /// # Errors
 ///
 /// Returns the refusal when `target` names a runtime whose calling convention
@@ -404,7 +417,7 @@ fn project_wasm_path(ctx: &ProjectContext) -> PathBuf {
 /// the runtime must hear the refusal rather than an install prompt for a tool
 /// that would change nothing.
 fn refuse_target_wasmtime_cannot_invoke(target: TargetName) -> Result<()> {
-    if target != TargetName::Stellar {
+    if target.runs_under_a_plain_wasm_runtime() {
         return Ok(());
     }
     bail!(
@@ -415,7 +428,7 @@ fn refuse_target_wasmtime_cannot_invoke(target: TargetName) -> Result<()> {
          wrong answer rather than an error. Build it with `infs build` and \
          deploy it, or run the same source at the `{}` target to execute it \
          locally. See the book's Compilation Targets chapter.",
-        TargetName::Stellar.as_str(),
+        target.as_str(),
         TargetName::DEFAULT.as_str(),
     )
 }
@@ -764,6 +777,33 @@ mod tests {
         );
     }
 
+    /// Whether `infs run` refuses a target follows the calling convention its
+    /// runtime imposes, and not whether the target is the default one. Every name
+    /// in the vocabulary is asked here, at the function both call sites go
+    /// through.
+    ///
+    /// Unit-tested rather than left to the end-to-end suite because the arm that
+    /// *permits* a non-default target is reached there only with `wasmtime`
+    /// installed: on a machine without the runtime, a positional check
+    /// reintroduced here would have nothing to catch it, while the refusing arm
+    /// would keep its coverage.
+    ///
+    /// Fails if the refusal reverts to a comparison against `TargetName::DEFAULT`,
+    /// which answers the same for every name but the one whose artifact is the
+    /// default's.
+    #[test]
+    fn the_wasmtime_refusal_asks_the_calling_convention_and_not_the_default() {
+        for target in TargetName::ALL {
+            assert_eq!(
+                refuse_target_wasmtime_cannot_invoke(target).is_ok(),
+                target.runs_under_a_plain_wasm_runtime(),
+                "`{}` must be let through exactly when a plain runtime can invoke \
+                 its artifact",
+                target.as_str()
+            );
+        }
+    }
+
     /// Explicit `--entry-point main` is the default and must *not* be treated as
     /// a custom entry point — the rejection above must not fire for it. Verified
     /// at the unit level so it does not depend on wasmtime; `execute_project`
@@ -868,23 +908,44 @@ mod forwarding_tests {
     /// fixture declares a feature or a memory table, so the block runs for some
     /// other reason and the target rides along.
     ///
-    /// Driven through `compile_to_wasm` directly rather than through `infs run`,
-    /// because `run` refuses the only non-default target there is today before
-    /// reaching this code. That refusal is about how a contract is invoked; the
-    /// forward is about what gets built, and the next target to enter the
-    /// vocabulary will reach here.
+    /// Driven through `compile_to_wasm` directly rather than through `infs run`:
+    /// one of the names covered here is refused by `run` before this code is
+    /// reached, and the one that is not sends `run` to the real compiler, where
+    /// argv is unobservable. That refusal is about how a contract is invoked; the
+    /// forward is about what gets built, and the two are independent.
+    ///
+    /// Every forwarded name is driven rather than one, because a forward that is
+    /// gated on the name — rather than on the target being non-default — would
+    /// pass with the name it was written against and drop the next one.
     #[test]
     fn a_non_default_target_is_forwarded_with_nothing_else_declared() {
-        let argv = compile_argv(TargetName::Stellar);
-        let position = argv
-            .iter()
-            .position(|entry| entry == "--target")
-            .unwrap_or_else(|| panic!("`--target` must be forwarded, got argv: {argv:?}"));
-        assert_eq!(
-            argv.get(position + 1).map(String::as_str),
-            Some(TargetName::Stellar.as_str()),
-            "the flag's value must be the next argv entry, got argv: {argv:?}"
+        let forwarded: Vec<TargetName> = TargetName::ALL
+            .into_iter()
+            .filter(|target| *target != TargetName::DEFAULT)
+            .collect();
+        assert!(
+            !forwarded.is_empty(),
+            "this test is a loop over the forwarded names, so an empty list \
+             reports `ok` while asserting nothing"
         );
+
+        for target in forwarded {
+            let argv = compile_argv(target);
+            let position = argv
+                .iter()
+                .position(|entry| entry == "--target")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`--target` must be forwarded for `{}`, got argv: {argv:?}",
+                        target.as_str()
+                    )
+                });
+            assert_eq!(
+                argv.get(position + 1).map(String::as_str),
+                Some(target.as_str()),
+                "the flag's value must be the next argv entry, got argv: {argv:?}"
+            );
+        }
     }
 
     /// The control for the test above: with the default target and nothing else

@@ -355,6 +355,13 @@ impl CompilerCompat {
 /// The gate is on the *name*, not on the flag: see
 /// [`CompilerCompat::supports_target`].
 ///
+/// The refusal ends with the target's own
+/// [`TargetName::unforwarded_consequence`]. Without it the message is version
+/// arithmetic and reads as pedantry — the obvious response to "your compiler is
+/// too old for this name" is to drop the name, which is the one thing the gate
+/// exists to prevent, and what dropping it costs differs per target and is
+/// inferable from nothing else in the sentence.
+///
 /// `manifest_path` names the file the remediation tells the user to edit, which
 /// matters as soon as a walk was involved: single-file mode may have found a
 /// manifest several directories up. `None` can only accompany the default target
@@ -380,10 +387,13 @@ pub(crate) fn forward_target(
             |path| path.display().to_string(),
         );
         let minor = target.abi_minor();
+        let consequence = target
+            .unforwarded_consequence()
+            .map_or_else(String::new, |clause| format!(" {clause}"));
         bail!(
             "the resolved infc cannot build for the `{}` target (requires infc \
              ABI ≥ {COMPILER_ABI_MAJOR}.{minor}); update the toolchain or remove \
-             `[build] target` from {manifest}.",
+             `[build] target` from {manifest}.{consequence}",
             target.as_str()
         );
     }

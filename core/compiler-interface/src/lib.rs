@@ -149,7 +149,25 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// [`TargetName::abi_minor`] — neither on this constant, which any later
 /// additive flag will bump past it, nor on the minor `--target` itself entered
 /// at, which is five and would wave this name through.
-pub const COMPILER_ABI_MINOR: u32 = 6;
+///
+/// Minor 7 adds no flag either. It adds the name `spacewasm` to the vocabulary
+/// [`TargetName`] holds — the second name-only minor, and the first name whose
+/// artifact *is* the default's: nothing on the emission path reads a target, so
+/// a `spacewasm` build and a `wasm32` build of one source are the same bytes.
+/// What this name selects is an envelope rather than an artifact. It is
+/// backward compatible in the same sense as the minors above: a build that
+/// names no target, or names `wasm32`, gets exactly the artifact minor 6
+/// produced. The reverse pairing is gated for the reason minor 5 states, and
+/// this is the first name to land on the cheaper of the two consequences that
+/// sentence describes rather than the expensive one. A forward that *reaches* a
+/// minor-6 `infc` fails loudly, on a name that compiler does not have; a
+/// forward a caller decides is unnecessary and *omits* costs nothing in the
+/// bytes and costs the whole of what the name is for, because the envelope —
+/// and the conformance check that lands with it — is then never applied to the
+/// module that ships. So the gate is on [`TargetName::SpaceWasm`]'s own
+/// [`TargetName::abi_minor`] like every other name's, even though the artifact
+/// it protects is one an older compiler would have produced byte for byte.
+pub const COMPILER_ABI_MINOR: u32 = 7;
 
 /// A post-MVP WebAssembly proposal that a project may opt into.
 ///
@@ -420,11 +438,14 @@ pub fn resolve_wasm_features(
 /// test rather than resting on review: the variant records its own
 /// [`Self::abi_minor`], [`COMPILER_ABI_MINOR`] is bumped to that value, every
 /// exhaustive match from a name onto an emission target gains an arm, and each
-/// predicate below decides the new name explicitly. The predicates are matches
+/// accessor below decides the new name explicitly. The accessors are matches
 /// rather than `matches!(self, Self::Wasm32)` for that last reason alone: the
 /// concise form compiles unchanged for a new variant and hands it `false`, so a
 /// name that should have been allowed something would be refused it with nobody
-/// having decided so.
+/// having decided so. The two that answer with a sentence rather than a `bool`
+/// are held to the same rule for the same reason, and answer `Option` so that a
+/// `None` arm is a decision that this name has nothing extra to say rather than
+/// a variant nobody reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TargetName {
     /// General-purpose WebAssembly, for an embedder that imposes no ABI of its
@@ -443,13 +464,35 @@ pub enum TargetName {
     /// owns the last of those; the two here are the ones a front end can answer
     /// before spawning a compiler at all.
     Stellar,
+
+    /// A module for the SpaceWasm flight interpreter.
+    ///
+    /// The runtime is NASA JPL's `no_std` WebAssembly 1.0 interpreter for
+    /// flight software, and it imposes no ABI of its own: the artifact is the
+    /// default target's, byte for byte, with nothing appended and nothing
+    /// rewritten. This is the first name that selects an envelope rather than
+    /// an artifact, which is why it is the counterexample to reading
+    /// "non-default target" as "different bytes".
+    ///
+    /// What the envelope narrows, of the things a front end holding only the
+    /// name can answer: no proof mode, because the interpreter's decoder does
+    /// not define the custom `0xfc` instructions, and no post-MVP instruction
+    /// family, because it implements none of the proposals that add one. The
+    /// decode-time maxima the interpreter also enforces — parameter and local
+    /// word counts, name lengths, host arity — are properties of the finished
+    /// module rather than of the request, so nothing here can answer them.
+    SpaceWasm,
 }
 
 impl TargetName {
     /// Every requestable target, in canonical order. The rendered supported-set
     /// listing in diagnostics comes from here, so a new variant surfaces in every
     /// "unknown target" message with no further edit.
-    pub const ALL: [Self; 2] = [Self::Wasm32, Self::Stellar];
+    ///
+    /// Prose is not rendered from here. The set is restated in documentation no
+    /// test can make red, and [`RESERVED_TARGET_NAMES`] carries the inventory of
+    /// where, which a name added here has to walk.
+    pub const ALL: [Self; 3] = [Self::Wasm32, Self::Stellar, Self::SpaceWasm];
 
     /// The target a build gets when it names none, on either surface.
     ///
@@ -465,6 +508,7 @@ impl TargetName {
         match self {
             Self::Wasm32 => "wasm32",
             Self::Stellar => "stellar",
+            Self::SpaceWasm => "spacewasm",
         }
     }
 
@@ -490,6 +534,7 @@ impl TargetName {
         match self {
             Self::Wasm32 => 5,
             Self::Stellar => 6,
+            Self::SpaceWasm => 7,
         }
     }
 
@@ -510,7 +555,7 @@ impl TargetName {
     pub fn supports_proof_mode(self) -> bool {
         match self {
             Self::Wasm32 => true,
-            Self::Stellar => false,
+            Self::Stellar | Self::SpaceWasm => false,
         }
     }
 
@@ -523,7 +568,112 @@ impl TargetName {
     pub fn permits_bulk_memory(self) -> bool {
         match self {
             Self::Wasm32 => true,
+            Self::Stellar | Self::SpaceWasm => false,
+        }
+    }
+
+    /// Whether a module built for this target can be invoked by a plain
+    /// WebAssembly runtime — one that calls an export by name and passes each
+    /// argument as a value of the declared parameter type.
+    ///
+    /// This is the question `infs run` asks before handing an artifact to
+    /// `wasmtime`, and it has no emission-side counterpart: whether a module
+    /// *runs* under a general-purpose runtime is a property of the calling
+    /// convention its runtime imposes, which code generation never sees. A
+    /// target that imposes one answers `false` — not because the module is
+    /// invalid WebAssembly, but because invoking it this way returns a wrong
+    /// answer rather than an error.
+    ///
+    /// A target that adds no convention answers `true` even when it is not the
+    /// default: the SpaceWasm artifact is the default's bytes and its `main`
+    /// keeps the `argc, argv` shape, so a general-purpose runtime can invoke it.
+    ///
+    /// That is an answer about the calling convention and nothing else. The
+    /// runtime a `true` here reaches is not the target's runtime, so running the
+    /// module locally exercises the module and not the environment it was built
+    /// for: none of that environment's decode-time maxima, and nothing else it
+    /// does differently, is checked by running it here.
+    #[must_use]
+    pub fn runs_under_a_plain_wasm_runtime(self) -> bool {
+        match self {
+            Self::Wasm32 | Self::SpaceWasm => true,
             Self::Stellar => false,
+        }
+    }
+
+    /// What a build loses if a caller drops this target instead of forwarding
+    /// it, as a sentence appended to the refusal that would otherwise report
+    /// only version arithmetic.
+    ///
+    /// Per name because the loss is per name and no reader can infer it from
+    /// the arithmetic: for one target the artifact comes out the wrong shape
+    /// entirely, for another it comes out byte-identical with the whole reason
+    /// the name was written never applied. A refusal that names the minor but
+    /// not the stake reads as toolchain pedantry.
+    ///
+    /// The sentence names no surface. The two ways to select a target are not
+    /// spelled alike — `infc` takes a flag, `infs` takes a manifest key — and
+    /// the message this is appended to has already named whichever the user
+    /// wrote, so a clause that named one of them would be wrong wherever the
+    /// other was.
+    ///
+    /// [`Self::DEFAULT`] is never forwarded — dropping it selects the same
+    /// target — so it answers `None`: this name has nothing to add, as a
+    /// decision rather than as an empty string a caller has to remember not to
+    /// append a space in front of.
+    #[must_use]
+    pub fn unforwarded_consequence(self) -> Option<&'static str> {
+        match self {
+            Self::Wasm32 => None,
+            Self::Stellar => Some(
+                "Building without it would produce a plain WebAssembly module: no \
+                 value-ABI wrappers over the exported methods and no environment-metadata \
+                 section, so the artifact would not be a contract and a Soroban host would \
+                 refuse to upload it.",
+            ),
+            Self::SpaceWasm => Some(
+                "Building without it would produce the same bytes, since nothing on the \
+                 emission path reads a target — and would drop this target's acceptance \
+                 envelope with it, so nothing would hold the module that ships to what the \
+                 flight interpreter decodes.",
+            ),
+        }
+    }
+
+    /// The target-specific sentence a proof-mode refusal ends with, or `None`
+    /// when the generic remediation is the whole of it.
+    ///
+    /// The generic remediation — set `mode = "compile"`, or build for a target
+    /// that supports proof mode — is true everywhere and actionable nowhere in
+    /// particular. For a target whose artifact *is* the default's it is worse
+    /// than unhelpful: it reads as "this program cannot be proved" when what is
+    /// true is that the proof is one command away and describes these very
+    /// bytes, so that name earns the sentence saying so.
+    ///
+    /// A target whose artifact is a *rewrite* of the default's earns no such
+    /// sentence, and its `None` arm is the decision rather than an oversight.
+    /// There is a proof route for it too, but the relationship it rests on is
+    /// "rewritten from" rather than "equal to" — which takes the procedure the
+    /// book's Compilation Targets chapter sets out, not a clause appended to a
+    /// manifest error.
+    ///
+    /// Kept beside [`Self::unforwarded_consequence`] and held to the same
+    /// exhaustive-match rule: a name added to the vocabulary states which of the
+    /// two situations it is in rather than inheriting silence. It names no
+    /// selection surface for the same reason that clause names none: this one is
+    /// appended today to a manifest error and the emission-side refusal of the
+    /// same pairing is a flag error, so a sentence naming either would be wrong
+    /// in the other.
+    #[must_use]
+    pub fn proof_refusal_remediation(self) -> Option<&'static str> {
+        match self {
+            Self::Wasm32 | Self::Stellar => None,
+            Self::SpaceWasm => Some(
+                "No separate proof build is needed for this target: nothing on the emission \
+                 path reads a target, so its compile-mode bytes are the `wasm32` build's. \
+                 Prove the program in a `wasm32` build and deploy the artifact this build \
+                 produces.",
+            ),
         }
     }
 }
@@ -550,8 +700,10 @@ impl TargetName {
 /// - `apps/infs/docs/inference-toml.md` — the accepted values listed under the
 ///   `[build]` `target` field.
 /// - `book/src/projects-and-the-infs-toolchain.md` — the `target` row of the
-///   manifest field table, and the paragraph on case sensitivity that names the
-///   rejected spellings.
+///   manifest field table, the `--target` row of the `infc` flag table, the
+///   scaffolded `Inference.toml` it reproduces (an abridged restatement of the
+///   scaffolder's comment below), and the paragraph on case sensitivity that
+///   names the rejected spellings.
 /// - `apps/infs/src/project/scaffold.rs` — the `[build]` comment the scaffolder
 ///   writes into a new project's `Inference.toml`.
 pub const RESERVED_TARGET_NAMES: &[&str] = &["soroban"];
@@ -882,9 +1034,9 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one_dot_six() {
+    fn abi_version_is_one_dot_seven() {
         assert_eq!(COMPILER_ABI_MAJOR, 1);
-        assert_eq!(COMPILER_ABI_MINOR, 6);
+        assert_eq!(COMPILER_ABI_MINOR, 7);
     }
 
     #[test]
@@ -1411,11 +1563,28 @@ mod tests {
         assert_eq!(TargetName::DEFAULT.as_str(), "wasm32");
     }
 
+    /// `spacewasm` is the first name whose natural CamelCase rendering differs
+    /// from its wire spelling by more than a leading capital, so the separator
+    /// spellings a reader might reach for — `space-wasm`, `space_wasm` — are
+    /// listed beside the case variants. The wire spelling is one word.
     #[test]
     fn target_matching_is_case_sensitive_and_untrimmed() {
         for near_miss in [
-            "Wasm32", "WASM32", "wasm_32", " wasm32", "wasm32 ", "Stellar", "STELLAR",
-            " stellar", "stellar ",
+            "Wasm32",
+            "WASM32",
+            "wasm_32",
+            " wasm32",
+            "wasm32 ",
+            "Stellar",
+            "STELLAR",
+            " stellar",
+            "stellar ",
+            "SpaceWasm",
+            "SPACEWASM",
+            "space-wasm",
+            "space_wasm",
+            " spacewasm",
+            "spacewasm ",
         ] {
             assert_eq!(
                 TargetName::from_name(near_miss),
@@ -1433,8 +1602,11 @@ mod tests {
     /// [`COMPILER_ABI_MINOR`], which *any* additive `infc` flag bumps — the four
     /// minors before this one had nothing to do with targets — so an unrelated
     /// bump must not turn this red.
-    const TARGET_ENTRY_MINORS: &[(TargetName, u32)] =
-        &[(TargetName::Wasm32, 5), (TargetName::Stellar, 6)];
+    const TARGET_ENTRY_MINORS: &[(TargetName, u32)] = &[
+        (TargetName::Wasm32, 5),
+        (TargetName::Stellar, 6),
+        (TargetName::SpaceWasm, 7),
+    ];
 
     /// The safety property: no name may claim a minor this compiler does not
     /// advertise. A name whose minor ran ahead of [`COMPILER_ABI_MINOR`] would
@@ -1497,25 +1669,134 @@ mod tests {
         }
     }
 
+    /// Driven from the vocabulary rather than from one line per name: the loop
+    /// over the two surfaces already scaled and the assertions inside it did
+    /// not, so a name added to `ALL` used to get no per-surface coverage at all.
     #[test]
     fn a_supported_name_resolves_on_either_surface() {
         for source in [TargetSource::Manifest, TargetSource::Flag] {
-            assert_eq!(resolve_target("wasm32", source), Ok(TargetName::Wasm32));
-            assert_eq!(resolve_target("stellar", source), Ok(TargetName::Stellar));
+            for target in TargetName::ALL {
+                assert_eq!(resolve_target(target.as_str(), source), Ok(target));
+            }
         }
     }
 
-    /// The two predicates a front end holding only a name can answer, pinned
-    /// per variant. They are copies of the emission-side target's, and the
+    /// The predicates a front end holding only a name can answer, pinned per
+    /// variant. Two of them are copies of the emission-side target's, and the
     /// mirror test in `inference-wasm-codegen` is what holds the copies to the
     /// originals; this pins what the copies say, so a change here is deliberate
     /// rather than a silent widening of what a manifest may ask for.
+    ///
+    /// The third has no emission-side original — whether a plain runtime can
+    /// invoke the module is not a question code generation answers — so these
+    /// assertions are the only thing pinning it at all.
+    ///
+    /// Every conversion of a `matches!(self, Self::Wasm32)` into an exhaustive
+    /// match belongs here in the same change. A new variant inherits `false`
+    /// from the concise form and states `false` under the exhaustive one, which
+    /// is the same answer: without the pin the conversion has no observable
+    /// effect and reads as a no-op refactor.
     #[test]
     fn each_target_records_what_it_permits() {
         assert!(TargetName::Wasm32.supports_proof_mode());
         assert!(TargetName::Wasm32.permits_bulk_memory());
+        assert!(TargetName::Wasm32.runs_under_a_plain_wasm_runtime());
         assert!(!TargetName::Stellar.supports_proof_mode());
         assert!(!TargetName::Stellar.permits_bulk_memory());
+        assert!(!TargetName::Stellar.runs_under_a_plain_wasm_runtime());
+        assert!(!TargetName::SpaceWasm.supports_proof_mode());
+        assert!(!TargetName::SpaceWasm.permits_bulk_memory());
+        assert!(TargetName::SpaceWasm.runs_under_a_plain_wasm_runtime());
+    }
+
+    /// The two per-name clauses, pinned the same way and for the same reason:
+    /// each is an exhaustive match whose `None` arm is a decision.
+    ///
+    /// The pairs asserted are what makes a decided `None` distinguishable from
+    /// an unwritten one. `Wasm32` is never forwarded and supports proof mode, so
+    /// both of its clauses are `None` by construction; every other name has to
+    /// have decided at least the first, because a non-default name is exactly
+    /// what can be dropped on the way to an older compiler.
+    ///
+    /// What each clause *says* is pinned too, and not only that one exists. The
+    /// point of a per-name clause is that the names differ, so a clause pasted
+    /// from the neighbouring arm is the mistake worth catching, and a
+    /// non-emptiness check cannot see it. The phrase a clause is held to is
+    /// chosen in an exhaustive match on the name, so a name added to the
+    /// vocabulary is pinned to saying something of its own rather than counted.
+    ///
+    /// Fails if a name is added with no consequence, if one arm's text is copied
+    /// into the other, if either clause is blank — each is appended verbatim to a
+    /// refusal, so a blank one is a trailing space and no sentence — if either
+    /// starts naming a selection surface (the two that exist spell a target
+    /// differently and these clauses are appended on both), or if Stellar's proof
+    /// refusal acquires a per-name clause that is not true of it.
+    #[test]
+    fn each_non_default_target_states_what_dropping_it_would_cost() {
+        assert_eq!(TargetName::Wasm32.unforwarded_consequence(), None);
+        assert_eq!(TargetName::Wasm32.proof_refusal_remediation(), None);
+
+        for target in TargetName::ALL {
+            if target == TargetName::DEFAULT {
+                continue;
+            }
+            let consequence = target.unforwarded_consequence().unwrap_or_else(|| {
+                panic!(
+                    "`{}` can be dropped on the way to an older compiler and says \
+                     nothing about what that would cost",
+                    target.as_str()
+                )
+            });
+            let distinctive = match target {
+                TargetName::Wasm32 => unreachable!("the default is skipped above"),
+                TargetName::Stellar => "would not be a contract",
+                TargetName::SpaceWasm => "the same bytes",
+            };
+            assert!(
+                consequence.contains(distinctive),
+                "`{}`'s clause must say what dropping this name costs, in the terms \
+                 only it can be described in: {consequence}",
+                target.as_str()
+            );
+
+            for clause in [Some(consequence), target.proof_refusal_remediation()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(
+                    !clause.trim().is_empty(),
+                    "`{}` carries a clause appended verbatim to a refusal, so a \
+                     blank one is a trailing space and no sentence",
+                    target.as_str()
+                );
+                assert!(
+                    !clause.contains("--target") && !clause.contains("[build] target"),
+                    "`{}`'s clauses are appended to messages on both selection \
+                     surfaces, so neither may name one: {clause}",
+                    target.as_str()
+                );
+            }
+        }
+
+        assert_ne!(
+            TargetName::Stellar.unforwarded_consequence(),
+            TargetName::SpaceWasm.unforwarded_consequence(),
+            "two names whose artifacts differ in kind cannot share one clause"
+        );
+
+        assert_eq!(
+            TargetName::Stellar.proof_refusal_remediation(),
+            None,
+            "a target whose artifact is a rewrite of the default's takes the \
+             book's procedure, not an appended clause"
+        );
+        assert!(
+            TargetName::SpaceWasm
+                .proof_refusal_remediation()
+                .is_some_and(|clause| clause.contains("Prove the program in a `wasm32` build")),
+            "a target whose artifact is the default's must name the build that \
+             does produce a proof"
+        );
     }
 
     #[test]
@@ -1526,7 +1807,7 @@ mod tests {
 
     #[test]
     fn the_supported_listing_is_rendered_from_the_vocabulary() {
-        assert_eq!(supported_targets_listing(), "`wasm32`, `stellar`");
+        assert_eq!(supported_targets_listing(), "`wasm32`, `stellar`, `spacewasm`");
     }
 
     /// The rendering is pinned character for character: the `#[error(...)]`
@@ -1539,7 +1820,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Invalid `[build] target` value `wasm64`: unknown compilation target. \
-             Supported targets: `wasm32`, `stellar`."
+             Supported targets: `wasm32`, `stellar`, `spacewasm`."
         );
     }
 
@@ -1557,7 +1838,7 @@ mod tests {
                 .to_string(),
             "Invalid `--target` value `soroban`: `soroban` is the former name of the `stellar` \
              target and is not accepted; write `stellar` instead. Supported targets: `wasm32`, \
-             `stellar`."
+             `stellar`, `spacewasm`."
         );
     }
 
@@ -1592,8 +1873,8 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Invalid `--target` value ` wasm32`: unknown compilation target. Supported targets: \
-             `wasm32`, `stellar`. Target names are matched exactly and this entry has \
-             surrounding whitespace: write `wasm32`."
+             `wasm32`, `stellar`, `spacewasm`. Target names are matched exactly and this entry \
+             has surrounding whitespace: write `wasm32`."
         );
     }
 

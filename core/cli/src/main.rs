@@ -378,6 +378,7 @@ fn resolve_target_flag(requested: Option<&str>) -> anyhow::Result<inference_wasm
     Ok(match name {
         TargetName::Wasm32 => inference_wasm_codegen::Target::Wasm32,
         TargetName::Stellar => inference_wasm_codegen::Target::Stellar,
+        TargetName::SpaceWasm => inference_wasm_codegen::Target::SpaceWasm,
     })
 }
 
@@ -455,6 +456,14 @@ fn foreign_module_refusal(externals: &[ResolvedExternalModule]) -> Option<String
 /// second refusal for the same thing would be a second wording to keep in step.
 /// What is left is `--mode compile -v`, the one spelling that keeps compile mode
 /// and still asks for a translation.
+///
+/// The condition names one target rather than asking a predicate, and that is
+/// deliberate: what it refuses is a *rewrite*, and only that target performs
+/// one. A target that adds nothing to the module falls through and gets the `.v`
+/// a `wasm32` compile-mode build of the same source writes — byte for byte,
+/// because that is what the bytes on disk are. Widening this to "any non-default
+/// target" would refuse the pairing that is most worth having, in a message
+/// about a rewrite that never happened.
 fn proof_artifact_refusal(
     target: inference_wasm_codegen::Target,
     mode: Option<CliMode>,

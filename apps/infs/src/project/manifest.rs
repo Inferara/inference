@@ -499,18 +499,34 @@ impl BuildConfig {
     ///   version is not pinned by anything here — and a module that lost either
     ///   is refused at upload or, worse, uploads and misdecodes its arguments. A
     ///   build-time refusal costs a manifest edit; the alternative costs a
-    ///   deployment.
+    ///   deployment. Both of those are things one target's artifact carries and
+    ///   no other's does, which is what the name equality says. A target whose
+    ///   module is the default's bytes carries neither, so it keeps the
+    ///   optimizer — and wants it most, since the runtimes that narrow a build
+    ///   this way are the ones with the least room to load it into.
     ///
     /// The arms run in the order the per-key checks in [`Self::validate`] run —
     /// `mode`, then `wasm-features`, then the optimizer sub-table — so a manifest
     /// wrong in two ways is told about the same key either kind of check would
     /// have reported first.
     ///
-    /// A load-time error rather than a build-time one because it is invalid for
-    /// every command: `infs run`, a proof build and a plain `infs build` all read
-    /// a manifest that describes an artifact the toolchain will not make.
+    /// A load-time error rather than a build-time one so that every command
+    /// reports the same key. Deciding the mode arm once the *effective* mode is
+    /// known would have each command answer differently on one unchanged
+    /// manifest: `infs run` forces compile mode and would proceed, `infs build
+    /// --mode compile` would proceed, a plain `infs build` would not — and the
+    /// user would learn which of their commands the manifest is wrong for rather
+    /// than that it is wrong.
+    ///
+    /// The cost is real and worth naming: `infs build --mode compile` on a
+    /// `mode = "proof"` manifest whose target has no proof mode asks for a build
+    /// the toolchain can make, and this refuses it until `[build] mode` is
+    /// edited.
     fn validate_target_pairings(&self, target: TargetName) -> Result<()> {
         if self.mode == "proof" && !target.supports_proof_mode() {
+            let remediation = target
+                .proof_refusal_remediation()
+                .map_or_else(String::new, |clause| format!(" {clause}"));
             bail!(
                 "`[build] target = \"{}\"` cannot be combined with \
                  `[build] mode = \"proof\"`. Proof mode emits Inference's \
@@ -518,7 +534,7 @@ impl BuildConfig {
                  which no runtime outside Inference's own tooling decodes, so \
                  the artifact this manifest describes is one the runtime it \
                  names could not load. Set `mode = \"compile\"`, or build for \
-                 a target that supports proof mode.",
+                 a target that supports proof mode.{remediation}",
                 target.as_str()
             );
         }
@@ -2557,6 +2573,105 @@ target = "wasm32"
         .expect("an empty list asks for nothing and is not a pairing");
     }
 
+    /// Proof mode is refused for the `SpaceWasm` target too — the mode arm asks
+    /// the vocabulary rather than naming a target, so a name arrives here
+    /// already answered — and the refusal carries the remediation only this
+    /// target has: its compile-mode bytes are the `wasm32` build's, so the
+    /// proof is one command away rather than unavailable.
+    ///
+    /// Fails if the remediation clause is dropped from
+    /// `TargetName::proof_refusal_remediation`, or if the message is assembled
+    /// without it.
+    #[test]
+    fn the_spacewasm_target_refuses_proof_mode_naming_the_build_that_proves_it() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "target = \"spacewasm\"\nmode = \"proof\"\n",
+        ))
+        .expect_err("the pairing is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`[build] target = \"spacewasm\"`") && msg.contains("`[build] mode"),
+            "the refusal must name both keys, got: {msg}"
+        );
+        assert!(
+            msg.contains("Prove the program in a `wasm32` build"),
+            "the refusal must name the build that does produce a proof, got: {msg}"
+        );
+
+        InferenceToml::from_toml(&manifest_with_build("target = \"spacewasm\"\n"))
+            .expect("the SpaceWasm target alone loads");
+    }
+
+    /// Stellar's refusal must not acquire `SpaceWasm`'s remediation: its artifact
+    /// is a rewrite of the `wasm32` module rather than the same bytes, so
+    /// "prove at `wasm32`, deploy this build" is not a sentence that is true
+    /// there without the qualification the book gives it.
+    ///
+    /// Fails if the per-name clause is replaced by one sentence for every
+    /// non-proving target.
+    #[test]
+    fn the_stellar_proof_refusal_carries_no_per_target_remediation() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "target = \"stellar\"\nmode = \"proof\"\n",
+        ))
+        .expect_err("the pairing is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.ends_with("or build for a target that supports proof mode."),
+            "the generic remediation must be the whole of it, got: {msg}"
+        );
+    }
+
+    /// A `wasm-features` request is refused for the `SpaceWasm` target, with the
+    /// same both-halves assertion the Stellar row uses.
+    ///
+    /// Fails if `SpaceWasm` starts permitting bulk memory, or if the feature arm
+    /// starts naming a target instead of asking the predicate.
+    #[test]
+    fn the_spacewasm_target_refuses_a_wasm_features_request() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "target = \"spacewasm\"\nwasm-features = [\"bulk-memory\"]\n",
+        ))
+        .expect_err("the pairing is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`[build] target = \"spacewasm\"`")
+                && msg.contains("`[build] wasm-features`"),
+            "the refusal must name both keys, got: {msg}"
+        );
+
+        InferenceToml::from_toml(&manifest_with_build(
+            "target = \"spacewasm\"\nwasm-features = []\n",
+        ))
+        .expect("an empty list asks for nothing and is not a pairing");
+    }
+
+    /// The optimizer table *loads* for the `SpaceWasm` target, and the asymmetry
+    /// with Stellar is deliberate rather than inherited from a name equality
+    /// nobody revisited: what that arm protects is a contract's value-ABI
+    /// wrappers and its metadata section, and a target whose module is the
+    /// default's bytes has neither. A size-constrained runtime is the one that
+    /// wants the optimizer most.
+    ///
+    /// Fails the moment the optimizer arm is generalized from the one target to
+    /// "any non-default target" — which is the shape a reader is most likely to
+    /// mistake it for.
+    #[test]
+    fn the_spacewasm_target_keeps_the_optimizer_table() {
+        let manifest = InferenceToml::from_toml(&manifest_with_build(
+            "target = \"spacewasm\"\n\n[build.wasm-opt]\nlevel = \"s\"\n",
+        ))
+        .expect("the SpaceWasm target permits the optimizer");
+        assert_eq!(
+            manifest.build.resolved_target().expect("resolves"),
+            TargetName::SpaceWasm
+        );
+        assert!(
+            manifest.build.wasm_opt.is_some(),
+            "the optimizer table must survive the load, not merely fail to refuse it"
+        );
+    }
+
     /// The pairing check runs after the per-key checks, so a manifest that is
     /// wrong in both ways is told about the malformed table rather than about a
     /// pairing it would still have to fix afterwards.
@@ -2577,7 +2692,7 @@ target = "wasm32"
     /// TOML string a trailing space is invisible in the echoed value.
     #[test]
     fn target_matching_is_exact_on_the_manifest_surface() {
-        for near_miss in ["Wasm32", "wasm32 ", " wasm32"] {
+        for near_miss in ["Wasm32", "wasm32 ", " wasm32", "SpaceWasm", "spacewasm "] {
             let err = InferenceToml::from_toml(&manifest_with_build(&format!(
                 "target = \"{near_miss}\"\n"
             )))

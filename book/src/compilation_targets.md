@@ -29,6 +29,8 @@ For project-aware builds — `Inference.toml`, project discovery, and the `infs 
 
 Both spellings of a Rocq request are refused at `--target stellar`: `--mode proof` (and a bare `-v`, which implies it) because the target cannot decode the instructions proof mode emits, and `--mode compile -v` because the `.v` would describe the module *before* the value-ABI rewrite while the `.wasm` beside it is the module after. See [Stellar](#stellar) below.
 
+At `--target spacewasm` only the first of those is refused. `--mode proof` and a bare `-v` fail for the same reason as at Stellar, but `--mode compile -v` **succeeds** and writes the `.v` a `wasm32` compile-mode build writes, character for character — there is no rewrite for the translation to run ahead of, because the two builds are the same module. See [SpaceWasm](#spacewasm) below.
+
 | Property | Value | Rationale |
 |----------|-------|-----------|
 | Spec function lowering | Structural 1:1 from source | Rocq readability — no optimizer runs to disturb it |
@@ -295,7 +297,8 @@ are therefore properties of code generation:
 Produces a module for the SpaceWasm flight interpreter — NASA JPL's `no_std`
 WebAssembly 1.0 interpreter for flight software, which decodes a module into its
 own IR on a fixed allocation and executes it with no operating system
-underneath.
+underneath. Selected with `infc --target spacewasm` or
+`[build] target = "spacewasm"` in an `Inference.toml`.
 
 Unlike the Stellar target, this one imposes no calling convention and adds
 nothing to the module. There is no marshalling shell, no metadata section and no
@@ -358,9 +361,7 @@ reference numbers a report can be read against, not a promise about the vehicle.
 
 Because code generation never reads the target, a SpaceWasm build and a `wasm32`
 build of the same source are the same module. Not "the module the other was
-derived from" — the same file. That is why the Rocq path is refused at this
-target rather than qualified: there would be nothing for a second `.v` to
-describe that the first does not.
+derived from" — the same file.
 
 The procedure:
 
@@ -387,10 +388,47 @@ procedure above deliberately does not have one: a Stellar artifact carries
 appended wrappers and a metadata section, so its relationship to the proved
 module is "rewritten from", not "equal to".
 
-What the SpaceWasm build buys today is the envelope — the three refusals above,
-applied to a build whose output is otherwise the default target's. The
-conformance report against the decode-time limits is what will make it buy more,
-and it is landing in a later change.
+The same difference shows up as a command line that works here and not there.
+Proof mode is refused at both targets, for the same reason — it emits the custom
+`0xfc` instructions and neither runtime decodes them — so `--mode proof` and a
+bare `-v` fail either way. But `--mode compile -v`, the one spelling that keeps
+compile mode and still asks for a translation, **succeeds** at `spacewasm` and
+writes exactly the `.v` a `wasm32` compile-mode build writes:
+
+```bash
+infc main.inf --target spacewasm --mode compile -v --out-dir out/spacewasm/
+infc main.inf --target wasm32    --mode compile -v --out-dir out/wasm32/
+cmp out/wasm32/main.v out/spacewasm/main.v          # fc /b on Windows
+```
+
+At `stellar` that spelling is refused, because there the translation reads the
+pre-rewrite bytes while the `.wasm` written beside it is the contract. Here
+there is no rewrite for it to run ahead of. It is a decision rather than a
+consequence of where the refusal happens to be written, and the CLI suite pins
+it — a refusal widened from "the rewriting target" to "any non-default target"
+would take this with it.
+
+What the SpaceWasm build buys today is the envelope, applied to a build whose
+output is otherwise the default target's. Named rather than counted, because
+only two of the three are rows in the settings table above: a build for this
+target refuses proof mode, refuses every post-MVP instruction family, and
+refuses a non-deterministic construct — a `forall`, `exists`, `assume` or
+`unique` block, or a bare `@` — in a function that ships.
+
+The third is not a narrowing this target introduces. Analysis rules A042 and
+A006 refuse non-determinism outside a `spec` in every build at every target,
+with a source location, and every `infc` build runs both. What this target adds
+is that code generation asks the question again, as a backstop for a caller that
+reached it without running analysis; the default target does not ask it, because
+there the custom `0xfc` instructions are ones Inference's own tooling decodes —
+no general-purpose embedder does — which is what makes this a target-specific
+question rather than a second copy of A042. Either way the refusal is about
+executable code only: `compile` mode strips `spec` bodies before either check
+looks at them, so a specification written in those constructs costs a SpaceWasm
+build nothing.
+
+The conformance report against the decode-time limits is what will make the
+envelope buy more, and it is landing in a later change.
 
 **The two links.** For the deployed bytes to be the proved bytes, two identities
 have to hold, and each has its own guard in the test suite:

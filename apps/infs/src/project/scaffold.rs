@@ -209,7 +209,7 @@ fn write_git_files(project_path: &Path) -> Result<()> {
 /// produce a value the loader reads back consistently — the round-trip is
 /// covered by a test. `target` stays commented because the default is what a
 /// new project wants — generic WebAssembly, buildable and runnable with no
-/// further choice — and the key is shown so it is discoverable, with both
+/// further choice — and the key is shown so it is discoverable, with all three
 /// accepted values named beside it; it is validated on load rather than
 /// ignored, so uncommenting it and writing a name that does not exist is a load
 /// error. `optimize` stays commented because it is not yet
@@ -245,8 +245,11 @@ infc_version = "{infc_version}"
 # 64-bit tagged word. "stellar" narrows what the project may contain: no proof
 # mode, no wasm-features, no [build.wasm-opt], no `infs run`, and an exported
 # function's parameters and return confined to the scalar set the convention
-# encodes. Names are matched exactly; an unrecognized one is a load error, not a
-# fall back to the default.
+# encodes. "spacewasm" is the SpaceWasm flight interpreter, and adds nothing to
+# the module: the artifact is the "wasm32" one byte for byte. It narrows only
+# what a build may contain -- no proof mode and no wasm-features -- and leaves
+# [build.wasm-opt] and `infs run` available. Names are matched exactly; an
+# unrecognized one is a load error, not a fall back to the default.
 # target = "wasm32"
 # Compilation mode: "compile" (executable WASM) or "proof" (Rocq specs).
 mode = "compile"
@@ -528,6 +531,27 @@ mod tests {
         assert!(content.contains("my_awesome_project"));
         assert!(content.contains("version = \"0.1.0\""));
         assert!(content.contains("infc_version = \""));
+    }
+
+    /// The scaffolded `[build] target` comment enumerates the accepted names in
+    /// prose, and prose is the one place in this feature nothing else holds to
+    /// the vocabulary: the forwarding tests derive their matrix from
+    /// `TargetName::ALL`, the manifest validates against it, and this comment is
+    /// hand-written.
+    ///
+    /// Fails when a name is added to the vocabulary and the template is not
+    /// updated, which is the whole failure mode — a new project is scaffolded
+    /// with a comment that omits a name the loader accepts.
+    #[test]
+    fn the_scaffolded_target_comment_names_every_accepted_value() {
+        let content = manifest_content("demo");
+        for target in inference_compiler_interface::TargetName::ALL {
+            assert!(
+                content.contains(&format!("\"{}\"", target.as_str())),
+                "the scaffolded `[build] target` comment omits `{}`",
+                target.as_str()
+            );
+        }
     }
 
     #[test]
