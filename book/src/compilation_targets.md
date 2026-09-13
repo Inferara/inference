@@ -17,7 +17,7 @@
 
 **`compile` mode**: Produces production binaries. Non-det `spec` nodes are stripped from codegen since they have no runtime meaning. The output can be the verification target — the artifact whose behavior is proven correct by Rocq proofs.
 
-**`proof` mode**: Emits a single WASM module for `wasm_to_v` Rocq translation, preserving the specification code that compile mode strips. The non-deterministic constructs do not survive into the module: a `forall`-quantified (or plain) spec function becomes an `hassert` obligation and is omitted from the module record altogether, while an `exists`- or `unique`-quantified one is retained with a vanilla body — each scalar `@` becomes a hidden trailing choice parameter, and each `assume`/`assert` a trap-on-false filter. What proof mode does preserve is source order and shape: statements lower in the order written and the compiler applies no optimization pass to reshape them, so a retained body reads against its source and there is no optimization barrier to insert. Execution functions are byte-for-byte identical to what compile mode's release profile emits for the same source, so Rocq proofs cover the artifact that actually ships. If the source has no `non_det_operations`, proof mode output is identical to compile mode release output (`Option 5` = `Option 2`). The target is always `Wasm32`; the `Stellar` target supports `compile` mode only. Build profiles (`debug`/`release`) do not change proof mode's output — only the `OptLevel` value it records, which today changes no emitted byte either way (see Appendix A below).
+**`proof` mode**: Emits a single WASM module for `wasm_to_v` Rocq translation, preserving the specification code that compile mode strips. The non-deterministic constructs do not survive into the module: a `forall`-quantified (or plain) spec function becomes an `hassert` obligation and is omitted from the module record altogether, while an `exists`- or `unique`-quantified one is retained with a vanilla body — each scalar `@` becomes a hidden trailing choice parameter, and each `assume`/`assert` a trap-on-false filter. What proof mode does preserve is source order and shape: statements lower in the order written and the compiler applies no optimization pass to reshape them, so a retained body reads against its source and there is no optimization barrier to insert. Execution functions are byte-for-byte identical to what compile mode's release profile emits for the same source, so Rocq proofs cover the artifact that actually ships. If the source has no `non_det_operations`, proof mode output is identical to compile mode release output (`Option 5` = `Option 2`). The target is always `Wasm32`: every other target supports `compile` mode only, because the custom 0xfc instructions proof mode is made of are decodable by no runtime but our own tooling. Build profiles (`debug`/`release`) do not change proof mode's output — only the `OptLevel` value it records, which today changes no emitted byte either way (see Appendix A below).
 
 The contract between the generated `.wasm` binary, the per-spec function index map carried alongside (or embedded as the `inference.spec_funcs` custom section), and the Rocq predicates the generated `.v` file depends on is documented in [`core/wasm-to-v/ROCQ_CONTRACT.md`](../../core/wasm-to-v/ROCQ_CONTRACT.md).
 
@@ -290,6 +290,133 @@ are therefore properties of code generation:
   from its top toward 0, and anything above it is the data region. Its size is one 64 KiB page
   by default and is set through `[memory]` / `--stack-size`, not by a link-time flag.
 
+### SpaceWasm
+
+Produces a module for the SpaceWasm flight interpreter — NASA JPL's `no_std`
+WebAssembly 1.0 interpreter for flight software, which decodes a module into its
+own IR on a fixed allocation and executes it with no operating system
+underneath.
+
+Unlike the Stellar target, this one imposes no calling convention and adds
+nothing to the module. There is no marshalling shell, no metadata section and no
+rewrite: the artifact a SpaceWasm build writes is, byte for byte, the artifact a
+`wasm32` build writes from the same source. What the target does is narrow what
+a build may *contain* — the instruction set, and nothing else.
+
+| Setting | Value | Source |
+|---------|-------|--------|
+| Target | `wasm32-unknown-unknown` | The only module shape code generation produces |
+| Instruction set | WebAssembly 1.0, with no opt-in available | `Target::permits_bulk_memory()` is `false`, so the one post-MVP family the compiler can emit is unreachable here |
+| WASM proposals the module uses | `mutable-globals` only — a module with linear memory exports its mutable `__stack_pointer` global — and no instruction outside WebAssembly 1.0 | See "What the interpreter decodes" below |
+| Compilation mode | `compile` only | Proof mode emits the custom 0xfc non-deterministic instructions, which the interpreter's decoder does not define |
+| Recorded `OptLevel` (compile) | `Os` under `release`, `O0` under `debug` — no optimization pass currently acts on either | `Os` is the target's `default_opt_level`: size is the scarce resource on a flight computer |
+| Floats | Impossible — no float instruction can be emitted, at any target | The language has no floating-point type: `SimpleTypeKind` (`core/ast`) admits `unit`, `bool` and the eight integer widths and nothing else |
+| Emitted bytes | Identical to a `wasm32` compile-mode build of the same source | Nothing on the emission path reads a target; see the procedure below |
+
+#### What the interpreter decodes
+
+The instruction set is the WebAssembly 1.0 MVP plus `mutable-globals`. Several
+further proposals are tracked upstream and not implemented, and only one of
+them, `bulk-memory`, costs an Inference build anything at all:
+
+| Proposal | Interpreter status | What it costs a build here |
+|----------|--------------------|----------------------------|
+| `mutable-globals` | Implemented, every version | Nothing — the exported `__stack_pointer` global needs it |
+| `custom-page-sizes` | Implemented since 0.2.0 | Nothing — memory stays 64 KiB pages, `min == max` |
+| `bulk-memory` | Planned, `nasa/spacewasm#54` | `--wasm-features bulk-memory` fails the build before a byte is emitted; region fills and copies take the load/store lowering instead |
+| `sign-ext` | Planned, `nasa/spacewasm#55` | Nothing — no target ever emits `i32.extend8_s` or its relatives; a narrow signed value is normalized with `i32.shl` followed by `i32.shr_s` |
+| `saturating-float-to-int` | Planned, `nasa/spacewasm#56` | Nothing — the language has no float type |
+| SIMD, multi-value, multi-memory, reference types | Not implemented | Nothing — code generation emits no instruction from any of them |
+
+#### Decode-time limits
+
+Decoding a module is where the interpreter checks its own maxima, and a module
+that exceeds one is refused on the device rather than at build time. **Nothing in
+the compiler checks any of these today.** The conformance step that will is
+landing in a later change; until it does, a module this target accepts is one
+whose *instruction set* the interpreter covers, which is not yet the same
+statement as one it will load.
+
+| Limit | Value | Where it comes from |
+|-------|-------|---------------------|
+| Parameter words per function | 255 | An `i64` is two words, so 128 `i64` parameters already exceed it |
+| Local words per function | 65,535 | The same accounting |
+| Import module and field name | 32 bytes each | `Module::MAX_NAME_LENGTH` |
+| Host-registered module and function name | 31 bytes each | `HOST_MODULE_NAME_CAP` / `HOST_FUNCTION_NAME_CAP` — the registration side is one byte tighter than the decode side, so 31 is the cap an import name has to meet to be bindable at all |
+| Host function parameters | 9, and a single result | `MAX_HOST_FUNCTION_PARAMS`; more than one result is `MultiReturnNotAllowed` |
+| Custom section name | 32 bytes | Compile mode emits at most `inference.checked` and `name`, both well inside it |
+| Control-frame nesting | Embedder-configured; 64 in the `spacewasm_std` reference embedding | `MAX_CONTROL_FRAMES`, a const generic of `Module::new` — a *deployment's* number, not the interpreter's |
+| Operand-stack depth | Embedder-configured; 256 in `spacewasm_std` | `MAX_STACK_DEPTH`, the same const generic |
+| Linear memory | 4 GiB | The WebAssembly 32-bit address space |
+
+The last two are the ones to read carefully: they belong to whoever embedded the
+interpreter, not to the interpreter, so "does this module fit" is only answerable
+against a particular flight configuration. `spacewasm_std`'s 64 and 256 are the
+reference numbers a report can be read against, not a promise about the vehicle.
+
+#### Proving the `wasm32` build and deploying the SpaceWasm one
+
+Because code generation never reads the target, a SpaceWasm build and a `wasm32`
+build of the same source are the same module. Not "the module the other was
+derived from" — the same file. That is why the Rocq path is refused at this
+target rather than qualified: there would be nothing for a second `.v` to
+describe that the first does not.
+
+The procedure:
+
+```bash
+# The module to reason about, and its Rocq translation. `-v` implies proof mode.
+infc main.inf --target wasm32 -v --out-dir proofs/
+
+# The module to deploy, and the same source at the default target.
+infc main.inf --target spacewasm --out-dir out/spacewasm/
+infc main.inf --target wasm32    --out-dir out/wasm32/
+
+# The two compile-mode modules are the same file.
+cmp out/wasm32/main.wasm out/spacewasm/main.wasm    # fc /b on Windows
+```
+
+The `cmp` is the second of the two links below. It compares two *compile-mode*
+builds, which is the comparison the target claim is about; `proofs/main.wasm` is
+a proof-mode artifact and carries whatever the specifications in the source add
+to it, so it is the first link — not this one — that ties it to
+`out/wasm32/main.wasm`.
+
+That `cmp` is a statement about *this* target and no other. The Stellar
+procedure above deliberately does not have one: a Stellar artifact carries
+appended wrappers and a metadata section, so its relationship to the proved
+module is "rewritten from", not "equal to".
+
+What the SpaceWasm build buys today is the envelope — the three refusals above,
+applied to a build whose output is otherwise the default target's. The
+conformance report against the decode-time limits is what will make it buy more,
+and it is landing in a later change.
+
+**The two links.** For the deployed bytes to be the proved bytes, two identities
+have to hold, and each has its own guard in the test suite:
+
+1. A proof-mode module's execution functions are byte-identical to compile
+   mode's. Codegen applies no optimization pass in either mode, so the only
+   difference a proof build can carry is the spec functions compile mode drops.
+
+   ```bash
+   cargo test -p inference-tests --lib \
+     codegen::wasm::checked_arith::checked_arith_tests::proof_and_compile_builds_of_a_guarded_source_are_byte_identical
+   ```
+
+2. A compile-mode SpaceWasm module is byte-identical to a compile-mode `wasm32`
+   module. This is checked over every single-file fixture in the code-generation
+   corpus, each side built at its own default optimization level as the two
+   command lines really build them:
+
+   ```bash
+   cargo test -p inference-tests --lib \
+     codegen::wasm::target_identity::target_identity_tests::every_target_emits_what_the_default_target_emits
+   ```
+
+Break either link and the `.v` describes a program that is not the one on the
+vehicle. Both hold, so it is.
+
 # Appendix A: Optimization Levels
 
 `OptLevel` is a single per-build value recorded on the compiled output — not a
@@ -304,7 +431,7 @@ descriptions below are the levels' *intended* meaning for a future consumer
 | `-O1` | Some optimizations. Balanced compile time and code size. |
 | `-O2` | Aggressive optimizations. Standard release. |
 | `-O3` | Maximum optimizations. Default recorded level for the Wasm32 target. |
-| `-Os` | Optimize for size. Similar to `-O2` with additional size reductions. |
+| `-Os` | Optimize for size. Similar to `-O2` with additional size reductions. Default recorded level for the SpaceWasm target. |
 | `-Oz` | Optimize for minimum size. Default recorded level for the Stellar target. |
 
 # Appendix B: WebAssembly Features

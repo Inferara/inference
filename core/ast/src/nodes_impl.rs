@@ -21,6 +21,23 @@ impl AstArena {
     }
 
     /// Checks whether a statement contains any non-deterministic constructs.
+    ///
+    /// The walk is not total over the statement tree: a `loop` is inspected for
+    /// a non-deterministic *condition* and its body is not descended, and
+    /// `Stmt::Assign`, `Stmt::Assert` and `Stmt::ConstDef` answer `false`
+    /// without looking at their operands (`Stmt::Break` carries none).
+    ///
+    /// It is not total *within* a statement either, which is the wider gap. Every
+    /// arm that inspects an expression asks [`Self::expr_is_non_det`], and that
+    /// recognizes a bare `@` and nothing that merely contains one -- so
+    /// `return x + @;` answers `false` through the `Return` arm as surely as a
+    /// construct in a loop body does, and so do `let n: i32 = f(@);` and
+    /// `if @ == 1 { }`.
+    ///
+    /// A caller that needs the total answer -- every construct in every nested
+    /// block -- uses the analysis walker, which descends all of them; this one is
+    /// a cheap approximation and a `false` from it is not a proof that a body is
+    /// deterministic.
     #[must_use]
     pub fn stmt_is_non_det(&self, stmt_id: StmtId) -> bool {
         match &self[stmt_id].kind {
@@ -91,6 +108,56 @@ impl AstArena {
         }
     }
 
+    /// The first definition in `defs`, or in a struct's methods below one, whose
+    /// body is non-deterministic.
+    ///
+    /// [`Self::def_is_non_det`] answers for a single definition, which is the
+    /// whole answer only for a caller that already holds every function. A
+    /// caller sweeping a file's top-level `defs` does not: a struct's methods
+    /// are ordinary functions that reach code generation and appear in no file's
+    /// list, so asking the top level alone accepts a program whose
+    /// non-determinism is one `impl`-block deep.
+    ///
+    /// The descent stops at [`Def::Spec`], deliberately and not for want of a
+    /// second arm. A specification body is non-deterministic by construction and
+    /// `compile` mode strips it before a byte is emitted, so a caller asking
+    /// this question about executable code would, by descending, answer `Some`
+    /// for every program that writes a specification at all.
+    ///
+    /// The returned id names the offending *function*, so a diagnostic can print
+    /// its name rather than the name of whatever contains it.
+    ///
+    /// Whether a function's own body counts is [`Self::def_is_non_det`]'s
+    /// answer, and that walk is an approximation rather than a decision
+    /// procedure, so `None` here means "no offender this walk can see".
+    ///
+    /// The match is exhaustive and takes no wildcard. Which definitions nest
+    /// further definitions is the whole content of this function, so a variant
+    /// added to [`Def`] has to say whether it does rather than inherit "it does
+    /// not" from an arm nobody revisits.
+    #[must_use]
+    pub fn first_non_det_def(&self, defs: &[DefId]) -> Option<DefId> {
+        for &def_id in defs {
+            match &self[def_id].kind {
+                Def::Function { .. } => {
+                    if self.def_is_non_det(def_id) {
+                        return Some(def_id);
+                    }
+                }
+                Def::Struct { methods, .. } => {
+                    if let Some(found) = self.first_non_det_def(methods) {
+                        return Some(found);
+                    }
+                }
+                Def::Spec { .. }
+                | Def::Enum { .. }
+                | Def::Constant { .. }
+                | Def::ExternFunction { .. } => {}
+            }
+        }
+        None
+    }
+
     /// The expression a *transparent wrapper* encloses, or `None` when
     /// `expr_id` is not one.
     ///
@@ -158,6 +225,147 @@ mod tests {
             location: Location::default(),
             kind,
         })
+    }
+
+    /// A `pub fn` named `name` whose body is `@`-free or holds one uzumaki.
+    fn function(arena: &mut AstArena, name: &str, non_det: bool) -> DefId {
+        use crate::nodes::{BlockData, BlockKind, DefData, Ident, StmtData, Visibility};
+
+        let value = if non_det {
+            push(arena, Expr::Uzumaki)
+        } else {
+            number(arena)
+        };
+        let stmts = vec![arena.stmts.alloc(StmtData {
+            location: Location::default(),
+            kind: Stmt::Return { expr: value },
+        })];
+        let body = arena.blocks.alloc(BlockData {
+            location: Location::default(),
+            block_kind: BlockKind::Regular,
+            stmts,
+        });
+        let name = arena.idents.alloc(Ident {
+            location: Location::default(),
+            name: name.to_string(),
+        });
+        arena.defs.alloc(DefData {
+            location: Location::default(),
+            kind: Def::Function {
+                name,
+                vis: Visibility::Public,
+                type_params: Vec::new(),
+                args: Vec::new(),
+                returns: None,
+                body,
+            },
+        })
+    }
+
+    /// A field-less `struct` carrying `methods`.
+    fn struct_with_methods(arena: &mut AstArena, name: &str, methods: Vec<DefId>) -> DefId {
+        use crate::nodes::{DefData, Ident, Visibility};
+
+        let name = arena.idents.alloc(Ident {
+            location: Location::default(),
+            name: name.to_string(),
+        });
+        arena.defs.alloc(DefData {
+            location: Location::default(),
+            kind: Def::Struct {
+                name,
+                vis: Visibility::Public,
+                fields: Vec::new(),
+                methods,
+            },
+        })
+    }
+
+    /// A `spec` block carrying `defs`.
+    fn spec_with_defs(arena: &mut AstArena, name: &str, defs: Vec<DefId>) -> DefId {
+        use crate::nodes::{DefData, Ident, Visibility};
+
+        let name = arena.idents.alloc(Ident {
+            location: Location::default(),
+            name: name.to_string(),
+        });
+        arena.defs.alloc(DefData {
+            location: Location::default(),
+            kind: Def::Spec {
+                name,
+                vis: Visibility::Public,
+                defs,
+            },
+        })
+    }
+
+    /// The walk finds nothing in a program that holds nothing, and finds the
+    /// top-level function when it is the one that is non-deterministic.
+    ///
+    /// Fails if the walk ever stops consulting [`AstArena::def_is_non_det`] for
+    /// the entries of the list it was handed.
+    #[test]
+    fn the_walk_answers_for_the_top_level_list_itself() {
+        let mut arena = AstArena::default();
+        let plain = function(&mut arena, "plain", false);
+        assert_eq!(arena.first_non_det_def(&[plain]), None);
+
+        let nondet = function(&mut arena, "nondet", true);
+        assert_eq!(arena.first_non_det_def(&[plain, nondet]), Some(nondet));
+    }
+
+    /// A method is an ordinary function that no file's `defs` list names, so a
+    /// walk that does not descend a struct accepts a program whose
+    /// non-determinism is one declaration deep.
+    ///
+    /// Fails if the `Def::Struct` arm is removed: the method would be invisible
+    /// and this would read `None`.
+    #[test]
+    fn the_walk_descends_into_a_struct_s_methods() {
+        let mut arena = AstArena::default();
+        let method = function(&mut arena, "method", true);
+        let owner = struct_with_methods(&mut arena, "Owner", vec![method]);
+
+        assert_eq!(
+            arena.first_non_det_def(&[owner]),
+            Some(method),
+            "the offending method is what a diagnostic has to name, not its struct"
+        );
+    }
+
+    /// The one descent the walk must *not* make. A `spec` body is
+    /// non-deterministic by construction, so descending would make every
+    /// specification-bearing program answer `Some`.
+    ///
+    /// Fails the moment a `Def::Spec` arm is added, including one copied from
+    /// `def_in_list`, which descends specs because it is answering a different
+    /// question.
+    #[test]
+    fn the_walk_stops_at_a_spec_block() {
+        let mut arena = AstArena::default();
+        let inside = function(&mut arena, "inside", true);
+        let spec = spec_with_defs(&mut arena, "properties", vec![inside]);
+        assert_eq!(arena.first_non_det_def(&[spec]), None);
+
+        let method_spec = spec_with_defs(&mut arena, "nested", vec![inside]);
+        let owner = struct_with_methods(&mut arena, "Owner", vec![method_spec]);
+        assert_eq!(
+            arena.first_non_det_def(&[owner]),
+            None,
+            "a spec reached through a struct is still a spec"
+        );
+    }
+
+    /// The first offender in declaration order is the one reported, so the
+    /// diagnostic a user sees does not depend on how the arena happened to be
+    /// filled.
+    #[test]
+    fn the_walk_reports_the_first_offender_in_order() {
+        let mut arena = AstArena::default();
+        let second = function(&mut arena, "second", true);
+        let first = function(&mut arena, "first", true);
+        assert_eq!(arena.first_non_det_def(&[first, second]), Some(first));
+        assert_eq!(arena.first_non_det_def(&[second, first]), Some(second));
     }
 
     fn number(arena: &mut AstArena) -> ExprId {

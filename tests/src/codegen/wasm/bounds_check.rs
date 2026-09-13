@@ -2,9 +2,14 @@
 //
 // Every build precedes a dynamic-index array load or store with the guard
 // `index >= length -> unreachable`: Compile and Proof mode, Debug and Release,
-// Wasm32 and Stellar. The deployed artifact is always checked, and the artifact
-// a proof is written about is the artifact that ships. Constant indices are
+// at every target. The deployed artifact is always checked, and the artifact a
+// proof is written about is the artifact that ships. Constant indices are
 // validated statically by analysis rule A037 and get no runtime guard.
+//
+// The per-target half of that claim is the corpus-wide identity sweep in
+// `target_identity.rs`, not this module: the counted test below is arithmetic
+// over two builds, so it pins the guard's presence at one non-default target
+// and cannot be widened to a third without its count becoming wrong.
 //
 // The single choke point `emit_index_offset` is shared by reads and writes, so
 // a source exercising both proves both paths are guarded.

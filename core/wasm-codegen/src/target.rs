@@ -13,6 +13,9 @@
 //! - [`Target::Stellar`] -- Stellar smart contract target for standard code
 //!   without non-deterministic instructions, whose exported functions are held
 //!   to the scalar set the contract calling convention can encode.
+//! - [`Target::SpaceWasm`] -- The `SpaceWasm` flight interpreter, for standard
+//!   code without non-deterministic instructions. It narrows what a build may
+//!   request and changes nothing about what is emitted.
 //!
 //! # Compilation Mode
 //!
@@ -59,8 +62,9 @@ pub use inference_compiler_interface::{MemoryLayout, MemoryLayoutError, MemoryLa
 
 /// Compilation target for code generation.
 ///
-/// Both targets produce WebAssembly modules but differ in which WASM features and
-/// non-deterministic instructions are permitted.
+/// Every target produces a WebAssembly module; what differs is which WASM
+/// features, compilation modes and non-deterministic instructions a build for it
+/// may request.
 ///
 /// # Examples
 ///
@@ -102,6 +106,46 @@ pub enum Target {
     /// optimization pass runs during emission (see [`OptLevel`]) and no contract
     /// size limit is checked anywhere in the compiler.
     Stellar,
+
+    /// The `SpaceWasm` flight interpreter.
+    ///
+    /// `SpaceWasm` is NASA JPL's `no_std` WebAssembly 1.0 interpreter, written for
+    /// flight software: it decodes a module into its own IR on a fixed
+    /// allocation and executes it with no host operating system underneath. Like
+    /// [`Target::Stellar`] this target narrows what a build may *request* and
+    /// changes nothing about what is produced -- for any configuration both
+    /// accept, emission is byte-for-byte what [`Target::Wasm32`] emits, because
+    /// nothing on the emission path reads a `Target`. Unlike Stellar there is no
+    /// rewrite afterwards either, so the deployed module and the module a proof
+    /// is written about are the same file, not one derived from the other.
+    ///
+    /// What the envelope narrows:
+    ///
+    /// - `proof` mode is refused: the custom 0xfc intrinsics it emits are not in
+    ///   the instruction set the interpreter decodes.
+    /// - A non-deterministic construct in an executable function is refused for
+    ///   the same reason (see [`Target::supports_non_det_functions`]). Analysis
+    ///   rules A042 and A006 are what make that refusal total -- A042 the
+    ///   non-deterministic blocks, A006 the bare `@` A042 leaves to it; the
+    ///   code-generation gate behind the predicate is the coarser backstop for a
+    ///   caller that never ran analysis.
+    /// - A bulk-memory request is refused: the decoder has not implemented the
+    ///   proposal (nasa/spacewasm#54). The sign-extension and
+    ///   saturating-truncation proposals are open upstream beside it
+    ///   (nasa/spacewasm#55 and #56) and cost this target nothing, because code
+    ///   generation emits no instruction from either family at any target.
+    /// - [`OptLevel::Os`] is this target's
+    ///   [`default_opt_level`](Target::default_opt_level), size being the scarce
+    ///   resource on a flight computer. As everywhere, the level is recorded for
+    ///   a post-build tool and applied by nothing during emission.
+    ///
+    /// The interpreter also enforces decode-time maxima -- parameter and local
+    /// words per function, name and custom-section byte caps, and
+    /// embedder-configured control-frame and operand-stack depths -- which
+    /// nothing in this crate checks today. A module this target accepts is
+    /// therefore inside the *instruction set* the interpreter decodes, which is
+    /// not yet the same statement as one it will load.
+    SpaceWasm,
 }
 
 /// Compilation mode controlling spec-node handling.
@@ -310,29 +354,40 @@ impl Target {
     /// vocabulary when a user may ask for it, and those are two different dates.
     /// The cross-check that every requestable name lands on a target here lives
     /// in this module's tests.
-    pub const ALL: [Self; 2] = [Self::Wasm32, Self::Stellar];
+    pub const ALL: [Self; 3] = [Self::Wasm32, Self::Stellar, Self::SpaceWasm];
 
-    /// This target's canonical name: the lowercase spelling
-    /// `inference_compiler_interface::TargetName` uses for it, so the two enums
-    /// can be checked against each other rather than trusted to agree.
+    /// This target's canonical name: for a target a user may ask for, the
+    /// lowercase spelling `inference_compiler_interface::TargetName` uses for
+    /// it, so the two enums can be checked against each other rather than
+    /// trusted to agree. A target this enum carries ahead of that vocabulary
+    /// -- see [`Target::ALL`] on why it may -- names itself here in the spelling
+    /// the vocabulary will use for it.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Wasm32 => "wasm32",
             Self::Stellar => "stellar",
+            Self::SpaceWasm => "spacewasm",
         }
     }
 
     /// Whether a module using bulk memory instructions is accepted by this
     /// target's runtime.
     ///
-    /// `Stellar` rejects them, and does so deliberately rather than for want of
-    /// evidence: that runtime's documented wasmi configuration enables the
-    /// proposal. Keeping the target's output inside WebAssembly 1.0 is the
-    /// conservative choice -- it is what every deployment path accepts, no
-    /// lowering the target can reach today needs the instructions (the region
-    /// fill and copy lowerings have a load/store form), and a build-time refusal
-    /// is a better failure than a contract rejected at deploy time.
+    /// Every target but the default one answers `false`, pinning its output to
+    /// the WebAssembly 1.0 instruction set -- but *why* differs per target, and
+    /// each variant's own documentation is where its reason lives. One says the
+    /// runtime would accept the instructions and the pin is a deliberate
+    /// conservatism; the other says the decoder has not implemented them. Read
+    /// as a general claim about targets, either reason would be wrong about the
+    /// other.
+    ///
+    /// What the two share is the consequence, and it is why the answer is `false`
+    /// in both cases rather than merely defensible: no lowering any target can
+    /// reach needs the instructions (the region fill and copy lowerings have a
+    /// load/store form), WebAssembly 1.0 is what every deployment path accepts,
+    /// and a build-time refusal is a better failure than a module rejected on
+    /// arrival.
     ///
     /// # Examples
     ///
@@ -341,17 +396,22 @@ impl Target {
     ///
     /// assert!(Target::Wasm32.permits_bulk_memory());
     /// assert!(!Target::Stellar.permits_bulk_memory());
+    /// assert!(!Target::SpaceWasm.permits_bulk_memory());
     /// ```
     #[must_use]
     pub fn permits_bulk_memory(self) -> bool {
-        matches!(self, Self::Wasm32)
+        match self {
+            Self::Wasm32 => true,
+            Self::Stellar | Self::SpaceWasm => false,
+        }
     }
 
     /// Returns whether this target supports proof mode.
     ///
-    /// Only `Wasm32` supports proof mode because it uses custom 0xfc non-deterministic
-    /// instructions for formal verification. Other targets (e.g., `Stellar`) cannot
-    /// process these custom instructions.
+    /// Only `Wasm32` supports proof mode, because proof mode's output is built
+    /// out of the custom 0xfc non-deterministic instructions and no runtime but a
+    /// general-purpose WebAssembly embedder under our own tooling decodes them.
+    /// Every other target refuses the mode.
     ///
     /// # Examples
     ///
@@ -360,18 +420,59 @@ impl Target {
     ///
     /// assert!(Target::Wasm32.supports_proof_mode());
     /// assert!(!Target::Stellar.supports_proof_mode());
+    /// assert!(!Target::SpaceWasm.supports_proof_mode());
     /// ```
     #[must_use]
     pub fn supports_proof_mode(self) -> bool {
-        matches!(self, Self::Wasm32)
+        match self {
+            Self::Wasm32 => true,
+            Self::Stellar | Self::SpaceWasm => false,
+        }
+    }
+
+    /// Returns whether this target's runtime can execute a function containing a
+    /// non-deterministic construct.
+    ///
+    /// Uzumaki (`@`) and the `forall`/`exists`/`assume`/`unique` blocks lower to
+    /// the same custom 0xfc instructions proof mode is made of, so a target
+    /// whose runtime is somebody else's answers `false`, and analysis rules A042
+    /// and A006 refuse a build carrying one in a function that ships -- A042 the
+    /// blocks, A006 the bare `@` A042 leaves to it. Code generation re-asks the
+    /// question for a caller that skipped analysis, but with a coarser walk than
+    /// theirs -- see [`crate::codegen`].
+    ///
+    /// Separate from [`Self::supports_proof_mode`] because the two questions come
+    /// apart: that one asks whether a build may request the mode whose entire
+    /// output is such instructions, this one whether an ordinary `compile`-mode
+    /// program may contain any at all. `compile` mode strips `spec` bodies, so
+    /// the constructs a specification is written in cost a refusal only where
+    /// they sit in executable code -- which is what makes "move it into a
+    /// `spec` block" a real remedy rather than a deletion.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use inference_wasm_codegen::Target;
+    ///
+    /// assert!(Target::Wasm32.supports_non_det_functions());
+    /// assert!(!Target::Stellar.supports_non_det_functions());
+    /// assert!(!Target::SpaceWasm.supports_non_det_functions());
+    /// ```
+    #[must_use]
+    pub fn supports_non_det_functions(self) -> bool {
+        match self {
+            Self::Wasm32 => true,
+            Self::Stellar | Self::SpaceWasm => false,
+        }
     }
 
     /// Returns the default optimization level for this target.
     ///
-    /// | Target  | `OptLevel` |
-    /// |---------|----------|
-    /// | Wasm32  | O3       |
-    /// | Stellar | Oz       |
+    /// | Target        | `OptLevel` |
+    /// |---------------|------------|
+    /// | `Wasm32`      | `O3`       |
+    /// | `Stellar`     | `Oz`       |
+    /// | `SpaceWasm`   | `Os`       |
     ///
     /// The optimization level is target-specific and mode-independent. In `proof`
     /// mode, spec functions are emitted without optimization to preserve structural
@@ -385,12 +486,14 @@ impl Target {
     ///
     /// assert_eq!(Target::Wasm32.default_opt_level(), OptLevel::O3);
     /// assert_eq!(Target::Stellar.default_opt_level(), OptLevel::Oz);
+    /// assert_eq!(Target::SpaceWasm.default_opt_level(), OptLevel::Os);
     /// ```
     #[must_use]
     pub fn default_opt_level(self) -> OptLevel {
         match self {
             Self::Wasm32 => OptLevel::O3,
             Self::Stellar => OptLevel::Oz,
+            Self::SpaceWasm => OptLevel::Os,
         }
     }
 }
@@ -425,6 +528,11 @@ mod tests {
     }
 
     #[test]
+    fn spacewasm_default_opt_level_is_os() {
+        assert_eq!(Target::SpaceWasm.default_opt_level(), OptLevel::Os);
+    }
+
+    #[test]
     fn wasm32_supports_proof_mode() {
         assert!(Target::Wasm32.supports_proof_mode());
     }
@@ -432,6 +540,46 @@ mod tests {
     #[test]
     fn stellar_does_not_support_proof_mode() {
         assert!(!Target::Stellar.supports_proof_mode());
+    }
+
+    #[test]
+    fn spacewasm_does_not_support_proof_mode() {
+        assert!(!Target::SpaceWasm.supports_proof_mode());
+    }
+
+    /// The three predicates answer the same way for every target but the
+    /// default, and the exhaustive matches behind them are what force a fourth
+    /// target to state three decisions rather than inherit them. Iterating
+    /// `Target::ALL` is what makes this a statement about the set rather than
+    /// about the two variants somebody remembered to name.
+    ///
+    /// This fails if a target is added that permits one of the three without
+    /// being the default, which is the moment the envelope stops being "Wasm32
+    /// or a narrowing of it" and the callers reading these predicates need
+    /// re-examining.
+    #[test]
+    fn only_the_default_target_admits_the_compiler_s_own_extensions() {
+        for target in Target::ALL {
+            let is_default = target == Target::default();
+            assert_eq!(
+                target.supports_proof_mode(),
+                is_default,
+                "`{}` disagrees with the default about proof mode",
+                target.as_str()
+            );
+            assert_eq!(
+                target.supports_non_det_functions(),
+                is_default,
+                "`{}` disagrees with the default about non-deterministic functions",
+                target.as_str()
+            );
+            assert_eq!(
+                target.permits_bulk_memory(),
+                is_default,
+                "`{}` disagrees with the default about bulk memory",
+                target.as_str()
+            );
+        }
     }
 
     #[test]
@@ -478,6 +626,14 @@ mod tests {
     fn stellar_rejects_bulk_memory() {
         assert_eq!(
             EmitFeatures { bulk_memory: true }.first_rejected_by(Target::Stellar),
+            Some("bulk-memory")
+        );
+    }
+
+    #[test]
+    fn spacewasm_rejects_bulk_memory() {
+        assert_eq!(
+            EmitFeatures { bulk_memory: true }.first_rejected_by(Target::SpaceWasm),
             Some("bulk-memory")
         );
     }
@@ -561,12 +717,12 @@ mod tests {
     fn all_lists_every_emission_target_once() {
         for target in Target::ALL {
             match target {
-                Target::Wasm32 | Target::Stellar => {}
+                Target::Wasm32 | Target::Stellar | Target::SpaceWasm => {}
             }
         }
         assert_eq!(
             Target::ALL.len(),
-            2,
+            3,
             "a new target must be added to `Target::ALL`"
         );
 

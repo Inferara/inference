@@ -146,9 +146,10 @@ pub use crate::checked_section::SECTION_VERSION as CHECKED_SECTION_VERSION;
 /// # Errors
 ///
 /// Returns an error if:
-/// - Validation fails (proof + non-Wasm32, Stellar + non-det, a feature the
-///   target does not accept, or an export the Stellar target cannot carry —
-///   see [`check_stellar_exports`])
+/// - Validation fails: a feature the target does not accept, `proof` mode at a
+///   target that refuses it, a non-deterministic construct in a function that
+///   ships at a target that refuses those, or an export the Stellar target
+///   cannot carry (see [`check_stellar_exports`])
 /// - Code generation fails
 pub fn codegen(
     typed_context: &TypedContext,
@@ -166,41 +167,66 @@ pub fn codegen(
     // Refuse a feature the target's runtime does not accept before a single byte
     // is emitted: a build-time refusal names the manifest entry to remove, where
     // the same module rejected at deploy time names nothing.
+    //
+    // Every target name in the three configuration refusals below is rendered
+    // through `as_str()`, which is the spelling `--target` and `Inference.toml`
+    // accept. A user reading one has to be able to paste the name back into the
+    // command that produced it, which the `Debug` form does not allow.
     if let Some(feature) = features.first_rejected_by(target) {
         cov_mark::hit!(wasm_codegen_target_rejects_feature);
+        let name = target.as_str();
         return Err(anyhow::anyhow!(
-            "{target:?} target does not support the '{feature}' WebAssembly feature. \
+            "The `{name}` target does not support the '{feature}' WebAssembly feature. \
              This target is pinned to the WebAssembly 1.0 instruction set, so a module \
              using the instructions '{feature}' adds is refused here rather than at \
              deployment; drop '{feature}' from the requested features to build for \
-             {target:?}."
+             `{name}`."
         ));
     }
 
     if mode == CompilationMode::Proof && !target.supports_proof_mode() {
         cov_mark::hit!(wasm_codegen_proof_mode_rejected_non_wasm32);
+        let name = target.as_str();
+        let proof_target = Target::Wasm32.as_str();
         return Err(anyhow::anyhow!(
-            "Proof mode requires Wasm32 target. Proof mode emits custom 0xfc \
-             non-deterministic instructions that only the Wasm32 target supports; \
-             the {target:?} target cannot process these."
+            "Proof mode requires the `{proof_target}` target. Proof mode emits custom \
+             0xfc non-deterministic instructions that only `{proof_target}` accepts; the \
+             `{name}` runtime rejects a module carrying them. Build the proof at \
+             `--target {proof_target}`: code generation is target-blind, so the module a \
+             `{name}` build starts from is the `{proof_target}` build's."
         ));
     }
 
     let arena = typed_context.arena();
 
-    if target == Target::Stellar {
+    if !target.supports_non_det_functions() {
+        // Analysis rules A006 and A042 are the primary rejection and report the
+        // source location -- A042 refuses a non-deterministic block outside a
+        // `spec`, and A006 the bare `@`, which A042 leaves to it. This is the
+        // backstop for a caller reaching code generation without having run
+        // analysis, and it is total in one direction only. Over definitions it
+        // descends a struct's methods, so a function in no file's top-level
+        // `defs` is asked about too, and it stops only at `Def::Spec`, whose body
+        // compile mode strips before emission. Within a definition it is partial:
+        // it covers the statement kinds `AstArena::stmt_is_non_det` handles and
+        // recognizes only a bare `@` in an expression, where analysis descends
+        // every block and every operand. So a `forall` in a loop body, or a `@`
+        // under any operator, is analysis's to catch and not this gate's.
         for source_file in typed_context.source_files() {
-            for &def_id in &source_file.defs {
-                if arena.def_is_non_det(def_id) {
-                    cov_mark::hit!(wasm_codegen_stellar_rejects_nondet_function);
-                    let fn_name = arena.def_name(def_id);
-                    return Err(anyhow::anyhow!(
-                        "Stellar target does not support non-deterministic operations. \
-                         Function '{fn_name}' contains non-deterministic constructs (uzumaki, \
-                         forall, exists, assume, or unique blocks) that produce custom \
-                         0xfc WebAssembly instructions incompatible with the Stellar VM.",
-                    ));
-                }
+            if let Some(def_id) = arena.first_non_det_def(&source_file.defs) {
+                cov_mark::hit!(wasm_codegen_target_rejects_nondet_function);
+                let name = target.as_str();
+                let proof_target = Target::Wasm32.as_str();
+                let fn_name = arena.def_name(def_id);
+                return Err(anyhow::anyhow!(
+                    "The `{name}` target does not support non-deterministic operations. \
+                     Function '{fn_name}' contains non-deterministic constructs (uzumaki, \
+                     forall, exists, assume, or unique blocks), which compile to custom \
+                     0xfc WebAssembly instructions the `{name}` runtime rejects. \
+                     Non-deterministic code is specification code: move it into a `spec` \
+                     block, which compile mode strips from the artifact, or build this \
+                     program with `--target {proof_target}`."
+                ));
             }
         }
     }
@@ -257,10 +283,11 @@ struct Emitted {
 /// would do it silently. A target read in here would therefore have to be
 /// conjured rather than handed in — which is what the signature buys, not an
 /// impossibility: [`Target`] is in scope for every item in this module, so the
-/// backstop for the hard way is the identity test that builds one set of
-/// sources at another target and compares the bytes with the default build:
-/// `a_stellar_build_is_byte_identical_to_the_default_build`, in
-/// `tests/src/codegen/wasm/stellar_gate.rs`.
+/// backstop for the hard way is the identity test that builds sources at
+/// another target and compares the bytes with the default build:
+/// `every_target_emits_what_the_default_target_emits`, in
+/// `tests/src/codegen/wasm/target_identity.rs`, which runs every non-default
+/// target over the whole single-file codegen corpus.
 ///
 /// A target-specific acceptance check therefore runs in [`codegen`], on what
 /// this function returns rather than on a half-built module: see
@@ -483,6 +510,11 @@ fn stellar_parameter_label(name: Option<&str>, index: usize) -> String {
 
 /// Refuses an exported function the Stellar target cannot carry, reading the
 /// source types off the export descriptor.
+///
+/// Every refusal below opens with the fixed prose `Stellar target: `, rather
+/// than the interpolated `Target::as_str()` the three configuration gates in
+/// [`codegen`] render. This gate is only ever reached at that one target, so
+/// there is no variant name to hand the reader back.
 ///
 /// # The overlap with the Val-ABI rewriter is deliberate
 ///
@@ -1879,6 +1911,11 @@ mod feature_validation_tests {
         )
     }
 
+    /// Pinned whole rather than by substring: the refusal renders the target
+    /// through `Target::as_str()`, so the user-visible text moves whenever that
+    /// spelling does while every substring that omits the name keeps passing.
+    /// The name is also what a user pastes back into `--target`, so a wrong one
+    /// is a wrong instruction, not a cosmetic slip.
     #[test]
     fn stellar_rejects_a_bulk_memory_request() {
         cov_mark::check!(wasm_codegen_target_rejects_feature);
@@ -1890,11 +1927,11 @@ mod feature_validation_tests {
         .expect_err("Stellar does not accept bulk memory");
         assert_eq!(
             err.to_string(),
-            "Stellar target does not support the 'bulk-memory' WebAssembly feature. \
+            "The `stellar` target does not support the 'bulk-memory' WebAssembly feature. \
              This target is pinned to the WebAssembly 1.0 instruction set, so a module \
              using the instructions 'bulk-memory' adds is refused here rather than at \
              deployment; drop 'bulk-memory' from the requested features to build for \
-             Stellar."
+             `stellar`."
         );
     }
 
