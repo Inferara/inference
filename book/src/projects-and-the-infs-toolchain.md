@@ -62,8 +62,9 @@ infc_version = "0.1.0"
 
 [build]
 # The runtime the module is built for; "wasm32" (the default) is generic
-# WebAssembly and "stellar" builds a Soroban smart contract. Validated on load:
-# an unrecognized name is an error.
+# WebAssembly, "stellar" builds a Soroban smart contract, and "spacewasm"
+# builds for the SpaceWasm flight interpreter. Validated on load: an
+# unrecognized name is an error.
 # target = "wasm32"
 # "compile" (default) or "proof"
 mode = "compile"
@@ -92,14 +93,16 @@ The fields:
 | `description` | `[package]` | string | absent | Optional description |
 | `authors` | `[package]` | array | absent | Optional author list |
 | `license` | `[package]` | string | absent | Optional SPDX identifier |
-| `target` | `[build]` | target name | `"wasm32"` | The runtime the module is built for; `"wasm32"` is generic WebAssembly and `"stellar"` a Soroban smart contract. Accepted: `"wasm32"`, `"stellar"` |
+| `target` | `[build]` | target name | `"wasm32"` | The runtime the module is built for; `"wasm32"` is generic WebAssembly, `"stellar"` a Soroban smart contract, and `"spacewasm"` the SpaceWasm flight interpreter. Accepted: `"wasm32"`, `"stellar"`, `"spacewasm"` |
 | `mode` | `[build]` | `"compile"` \| `"proof"` | `"compile"` | Build mode (see below) |
 | `wasm-features` | `[build]` | array of proposal names | `[]` | Post-MVP WebAssembly proposals the artifact may use; `[]` = pure Wasm 1.0. Supported: `"bulk-memory"` |
 | `output-dir` | `[verification]` | path string | `"proofs/"` | Proof artifact directory; proof mode only |
 | `<name>` | `[wasm-dependencies]` | `{ path = "…" }` | — | External `.wasm` module dependency |
 
-`target` and `mode` are case-sensitive: `"Wasm32"` and `"Proof"` are both
-rejected, and neither trims whitespace. Both are validated on load; an invalid
+`target` and `mode` are case-sensitive: `"Wasm32"`, `"SpaceWasm"` and `"Proof"`
+are all rejected, and neither key trims whitespace. The wire spelling of every
+target name is one lower-case word, so `"space-wasm"` and `"space_wasm"` are
+rejected too. Both are validated on load; an invalid
 value is an immediate error with the allowed set named in the message, never a
 fall back to the default. `target` names the same vocabulary as `infc --target`
 and is rejected with the same wording; `"soroban"`, the former name of
@@ -110,10 +113,20 @@ generic unknown-target one.
 with a `[build.wasm-opt]` table — that pairing is itself a load error, because
 whether an external Binaryen preserves a contract's metadata section depends on
 a version nothing here pins — it admits no `wasm-features`, `mode = "proof"`
-fails the build, and `infs run` refuses the project outright, since a contract is
-invoked by a Soroban host and not by a plain WebAssembly runtime. What an
-exported function may declare is narrowed too; see
-[Compilation Targets](compilation_targets.md). The same load-time strictness applies to
+is a load error too, and `infs run` refuses the project outright, since a
+contract is invoked by a Soroban host and not by a plain WebAssembly runtime.
+What an exported function may declare is narrowed too; see
+[Compilation Targets](compilation_targets.md).
+
+`target = "spacewasm"` narrows it less, and the difference is instructive. It
+admits no `wasm-features` and no `mode = "proof"`, on load, for the same reason
+— the interpreter decodes neither the post-MVP families nor the custom `0xfc`
+instructions. But it keeps `[build.wasm-opt]`, because what that refusal
+protects is a contract's wrappers and metadata section and this target's module
+has neither, and it keeps `infs run`, because the artifact is plain WebAssembly
+whose `main` a runtime can invoke. Nothing narrows what an exported function
+may declare: the bytes are the `"wasm32"` build's. The same load-time
+strictness applies to
 keys: every fixed-schema table rejects a key it does not recognize, naming the
 offending key and the fields the table accepts — a misspelled `wasm_features`
 fails the build rather than silently shipping a differently-configured
@@ -274,7 +287,10 @@ In **project mode** (no path given):
 
 - Always builds in compile mode, regardless of `[build] mode` in the manifest.
   Proof-mode WASM embeds custom non-deterministic opcodes (`0xfc` family) that
-  wasmtime cannot execute.
+  wasmtime cannot execute. The one thing `[build] mode` can still do to `run` is
+  stop it before it starts: `mode = "proof"` paired with a target that has no
+  proof mode is a load error for every command, `run` included — a value `run`
+  would ignore can still refuse to be read.
 - Always invokes `main`. Passing `--entry-point` to anything other than `main`
   is rejected with guidance to use single-file mode instead.
 - Checks wasmtime availability before starting the build, failing fast if the
@@ -467,7 +483,7 @@ infs run <path> (single-file mode)
 | `--out-dir <path>` | Override output directory (default `out/` relative to CWD); both `.wasm` and `.v` land here |
 | `-L <dir>` / `--wasm-lib-dir <dir>` | Add external `.wasm` search directory; repeatable |
 | `--wasm-dep <name>=<path>` | Bind a logical module name directly to a `.wasm` file; takes precedence over `-L` |
-| `--target <name>` | Name the runtime the module is built for; matched exactly against the same vocabulary `[build] target` uses (`wasm32`, `stellar`). Omitted selects `wasm32` |
+| `--target <name>` | Name the runtime the module is built for; matched exactly against the same vocabulary `[build] target` uses (`wasm32`, `stellar`, `spacewasm`). Omitted selects `wasm32` |
 | `--wasm-features <names>` | Post-MVP WebAssembly proposals emission may use; comma separated, proposal names only |
 | `--memory-pages <n>` | Linear memory size of the emitted module, in 64 KiB pages |
 | `--stack-size <bytes>` | Shadow stack size, and the budget A036 measures call-chain frame usage against |
@@ -475,7 +491,7 @@ infs run <path> (single-file mode)
 | `--commit-hash` | Print the build commit hash and exit; used by the `infs` handshake |
 | `--abi-version` | Print `<major>.<minor>` ABI version and exit; used by the `infs` handshake |
 
-> **Note:** The current ABI version is `1.6`.
+> **Note:** The current ABI version is `1.7`.
 
 The default behavior when no phase flag is supplied is full compilation with
 WASM output written to disk — equivalent to `--codegen -o`.
@@ -493,7 +509,7 @@ is parsed as `<major>.<minor>`:
 - **Unknown/old** (`infc` exits non-zero or prints `unknown`): silent; treated
   as graceful skip, equivalent to ABI unknown.
 
-The current ABI is `1.6` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 6` in
+The current ABI is `1.7` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 7` in
 `core/compiler-interface/src/lib.rs`). Each additive flag is gated at the minor
 it was introduced at, independently: `--out-dir` landed at minor 1,
 `--wasm-features` at minor 2, `--memory-pages` and `--stack-size` at minor 3,
@@ -502,9 +518,12 @@ each only to an `infc` that reports an ABI minor at or above the flag's own (or
 matches by commit hash) — an `infc` that reports minor 1, for instance,
 supports `--out-dir` but not `--wasm-features`. `--target` is gated on the
 *name* rather than on the flag: each target became requestable at its own minor
-(`wasm32` at 5, `stellar` at 6), and an `infc` that parses the flag but predates
-a name would accept it and build for the default runtime — a wrong artifact
-rather than a refusal. The default target is never forwarded at all, so a
+(`wasm32` at 5, `stellar` at 6, `spacewasm` at 7), and an `infc` that parses the
+flag but predates a name would accept it and build for the default runtime — a
+wrong artifact rather than a refusal. That is true even where the two builds are
+the same bytes: dropping `spacewasm` produces the module a `wasm32` build
+produces and drops the target's acceptance envelope with it, so what the name
+was written for never runs. The default target is never forwarded at all, so a
 project that names none puts no floor under its compiler. Pairing a manifest
 with a non-default `[verification] output-dir` against an older `infc` is a hard
 error:

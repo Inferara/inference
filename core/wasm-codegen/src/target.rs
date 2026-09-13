@@ -689,6 +689,7 @@ mod tests {
             let emitted = match name {
                 TargetName::Wasm32 => Target::Wasm32,
                 TargetName::Stellar => Target::Stellar,
+                TargetName::SpaceWasm => Target::SpaceWasm,
             };
             assert_eq!(
                 name.as_str(),
