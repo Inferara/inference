@@ -51,6 +51,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use inf_wasmparser::{Operator, Parser, Payload, WasmFeatures};
+use inference_compiler_interface::TargetName;
 
 use crate::commands::build::BuildMode;
 use crate::project::ProjectContext;
@@ -206,12 +207,13 @@ pub(crate) fn post_build_optimize(
     check_wasm_opt_version(&wasm_opt)?;
 
     let before = wasm_bytes.len() as u64;
-    optimize_in_place(
+    let conformance = optimize_in_place(
         &wasm_opt,
         &config.level,
         &wasm_path,
         uses_bulk_memory,
         records_overflow_guards,
+        ctx.manifest.build.resolved_target()?,
     )?;
     let after = std::fs::metadata(&wasm_path)
         .with_context(|| format!("Failed to stat optimized {}", wasm_path.display()))?
@@ -221,6 +223,16 @@ pub(crate) fn post_build_optimize(
         "wasm-opt -O{}: main.wasm {before} -> {after} bytes",
         config.level
     );
+    // The compiler printed these numbers about the module it wrote, and the
+    // optimizer has since reshaped control flow and coalesced locals — both of
+    // them quantities that line reports. The artifact on disk is this one, so
+    // the last budget in the log has to be this one's.
+    if let Some(report) = conformance {
+        println!("{}", report.summary_line());
+        for warning in report.budget_warnings() {
+            eprintln!("warning: {warning}");
+        }
+    }
     if records_overflow_guards {
         println!(
             "wasm-opt: main.wasm records overflow guards, and the optimizer has renumbered \
@@ -675,17 +687,27 @@ fn wasm_opt_args(
 /// the forwarded feature flags and the re-validation envelope so the two cannot
 /// drift apart.
 ///
+/// `target` is what the manifest asked for, and reaches here because a target
+/// whose runtime has an envelope of its own has to re-ask about it: `infc`
+/// checked the artifact it wrote, and these are different bytes — the optimizer
+/// reshapes control flow and coalesces locals, both of them quantities the
+/// answer measures. The measurement it carries is returned rather than dropped,
+/// because it is the one that describes the artifact the build leaves behind;
+/// `None` is a target with no envelope to measure.
+///
 /// # Errors
 ///
 /// Errors if `wasm-opt` cannot be spawned, exits nonzero, produces output that
-/// cannot be read or fails re-validation, or if the final rename fails.
+/// cannot be read, fails re-validation or fails the target's conformance check,
+/// or if the final rename fails.
 fn optimize_in_place(
     wasm_opt: &Path,
     level: &str,
     wasm_path: &Path,
     uses_bulk_memory: bool,
     records_overflow_guards: bool,
-) -> Result<()> {
+    target: TargetName,
+) -> Result<Option<inference_target_conformance::spacewasm::Report>> {
     let tmp_path = optimized_tmp_path(wasm_path);
     let args = wasm_opt_args(level, wasm_path, &tmp_path, uses_bulk_memory);
 
@@ -730,7 +752,7 @@ fn optimize_in_place(
     // record is replaced by the admission that it can no longer name them —
     // before the artifact is put in place, so a failure here leaves the exact
     // one where it was.
-    if records_overflow_guards {
+    let landing = if records_overflow_guards {
         let marked = match mark_overflow_guards_opaque(&optimized) {
             Ok(marked) => marked,
             Err(err) => {
@@ -750,7 +772,37 @@ fn optimize_in_place(
                 wasm_path.display()
             )));
         }
-    }
+        marked
+    } else {
+        optimized
+    };
+
+    // The target's own envelope, asked of the bytes that are about to land
+    // rather than of the optimizer's output: the guard record above is rewritten
+    // after re-validation, so a check placed beside that one would be a
+    // statement about bytes no build ships.
+    //
+    // Variant equality rather than a predicate: the reason is on
+    // `spacewasm::check`, which is also where the compiler's identical gate
+    // points.
+    let conformance = if target == TargetName::SpaceWasm {
+        match inference_target_conformance::spacewasm::check(&landing) {
+            Ok(report) => Some(report),
+            Err(violations) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                bail!(
+                    "{}",
+                    violations.render(
+                        &wasm_path.display().to_string(),
+                        "The original artifact is unchanged; try `--no-wasm-opt`, or a \
+                         different Binaryen version."
+                    )
+                );
+            }
+        }
+    } else {
+        None
+    };
 
     std::fs::rename(&tmp_path, wasm_path).map_err(|err| {
         let _ = std::fs::remove_file(&tmp_path);
@@ -760,7 +812,7 @@ fn optimize_in_place(
         ))
     })?;
 
-    Ok(())
+    Ok(conformance)
 }
 
 /// The sibling temp path `wasm-opt` writes to: the artifact path with `.opt`
@@ -1554,7 +1606,7 @@ mod tests {
 
         let fake = write_failing_wasm_opt(&dir);
         let err = crate::testing::retry_while_exec_busy(|| {
-            optimize_in_place(&fake, "z", &wasm_path, false, false)
+            optimize_in_place(&fake, "z", &wasm_path, false, false, TargetName::DEFAULT)
         })
         .unwrap_err();
         assert!(

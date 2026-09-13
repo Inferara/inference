@@ -1,0 +1,338 @@
+//! Every way the `SpaceWasm` envelope can refuse an artifact.
+//!
+//! One enum rather than one per question, because a caller holding bytes wants
+//! a single thing to match on and a single rendering to print. Everything here
+//! belongs to that one runtime: the variants, the maxima they quote, the
+//! authority and remedy sentence behind each, and the header
+//! [`Violations::render`] writes. The module is split out of
+//! [`crate::spacewasm`] for length rather than because anything in it is
+//! target-neutral, and the types are re-exported from there, which is the path
+//! a caller reaches them through.
+//!
+//! The one refusal this crate makes that is not among them is
+//! [`crate::check_wasm1`]'s, which is the validator's own message: not this
+//! crate's finding but the decoder's, and the caller that knows where the bytes
+//! came from is what turns it into a sentence.
+
+use core::fmt;
+use core::fmt::Write as _;
+
+use crate::spacewasm::{
+    MAX_CUSTOM_SECTION_NAME_BYTES, MAX_FRAME_WORDS, MAX_HOST_FUNCTION_PARAMS,
+    MAX_HOST_FUNCTION_RESULTS, MAX_IMPORT_NAME_BYTES, MAX_LOCAL_WORDS, MAX_LOCALS_GROUP_COUNT,
+    MAX_MEMORY_PAGES, MAX_PARAM_WORDS,
+};
+
+/// Which half of an import's two names a length refusal is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamePart {
+    /// The module name — the left half of `(import "m" "f" …)`.
+    Module,
+    /// The field name — the right half.
+    Field,
+}
+
+impl fmt::Display for NamePart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Module => f.write_str("module"),
+            Self::Field => f.write_str("field"),
+        }
+    }
+}
+
+/// One reason a module cannot be loaded by a `SpaceWasm` embedder.
+///
+/// The `Display` here is the finding alone — what, and both numbers. The
+/// sentence naming the authority and the sentence naming the remedy are
+/// separate, because [`Violations`] renders all three and a caller quoting one
+/// violation wants the first.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Violation {
+    /// The module uses something outside WebAssembly 1.0, or is malformed.
+    #[error("not WebAssembly 1.0: {detail}")]
+    OutsideWasm1 {
+        /// The validator's own message, naming the feature and the offset.
+        detail: String,
+    },
+    /// A function declares more parameter words than the decoder's field holds.
+    #[error(
+        "parameter words exceeded: function `{function}` declares {words} parameter words; \
+         SpaceWasm accepts at most {MAX_PARAM_WORDS}"
+    )]
+    ParamWordsExceeded {
+        /// The function, named from the `name` section where it has one.
+        function: String,
+        /// The declared width, in words.
+        words: u64,
+    },
+    /// A function declares more local words than the decoder's field holds.
+    #[error(
+        "local words exceeded: function `{function}` declares {words} local words; \
+         SpaceWasm accepts at most {MAX_LOCAL_WORDS}"
+    )]
+    LocalWordsExceeded {
+        /// The function, named from the `name` section where it has one.
+        function: String,
+        /// The declared width, in words.
+        words: u64,
+    },
+    /// A function's worst-case call frame is wider than the decoder's field.
+    #[error(
+        "call frame too wide: function `{function}` needs {words} stack words \
+         ({local_words} local words plus {operand_words} operand words plus 2 of header); \
+         SpaceWasm accepts at most {MAX_FRAME_WORDS}"
+    )]
+    FrameWordsExceeded {
+        /// The function, named from the `name` section where it has one.
+        function: String,
+        /// The whole frame, in words.
+        words: u64,
+        /// Its locals half.
+        local_words: u64,
+        /// Its operand half.
+        operand_words: u32,
+    },
+    /// One locals group declares a count wider than the decoder's field.
+    #[error(
+        "locals group too large: function `{function}` declares a group of {count} locals; \
+         SpaceWasm accepts at most {MAX_LOCALS_GROUP_COUNT} per group"
+    )]
+    LocalsGroupTooLarge {
+        /// The function, named from the `name` section where it has one.
+        function: String,
+        /// The declared group count.
+        count: u32,
+    },
+    /// An import name is longer than an embedder can register a host under.
+    #[error(
+        "import name too long: import {which} name `{name}` on `{module}`.`{field}` is \
+         {len} bytes; SpaceWasm accepts at most {MAX_IMPORT_NAME_BYTES}"
+    )]
+    ImportNameTooLong {
+        /// The import's module name.
+        module: String,
+        /// The import's field name.
+        field: String,
+        /// Which of the two the length is about.
+        which: NamePart,
+        /// The offending name, repeated so the finding reads alone.
+        name: String,
+        /// Its length in bytes.
+        len: usize,
+    },
+    /// An imported function declares more parameters than a host can carry.
+    #[error(
+        "host function takes too many parameters: import `{module}`.`{field}` declares \
+         {params} parameters; SpaceWasm accepts at most {MAX_HOST_FUNCTION_PARAMS}"
+    )]
+    ImportArityExceeded {
+        /// The import's module name.
+        module: String,
+        /// The import's field name.
+        field: String,
+        /// The declared parameter count.
+        params: usize,
+    },
+    /// An imported function declares more than one result.
+    #[error(
+        "host function returns more than one value: import `{module}`.`{field}` declares \
+         {results} results; SpaceWasm accepts at most {MAX_HOST_FUNCTION_RESULTS}"
+    )]
+    ImportMultipleResults {
+        /// The import's module name.
+        module: String,
+        /// The import's field name.
+        field: String,
+        /// The declared result count.
+        results: usize,
+    },
+    /// A custom section's name is longer than the decoder's name buffer.
+    #[error(
+        "custom section name too long: `{name}` is {len} bytes; SpaceWasm accepts at most \
+         {MAX_CUSTOM_SECTION_NAME_BYTES}"
+    )]
+    CustomSectionNameTooLong {
+        /// The section's name.
+        name: String,
+        /// Its length in bytes.
+        len: usize,
+    },
+    /// A linear memory declares more pages than the decoder admits.
+    #[error(
+        "linear memory too large: declares {pages} pages; SpaceWasm addresses at most \
+         {MAX_MEMORY_PAGES}"
+    )]
+    MemoryTooLarge {
+        /// The offending page count — the minimum, or the maximum when that is
+        /// the half over the bound.
+        pages: u64,
+    },
+}
+
+impl Violation {
+    /// The sentence naming what imposes this limit.
+    ///
+    /// Never "`SpaceWasm` rejects it": a decode limit and a registration limit
+    /// are met at different moments and shortened by different edits, and a
+    /// user told the wrong one changes the wrong thing.
+    #[must_use]
+    pub fn authority(&self) -> &'static str {
+        match self {
+            Self::OutsideWasm1 { .. } => {
+                "SpaceWasm decodes WebAssembly 1.0 plus mutable globals, and nothing else. \
+                 Inference code generation emits no post-1.0 instruction for this target, so \
+                 this arrived from a linked module or a post-build step."
+            }
+            Self::ParamWordsExceeded { .. } => {
+                "SpaceWasm stores a function's parameter size in a single byte. An i64 or f64 \
+                 parameter counts as 2 words, every other parameter as 1."
+            }
+            Self::LocalWordsExceeded { .. } => {
+                "SpaceWasm stores a function's local size in a 16-bit field. An i64 or f64 \
+                 local counts as 2 words, every other local as 1, and the locals of every \
+                 nested block belong to the whole call."
+            }
+            Self::FrameWordsExceeded { .. } => {
+                "SpaceWasm bounds the whole call frame a function leaves on the engine stack — \
+                 two words of header, its locals, and its operand stack at the deepest call — \
+                 to a 16-bit length. That is a tighter bound on locals alone than the local \
+                 size field is, because the header is always there."
+            }
+            Self::LocalsGroupTooLarge { .. } => {
+                "A code section declares locals as run-length groups, and SpaceWasm stores \
+                 each group's count in a 16-bit field."
+            }
+            Self::ImportNameTooLong { .. } => {
+                "This is a registration limit, not a decode limit: the decoder reads a name \
+                 of up to 32 bytes, but an embedder registers host modules and host functions \
+                 through a 31-byte name type, so a 32-byte name decodes and can never be bound \
+                 to a host. 31 is the cap that matters."
+            }
+            Self::ImportArityExceeded { .. } => {
+                "This is a registration limit, not a decode limit: host arguments are passed \
+                 through a fixed-size list of 9, so a host function declaring more cannot be \
+                 registered and the module can never instantiate."
+            }
+            Self::ImportMultipleResults { .. } => {
+                "A host function returns at most one value, and a module importing more could \
+                 never be bound to one."
+            }
+            Self::CustomSectionNameTooLong { .. } => {
+                "SpaceWasm reads a custom section's name into a fixed 32-byte buffer, before \
+                 it reaches the payload it would otherwise skip."
+            }
+            Self::MemoryTooLarge { .. } => {
+                "65536 pages of 64 KiB is the whole 32-bit address space a WebAssembly 1.0 \
+                 memory can address."
+            }
+        }
+    }
+
+    /// The one thing to change, in the source where there is one.
+    ///
+    /// Four of these shapes are not producible by this compiler at all. Their
+    /// remedy splits on provenance instead of naming a source edit that does
+    /// not exist: either the module was linked in, or a compiler bug produced
+    /// it, and only the person holding the build knows which.
+    #[must_use]
+    pub fn remedy(&self) -> &'static str {
+        match self {
+            Self::OutsideWasm1 { .. } => {
+                "Rebuild the linked module against the WebAssembly 1.0 baseline — a stock Rust \
+                 `wasm32-unknown-unknown` build emits sign-extension instructions by default — \
+                 or drop it from the build."
+            }
+            Self::ParamWordsExceeded { .. } => {
+                "Pass fewer parameters, or collect them into a struct: a struct or array \
+                 parameter is one i32 pointer, which is 1 word."
+            }
+            Self::LocalWordsExceeded { .. } | Self::FrameWordsExceeded { .. } => {
+                "Split the function into smaller functions, or move a large array out of the \
+                 frame."
+            }
+            Self::ImportNameTooLong { which, .. } => match which {
+                NamePart::Module => "Shorten the module name this extern is bound under.",
+                NamePart::Field => {
+                    "Rename the `external fn`, or bind it to a shorter export field."
+                }
+            },
+            Self::ImportArityExceeded { .. } => {
+                "Declare fewer parameters on the `external fn`, or collect them into a struct: \
+                 a struct or array argument is one i32 pointer."
+            }
+            Self::LocalsGroupTooLarge { .. }
+            | Self::ImportMultipleResults { .. }
+            | Self::CustomSectionNameTooLong { .. }
+            | Self::MemoryTooLarge { .. } => {
+                "This module shape is not producible by this compiler: if `infc` produced it, \
+                 please report a compiler bug; if it was linked in, rebuild the external \
+                 module."
+            }
+        }
+    }
+}
+
+/// Every reason a module was refused, in a fixed order.
+///
+/// Non-empty by construction: [`crate::spacewasm::check`] returns `Ok` when
+/// there is nothing to report, so a `Violations` in hand always names at least
+/// one finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Violations(Vec<Violation>);
+
+impl Violations {
+    /// The refusals [`crate::spacewasm::check`] found, which is the only place
+    /// a `Violations` is built: the invariant that it is non-empty is that
+    /// function's, and a constructor open to callers would lose it.
+    pub(crate) fn new(violations: Vec<Violation>) -> Self {
+        Self(violations)
+    }
+
+    /// The findings, in the order they are rendered.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Violation] {
+        &self.0
+    }
+
+    /// The full refusal: a header naming what was checked and what it cost,
+    /// then one block per finding giving the two numbers, the authority and one
+    /// thing to change.
+    ///
+    /// `subject` is what the reader knows the bytes as — a path, or a phrase
+    /// like "the linked module" for a build that writes no file. `consequence`
+    /// is the one sentence only the caller can write: what it did about the
+    /// refusal. Both are the caller's because this crate is handed bytes and
+    /// nothing else.
+    ///
+    /// An empty `consequence` omits that line, which is what the `Display` impl
+    /// passes: a reader quoting the violations out of a build has no build to
+    /// report the consequence of.
+    #[must_use]
+    pub fn render(&self, subject: &str, consequence: &str) -> String {
+        let mut out = format!(
+            "SpaceWasm conformance failed: {subject} cannot be loaded by a SpaceWasm embedder.\n"
+        );
+        if !consequence.is_empty() {
+            out.push_str(consequence);
+            out.push('\n');
+        }
+        for violation in &self.0 {
+            let _ = write!(
+                out,
+                "\n  {violation}.\n    {}\n    {}\n",
+                violation.authority(),
+                violation.remedy()
+            );
+        }
+        out
+    }
+}
+
+impl fmt::Display for Violations {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render("this module", ""))
+    }
+}
+
+impl std::error::Error for Violations {}

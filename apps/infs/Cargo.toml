@@ -35,6 +35,7 @@ crossterm = "0.29.0"
 anyhow.workspace = true
 thiserror.workspace = true
 inference-compiler-interface.workspace = true
+inference-target-conformance.workspace = true
 inf-wasmparser.workspace = true
 wasm-encoder.workspace = true
 

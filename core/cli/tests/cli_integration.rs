@@ -1012,6 +1012,11 @@ fn sign_extending_project() -> (assert_fs::TempDir, std::path::PathBuf, std::pat
 /// The negative control is the same external at the default target, which links
 /// it and writes the artifact — which is what makes the advertised remedy an
 /// actual remedy rather than a sentence.
+///
+/// The opening names the target as `--target` spells it, and the SpaceWasm twin
+/// below asserts its own: two targets pinning their own prefix is what makes
+/// the name an interpolation rather than a literal one of them could keep while
+/// the other drifted.
 #[test]
 fn a_foreign_module_outside_webassembly_one_is_refused_before_the_merge() {
     let (temp, entry, lib) = sign_extending_project();
@@ -1029,6 +1034,7 @@ fn a_foreign_module_outside_webassembly_one_is_refused_before_the_merge() {
 
     let resolved = lib.join("rustlib.wasm");
     for fragment in [
+        "The `stellar` target:",
         "`rustlib`",
         resolved.to_str().expect("temp paths are UTF-8"),
         "not a WebAssembly 1.0 module",
@@ -1188,6 +1194,356 @@ fn the_stellar_branch_leaves_the_default_write_path_untouched() {
 }
 
 // The SpaceWasm target ---
+
+/// A SpaceWasm build reports the two numbers an embedder must be built with,
+/// and reports them whether or not it writes a file.
+///
+/// The summary is the whole user-facing half of the conformance check: the
+/// refusal only fires on a module the target cannot load, while every
+/// successful build has to hand a flight integrator the control-frame and
+/// operand-stack budgets, which nothing else in the toolchain can tell them.
+/// Both numbers carry their unit in the line, because the value count and the
+/// word count are different quantities and sizing either const generic from the
+/// wrong one is exactly the deploy-time failure this check exists to prevent.
+///
+/// The `--codegen` half is the deliberate asymmetry with the Stellar summary
+/// next door, which is withheld from a build that writes nothing because it
+/// reports a file's size. This line reports properties of the module, which a
+/// phase-only build has just as much.
+///
+/// Fails if the summary is gated on the write, if it stops naming the function
+/// that attains a maximum, if either unit is dropped, or if the number an
+/// embedder is told to build with stops being the number that was measured.
+#[test]
+fn a_spacewasm_build_reports_the_budget_its_embedder_needs() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", COMPOUND_COPY_SOURCE);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--target")
+        .arg("spacewasm");
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("warning: spacewasm"),
+        "this module is far inside the reference budget, so a warning here would mean the \
+         warnings fire unconditionally: {stderr}"
+    );
+
+    for fragment in [
+        "spacewasm: conformant with WebAssembly 1.0",
+        "deepest control nesting",
+        "tallest operand stack",
+        "values in",
+        "stack words in",
+        "MAX_CONTROL_FRAMES >=",
+        "MAX_STACK_DEPTH >=",
+        "spacewasm_std uses 64 and 256",
+        "limits from spacewasm 0.7.1",
+    ] {
+        assert!(
+            stdout.contains(fragment),
+            "the summary must carry `{fragment}`, got: {stdout}"
+        );
+    }
+
+    // Every fragment above is prose on one side or the other of an
+    // interpolation, so a line that named no function and reported zeroes would
+    // carry all nine. The two numbers and the three names are what the line is
+    // for, so they are asserted as values.
+    let summary = stdout
+        .lines()
+        .find(|line| line.starts_with("spacewasm: conformant"))
+        .expect("the summary line is on stdout");
+    assert!(
+        !summary.contains("in ``"),
+        "every maximum names the function that attains it: {summary}"
+    );
+    let number_after = |marker: &str| -> u32 {
+        let tail = summary
+            .split_once(marker)
+            .unwrap_or_else(|| panic!("the summary must carry `{marker}`: {summary}"))
+            .1;
+        tail.trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|digits| digits.parse().ok())
+            .unwrap_or_else(|| panic!("`{marker}` must be followed by a number: {summary}"))
+    };
+    let depth = number_after("deepest control nesting");
+    let values = number_after("tallest operand stack");
+    assert!(
+        depth >= 1 && values >= 1,
+        "a module that defines a function has at least the body frame and at least one \
+         live value: {summary}"
+    );
+    assert_eq!(
+        (depth, values),
+        (
+            number_after("MAX_CONTROL_FRAMES >="),
+            number_after("MAX_STACK_DEPTH >=")
+        ),
+        "the two numbers an embedder is told to build with are the two measured, with no \
+         off-by-one to apply: {summary}"
+    );
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", COMPOUND_COPY_SOURCE);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--codegen")
+        .arg("--target")
+        .arg("spacewasm");
+    let assert = cmd.assert().success();
+    assert!(
+        String::from_utf8_lossy(&assert.get_output().stdout)
+            .contains("spacewasm: conformant with WebAssembly 1.0"),
+        "a build that writes no file still has a module to describe, and its budget is \
+         what a reader of this line came for"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "--codegen alone writes nothing"
+    );
+}
+
+/// A module past the reference embedder's budget warns, names the functions to
+/// blame, and still builds.
+///
+/// Conformance and budget are different verdicts and the build treats them
+/// differently: the fixed limits are the decoder's and a module outside them is
+/// refused, while `MAX_CONTROL_FRAMES` and `MAX_STACK_DEPTH` belong to whoever
+/// embedded the interpreter, so a module above them is a perfectly good module
+/// for a bigger embedder. Failing such a build would be this toolchain deciding
+/// a deployment's const generics for it, so the warning is the whole mechanism
+/// and the exit code has to stay 0.
+///
+/// The three-name ranking is what makes it actionable — flattening the deepest
+/// function is often cheaper than raising a const generic, and which functions
+/// they are decides that — so the shallow function must not be named and the
+/// order must be worst-first.
+///
+/// Fails if the warning loop is dropped (nothing else asserts it fires), if a
+/// warning starts failing the build, if the ranking stops being worst-first or
+/// stops stopping at three, or if the axis that is inside its bound starts
+/// warning too.
+#[test]
+fn a_spacewasm_build_past_the_reference_budget_warns_and_still_builds() {
+    /// A function whose body nests `depth` `if` statements.
+    fn nested(name: &str, depth: usize) -> String {
+        let mut body = String::from("    r = r + 1;\n");
+        for level in (0..depth).rev() {
+            body = format!("    if r > {level} {{\n{body}    }}\n");
+        }
+        format!("fn {name}(x: u32) -> u32 {{\n    let mut r: u32 = x;\n{body}    return r;\n}}\n")
+    }
+
+    let source = format!(
+        "{}{}{}{}",
+        nested("deepest", 70),
+        nested("middle", 66),
+        nested("third", 64),
+        "fn shallow(x: u32) -> u32 {\n    return x;\n}\n"
+    );
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", &source);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--target")
+        .arg("spacewasm");
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    assert!(
+        temp.child("out").child("prog.wasm").path().exists(),
+        "a module above a deployment's const generic is still a module: {stderr}"
+    );
+
+    let warning = stderr
+        .lines()
+        .find(|line| line.starts_with("warning: spacewasm: control nesting"))
+        .unwrap_or_else(|| panic!("the over-budget build owes a warning, got: {stderr}"));
+    assert!(
+        warning.contains("exceeds spacewasm_std's MAX_CONTROL_FRAMES of 64"),
+        "the warning must name the bound that was passed and whose it is: {warning}"
+    );
+
+    // The depth is codegen's to decide, so it is read out of the summary rather
+    // than written here; what this pins is that the two lines agree and that
+    // the warning fired because the measured number is over the reference.
+    let summary = stdout
+        .lines()
+        .find(|line| line.starts_with("spacewasm: conformant"))
+        .expect("a successful build still prints its summary");
+    let depth = summary
+        .split_once("MAX_CONTROL_FRAMES >= ")
+        .expect("the summary names the control-frame budget")
+        .1
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|digits| digits.parse::<u32>().ok())
+        .expect("the budget is a number");
+    assert!(depth > 64, "the fixture must be over the reference: {summary}");
+    assert!(
+        warning.contains(&format!("control nesting {depth} exceeds")),
+        "the warning and the summary must report one measurement: {warning} / {summary}"
+    );
+
+    let ranking = warning
+        .split_once("Deepest functions: ")
+        .expect("the warning names the functions to blame")
+        .1;
+    let positions: Vec<usize> = ["`deepest`", "`middle`", "`third`"]
+        .iter()
+        .map(|name| {
+            ranking
+                .find(name)
+                .unwrap_or_else(|| panic!("the ranking must name {name}: {ranking}"))
+        })
+        .collect();
+    assert!(
+        positions[0] < positions[1] && positions[1] < positions[2],
+        "the ranking is worst-first: {ranking}"
+    );
+    assert!(
+        !ranking.contains("`shallow`"),
+        "the ranking stops at three, so the flattest function must not appear: {ranking}"
+    );
+    assert!(
+        !stderr.contains("MAX_STACK_DEPTH of"),
+        "the operand stack is far inside its bound, and one axis being over must not warn \
+         about the other: {stderr}"
+    );
+}
+
+/// A module outside the target's envelope is refused after linking, and the
+/// build writes nothing.
+///
+/// The per-external gate below catches an instruction set; this catches a
+/// *size*, which no external can be blamed for and which only the finished
+/// module can be measured for. 256 parameter words is the one such shape a
+/// source file can reach on its own — the decoder holds a function's parameter
+/// size in a single byte — so it is what makes the post-link arm reachable at
+/// all.
+///
+/// The refusal has to arrive before anything is on disk: an artifact a flight
+/// computer cannot load is worse company for a build log than no artifact, and
+/// a reader who saw one written would reasonably try to fly it.
+///
+/// Fails if the check moves after the write, if the refusal stops naming the
+/// artifact it is about, or if it stops carrying the number and the remedy.
+#[test]
+fn a_module_outside_the_spacewasm_envelope_is_refused_after_linking() {
+    let params = (0..256)
+        .map(|index| format!("p{index}: u32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!("fn wide({params}) -> u32 {{\n    return p0;\n}}\n");
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", &source);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--target")
+        .arg("spacewasm");
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    for fragment in [
+        "SpaceWasm conformance failed",
+        "prog.wasm",
+        "No file was written.",
+        "function `wide` declares 256 parameter words",
+        "at most 255",
+        "collect them into a struct",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the refusal must carry `{fragment}`, got: {stderr}"
+        );
+    }
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a module the target cannot load must leave nothing behind"
+    );
+}
+
+/// The same sign-extending external, refused at this target too, by the same
+/// per-external gate and in a sentence that no longer talks about contracts.
+///
+/// The gate was written for one target and is asked through a predicate now, so
+/// this is where the generalization is observed: the module is named, the file
+/// it resolved to is named, the remedy is the same, and the refusal still
+/// arrives *before* the merge — which is the only point at which a message can
+/// name a file at all.
+///
+/// The negative control is the same external at the default target, which links
+/// it and writes the artifact, so the advertised remedy is an actual remedy.
+///
+/// Fails if the gate goes back to naming one target, if the prose reverts to
+/// contract wording, or if the refusal moves after the merge.
+#[test]
+fn a_foreign_module_outside_webassembly_one_is_refused_at_the_spacewasm_target() {
+    let (temp, entry, lib) = sign_extending_project();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("-L")
+        .arg(&lib)
+        .arg("--target")
+        .arg("spacewasm");
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    let resolved = lib.join("rustlib.wasm");
+    for fragment in [
+        "The `spacewasm` target:",
+        "`rustlib`",
+        resolved.to_str().expect("temp paths are UTF-8"),
+        "not a WebAssembly 1.0 module",
+        "sign extension",
+        "Rebuild `rustlib`",
+        "--target wasm32",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the refusal must carry `{fragment}`, got: {stderr}"
+        );
+    }
+    assert!(
+        !stderr.contains("contract"),
+        "the sentence is shared with a target whose artifact is a contract, and this \
+         target's is not: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Linked"),
+        "the refusal must come before the merge, or it cannot name a file: {stdout}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a refused build must leave no artifact"
+    );
+
+    let (temp, entry, lib) = sign_extending_project();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-L").arg(&lib);
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("Linked 1 external module(s)"),
+        "the default target must link the very same module, or the refusal above is about \
+         a broken fixture rather than about the instruction set"
+    );
+}
 
 /// Compiles `source` with `args` and returns the Rocq translation written
 /// beside the module.

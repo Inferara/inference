@@ -142,9 +142,12 @@ pub enum Target {
     /// The interpreter also enforces decode-time maxima -- parameter and local
     /// words per function, name and custom-section byte caps, and
     /// embedder-configured control-frame and operand-stack depths -- which
-    /// nothing in this crate checks today. A module this target accepts is
-    /// therefore inside the *instruction set* the interpreter decodes, which is
-    /// not yet the same statement as one it will load.
+    /// nothing in this crate checks: emission is target-blind, and every one of
+    /// those maxima is a property of the finished module rather than of any
+    /// instruction. What this target answers is therefore the *instruction set*
+    /// question alone. `infc` asks the rest of `inference-target-conformance`,
+    /// of the linked artifact and before it writes it, so a module a `spacewasm`
+    /// build leaves on disk is one the interpreter loads.
     SpaceWasm,
 }
 
@@ -406,6 +409,40 @@ impl Target {
         }
     }
 
+    /// Whether a foreign module linked into this target's artifact must itself
+    /// be WebAssembly 1.0.
+    ///
+    /// Asked of the *externals*, one artifact at a time, before the merge. It
+    /// is a different question from [`Self::permits_bulk_memory`], which asks
+    /// what this compiler may *emit*: emission is under this toolchain's
+    /// control and a foreign artifact is not, so a target can narrow one
+    /// without narrowing the other. What makes them answer alike today is that
+    /// the linker is deliberately permissive -- it accepts sign extension, bulk
+    /// memory and mutable globals, which is what an ordinary foreign toolchain
+    /// emits -- so a target whose runtime stops at 1.0 has to say so here or
+    /// discover a post-1.0 external only once it is merged into bytes no file
+    /// holds.
+    ///
+    /// The default target answers `false` because it does not narrow the
+    /// instruction set at all, not because its externals go unchecked.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use inference_wasm_codegen::Target;
+    ///
+    /// assert!(!Target::Wasm32.requires_wasm1_externals());
+    /// assert!(Target::Stellar.requires_wasm1_externals());
+    /// assert!(Target::SpaceWasm.requires_wasm1_externals());
+    /// ```
+    #[must_use]
+    pub fn requires_wasm1_externals(self) -> bool {
+        match self {
+            Self::Wasm32 => false,
+            Self::Stellar | Self::SpaceWasm => true,
+        }
+    }
+
     /// Returns whether this target supports proof mode.
     ///
     /// Only `Wasm32` supports proof mode, because proof mode's output is built
@@ -547,13 +584,15 @@ mod tests {
         assert!(!Target::SpaceWasm.supports_proof_mode());
     }
 
-    /// The three predicates answer the same way for every target but the
-    /// default, and the exhaustive matches behind them are what force a fourth
-    /// target to state three decisions rather than inherit them. Iterating
-    /// `Target::ALL` is what makes this a statement about the set rather than
-    /// about the two variants somebody remembered to name.
+    /// Four predicates split `Target::ALL` the same way, and the exhaustive
+    /// matches behind them are what force a fourth target to state four
+    /// decisions rather than inherit them. Three are true of the default alone;
+    /// `requires_wasm1_externals` is the inverse of the same split, because a
+    /// target that narrows what it emits narrows what it will link as well.
+    /// Iterating `Target::ALL` is what makes this a statement about the set
+    /// rather than about the two variants somebody remembered to name.
     ///
-    /// This fails if a target is added that permits one of the three without
+    /// This fails if a target is added that admits one of the four without
     /// being the default, which is the moment the envelope stops being "Wasm32
     /// or a narrowing of it" and the callers reading these predicates need
     /// re-examining.
@@ -577,6 +616,12 @@ mod tests {
                 target.permits_bulk_memory(),
                 is_default,
                 "`{}` disagrees with the default about bulk memory",
+                target.as_str()
+            );
+            assert_eq!(
+                target.requires_wasm1_externals(),
+                !is_default,
+                "`{}` disagrees with the default about foreign-module dialect",
                 target.as_str()
             );
         }

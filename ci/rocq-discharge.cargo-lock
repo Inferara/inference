@@ -2306,6 +2306,7 @@ dependencies = [
  "inference",
  "inference-compiler-interface",
  "inference-stellar-abi",
+ "inference-target-conformance",
  "inference-wasm-codegen",
  "predicates",
  "walkdir",
@@ -2397,9 +2398,18 @@ dependencies = [
 name = "inference-stellar-abi"
 version = "0.0.1"
 dependencies = [
+ "inference-target-conformance",
  "inference-wasm-codegen",
  "thiserror 2.0.20",
  "wasm-encoder 0.254.0",
+ "wasmparser 0.254.0",
+]
+
+[[package]]
+name = "inference-target-conformance"
+version = "0.0.1"
+dependencies = [
+ "thiserror 2.0.20",
  "wasmparser 0.254.0",
 ]
 
@@ -2417,6 +2427,7 @@ dependencies = [
  "inference-hassert",
  "inference-parser",
  "inference-stellar-abi",
+ "inference-target-conformance",
  "inference-type-checker",
  "inference-wasm-codegen",
  "inference-wasm-to-v-translator",
@@ -2521,6 +2532,7 @@ dependencies = [
  "hex",
  "inf-wasmparser",
  "inference-compiler-interface",
+ "inference-target-conformance",
  "predicates",
  "ratatui",
  "regex",

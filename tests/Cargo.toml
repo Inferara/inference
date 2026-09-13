@@ -24,6 +24,10 @@ inference-parser.workspace = true
 # the library, and the Stellar host tier is an integration binary that reaches
 # the compile helpers through it.
 inference-stellar-abi.workspace = true
+# A NORMAL dependency for the same reason: the conformance sweeps live in
+# `src/codegen/wasm/spacewasm_conformance.rs`, which is compiled into the
+# library.
+inference-target-conformance.workspace = true
 inference-wasm-codegen.workspace = true
 inference-wasm-to-v-translator.workspace = true
 inference-type-checker = { workspace = true, features = ["test-utils"] }

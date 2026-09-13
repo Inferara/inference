@@ -29,6 +29,7 @@ use support::StdAllocator;
 
 spacewasm::global_allocator!(StdAllocator, StdAllocator);
 
+mod conformance_oracle;
 mod decode_sweep;
 mod differential;
 mod support;

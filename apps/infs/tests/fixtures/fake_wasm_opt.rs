@@ -17,6 +17,18 @@
 //!   to stderr and exit with that code (the optimizer-failed path).
 //! - `FAKE_WASM_OPT_GARBAGE=1`: write non-wasm bytes to the `-o` target instead
 //!   of a valid module (the re-validation-failed path).
+//! - `FAKE_WASM_OPT_OVERSIZED_PARAMS=1`: write a module that is valid
+//!   WebAssembly 1.0 and outside a narrowed target's envelope — one function of
+//!   256 i32 parameters, one word past what a SpaceWasm embedder's parameter
+//!   field holds. This is the only way to reach the post-optimization
+//!   conformance check from a test: the compiler cannot produce such a module,
+//!   and an optimizer that produced one is exactly what the check is there for.
+//! - `FAKE_WASM_OPT_DEEP_NESTING=1`: write a module that is conformant and past
+//!   the reference embedder's control-frame budget — one function nesting 65
+//!   empty blocks. Conformance and budget are different questions, and this is
+//!   the role that separates them: the module loads under an embedder built
+//!   with a larger const generic, so the build succeeds and owes a warning
+//!   rather than a refusal.
 //! - otherwise: copy the positional input file to the `-o` target byte-for-byte
 //!   and exit 0 (the success path).
 //!
@@ -58,6 +70,18 @@ fn main() {
     if std::env::var("FAKE_WASM_OPT_GARBAGE").as_deref() == Ok("1") {
         std::fs::write(&output, b"not a valid wasm module")
             .expect("fake wasm-opt: failed to write garbage output");
+        return;
+    }
+
+    if std::env::var("FAKE_WASM_OPT_OVERSIZED_PARAMS").as_deref() == Ok("1") {
+        std::fs::write(&output, oversized_parameter_module())
+            .expect("fake wasm-opt: failed to write the oversized-parameter module");
+        return;
+    }
+
+    if std::env::var("FAKE_WASM_OPT_DEEP_NESTING").as_deref() == Ok("1") {
+        std::fs::write(&output, deeply_nested_module())
+            .expect("fake wasm-opt: failed to write the deeply nested module");
         return;
     }
 
@@ -103,4 +127,88 @@ fn parse_io(args: &[String]) -> (Option<String>, Option<String>) {
         i += 1;
     }
     (input, output)
+}
+
+/// A module whose single function declares 256 `i32` parameters.
+///
+/// Valid WebAssembly 1.0 — a stock validator admits up to a thousand — and one
+/// word past the byte a SpaceWasm embedder keeps a function's parameter size in,
+/// so it passes the re-validation step and is caught only by the target's own
+/// conformance check.
+///
+/// Assembled by hand because this fixture takes no dependencies: it is compiled
+/// with a bare `rustc` invocation by the test harness.
+fn oversized_parameter_module() -> Vec<u8> {
+    const PARAMS: u32 = 256;
+
+    let mut functype = vec![0x60];
+    leb128_u32(&mut functype, PARAMS);
+    functype.extend(std::iter::repeat_n(0x7F, PARAMS as usize));
+    functype.push(0x00);
+
+    let mut types = vec![0x01];
+    types.extend_from_slice(&functype);
+
+    let mut module = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+    section(&mut module, 0x01, &types);
+    section(&mut module, 0x03, &[0x01, 0x00]);
+    section(&mut module, 0x0A, &[0x01, 0x02, 0x00, 0x0B]);
+    module
+}
+
+/// A module whose single function nests 65 empty blocks.
+///
+/// Valid WebAssembly 1.0 and inside every fixed SpaceWasm limit, so it is
+/// accepted — but its control-frame depth is 66 counting the function-body
+/// frame, past the 64 the reference `spacewasm_std` embedding is built with.
+/// That is the shape a budget warning is about, and it is distinct from the
+/// oversized-parameter module next door, which is refused outright.
+///
+/// Assembled by hand for the same reason: this fixture takes no dependencies.
+fn deeply_nested_module() -> Vec<u8> {
+    const BLOCKS: usize = 65;
+
+    let mut body = Vec::new();
+    for _ in 0..BLOCKS {
+        // `block` with an empty block type.
+        body.push(0x02);
+        body.push(0x40);
+    }
+    // One `end` per block, plus the one that closes the function body.
+    body.extend(std::iter::repeat_n(0x0B, BLOCKS + 1));
+
+    let mut entry = Vec::new();
+    // Body size counts the locals-group count byte that follows it.
+    leb128_u32(&mut entry, (body.len() + 1) as u32);
+    entry.push(0x00);
+    entry.extend_from_slice(&body);
+
+    let mut code = vec![0x01];
+    code.extend_from_slice(&entry);
+
+    let mut module = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+    section(&mut module, 0x01, &[0x01, 0x60, 0x00, 0x00]);
+    section(&mut module, 0x03, &[0x01, 0x00]);
+    section(&mut module, 0x0A, &code);
+    module
+}
+
+/// Appends a section with its LEB128-encoded byte length.
+fn section(module: &mut Vec<u8>, id: u8, contents: &[u8]) {
+    module.push(id);
+    leb128_u32(module, contents.len() as u32);
+    module.extend_from_slice(contents);
+}
+
+/// Appends `value` in unsigned LEB128.
+fn leb128_u32(out: &mut Vec<u8>, mut value: u32) {
+    loop {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
 }

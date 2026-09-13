@@ -13,8 +13,10 @@ categories = ["compilers", "wasm"]
 wasm-encoder.workspace = true
 # STOCK wasmparser, deliberately not the in-tree `inf-wasmparser` fork: the fork
 # decodes and validates the custom non-deterministic opcodes with no feature
-# gate, so it cannot testify that a module is WebAssembly 1.0 — which is the one
-# question asked of the parser here.
+# gate, so it cannot testify about a module's feature set. The WebAssembly 1.0
+# question lives in `inference-target-conformance`; what this crate parses is
+# the sections its rewrite appends to and rebuilds.
 wasmparser = { workspace = true }
 inference-wasm-codegen.workspace = true
+inference-target-conformance.workspace = true
 thiserror.workspace = true

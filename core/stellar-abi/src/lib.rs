@@ -86,10 +86,13 @@
 //! by default for years — and refused at that point the answer is a byte offset
 //! into bytes that came from no single file.
 //!
-//! [`check_wasm1`] is the same question, published so a caller holding the
-//! artifacts separately can ask it of each one first and name the file in the
-//! refusal. It is the caller's job because only the caller knows where the
-//! bytes came from.
+//! `inference_target_conformance::check_wasm1` is the same question, asked of
+//! one artifact at a time so that a caller holding them separately can name the
+//! file in the refusal. It is the caller's job because only the caller knows
+//! where the bytes came from, and it lives in that crate rather than this one
+//! because two targets are now held to the WebAssembly 1.0 envelope and two
+//! crates spelling it independently is how the two answers drift apart. This
+//! pass calls it on both the module it is handed and the module it produces.
 //!
 //! # Example
 //!
@@ -119,4 +122,4 @@ mod val;
 
 pub use error::StellarAbiError;
 pub use meta::{STELLAR_ENV_PRE_RELEASE, STELLAR_ENV_PROTOCOL};
-pub use rewrite::{MAX_EXPORT_NAME_BYTES, MAX_VAL_PARAMETERS, check_wasm1, rewrite};
+pub use rewrite::{MAX_EXPORT_NAME_BYTES, MAX_VAL_PARAMETERS, rewrite};
