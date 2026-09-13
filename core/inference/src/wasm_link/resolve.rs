@@ -216,6 +216,19 @@ pub enum ResolveError {
     },
 }
 
+/// Why a miss can survive a correct search path, and where the work that would
+/// satisfy it is tracked.
+///
+/// The resolver's only currency is a file: every external this toolchain binds
+/// is a `.wasm` module read off disk and merged into the artifact. An author
+/// who meant the function to be supplied by whatever runs the program has
+/// written something the toolchain cannot express yet, and a list of probed
+/// paths on its own sends them hunting for a file that was never going to
+/// exist.
+const EMBEDDER_SUPPLIED_NEXT_STEP: &str = "An `external fn` satisfied by the embedder at run \
+     time, rather than by a `.wasm` file this build links in, is not supported yet; issue #464 \
+     is where that work is tracked.";
+
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -228,19 +241,14 @@ impl std::fmt::Display for ResolveError {
                     "could not resolve module `{logical_name}` to a `.wasm` file"
                 )?;
                 if searched.is_empty() {
-                    write!(f, "  (no search directories were configured)")
+                    writeln!(f, "  (no search directories were configured)")?;
                 } else {
                     writeln!(f, "  searched the following locations:")?;
-                    for (i, path) in searched.iter().enumerate() {
-                        let last = i + 1 == searched.len();
-                        if last {
-                            write!(f, "    - {}", path.display())?;
-                        } else {
-                            writeln!(f, "    - {}", path.display())?;
-                        }
+                    for path in searched {
+                        writeln!(f, "    - {}", path.display())?;
                     }
-                    Ok(())
                 }
+                write!(f, "  {EMBEDDER_SUPPLIED_NEXT_STEP}")
             }
             ResolveError::ManifestPathMissing { logical_name, path } => {
                 write!(
@@ -381,6 +389,57 @@ mod tests {
         let env_line = format!("{}", Path::new("env").join("crypto").join("sha256.wasm").display());
         assert!(rendered.contains(&lib_line), "lists first path: {rendered}");
         assert!(rendered.contains(&env_line), "lists last path: {rendered}");
+    }
+
+    /// Both shapes of a not-found miss end by naming the feature that would
+    /// have satisfied an extern nothing on disk provides.
+    ///
+    /// The two branches print entirely separate bodies — a list of probed paths,
+    /// or a note that nothing was probed — so a pointer appended inside one of
+    /// them reaches only half the users who need it, and the half that
+    /// configured no search path at all is the half most likely to have meant
+    /// the embedder. Asserting on the sentence rather than on `464` is what
+    /// makes this fail if the number survives while the explanation is dropped,
+    /// reworded past recognition, or moved into a branch of its own; asserting
+    /// that it comes last is what makes it fail if the sentence is hoisted above
+    /// the body it is the next step after, where a reader who stops at the list
+    /// of paths never reaches it.
+    #[test]
+    fn not_found_display_points_at_embedder_supplied_externs_in_both_branches() {
+        const PHRASE: &str = "satisfied by the embedder at run time";
+
+        let with_paths = ResolveError::NotFound {
+            logical_name: "crypto::sha256".into(),
+            searched: vec![PathBuf::from("lib").join("crypto").join("sha256.wasm")],
+        }
+        .to_string();
+        assert!(with_paths.contains(PHRASE), "{with_paths}");
+        assert!(with_paths.contains("issue #464"), "{with_paths}");
+        assert!(
+            with_paths.contains("searched the following locations"),
+            "the probed-path list still renders beside the pointer: {with_paths}"
+        );
+        assert!(
+            with_paths.find(PHRASE) > with_paths.find("searched the following locations"),
+            "the pointer follows the list it is the next step after: {with_paths}"
+        );
+
+        let without_paths = ResolveError::NotFound {
+            logical_name: "crypto::sha256".into(),
+            searched: Vec::new(),
+        }
+        .to_string();
+        assert!(without_paths.contains(PHRASE), "{without_paths}");
+        assert!(without_paths.contains("issue #464"), "{without_paths}");
+        assert!(
+            without_paths.contains("(no search directories were configured)"),
+            "the no-directories line still renders beside the pointer: {without_paths}"
+        );
+        assert!(
+            without_paths.find(PHRASE)
+                > without_paths.find("(no search directories were configured)"),
+            "the pointer follows the line it is the next step after: {without_paths}"
+        );
     }
 
     #[test]

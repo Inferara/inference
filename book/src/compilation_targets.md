@@ -475,6 +475,65 @@ re-validation next to it. A re-check that passes reprints the summary, so the
 last budget in the log is the one describing the artifact on disk rather than the
 one the compiler wrote before the optimizer saw it.
 
+#### Running a module under the embedder harness
+
+SpaceWasm is a library, not a program: it has no command line of its own, and a
+finished artifact answers "does it load?" only once something embeds it. This
+repository ships the smallest thing that does, as an example of the test crate.
+Every transcript below is a real run against one artifact — `out/main.wasm`,
+built by `infc main.inf --target spacewasm` from
+`pub fn main() -> i32 { return 10; }`, whose `pub` is what puts `main` in the
+export section — so the figures can be re-derived rather than taken on trust:
+
+```bash
+cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm --invoke main
+main = 10
+```
+
+It loads the artifact under the reference embedder configuration, calls one
+export, and prints the result as `NAME = value`, or `NAME = (unit)` for a
+function that returns nothing. Arguments follow the export name and are decimal
+integers coerced to the parameter types the artifact declares
+(`--invoke add 2 40`). With neither `--invoke` nor `--stats` it reports what the
+module exports and stops, which is the cheapest way to ask whether an artifact
+loads at all; asking for a measurement makes the measurement the report.
+
+Each way a run can end has an exit code of its own — a module that could not be
+read, one the interpreter refused, a missing export, a trap, an exhausted fuel
+budget — so a script can tell them apart without reading the message. A trap
+prints the interpreter's own reason. Execution runs under an instruction budget
+that `--fuel N` sets, so a program that does not terminate fails the run instead
+of hanging it. A module importing functions no embedder supplied is a load
+failure, and the harness names each `module.field` it found; binding an
+`external fn` to a host the embedder provides at run time is not supported yet
+and is tracked as issue #464.
+
+`--stats` reports what the module cost the interpreter — the IR pages it
+compiled to, the sixteen-bit words written into them against the words those
+pages hold, those words as bytes, the artifact's size, and the ratio of the two:
+
+```bash
+cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm --stats
+code pages: 1
+IR words (16-bit): 4 / 256 (1.56%)
+IR bytes: 8
+wasm bytes: 62
+IR bytes per wasm byte: 0.13
+```
+
+The page and word figures are computed the way upstream's own `spacewasm_std`
+demonstration binary computes them, so they can be read beside its output. The
+last line is deliberately not spelled the way upstream spells its own
+*compilation ratio*: that one is a different quantity — the live bytes its
+bounded page allocator holds, the engine and the guest memory as much as the IR
+— and this harness cannot produce it, because it runs on an unbounded allocator
+that keeps no statistics. A figure that is not upstream's should not travel
+under upstream's name. Adding `--json` prints the measurement as a single line
+of JSON instead, which is the hook for tracking these numbers over time; the
+keys are documented where the harness is implemented, and the ratio is carried
+there at full precision — the two decimals above are a courtesy to a reader,
+not the figure.
+
 #### Proving the `wasm32` build and deploying the SpaceWasm one
 
 Because code generation never reads the target, a SpaceWasm build and a `wasm32`
