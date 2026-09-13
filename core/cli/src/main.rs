@@ -408,32 +408,46 @@ fn stellar_summary(exports: &[inference_wasm_codegen::ExportSignature], size: us
     )
 }
 
-/// The refusal owed to a foreign module a contract build cannot carry, or
-/// `None` when every external clears the instruction set a contract is held to.
+/// The refusal owed to a foreign module a build for `target` cannot carry, or
+/// `None` when every external clears the instruction set that target is held
+/// to.
 ///
-/// A contract is WebAssembly 1.0 throughout: the Val-ABI rewrite validates the
-/// module it produces, and that module is the program *and* every external
-/// merged into it. The linker is deliberately more permissive — it accepts
-/// sign extension, bulk memory and mutable globals, which is what an ordinary
-/// foreign toolchain emits — so the first thing to notice a post-1.0 external
-/// is the rewrite, by which point the offending instruction sits at an offset
-/// into merged bytes that came from no single file, and the message can neither
+/// A target that answers
+/// [`inference_wasm_codegen::Target::requires_wasm1_externals`] ships an
+/// artifact that is WebAssembly 1.0 throughout, and that artifact is the
+/// program *and* every external merged into it. The linker is deliberately
+/// more permissive — it accepts sign extension, bulk memory and mutable
+/// globals, which is what an ordinary foreign toolchain emits — so without
+/// this the first thing to notice a post-1.0 external is a whole-artifact
+/// check, by which point the offending instruction sits at an offset into
+/// merged bytes that came from no single file, and the message can neither
 /// name the artifact nor suggest anything to do about it.
 ///
 /// Asked of each external before the merge, the same question names the module,
 /// the file it resolved to and a remedy, and the validator's offset points into
 /// that file.
-fn foreign_module_refusal(externals: &[ResolvedExternalModule]) -> Option<String> {
+///
+/// The sentence is target-neutral because the fact is: what each of these
+/// targets does with the merged module differs — one rewrites it into a
+/// contract, another hands it to a flight interpreter — but neither can carry
+/// an instruction its runtime does not decode, and a reason that named one
+/// runtime would be wrong about the other.
+fn foreign_module_refusal(
+    target: inference_wasm_codegen::Target,
+    externals: &[ResolvedExternalModule],
+) -> Option<String> {
     externals.iter().find_map(|external| {
-        let reason = inference_stellar_abi::check_wasm1(&external.bytes).err()?;
+        let reason = inference_target_conformance::check_wasm1(&external.bytes).err()?;
         let logical = &external.logical_module;
         Some(format!(
-            "Stellar target: the external module `{logical}`, resolved to {}, is not a \
-             WebAssembly 1.0 module: {reason}. A contract is WebAssembly 1.0 throughout and this \
-             module is merged into it, so the artifact is refused as a whole rather than in \
-             part. Rebuild `{logical}` for the WebAssembly 1.0 instruction set — a stock Rust \
-             `wasm32-unknown-unknown` build emits sign-extension instructions by default — or \
-             build this program at --target {}, which links the module as it is.",
+            "The `{}` target: the external module `{logical}`, resolved to {}, is not a \
+             WebAssembly 1.0 module: {reason}. This target's artifact is WebAssembly 1.0 \
+             throughout and this module is merged into it, so the artifact is refused as a \
+             whole rather than in part. Rebuild `{logical}` for the WebAssembly 1.0 \
+             instruction set — a stock Rust `wasm32-unknown-unknown` build emits \
+             sign-extension instructions by default — or build this program at --target {}, \
+             which links the module as it is.",
+            target.as_str(),
             external.path.display(),
             inference_compiler_interface::TargetName::DEFAULT.as_str(),
         ))
@@ -464,6 +478,13 @@ fn foreign_module_refusal(externals: &[ResolvedExternalModule]) -> Option<String
 /// because that is what the bytes on disk are. Widening this to "any non-default
 /// target" would refuse the pairing that is most worth having, in a message
 /// about a rewrite that never happened.
+///
+/// Its neighbour [`foreign_module_refusal`] *is* asked through a predicate, and
+/// the difference is the whole point: that one asks what a runtime decodes, a
+/// question every narrowed target answers the same way, while this one asks
+/// what this compiler does to the module after the translation has read it —
+/// which is nothing, for every target but one. A reader generalizing the two
+/// Stellar-gated refusals in this file together deletes a legitimate build.
 fn proof_artifact_refusal(
     target: inference_wasm_codegen::Target,
     mode: Option<CliMode>,
@@ -971,11 +992,11 @@ fn run() {
         };
         println!("Codegen complete");
 
-        // Held to the contract instruction set one file at a time, while each
+        // Held to the target's instruction set one file at a time, while each
         // artifact is still its own file and a refusal can say which one it is
         // about. After the merge there is only one module.
-        if target == inference_wasm_codegen::Target::Stellar
-            && let Some(refusal) = foreign_module_refusal(external_modules)
+        if target.requires_wasm1_externals()
+            && let Some(refusal) = foreign_module_refusal(target, external_modules)
         {
             eprintln!("{refusal}");
             process::exit(1);
@@ -1053,6 +1074,45 @@ fn run() {
             wasm_owned
         };
         let wasm_bytes = wasm_owned.as_slice();
+
+        // The conformance check runs on the bytes that ship: after the rewrite
+        // branch above, so a target that both rewrites and checks checks what
+        // it produced, and before the translation and every file write, so a
+        // refusal leaves nothing on disk. SpaceWasm performs no rewrite, which
+        // is what makes the two orderings indistinguishable here — the
+        // placement is for the target that comes after it.
+        //
+        // The summary is printed whatever the build was asked to write, unlike
+        // `stellar_summary` next door, which is withheld from a build that
+        // writes no file because it reports that file's size. This line reports
+        // properties of the module, which a `--codegen` run has just as much as
+        // a writing one.
+        //
+        // Variant equality rather than a predicate: the reason is on
+        // `spacewasm::check`, which is also where the second caller's identical
+        // gate points.
+        if target == inference_wasm_codegen::Target::SpaceWasm {
+            match inference_target_conformance::spacewasm::check(wasm_bytes) {
+                Ok(report) => {
+                    println!("{}", report.summary_line());
+                    for warning in report.budget_warnings() {
+                        eprintln!("warning: {warning}");
+                    }
+                }
+                Err(violations) => {
+                    let subject = if args.generate_wasm_output {
+                        output_path
+                            .join(format!("{source_fname}.wasm"))
+                            .display()
+                            .to_string()
+                    } else {
+                        String::from("the linked module")
+                    };
+                    eprintln!("{}", violations.render(&subject, "No file was written."));
+                    process::exit(1);
+                }
+            }
+        }
 
         // Run the Rocq translation *before* writing any file: a `wasm_to_v`
         // rejection (e.g. a spec or file named after a Rocq stdlib type) must not

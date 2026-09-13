@@ -210,12 +210,17 @@ The `[build]` section configures compilation settings.
     plain WebAssembly and `main` keeps the shape a runtime invokes, so `infs run`
     builds the module and executes it locally under `wasmtime`. That runtime is
     not the flight interpreter, and running the module here exercises the module
-    rather than the environment it was built for: the interpreter's decode-time
-    maxima (parameter and local word counts, name lengths, host arity) are
-    checked by nothing today, so a module `infs run` executes can still fail to
-    decode on the vehicle. The conformance step that will check them lands in a
-    later change. See the book's Compilation Targets chapter for the full rule
-    set.
+    rather than the environment it was built for: what a local `wasmtime` run
+    does not exercise is the interpreter's *environment* — its allocator, its
+    registered hosts, and the two const generics an embedder fixes. The
+    interpreter's decode-time maxima (parameter and local word counts, name
+    lengths, host arity) are not among them: `infc` checks every `spacewasm`
+    build against them after linking and before writing the artifact, and
+    prints the control-frame and operand-stack budget the module needs. With
+    `[build.wasm-opt]` enabled, `infs build` asks the same question again of
+    the optimized bytes and reprints the budget, because the artifact that
+    ships is that one. See the book's Compilation Targets chapter for the full
+    rule set.
   - `"soroban"` is the former name of `"stellar"` and is not accepted; it earns a
     message saying so rather than the generic unknown-target one.
   - Matching is exact and case-sensitive, and whitespace is not trimmed:

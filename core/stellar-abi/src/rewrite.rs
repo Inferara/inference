@@ -26,11 +26,12 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+use inference_target_conformance::check_wasm1;
 use inference_wasm_codegen::{AbiReturn, ExportSignature};
 use wasm_encoder::{Encode, ExportKind, ExportSection, Instruction, Module, RawSection};
 use wasmparser::{
     CompositeInnerType, ExternalKind, ImportSectionReader, Parser, Payload, SubType, TypeRef,
-    ValType, Validator, WasmFeatures,
+    ValType,
 };
 
 use crate::error::StellarAbiError;
@@ -114,29 +115,6 @@ fn check_protocol(protocol: u32) -> Result<(), StellarAbiError> {
         return Err(StellarAbiError::ProtocolPredatesSoroban { protocol });
     }
     Ok(())
-}
-
-/// Validates `wasm` at the WebAssembly 1.0 feature set, the only dialect every
-/// Soroban host is known to run. See the crate documentation for why this pass
-/// asks for 1.0 when the host of record accepts more.
-///
-/// Published because the rewrite is not the only place the question is asked.
-/// A module linked into a contract has to clear the same bar as the contract,
-/// and a caller that links foreign artifacts can ask it of each one *before*
-/// merging them — where a refusal can still name the file the offending
-/// instruction came from. Asked only of the merged module, the answer is a byte
-/// offset into bytes no file holds.
-///
-/// # Errors
-///
-/// Returns the validator's own message, which names the feature and the offset
-/// within `wasm`. A caller that knows where these bytes came from is expected to
-/// wrap it in a sentence that says so.
-pub fn check_wasm1(wasm: &[u8]) -> Result<(), String> {
-    Validator::new_with_features(WasmFeatures::WASM1)
-        .validate_all(wasm)
-        .map(|_| ())
-        .map_err(|err| err.to_string())
 }
 
 /// One section of the input, in the order it appeared.

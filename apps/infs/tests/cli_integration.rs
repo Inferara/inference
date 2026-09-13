@@ -5567,6 +5567,276 @@ fn wasm_opt_marks_the_overflow_guard_record_as_opaque() {
     );
 }
 
+/// An optimized artifact that no longer fits the target's runtime is refused,
+/// and the original stays where it was.
+///
+/// The compiler checked the module it wrote; these are different bytes. An
+/// external `wasm-opt` is not pinned by anything in the manifest, and what it
+/// does to control flow and to locals is a property of whichever Binaryen the
+/// machine happens to have — so the check is asked again here, of the buffer
+/// that is about to be renamed into place, after every rewrite this step
+/// performs. A check placed beside the re-validation would be a statement about
+/// bytes no build ships.
+///
+/// The fake optimizer supplies a module that is valid WebAssembly 1.0 and
+/// outside the `SpaceWasm` envelope, which is the only way to reach this arm: the
+/// compiler cannot produce one, which is precisely why the optimizer is where
+/// one could arrive.
+///
+/// Fails if the re-check is dropped, or if a failure leaves the optimizer's
+/// output on disk. It does *not* pin the placement relative to the guard-record
+/// rewrite: that rewrite touches only an `inference.checked` section, this
+/// fixture's module has none, and no module whose conformance verdict differs
+/// across it exists — so the rationale for the ordering lives beside the call
+/// rather than in an assertion that cannot fail.
+#[test]
+fn wasm_opt_output_outside_the_target_envelope_is_refused_and_leaves_the_original() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\ntarget = \"spacewasm\"\n\n[build.wasm-opt]\nlevel = \"s\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--no-wasm-opt");
+    cmd.assert().success();
+    let unoptimized = read_project_artifact(&temp);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_OVERSIZED_PARAMS", "1")
+        .current_dir(temp.path())
+        .arg("build");
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    for fragment in [
+        "SpaceWasm conformance failed",
+        "main.wasm",
+        "The original artifact is unchanged",
+        "declares 256 parameter words",
+        "at most 255",
+        "--no-wasm-opt",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the refusal must carry `{fragment}`, got: {stderr}"
+        );
+    }
+
+    assert_eq!(
+        read_project_artifact(&temp),
+        unoptimized,
+        "a refused optimization must leave the artifact the compiler wrote"
+    );
+    assert!(
+        !temp.child("out").child("main.wasm.opt").path().exists(),
+        "the temp file must be cleaned up after a refusal"
+    );
+}
+
+/// The same optimizer output at the default target is accepted, which is what
+/// makes the refusal above a statement about the target rather than about the
+/// module.
+///
+/// Without this pair a check that refused every optimized artifact would pass
+/// the test above. The artifact is compared against an unoptimized build so the
+/// control cannot be satisfied by an optimizer that never ran: "the build did
+/// not fail" is also what a broken `WASM_OPT_PATH` or an unparsed
+/// `[build.wasm-opt]` looks like, and this pair is meant to say that the
+/// oversized module reached disk at a target that does not check for it.
+///
+/// Fails if the re-check starts running for a target that never asked for it,
+/// or if the optimizer stops being reached at all.
+#[test]
+fn wasm_opt_output_outside_the_spacewasm_envelope_is_fine_at_the_default_target() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--no-wasm-opt");
+    cmd.assert().success();
+    let unoptimized = read_project_artifact(&temp);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_OVERSIZED_PARAMS", "1")
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+    assert_ne!(
+        read_project_artifact(&temp),
+        unoptimized,
+        "the fake optimizer's 256-parameter module must actually land, or this control is \
+         about a build that never optimized"
+    );
+}
+
+/// A project build that optimizes reports the budget of the module that ships,
+/// not the one the compiler wrote.
+///
+/// `infc` prints its summary about the bytes it emitted, and those bytes are
+/// then handed to an optimizer that reshapes control flow and coalesces
+/// locals — both quantities that line reports. An integrator sizing
+/// `MAX_CONTROL_FRAMES` off a build log reads the last such line, so the last
+/// one has to describe the artifact on disk.
+///
+/// Fails if the re-check keeps its verdict and drops its measurement, leaving
+/// the compiler's pre-optimization numbers as the only ones in the log.
+#[test]
+fn a_spacewasm_project_build_reports_the_budget_of_the_optimized_artifact() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\ntarget = \"spacewasm\"\n\n[build.wasm-opt]\nlevel = \"s\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .current_dir(temp.path())
+        .arg("build");
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    assert_eq!(
+        stdout
+            .matches("spacewasm: conformant with WebAssembly 1.0")
+            .count(),
+        2,
+        "the compiler reports the module it wrote and this step reports the one that \
+         ships: {stdout}"
+    );
+    let optimizer_line = stdout
+        .lines()
+        .position(|line| line.starts_with("wasm-opt -O"))
+        .expect("the optimizer reports its size change");
+    let last_summary = stdout
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("spacewasm: conformant"))
+        .map(|(index, _)| index)
+        .last()
+        .expect("a summary line is on stdout");
+    assert!(
+        last_summary > optimizer_line,
+        "the budget that describes the shipped artifact is the one printed after the \
+         optimizer ran: {stdout}"
+    );
+}
+
+/// An optimized artifact past the reference budget warns, and the warning is
+/// about the optimized bytes.
+///
+/// The compiler warns about the module it wrote; this step has to warn about
+/// the module that ships, because an optimizer can deepen control flow and the
+/// integrator sizing `MAX_CONTROL_FRAMES` off the log reads the last word on
+/// it. The fake optimizer's module is conformant and merely over budget, which
+/// is what separates this from the refusal test above: the build succeeds and
+/// the artifact is replaced.
+///
+/// The compiled program is far inside the budget, so the compiler's own pass
+/// prints no warning — every warning in this log is therefore this step's.
+///
+/// Fails if the warning loop is dropped from the optimize path, if the re-check
+/// reports the pre-optimization measurement, or if an over-budget artifact
+/// starts failing the build.
+#[test]
+fn a_spacewasm_project_build_warns_about_the_optimized_artifact_s_budget() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\ntarget = \"spacewasm\"\n\n[build.wasm-opt]\nlevel = \"s\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_DEEP_NESTING", "1")
+        .current_dir(temp.path())
+        .arg("build");
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    let warnings: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("warning: spacewasm: control nesting"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the compiled program is inside the budget and the optimizer's module is not, so \
+         exactly one pass owes a warning: {stderr}"
+    );
+    assert!(
+        warnings[0].contains("control nesting 66 exceeds spacewasm_std's MAX_CONTROL_FRAMES \
+                              of 64"),
+        "the warning must report the optimized module's own depth — 65 blocks and the \
+         function-body frame: {}",
+        warnings[0]
+    );
+
+    let budgets: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("spacewasm: conformant"))
+        .collect();
+    assert_eq!(
+        budgets.len(),
+        2,
+        "the compiler describes the module it wrote and this step describes the one that \
+         ships: {stdout}"
+    );
+    assert!(
+        !budgets[0].contains("MAX_CONTROL_FRAMES >= 66"),
+        "the compiler's line must be about the pre-optimization module, or the second line \
+         proves nothing: {}",
+        budgets[0]
+    );
+    assert!(
+        budgets[1].contains("MAX_CONTROL_FRAMES >= 66"),
+        "the last budget in the log is the shipped artifact's: {}",
+        budgets[1]
+    );
+}
+
 /// `--no-wasm-opt` is the documented way to keep an exact record, so it must
 /// leave one: without this pair the marking above could be a rewrite that
 /// happens on every build.

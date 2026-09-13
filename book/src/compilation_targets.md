@@ -334,16 +334,23 @@ them, `bulk-memory`, costs an Inference build anything at all:
 #### Decode-time limits
 
 Decoding a module is where the interpreter checks its own maxima, and a module
-that exceeds one is refused on the device rather than at build time. **Nothing in
-the compiler checks any of these today.** The conformance step that will is
-landing in a later change; until it does, a module this target accepts is one
-whose *instruction set* the interpreter covers, which is not yet the same
-statement as one it will load.
+that exceeds one would be refused on the device rather than at build time. The
+build asks the same questions first — see [Conformance](#conformance) below. The
+fixed limits are refusals: a module this target accepts meets every one of them,
+so its declarations fit the fields the decoder reads them into and not merely its
+instruction set. That is a claim about this table rather than a proof of
+decodability — the interpreter refuses a handful of shapes beyond it, and
+`core/target-conformance`'s README classifies every one of them with the reason
+it is out of reach or, for two, that it is not modelled. The two
+embedder-configured rows cannot be refusals, because their values belong to a
+deployment rather than to the interpreter; the build measures them instead and
+prints what they have to be.
 
 | Limit | Value | Where it comes from |
 |-------|-------|---------------------|
 | Parameter words per function | 255 | An `i64` is two words, so 128 `i64` parameters already exceed it |
 | Local words per function | 65,535 | The same accounting |
+| Call frame per function | 65,535 words | Two words of header plus the locals plus the operand peak. It bites before the local-word limit does: a function with an empty operand stack may declare 65,533 local words and no more |
 | Import module and field name | 32 bytes each | `Module::MAX_NAME_LENGTH` |
 | Host-registered module and function name | 31 bytes each | `HOST_MODULE_NAME_CAP` / `HOST_FUNCTION_NAME_CAP` — the registration side is one byte tighter than the decode side, so 31 is the cap an import name has to meet to be bindable at all |
 | Host function parameters | 9, and a single result | `MAX_HOST_FUNCTION_PARAMS`; more than one result is `MultiReturnNotAllowed` |
@@ -356,6 +363,117 @@ The last two are the ones to read carefully: they belong to whoever embedded the
 interpreter, not to the interpreter, so "does this module fit" is only answerable
 against a particular flight configuration. `spacewasm_std`'s 64 and 256 are the
 reference numbers a report can be read against, not a promise about the vehicle.
+
+#### Foreign modules
+
+A module bound through `[wasm-dependencies]` or `-L` is merged into the artifact,
+so it is held to the same instruction set the artifact is. The build asks that of
+each external *before* the merge, while each one is still its own file:
+
+```
+$ infc main.inf -L lib/ --target spacewasm
+The `spacewasm` target: the external module `rustlib`, resolved to lib/rustlib.wasm,
+is not a WebAssembly 1.0 module: sign extension operations support is not enabled (at
+offset 0x1b). This target's artifact is WebAssembly 1.0 throughout and this module is merged
+into it, so the artifact is refused as a whole rather than in part. Rebuild `rustlib`
+for the WebAssembly 1.0 instruction set — a stock Rust `wasm32-unknown-unknown` build
+emits sign-extension instructions by default — or build this program at --target
+wasm32, which links the module as it is.
+```
+
+Asked after the merge instead, the same question could only answer with a byte
+offset into bytes that came from no single file. The linker itself is
+deliberately more permissive — it accepts sign extension, bulk memory and mutable
+globals, which is what an ordinary foreign toolchain emits — so this refusal is
+the target's, not the linker's, and the same external links without complaint at
+`--target wasm32`. The conformance check below still asks the whole-artifact
+question afterwards, as the backstop for anything that reaches the module by some
+other route.
+
+#### Conformance
+
+Every SpaceWasm build checks the module it is about to write against every fixed
+limit in the table above, and measures the two that an embedder chooses. The
+check runs after linking and before any file is written, so a refusal leaves
+nothing on disk:
+
+```
+$ infc main.inf --target spacewasm
+Parsed: main.inf
+Analyzed: main.inf
+Codegen complete
+spacewasm: conformant with WebAssembly 1.0; deepest control nesting 7 in `render_row`,
+tallest operand stack 19 values in `mix` (peak 27 stack words in `mix`). Build the
+embedder with MAX_CONTROL_FRAMES >= 7 and MAX_STACK_DEPTH >= 19 (spacewasm_std uses
+64 and 256); limits from spacewasm 0.7.1.
+WASM generated at: out/main.wasm
+```
+
+**What is failed.** Anything outside WebAssembly 1.0 plus mutable globals — which
+for a linked build means a post-1.0 instruction in a foreign module, refused
+earlier and by name, see [Foreign modules](#foreign-modules)
+— and each decode-time and registration-time limit in the table: parameter words,
+local words, call-frame words, a locals group, an import module or field name over
+31 bytes, a host function over nine parameters or one result, a custom section name
+over 32 bytes, and a memory over the address space. Every refusal names the two
+numbers, says which cap it met, and gives one thing to change. Four of them
+describe module shapes this compiler cannot produce; those say so, and ask you to
+rebuild the external module or report a compiler bug, because there is no source
+edit that would have avoided them.
+
+**What is reported.** Three numbers, and each carries its unit because two of
+them sound alike and are not the same quantity:
+
+- **Deepest control nesting**, in frames, counting the implicit function-body
+  frame that both the interpreter and the compiler's checker push before reading
+  an operator. Compare it directly against `MAX_CONTROL_FRAMES`; there is no
+  off-by-one to apply.
+- **Tallest operand stack**, in **values** — one entry per value whatever its
+  width. This is the unit of `MAX_STACK_DEPTH`, so it is the number the second
+  const generic must clear.
+- **Peak stack words**, the same high-water mark weighted by width, where an
+  `i64` counts two. This is *not* `MAX_STACK_DEPTH`'s unit: it is what the
+  engine's value stack holds, and it is what `Engine::new`'s stack budget is
+  sized from.
+
+Sizing the verifier's const generic from the word figure over-allocates; sizing
+the engine's stack from the value figure under-allocates and fails in flight.
+That is why both are printed, each labelled, and why the line ends with the
+release the limits were read from.
+
+When a maximum exceeds the `spacewasm_std` reference configuration the build
+still succeeds — a conformant module that needs a bigger const generic is not a
+broken module — and prints a warning naming the three functions that reach
+highest, so the choice between raising the generic and flattening a function is
+made with the functions in front of you:
+
+```
+warning: spacewasm: control nesting 71 exceeds spacewasm_std's MAX_CONTROL_FRAMES of 64.
+Deepest functions: `render_row` (71), `blend` (66), `mix` (65). Either raise the const
+generic in your embedder or flatten the nesting in these functions.
+```
+
+**The `wasm-opt` re-check.** This target keeps `[build.wasm-opt]` — its artifact
+is plain WebAssembly 1.0 with nothing layered on top, and size is the scarce
+resource on a flight computer, which is why `-Os` is its recorded level. But the
+optimizer is an external Binaryen that nothing here pins, and it reshapes control
+flow and coalesces locals — both of them quantities the report above measures. So
+`infs` runs the same check again on the optimized bytes, immediately before they
+are moved into place, and a failure leaves the artifact the compiler wrote
+exactly where it was:
+
+```
+$ infs build
+...
+SpaceWasm conformance failed: out/main.wasm cannot be loaded by a SpaceWasm embedder.
+The original artifact is unchanged; try `--no-wasm-opt`, or a different Binaryen version.
+```
+
+The invariant is "the checked bytes are the bytes that ship", which is why the
+re-check sits after every rewrite that step performs rather than beside the
+re-validation next to it. A re-check that passes reprints the summary, so the
+last budget in the log is the one describing the artifact on disk rather than the
+one the compiler wrote before the optimizer saw it.
 
 #### Proving the `wasm32` build and deploying the SpaceWasm one
 
@@ -427,8 +545,10 @@ executable code only: `compile` mode strips `spec` bodies before either check
 looks at them, so a specification written in those constructs costs a SpaceWasm
 build nothing.
 
-The conformance report against the decode-time limits is what will make the
-envelope buy more, and it is landing in a later change.
+The conformance report against the decode-time limits is what makes the envelope
+buy more, and every build produces one: see [Conformance](#conformance) above
+for what a build fails on, what it reports, and how to read the report against
+an embedder's `MAX_CONTROL_FRAMES` and `MAX_STACK_DEPTH`.
 
 **The two links.** For the deployed bytes to be the proved bytes, two identities
 have to hold, and each has its own guard in the test suite:

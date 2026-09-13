@@ -142,9 +142,15 @@ host that has ever run, at upload, long after the compiler said yes.
 
 ## Dependencies
 
+`inference-target-conformance` owns the WebAssembly 1.0 question. `check_wasm1`
+used to live here and moved there when a second target came to ask it: two
+runtimes held to one envelope have to be held to one answer, and the two error
+variants that quote it — `InputNotWasm1` and `RewrittenNotWasm1` — read exactly
+as they did, because the message is the validator's own.
+
 `wasmparser` here is the **stock** upstream crate, deliberately not the in-tree
 `inf-wasmparser` fork: the fork decodes and validates the custom
-non-deterministic opcodes with no feature gate, so it cannot testify that a
-module is WebAssembly 1.0 — which is the one question asked of a parser in this
-crate. Default features are off, because the only consumer parses and validates
-a core module.
+non-deterministic opcodes with no feature gate, so it cannot testify about a
+module's feature set. Default features are off, because the parsing this crate
+does itself — reading the sections the rewrite appends to and rewrites — needs
+nothing more.

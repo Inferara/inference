@@ -45,6 +45,7 @@ mod negative;
 mod param_by_ref;
 mod self_extern_escape;
 mod short_circuit;
+mod spacewasm_conformance;
 mod spacewasm_gate;
 mod stellar_gate;
 mod target_identity;

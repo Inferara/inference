@@ -1,0 +1,18 @@
+[package]
+name = "inference-target-conformance"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Checks a finished WebAssembly artifact against the envelope of the runtime its target names, and measures what loading it costs"
+keywords = ["compiler", "webassembly", "spacewasm", "conformance", "wasm"]
+categories = ["compilers", "wasm"]
+
+[dependencies]
+# STOCK wasmparser, deliberately not the in-tree `inf-wasmparser` fork: the fork
+# decodes and validates the custom non-deterministic opcodes with no feature
+# gate, so it cannot testify that a module is WebAssembly 1.0 — which is the one
+# question asked of the parser here.
+wasmparser = { workspace = true }
+thiserror.workspace = true
