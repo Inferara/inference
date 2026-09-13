@@ -165,8 +165,36 @@ The `[build]` section configures compilation settings.
 
 #### Fields
 
-- **`target`** (string, default: `"wasm32"`): The compilation target platform
-  - Currently supported: `"wasm32"`
+- **`target`** (string, default: `"wasm32"`): The runtime the module is built
+  for. The axis is the runtime, not a compiler back end and not a target triple:
+  `"wasm32"` is the generic value, a module for any WebAssembly embedder that
+  imposes no ABI of its own, while a further name stands for one specific runtime
+  with its own calling convention or acceptance rules.
+  - Accepted values: `"wasm32"`, `"stellar"`.
+  - `"stellar"` builds a Soroban smart contract: every exported method is
+    rewritten to take and return the host's 64-bit tagged word, and the module
+    carries the environment-metadata section a host will not upload it without.
+    It narrows what a project may contain — no `mode = "proof"`, no
+    `wasm-features`, no `[build.wasm-opt]` (below), and an exported function's
+    parameters and return confined to the scalar set the convention encodes.
+    The first three are refused by the manifest itself, at load time, in a
+    message naming both keys, so they are invalid for every command rather than
+    skipped by some; the last is enforced by the compiler, where the exports
+    are. `infs run` also refuses such a project: a contract is invoked by a
+    Soroban host, which encodes each argument into that tagged word, and by
+    nothing else. See the book's Compilation Targets chapter for the full rule
+    set.
+  - `"soroban"` is the former name of `"stellar"` and is not accepted; it earns a
+    message saying so rather than the generic unknown-target one.
+  - Matching is exact and case-sensitive, and whitespace is not trimmed:
+    `"Wasm32"` and `"wasm32 "` are both rejected. An unrecognized value is a load
+    error listing the accepted set, never a silent fall back to the default — a
+    build that quietly targeted something other than what the manifest named
+    would be worse than a refusal.
+  - `infc --target <name>` is the same vocabulary validated with the same
+    wording, so a value rejected here is rejected identically there. `infs` has
+    no `--target` flag: a target is a property of the project, and a flag would
+    let one project produce artifacts for two runtimes.
 
 - **`optimize`** (string, default: `"debug"`): The optimization level
   - `"debug"`: No optimizations, faster compilation
@@ -181,7 +209,9 @@ The `[build]` section configures compilation settings.
   output-dir` is consulted. A CLI `--mode` flag always overrides this setting.
   `infs run` ignores this field entirely and always builds in compile mode.
 
-  The value is case-sensitive: `"Proof"` is rejected.
+  The value is case-sensitive: `"Proof"` is rejected. `"proof"` is refused
+  outright when `[build] target` names a target that has no proof mode: the
+  pairing is reported on load, naming both keys.
 
 - **`wasm-features`** (array of strings, default: `[]`): Post-MVP WebAssembly
   proposals the emitted module opts into. Empty — the default — means the output
@@ -201,6 +231,9 @@ The `[build]` section configures compilation settings.
   - **Changing this value invalidates proof artifacts generated before the
     change**, because the translated instructions differ. That is the reason it
     lives in the versioned manifest rather than in a command-line flag.
+  - A non-empty list is refused outright when `[build] target` names a target
+    that permits no post-MVP proposal: the pairing is reported on load, naming
+    both keys. An empty list asks for nothing and is accepted for every target.
   - Honored by single-file `build` and `run` as well as project mode (see
     [Settings Honored in Single-File Mode](#settings-honored-in-single-file-mode)),
     and requires an `infc` with ABI 1.2 or newer — an older compiler cannot honor
@@ -246,6 +279,7 @@ level = "z"
 
 - **Project mode only, for executable artifacts.** Both `infs build` and `infs run` apply `[build.wasm-opt]` to `out/main.wasm` after a successful compile — `run` optimizes exactly the artifact it then executes, so what you run is what `build` would have shipped. Single-file mode (`infs build file.inf`) never runs the optimizer, whether or not a manifest is present.
 - **Proof-mode and `-v` builds are always skipped, silently.** A build counts as proof mode when the effective `[build] mode` is `"proof"`, `--mode proof` is passed, or `-v` is passed at all (even without `--mode`). Their WASM can carry the non-deterministic opcodes (`forall`, `exists`, `assume`, `unique`, `@` uzumaki) that `wasm-opt` cannot parse, and they are a different artifact class from an executable.
+- **`target = "stellar"` refuses the table outright, at load time.** Declaring both is an invalid manifest for every command, not a silently-skipped step: a Stellar contract's value-ABI wrappers and its `contractenvmetav0` metadata section are the layer a host is trusted to decode, and whether an external `wasm-opt` preserves them depends on which Binaryen the machine has — a version nothing in the manifest pins. Remove one of the two keys.
 - **A compile-mode artifact that still contains a non-deterministic opcode is a hard error**, not a silent skip. Compile-mode builds strip `spec` blocks, so a well-formed executable should never carry one of these opcodes — if it does, `infs` scans for it before invoking `wasm-opt` (which would otherwise fail with an opaque parse error) and reports the offending construct by name, with remediation: move it into a `spec` block, or turn optimization off.
 
 #### Disabling optimization for one invocation

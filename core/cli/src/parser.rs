@@ -60,6 +60,13 @@ impl From<CliMode> for inference_wasm_codegen::CompilationMode {
 /// - `--out-dir <path>`: Override the output directory (default `out/`, relative
 ///   to the current working directory). Applies to both `.wasm` and `.v`.
 ///
+/// ## Target
+///
+/// - `--target <name>`: The runtime the emitted module is built for. Omitting it
+///   selects the default, which is what every build produced before the flag
+///   existed. Names are matched exactly; an unrecognized one is an error listing
+///   the accepted set, never a silent fall back to the default.
+///
 /// ## Instruction Set
 ///
 /// - `--wasm-features <list>`: Opt into post-MVP WebAssembly proposals by name.
@@ -239,6 +246,26 @@ pub(crate) struct Cli {
     /// may pass them by hand.
     #[clap(long = "wasm-dep", value_name = "NAME=PATH")]
     pub(crate) wasm_deps: Vec<String>,
+
+    /// The runtime the emitted module is built for.
+    ///
+    /// Omitting the flag selects `inference_compiler_interface::TargetName`'s
+    /// default, which is what every build produced before a target could be
+    /// named, so the artifact of a build that names none is unchanged.
+    ///
+    /// An `Option<String>` resolved through
+    /// `inference_compiler_interface::resolve_target` rather than a
+    /// `clap::ValueEnum`: clap renders a rejected value as a bare list of
+    /// possible values, which cannot carry the sentence that names surrounding
+    /// whitespace as the cause, nor the one that tells a user writing a
+    /// target's former name which spelling replaced it. Those are the two
+    /// rejections a user is most likely to hit, and they read nothing like the
+    /// rest of this compiler's diagnostics when clap writes them.
+    ///
+    /// `infs build` selects the target from the project's `[build] target`;
+    /// direct `infc` callers pass it by hand.
+    #[clap(long = "target", value_name = "NAME")]
+    pub(crate) target: Option<String>,
 
     /// Post-MVP WebAssembly features the emitted module may use, by proposal
     /// name.

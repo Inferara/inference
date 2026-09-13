@@ -27,6 +27,23 @@
 //! envelope and Binaryen's flag set are both strictly wider than what code
 //! generation knows how to emit.
 //!
+//! # Compilation target vocabulary
+//!
+//! [`TargetName`] is the set of runtimes a build may target. It is the axis of
+//! *what the module is built for*, not of which back end produces it: `wasm32`
+//! is the generic value, a module for any WebAssembly embedder that imposes no
+//! ABI of its own, while every further name stands for one runtime with its own
+//! calling convention or acceptance rules. The set is closed rather than a
+//! triple parsed at the boundary, because each name is something the compiler
+//! has to have been taught.
+//!
+//! [`resolve_target`] is the shared validation, so `infs` (reading
+//! `Inference.toml`) and `infc` (reading `--target`) reject the same spellings
+//! with the same words, and [`TargetName::abi_minor`] records the `infc` ABI
+//! minor each name became requestable at — per name, because a caller gating a
+//! forward on a single floor would wave a newer name past a compiler that
+//! cannot build for it.
+//!
 //! # Memory layout vocabulary
 //!
 //! [`MemoryLayout`] is the linear memory a build asks for — the page count and
@@ -43,7 +60,7 @@
 
 pub mod errors;
 
-pub use crate::errors::{MemoryLayoutError, WasmFeatureError};
+pub use crate::errors::{MemoryLayoutError, TargetError, WasmFeatureError};
 
 /// Breaking ABI changes: incompatible CLI flag removal/rename, stdout contract
 /// changes, exit-code semantics changes.
@@ -92,7 +109,47 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// obligation. An `infs` that forwards must therefore confirm the minor it is
 /// talking to and refuse, rather than write a proof artifact whose contents are
 /// not the ones the manifest asked for.
-pub const COMPILER_ABI_MINOR: u32 = 4;
+///
+/// Minor 5 adds the additive `--target <name>` flag to `infc`, naming the
+/// runtime the emitted module is built for from the vocabulary [`TargetName`]
+/// holds. It is backward compatible in the same sense as the minors above:
+/// omitting the flag selects [`TargetName::DEFAULT`], which is what every
+/// earlier minor built for, so a minor-4 `infs` still pairs with a minor-5
+/// `infc`. The reverse pairing is the one callers must gate on, and it has to be
+/// gated per *name* rather than on this single minor: each name enters the
+/// vocabulary at its own minor, recorded by [`TargetName::abi_minor`], so one
+/// floor set at the earliest of them would wave a later name past a compiler
+/// that cannot build for it. What an ungated forward costs depends on the name
+/// it drops. For a name whose emission is byte-for-byte the default's, the
+/// artifact still runs and what is lost is that target's conformance check,
+/// which silently never ran. For a name whose emission differs, what is lost is
+/// the bytes: the build ships a module in the default's shape, which the runtime
+/// the manifest named cannot invoke. An `infs` that forwards must therefore
+/// confirm the minor the name it is forwarding needs, and refuse rather than
+/// build for a target it cannot ask for. The gate belongs only to a name whose
+/// omission would change the artifact: a forward of [`TargetName::DEFAULT`] is
+/// *omitted* rather than gated, because dropping it selects the same target the
+/// older compiler already builds for, and gating it would turn every project
+/// build against an older `infc` into the hard error this flag was designed not
+/// to cause.
+///
+/// Minor 6 adds no flag. It adds the name `stellar` to the vocabulary
+/// [`TargetName`] holds, and with it the first target whose artifact is not the
+/// default's — a module wrapped in a contract calling convention rather than
+/// the plain WebAssembly every earlier minor emitted. It is backward compatible
+/// in the same sense as the minors above: a build that names no target, or
+/// names `wasm32`, gets exactly the artifact minor 5 produced, so a minor-5
+/// `infs` still pairs with a minor-6 `infc`. The reverse pairing is the one
+/// callers must gate on, and it is the case the per-name accessor exists for. A
+/// forward that *reaches* a minor-5 `infc` fails loudly, because that compiler
+/// parses `--target` and has no such name; what a caller must not do is decide
+/// the flag is unnecessary and omit it, because then the build succeeds and
+/// ships a module in the default's shape, which the Stellar runtime cannot
+/// invoke. So the gate is on [`TargetName::Stellar`]'s own
+/// [`TargetName::abi_minor`] — neither on this constant, which any later
+/// additive flag will bump past it, nor on the minor `--target` itself entered
+/// at, which is five and would wave this name through.
+pub const COMPILER_ABI_MINOR: u32 = 6;
 
 /// A post-MVP WebAssembly proposal that a project may opt into.
 ///
@@ -341,6 +398,217 @@ pub fn resolve_wasm_features(
         resolved.push(feature);
     }
     Ok(resolved)
+}
+
+/// A runtime a build may target, as it is named in a project's `Inference.toml`
+/// and on the `infc --target` command line.
+///
+/// The axis is the runtime the module is built for, not a compiler back end and
+/// not a target triple. [`Self::Wasm32`] is the generic value — a module for any
+/// WebAssembly embedder that imposes no ABI of its own — and every further name
+/// stands for one specific runtime, which is why this is a closed vocabulary
+/// rather than a triple parsed at the boundary.
+///
+/// It is deliberately separate from the emission-side target in
+/// `inference-wasm-codegen`, for the reason [`WasmFeatureName`] is separate from
+/// that crate's `EmitFeatures`: this is the set a user may *request*, that one is
+/// the set code generation knows how to *produce*, and the two are not the same
+/// set while a target is being built. `inference-wasm-codegen` carries the
+/// cross-check that maps one onto the other.
+///
+/// Adding a variant carries three obligations, each of which fails a compile or a
+/// test rather than resting on review: the variant records its own
+/// [`Self::abi_minor`], [`COMPILER_ABI_MINOR`] is bumped to that value, and every
+/// exhaustive match from a name onto an emission target gains an arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TargetName {
+    /// General-purpose WebAssembly, for an embedder that imposes no ABI of its
+    /// own. The default, and what every build produced before a target could be
+    /// named.
+    Wasm32,
+
+    /// A Stellar smart contract, for the Soroban host.
+    ///
+    /// The runtime imposes a calling convention of its own — every exported
+    /// method takes and returns the host's 64-bit tagged word — so this is the
+    /// first name whose artifact is not the default's. What a build for it may
+    /// contain is correspondingly narrower: no proof mode, no post-MVP
+    /// instruction family, and an exported function carrying only the scalar
+    /// types the convention can encode without a host object. Code generation
+    /// owns the last of those; the two here are the ones a front end can answer
+    /// before spawning a compiler at all.
+    Stellar,
+}
+
+impl TargetName {
+    /// Every requestable target, in canonical order. The rendered supported-set
+    /// listing in diagnostics comes from here, so a new variant surfaces in every
+    /// "unknown target" message with no further edit.
+    pub const ALL: [Self; 2] = [Self::Wasm32, Self::Stellar];
+
+    /// The target a build gets when it names none, on either surface.
+    ///
+    /// A single constant rather than a `Default` impl per surface: the manifest
+    /// default and the flag default have to be the same target, and a second
+    /// spelling of it is a second thing to keep in step.
+    pub const DEFAULT: Self = Self::Wasm32;
+
+    /// The target as it is written in `Inference.toml` and on the `--target`
+    /// command line.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Wasm32 => "wasm32",
+            Self::Stellar => "stellar",
+        }
+    }
+
+    /// The target written exactly as `name`, or `None`.
+    ///
+    /// The inverse of [`Self::as_str`]: matching is exact and case-sensitive, and
+    /// no whitespace is trimmed. Accepting a near-miss would build the artifact
+    /// for a runtime the author did not name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.as_str() == name)
+    }
+
+    /// The `infc` ABI minor at which this target became requestable.
+    ///
+    /// Per name rather than a single minimum: names enter the vocabulary at
+    /// different minors, so a caller that gated a forward on one floor would
+    /// either refuse pairings that work or, worse, forward a name to a compiler
+    /// that parses the flag and cannot build for it. A caller asks
+    /// "does this `infc` reach *this name*", never "does it reach targets".
+    #[must_use]
+    pub fn abi_minor(self) -> u32 {
+        match self {
+            Self::Wasm32 => 5,
+            Self::Stellar => 6,
+        }
+    }
+
+    /// Whether a build for this target may run in proof mode.
+    ///
+    /// Proof mode emits Inference's custom `0xfc` non-deterministic
+    /// instructions, which no runtime but a general-purpose WebAssembly
+    /// embedder under our own tooling can decode. A target that refuses them
+    /// refuses the mode.
+    ///
+    /// Mirrored by the emission-side target in `inference-wasm-codegen`, which
+    /// is where the refusal is enforced; this copy is what lets a front end
+    /// holding only a name — `infs` reading a manifest, before any compiler is
+    /// spawned — reject the combination in its own words. The two are held to
+    /// each other by that crate's mirror test, so the copy cannot drift into a
+    /// second opinion.
+    #[must_use]
+    pub fn supports_proof_mode(self) -> bool {
+        matches!(self, Self::Wasm32)
+    }
+
+    /// Whether a build for this target may request a post-MVP instruction
+    /// family.
+    ///
+    /// The same mirror rule as [`Self::supports_proof_mode`]: the emission-side
+    /// target decides, this copy exists for a front end that has only the name.
+    #[must_use]
+    pub fn permits_bulk_memory(self) -> bool {
+        matches!(self, Self::Wasm32)
+    }
+}
+
+/// Names that are not requestable and earn a dedicated diagnostic anyway,
+/// because the generic "unknown target" would be misleading about them.
+///
+/// The single entry is the former name of [`TargetName::Stellar`], and its
+/// message redirects to the current spelling. The message reads the name off
+/// this slice rather than spelling it into prose, so promoting or retiring one
+/// is an edit here rather than to a sentence.
+///
+/// The wording on [`TargetError::ReservedTarget`] says "former name", which is
+/// true of everything in this slice today and is the obligation an addition
+/// takes on: a name added here for some other reason — a target the emitter
+/// carries before a user may ask for it, say — needs its own variant rather
+/// than this one, or the message will tell the user to write a spelling that
+/// does not exist.
+///
+/// Deleting an entry is only most of the edit. The accepted-target set is also
+/// restated in prose that no test can make red, and each of these has to move in
+/// the same change:
+///
+/// - `apps/infs/docs/inference-toml.md` — the accepted values listed under the
+///   `[build]` `target` field.
+/// - `book/src/projects-and-the-infs-toolchain.md` — the `target` row of the
+///   manifest field table, and the paragraph on case sensitivity that names the
+///   rejected spellings.
+/// - `apps/infs/src/project/scaffold.rs` — the `[build]` comment the scaffolder
+///   writes into a new project's `Inference.toml`.
+pub const RESERVED_TARGET_NAMES: &[&str] = &["soroban"];
+
+/// Which surface a target was named on, so a diagnostic can name the exact thing
+/// the user has to edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetSource {
+    /// The `target` key of a project's `Inference.toml` `[build]` table.
+    Manifest,
+    /// The `--target` flag on an `infc` command line.
+    Flag,
+}
+
+impl TargetSource {
+    /// The backtick-quoted surface name a message points the user at.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manifest => "`[build] target`",
+            Self::Flag => "`--target`",
+        }
+    }
+}
+
+/// The supported set as a diagnostic renders it: backtick-quoted names, comma
+/// separated, in canonical order.
+#[must_use]
+pub fn supported_targets_listing() -> String {
+    TargetName::ALL
+        .iter()
+        .map(|t| format!("`{}`", t.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Resolves the target named on `source` into the vocabulary, or returns the one
+/// diagnostic that rejects it.
+///
+/// This is the whole validation both front ends run — not just the wording — so
+/// the order the failure families are checked in is decided once. The vocabulary
+/// is consulted first and [`RESERVED_TARGET_NAMES`] second, which is what makes
+/// promoting a reserved name a one-line deletion: until the name is requestable
+/// it gets the reserved sentence, and the moment it is, the vocabulary answers
+/// first.
+///
+/// Matching is exact and case-sensitive and no whitespace is trimmed, for the
+/// reason [`TargetName::from_name`] gives.
+///
+/// # Errors
+///
+/// Returns [`TargetError::ReservedTarget`] for a name in
+/// [`RESERVED_TARGET_NAMES`], and [`TargetError::UnknownTarget`] for anything
+/// else outside the vocabulary.
+pub fn resolve_target(entry: &str, source: TargetSource) -> Result<TargetName, TargetError> {
+    if let Some(target) = TargetName::from_name(entry) {
+        return Ok(target);
+    }
+    if RESERVED_TARGET_NAMES.contains(&entry) {
+        return Err(TargetError::ReservedTarget {
+            entry: entry.to_string(),
+            surface: source,
+        });
+    }
+    Err(TargetError::UnknownTarget {
+        entry: entry.to_string(),
+        surface: source,
+    })
 }
 
 /// One WASM memory page in bytes.
@@ -603,9 +871,9 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one_dot_four() {
+    fn abi_version_is_one_dot_six() {
         assert_eq!(COMPILER_ABI_MAJOR, 1);
-        assert_eq!(COMPILER_ABI_MINOR, 4);
+        assert_eq!(COMPILER_ABI_MINOR, 6);
     }
 
     #[test]
@@ -1115,6 +1383,233 @@ mod tests {
         assert_eq!(
             manifest.reason, flag.reason,
             "the same numbers must be refused for the same reason on either surface"
+        );
+    }
+    // Compilation target vocabulary ---
+
+    #[test]
+    fn every_target_round_trips_through_its_name() {
+        for target in TargetName::ALL {
+            assert_eq!(TargetName::from_name(target.as_str()), Some(target));
+        }
+    }
+
+    #[test]
+    fn the_default_target_is_wasm32() {
+        assert_eq!(TargetName::DEFAULT, TargetName::Wasm32);
+        assert_eq!(TargetName::DEFAULT.as_str(), "wasm32");
+    }
+
+    #[test]
+    fn target_matching_is_case_sensitive_and_untrimmed() {
+        for near_miss in [
+            "Wasm32", "WASM32", "wasm_32", " wasm32", "wasm32 ", "Stellar", "STELLAR",
+            " stellar", "stellar ",
+        ] {
+            assert_eq!(
+                TargetName::from_name(near_miss),
+                None,
+                "`{near_miss}` must not resolve"
+            );
+        }
+    }
+
+    /// The minor each name became requestable at, recorded by hand.
+    ///
+    /// This is the second opinion that turns [`TargetName::abi_minor`] into a
+    /// decision rather than a copy: adding a variant leaves it uncovered here
+    /// until someone writes its minor down. It is deliberately not derived from
+    /// [`COMPILER_ABI_MINOR`], which *any* additive `infc` flag bumps — the four
+    /// minors before this one had nothing to do with targets — so an unrelated
+    /// bump must not turn this red.
+    const TARGET_ENTRY_MINORS: &[(TargetName, u32)] =
+        &[(TargetName::Wasm32, 5), (TargetName::Stellar, 6)];
+
+    /// The safety property: no name may claim a minor this compiler does not
+    /// advertise. A name whose minor ran ahead of [`COMPILER_ABI_MINOR`] would
+    /// have callers gate a forward on a floor no released compiler reports, so
+    /// every pairing would be refused.
+    #[test]
+    fn no_target_claims_a_minor_the_compiler_does_not_advertise() {
+        for target in TargetName::ALL {
+            assert!(
+                target.abi_minor() <= COMPILER_ABI_MINOR,
+                "`{}` claims a minor this compiler does not advertise",
+                target.as_str()
+            );
+        }
+    }
+
+    /// The record must cover the vocabulary exactly, both ways: every name has a
+    /// minor written down, and nothing is written down that is not a name.
+    #[test]
+    fn every_target_records_the_minor_it_entered_at() {
+        assert_eq!(
+            TARGET_ENTRY_MINORS.len(),
+            TargetName::ALL.len(),
+            "every target's entry minor is recorded exactly once"
+        );
+        for &(target, minor) in TARGET_ENTRY_MINORS {
+            assert!(
+                TargetName::ALL.contains(&target),
+                "`{}` has a recorded minor but is not in the vocabulary",
+                target.as_str()
+            );
+            assert_eq!(
+                target.abi_minor(),
+                minor,
+                "`{}` reports a different minor than the one recorded",
+                target.as_str()
+            );
+        }
+        for target in TargetName::ALL {
+            assert!(
+                TARGET_ENTRY_MINORS.iter().any(|&(t, _)| t == target),
+                "`{}` entered the vocabulary with no recorded minor",
+                target.as_str()
+            );
+        }
+    }
+
+    /// A reserved name is one the vocabulary does *not* hold. The moment a name
+    /// becomes requestable its reserved entry is dead — [`resolve_target`]
+    /// consults the vocabulary first — and a dead entry is a diagnostic nobody
+    /// can reach and nobody notices is wrong.
+    #[test]
+    fn no_reserved_name_is_also_requestable() {
+        for reserved in RESERVED_TARGET_NAMES {
+            assert_eq!(
+                TargetName::from_name(reserved),
+                None,
+                "`{reserved}` is requestable, so remove it from `RESERVED_TARGET_NAMES`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_supported_name_resolves_on_either_surface() {
+        for source in [TargetSource::Manifest, TargetSource::Flag] {
+            assert_eq!(resolve_target("wasm32", source), Ok(TargetName::Wasm32));
+            assert_eq!(resolve_target("stellar", source), Ok(TargetName::Stellar));
+        }
+    }
+
+    /// The two predicates a front end holding only a name can answer, pinned
+    /// per variant. They are copies of the emission-side target's, and the
+    /// mirror test in `inference-wasm-codegen` is what holds the copies to the
+    /// originals; this pins what the copies say, so a change here is deliberate
+    /// rather than a silent widening of what a manifest may ask for.
+    #[test]
+    fn each_target_records_what_it_permits() {
+        assert!(TargetName::Wasm32.supports_proof_mode());
+        assert!(TargetName::Wasm32.permits_bulk_memory());
+        assert!(!TargetName::Stellar.supports_proof_mode());
+        assert!(!TargetName::Stellar.permits_bulk_memory());
+    }
+
+    #[test]
+    fn target_source_selects_the_spelling_the_message_names() {
+        assert_eq!(TargetSource::Manifest.label(), "`[build] target`");
+        assert_eq!(TargetSource::Flag.label(), "`--target`");
+    }
+
+    #[test]
+    fn the_supported_listing_is_rendered_from_the_vocabulary() {
+        assert_eq!(supported_targets_listing(), "`wasm32`, `stellar`");
+    }
+
+    /// The rendering is pinned character for character: the `#[error(...)]`
+    /// attribute is the only copy of this wording and both front ends show it
+    /// verbatim.
+    #[test]
+    fn an_unknown_target_lists_the_supported_set() {
+        let err = resolve_target("wasm64", TargetSource::Manifest)
+            .expect_err("`wasm64` is not in the vocabulary");
+        assert_eq!(
+            err.to_string(),
+            "Invalid `[build] target` value `wasm64`: unknown compilation target. \
+             Supported targets: `wasm32`, `stellar`."
+        );
+    }
+
+    /// The former name earns the dedicated sentence rather than the generic
+    /// "unknown target", which would be misleading about a runtime the compiler
+    /// does build for — and the sentence names the spelling that works, so the
+    /// message is a redirect rather than a refusal. Pinned character for
+    /// character: the `#[error(...)]` attribute is the only copy of this
+    /// wording.
+    #[test]
+    fn the_reserved_target_error_renders_its_exact_wording() {
+        assert_eq!(
+            resolve_target("soroban", TargetSource::Flag)
+                .expect_err("`soroban` is the former name")
+                .to_string(),
+            "Invalid `--target` value `soroban`: `soroban` is the former name of the `stellar` \
+             target and is not accepted; write `stellar` instead. Supported targets: `wasm32`, \
+             `stellar`."
+        );
+    }
+
+    /// The redirect must name a spelling that resolves, or it sends the user
+    /// from one rejection to another. Nothing else ties the sentence to the
+    /// vocabulary: the name is written into the `#[error(...)]` attribute by
+    /// hand.
+    #[test]
+    fn the_redirect_names_a_target_that_resolves() {
+        let message = resolve_target("soroban", TargetSource::Manifest)
+            .expect_err("`soroban` is the former name")
+            .to_string();
+        let suggested = message
+            .split("write `")
+            .nth(1)
+            .and_then(|rest| rest.split('`').next())
+            .expect("the redirect names a spelling to write");
+        assert_eq!(
+            resolve_target(suggested, TargetSource::Manifest),
+            Ok(TargetName::Stellar),
+            "the redirect suggests `{suggested}`, which does not resolve"
+        );
+    }
+
+    /// A trailing space inside a TOML string is invisible in the echoed entry, so
+    /// the message has to name the cause or the user reads their own spelling
+    /// reported back as unknown.
+    #[test]
+    fn whitespace_around_a_supported_target_is_named_as_the_cause() {
+        let err = resolve_target(" wasm32", TargetSource::Flag)
+            .expect_err("whitespace is rejected, never trimmed");
+        assert_eq!(
+            err.to_string(),
+            "Invalid `--target` value ` wasm32`: unknown compilation target. Supported targets: \
+             `wasm32`, `stellar`. Target names are matched exactly and this entry has \
+             surrounding whitespace: write `wasm32`."
+        );
+    }
+
+    /// The hint reaches the reserved names too: without it `"soroban "` reads as
+    /// an unknown target, which is the message the reserved sentence exists to
+    /// replace, with no sign of the space that caused it.
+    #[test]
+    fn whitespace_around_a_reserved_target_is_named_as_the_cause() {
+        let err = resolve_target("soroban ", TargetSource::Manifest)
+            .expect_err("whitespace is rejected, never trimmed");
+        assert!(
+            err.to_string().ends_with(
+                "Target names are matched exactly and this entry has surrounding whitespace: \
+                 write `soroban`."
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// A name with no whitespace and no near-miss earns no hint, so the sentence
+    /// stays a signal rather than boilerplate on every rejection.
+    #[test]
+    fn an_ordinary_typo_earns_no_whitespace_hint() {
+        let err = resolve_target("nope", TargetSource::Flag).expect_err("`nope` is unknown");
+        assert!(
+            !err.to_string().contains("surrounding whitespace"),
+            "got: {err}"
         );
     }
 }

@@ -10,8 +10,9 @@
 //! - [`Target::Wasm32`] -- General-purpose WASM with Inference non-deterministic
 //!   instruction support. Used for both verification (`proof` mode) and general
 //!   execution (`compile` mode).
-//! - [`Target::Soroban`] -- Stellar Soroban smart contract target for standard code
-//!   without non-deterministic instructions.
+//! - [`Target::Stellar`] -- Stellar smart contract target for standard code
+//!   without non-deterministic instructions, whose exported functions are held
+//!   to the scalar set the contract calling convention can encode.
 //!
 //! # Compilation Mode
 //!
@@ -83,13 +84,24 @@ pub enum Target {
     #[default]
     Wasm32,
 
-    /// Stellar Soroban smart contract target.
+    /// Stellar smart contract target.
     ///
-    /// Produces size-optimized binaries to fit within the 64 KB contract size limit.
-    ///
-    /// Only supports `compile` mode -- `proof` mode requires custom intrinsics that
-    /// are incompatible with the Soroban VM.
-    Soroban,
+    /// The target narrows what a build may *request*; it does not change what
+    /// code generation produces. For any configuration both targets accept,
+    /// emission is byte-for-byte what [`Target::Wasm32`] emits -- nothing on the
+    /// emission path reads a `Target`. What differs is the envelope: `proof` mode
+    /// is refused because its custom 0xfc intrinsics are not decodable by the
+    /// Stellar VM, a bulk-memory request is refused (see
+    /// [`Target::permits_bulk_memory`]), an exported function outside the scalar
+    /// set the contract calling convention can encode is refused, and
+    /// [`OptLevel::Oz`] is this target's
+    /// [`default_opt_level`](Target::default_opt_level), for a post-build tool
+    /// to act on. The level actually recorded on the output is whatever the
+    /// caller passes: the `Debug` build profile resolves this target to
+    /// [`OptLevel::O0`], and only `Release` takes the target default. No
+    /// optimization pass runs during emission (see [`OptLevel`]) and no contract
+    /// size limit is checked anywhere in the compiler.
+    Stellar,
 }
 
 /// Compilation mode controlling spec-node handling.
@@ -290,13 +302,37 @@ impl EmitFeatures {
 }
 
 impl Target {
+    /// Every target code generation can emit for, in canonical order.
+    ///
+    /// This is the emission side of the axis and is deliberately allowed to be
+    /// wider than `inference_compiler_interface::TargetName`: a target reaches
+    /// this enum when the emitter knows what to do with it, and the shared
+    /// vocabulary when a user may ask for it, and those are two different dates.
+    /// The cross-check that every requestable name lands on a target here lives
+    /// in this module's tests.
+    pub const ALL: [Self; 2] = [Self::Wasm32, Self::Stellar];
+
+    /// This target's canonical name: the lowercase spelling
+    /// `inference_compiler_interface::TargetName` uses for it, so the two enums
+    /// can be checked against each other rather than trusted to agree.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Wasm32 => "wasm32",
+            Self::Stellar => "stellar",
+        }
+    }
+
     /// Whether a module using bulk memory instructions is accepted by this
     /// target's runtime.
     ///
-    /// `Soroban` rejects them for now. Whether its validator admits the
-    /// bulk-memory opcodes is unverified, and a build-time refusal is a better
-    /// failure than a contract that is rejected at deploy time; relax this once
-    /// there is evidence.
+    /// `Stellar` rejects them, and does so deliberately rather than for want of
+    /// evidence: that runtime's documented wasmi configuration enables the
+    /// proposal. Keeping the target's output inside WebAssembly 1.0 is the
+    /// conservative choice -- it is what every deployment path accepts, no
+    /// lowering the target can reach today needs the instructions (the region
+    /// fill and copy lowerings have a load/store form), and a build-time refusal
+    /// is a better failure than a contract rejected at deploy time.
     ///
     /// # Examples
     ///
@@ -304,7 +340,7 @@ impl Target {
     /// use inference_wasm_codegen::Target;
     ///
     /// assert!(Target::Wasm32.permits_bulk_memory());
-    /// assert!(!Target::Soroban.permits_bulk_memory());
+    /// assert!(!Target::Stellar.permits_bulk_memory());
     /// ```
     #[must_use]
     pub fn permits_bulk_memory(self) -> bool {
@@ -314,7 +350,7 @@ impl Target {
     /// Returns whether this target supports proof mode.
     ///
     /// Only `Wasm32` supports proof mode because it uses custom 0xfc non-deterministic
-    /// instructions for formal verification. Other targets (e.g., `Soroban`) cannot
+    /// instructions for formal verification. Other targets (e.g., `Stellar`) cannot
     /// process these custom instructions.
     ///
     /// # Examples
@@ -323,10 +359,10 @@ impl Target {
     /// use inference_wasm_codegen::Target;
     ///
     /// assert!(Target::Wasm32.supports_proof_mode());
-    /// assert!(!Target::Soroban.supports_proof_mode());
+    /// assert!(!Target::Stellar.supports_proof_mode());
     /// ```
     #[must_use]
-    pub fn supports_proof_mode(&self) -> bool {
+    pub fn supports_proof_mode(self) -> bool {
         matches!(self, Self::Wasm32)
     }
 
@@ -335,7 +371,7 @@ impl Target {
     /// | Target  | `OptLevel` |
     /// |---------|----------|
     /// | Wasm32  | O3       |
-    /// | Soroban | Oz       |
+    /// | Stellar | Oz       |
     ///
     /// The optimization level is target-specific and mode-independent. In `proof`
     /// mode, spec functions are emitted without optimization to preserve structural
@@ -348,13 +384,13 @@ impl Target {
     /// use inference_wasm_codegen::{Target, OptLevel};
     ///
     /// assert_eq!(Target::Wasm32.default_opt_level(), OptLevel::O3);
-    /// assert_eq!(Target::Soroban.default_opt_level(), OptLevel::Oz);
+    /// assert_eq!(Target::Stellar.default_opt_level(), OptLevel::Oz);
     /// ```
     #[must_use]
-    pub fn default_opt_level(&self) -> OptLevel {
+    pub fn default_opt_level(self) -> OptLevel {
         match self {
             Self::Wasm32 => OptLevel::O3,
-            Self::Soroban => OptLevel::Oz,
+            Self::Stellar => OptLevel::Oz,
         }
     }
 }
@@ -384,8 +420,8 @@ mod tests {
     }
 
     #[test]
-    fn soroban_default_opt_level_is_oz() {
-        assert_eq!(Target::Soroban.default_opt_level(), OptLevel::Oz);
+    fn stellar_default_opt_level_is_oz() {
+        assert_eq!(Target::Stellar.default_opt_level(), OptLevel::Oz);
     }
 
     #[test]
@@ -394,8 +430,8 @@ mod tests {
     }
 
     #[test]
-    fn soroban_does_not_support_proof_mode() {
-        assert!(!Target::Soroban.supports_proof_mode());
+    fn stellar_does_not_support_proof_mode() {
+        assert!(!Target::Stellar.supports_proof_mode());
     }
 
     #[test]
@@ -425,7 +461,7 @@ mod tests {
 
     #[test]
     fn default_features_are_permitted_by_every_target() {
-        for target in [Target::Wasm32, Target::Soroban] {
+        for target in Target::ALL {
             assert_eq!(EmitFeatures::default().first_rejected_by(target), None);
         }
     }
@@ -439,9 +475,9 @@ mod tests {
     }
 
     #[test]
-    fn soroban_rejects_bulk_memory() {
+    fn stellar_rejects_bulk_memory() {
         assert_eq!(
-            EmitFeatures { bulk_memory: true }.first_rejected_by(Target::Soroban),
+            EmitFeatures { bulk_memory: true }.first_rejected_by(Target::Stellar),
             Some("bulk-memory")
         );
     }
@@ -468,6 +504,92 @@ mod tests {
                 EmitFeatures::default(),
                 "`{}` must set a field",
                 name.as_str()
+            );
+        }
+    }
+
+    /// Every target a user may request must map onto an emission target that
+    /// agrees with it on the name and on what it permits, or the two enums have
+    /// drifted and a request resolves to something other than what it spells.
+    ///
+    /// The exhaustive match is what enforces that the mapping *exists*: a new
+    /// `TargetName` fails to compile here until an emission target is decided for
+    /// it. The name equality is what catches the other drift — the same runtime
+    /// entering both enums under two spellings, which compiles fine and sends
+    /// every diagnostic and every manifest key to the wrong string.
+    ///
+    /// The predicate equalities catch the drift that costs a user a wrong
+    /// artifact rather than a wrong word. `TargetName` carries its own copies of
+    /// them so a front end holding only a name can refuse a combination before
+    /// spawning a compiler; if a copy ever said yes where emission says no, that
+    /// front end would forward a build this crate then refuses, and if it said
+    /// no where emission says yes it would refuse a build that works. Neither
+    /// enum is the authority on its own — they must simply agree.
+    #[test]
+    fn every_requestable_target_maps_onto_an_emission_target() {
+        use inference_compiler_interface::TargetName;
+
+        for name in TargetName::ALL {
+            let emitted = match name {
+                TargetName::Wasm32 => Target::Wasm32,
+                TargetName::Stellar => Target::Stellar,
+            };
+            assert_eq!(
+                name.as_str(),
+                emitted.as_str(),
+                "the requestable name and the emission target disagree on the spelling"
+            );
+            assert_eq!(
+                name.supports_proof_mode(),
+                emitted.supports_proof_mode(),
+                "`{}` disagrees with its emission target about proof mode",
+                name.as_str()
+            );
+            assert_eq!(
+                name.permits_bulk_memory(),
+                emitted.permits_bulk_memory(),
+                "`{}` disagrees with its emission target about bulk memory",
+                name.as_str()
+            );
+        }
+    }
+
+    /// `Target::ALL` is what every "for each target" check iterates, so a variant
+    /// missing from it is a target nothing checks. The exhaustive match makes a
+    /// new variant a compile error here, and the count is the reminder to add it.
+    #[test]
+    fn all_lists_every_emission_target_once() {
+        for target in Target::ALL {
+            match target {
+                Target::Wasm32 | Target::Stellar => {}
+            }
+        }
+        assert_eq!(
+            Target::ALL.len(),
+            2,
+            "a new target must be added to `Target::ALL`"
+        );
+
+        let mut names: Vec<&str> = Target::ALL.iter().map(|t| t.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            Target::ALL.len(),
+            "two targets share a name: {names:?}"
+        );
+    }
+
+    #[test]
+    fn each_target_is_named_in_lowercase_kebab_case() {
+        for target in Target::ALL {
+            let name = target.as_str();
+            assert!(
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "`{name}` is not a manifest-spellable target name"
             );
         }
     }

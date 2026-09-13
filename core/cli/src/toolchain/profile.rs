@@ -8,7 +8,7 @@
 //!
 //! # Profile Matrix
 //!
-//! | Profile | Wasm32 Compile | Soroban Compile | Proof (any target) |
+//! | Profile | Wasm32 Compile | Stellar Compile | Proof (any target) |
 //! |---------|----------------|-----------------|---------------------|
 //! | Debug   | O0             | O0              | O3 / Oz             |
 //! | Release | O3             | Oz              | O3 / Oz             |
@@ -35,7 +35,7 @@ pub enum BuildProfile {
     /// `--debug` flag in a future issue.
     #[allow(dead_code)]
     Debug,
-    /// Records the target-appropriate level: Wasm32 gets `-O3`, Soroban gets
+    /// Records the target-appropriate level: Wasm32 gets `-O3`, Stellar gets
     /// `-Oz`.
     #[default]
     Release,
@@ -57,7 +57,7 @@ impl BuildProfile {
                 Self::Debug => OptLevel::O0,
                 Self::Release => match target {
                     Target::Wasm32 => OptLevel::O3,
-                    Target::Soroban => OptLevel::Oz,
+                    Target::Stellar => OptLevel::Oz,
                 },
             },
         }
@@ -84,9 +84,9 @@ mod tests {
     }
 
     #[test]
-    fn release_soroban_compile_is_oz() {
+    fn release_stellar_compile_is_oz() {
         assert_eq!(
-            BuildProfile::Release.resolve_opt_level(Target::Soroban, CompilationMode::Compile),
+            BuildProfile::Release.resolve_opt_level(Target::Stellar, CompilationMode::Compile),
             OptLevel::Oz,
         );
     }
@@ -101,10 +101,10 @@ mod tests {
     }
 
     #[test]
-    fn release_soroban_proof_is_oz() {
+    fn release_stellar_proof_is_oz() {
         // Proof mode always records the target's release-profile level.
         assert_eq!(
-            BuildProfile::Release.resolve_opt_level(Target::Soroban, CompilationMode::Proof),
+            BuildProfile::Release.resolve_opt_level(Target::Stellar, CompilationMode::Proof),
             OptLevel::Oz,
         );
     }
@@ -120,9 +120,9 @@ mod tests {
     }
 
     #[test]
-    fn debug_soroban_compile_is_o0() {
+    fn debug_stellar_compile_is_o0() {
         assert_eq!(
-            BuildProfile::Debug.resolve_opt_level(Target::Soroban, CompilationMode::Compile),
+            BuildProfile::Debug.resolve_opt_level(Target::Stellar, CompilationMode::Compile),
             OptLevel::O0,
         );
     }
@@ -137,10 +137,10 @@ mod tests {
     }
 
     #[test]
-    fn debug_soroban_proof_is_oz() {
+    fn debug_stellar_proof_is_oz() {
         // Proof mode ignores profile, always records the target's release-profile level.
         assert_eq!(
-            BuildProfile::Debug.resolve_opt_level(Target::Soroban, CompilationMode::Proof),
+            BuildProfile::Debug.resolve_opt_level(Target::Stellar, CompilationMode::Proof),
             OptLevel::Oz,
         );
     }

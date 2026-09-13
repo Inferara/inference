@@ -36,6 +36,7 @@ inference-cli = { path = "./core/cli", version = "0.0.1" }
 inference-wasm-to-v-translator = { path = "./core/wasm-to-v", version = "0.0.1" }
 inference-wasm-codegen = { path = "./core/wasm-codegen", version = "0.0.1" }
 inference-wasm-linker = { path = "./core/wasm-linker", version = "0.0.1" }
+inference-stellar-abi = { path = "./core/stellar-abi", version = "0.0.1" }
 inference-analysis = { path = "./core/analysis", version = "0.0.1" }
 inference-compiler-interface = { path = "./core/compiler-interface", version = "0.0.1" }
 inference-fn-key = { path = "./core/fn-key", version = "0.0.1" }
@@ -60,6 +61,13 @@ wat-fmt = { path = "./tools/wat-fmt", version = "0.0.9" }
 inf-wast = { path = "./tools/inf-wast", version = "0.0.9" }
 inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
 wasm-encoder = "0.254.0"
+# Stock upstream wasmparser, held at the version `wasm-encoder` is held at.
+# Distinct from `inf-wasmparser` above and not a replacement for it: the fork
+# accepts the custom non-deterministic opcodes unconditionally, so only the
+# stock decoder can answer "is this WebAssembly 1.0?". Default features are off
+# because the only consumer parses and validates a core module: no component
+# model, no serde, no SIMD.
+wasmparser = { version = "0.254.0", default-features = false, features = ["std", "validate", "features", "hash-collections"] }
 
 anyhow = "1.0.104"
 thiserror = "2.0.19"

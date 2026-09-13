@@ -207,8 +207,13 @@ fn write_git_files(project_path: &Path) -> Result<()> {
 /// The `[build] mode` field is emitted explicitly because it is load-bearing
 /// in project mode (`infs build`/`run` consume it), so the scaffolded file must
 /// produce a value the loader reads back consistently — the round-trip is
-/// covered by a test. `target`/`optimize` stay commented because they are not
-/// yet consumed (writing them would imply they work). `[build.wasm-opt]` stays
+/// covered by a test. `target` stays commented because the default is what a
+/// new project wants — generic WebAssembly, buildable and runnable with no
+/// further choice — and the key is shown so it is discoverable, with both
+/// accepted values named beside it; it is validated on load rather than
+/// ignored, so uncommenting it and writing a name that does not exist is a load
+/// error. `optimize` stays commented because it is not yet
+/// consumed (writing it would imply it works). `[build.wasm-opt]` stays
 /// commented because it is opt-in and requires an external `wasm-opt` binary
 /// the project may not have installed. `[memory]` stays commented because its
 /// defaults live in code and an uncommented table would forward flags to `infc`
@@ -234,6 +239,15 @@ infc_version = "{infc_version}"
 # std = "0.1"
 
 [build]
+# The runtime the module is built for. "wasm32" -- the default -- is generic
+# WebAssembly, for an embedder that imposes no ABI of its own; "stellar" is a
+# Soroban smart contract, whose exported methods take and return the host's
+# 64-bit tagged word. "stellar" narrows what the project may contain: no proof
+# mode, no wasm-features, no [build.wasm-opt], no `infs run`, and an exported
+# function's parameters and return confined to the scalar set the convention
+# encodes. Names are matched exactly; an unrecognized one is a load error, not a
+# fall back to the default.
+# target = "wasm32"
 # Compilation mode: "compile" (executable WASM) or "proof" (Rocq specs).
 mode = "compile"
 # Post-MVP WebAssembly proposals to opt into. Empty (the default) emits pure
@@ -241,7 +255,6 @@ mode = "compile"
 # Changing this changes the instruction set of every artifact, in both modes.
 # wasm-features = ["bulk-memory"]
 # Not yet consumed:
-# target = "wasm32"
 # optimize = "release"
 
 # [build.wasm-opt]

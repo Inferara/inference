@@ -1,0 +1,4 @@
+// A method that takes nothing and answers: the wrap side on its own.
+pub fn answer() -> u32 {
+    return 42;
+}

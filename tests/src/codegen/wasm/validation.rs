@@ -3,7 +3,10 @@
 //! These tests verify:
 //! - `codegen()` produces valid `CodegenOutput` with non-empty WASM bytes
 //! - WASM contains expected content (exported functions, custom opcodes)
-//! - Target validation (proof + Soroban rejection, Soroban + non-det rejection)
+//! - Target validation (proof + Stellar rejection, Stellar + non-det rejection).
+//!   The fourth target gate — the Stellar export admissibility rules — has its
+//!   own module, `stellar_gate`, because it reads the export descriptor rather
+//!   than the configuration and needs a fixture per refusal.
 //! - Proof mode metadata matches compile mode for non-det-free code
 //! - `has_main` detection
 
@@ -140,37 +143,36 @@ pub fn read_first() -> i32 {
 
     // Target validation tests ---
 
+    /// Pinned whole, not by substring: the refusal renders the target through
+    /// `{target:?}`, so the user-visible text moves whenever the variant is
+    /// renamed while every substring that omits the name keeps passing.
     #[test]
-    fn codegen_rejects_proof_with_soroban() {
+    fn codegen_rejects_proof_with_stellar() {
         cov_mark::check!(wasm_codegen_proof_mode_rejected_non_wasm32);
         let source = "pub fn hello_world() -> i32 { return 42; }";
-        let result = codegen_with_target_mode(source, Target::Soroban, CompilationMode::Proof);
-        assert!(
-            result.is_err(),
-            "Proof mode with Soroban should be rejected"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("Proof mode requires Wasm32"),
-            "Error message should mention Wasm32 requirement. Got: {}",
-            err_msg
+        let err = codegen_with_target_mode(source, Target::Stellar, CompilationMode::Proof)
+            .expect_err("Proof mode with Stellar should be rejected");
+        assert_eq!(
+            err.to_string(),
+            "Proof mode requires Wasm32 target. Proof mode emits custom 0xfc \
+             non-deterministic instructions that only the Wasm32 target supports; \
+             the Stellar target cannot process these."
         );
     }
 
     #[test]
-    fn codegen_rejects_soroban_with_nondet() {
-        cov_mark::check!(wasm_codegen_soroban_rejects_nondet_function);
+    fn codegen_rejects_stellar_with_nondet() {
+        cov_mark::check!(wasm_codegen_stellar_rejects_nondet_function);
         let source = "pub fn with_nondet() -> i32 { return @; }";
-        let result = codegen_with_target_mode_no_analysis(source, Target::Soroban, CompilationMode::Compile);
-        assert!(
-            result.is_err(),
-            "Soroban target with non-det should be rejected"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("non-deterministic"),
-            "Error message should mention non-deterministic operations. Got: {}",
-            err_msg
+        let err =
+            codegen_with_target_mode_no_analysis(source, Target::Stellar, CompilationMode::Compile)
+                .expect_err("Stellar target with non-det should be rejected");
+        assert_eq!(
+            err.to_string(),
+            "Stellar target does not support non-deterministic operations. \
+             Function 'with_nondet' contains non-deterministic constructs (uzumaki, \
+             forall, exists, assume, or unique blocks) that produce custom \
+             0xfc WebAssembly instructions incompatible with the Stellar VM."
         );
     }
 
@@ -378,12 +380,12 @@ pub fn read_first() -> i32 {
     }
 
     #[test]
-    fn codegen_soroban_compile_succeeds() {
+    fn codegen_stellar_compile_succeeds() {
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let output =
-            codegen_with_target_mode(source, Target::Soroban, CompilationMode::Compile).unwrap();
+            codegen_with_target_mode(source, Target::Stellar, CompilationMode::Compile).unwrap();
 
-        assert_eq!(output.target(), Target::Soroban);
+        assert_eq!(output.target(), Target::Stellar);
         assert_eq!(output.mode(), CompilationMode::Compile);
         assert_eq!(output.opt_level(), OptLevel::Oz);
         assert!(!output.wasm().is_empty());

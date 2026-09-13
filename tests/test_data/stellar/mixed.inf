@@ -1,0 +1,8 @@
+// Both unwrap tags and a boolean selector, answering with a signed value.
+pub fn choose(a: u32, b: i32, c: bool) -> i32 {
+    if c {
+        return b;
+    }
+    let _unused: u32 = a;
+    return 0;
+}

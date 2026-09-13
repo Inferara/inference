@@ -95,8 +95,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::project_build::{
-    forward_memory_layout, forward_wasm_features, mode_flag, probe_compiler_compatibility,
-    run_project_build,
+    forward_memory_layout, forward_target, forward_wasm_features, mode_flag,
+    probe_compiler_compatibility, run_project_build,
 };
 use crate::errors::InfsError;
 use crate::project::manifest::{
@@ -104,7 +104,7 @@ use crate::project::manifest::{
 };
 use crate::project::{self, ProjectContext};
 use crate::toolchain::resolver::find_infc_with_source;
-use inference_compiler_interface::WasmFeatureName;
+use inference_compiler_interface::{TargetName, WasmFeatureName};
 
 /// Compilation mode forwarded to `infc --mode <…>`.
 ///
@@ -206,8 +206,8 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
 /// - The source file does not exist
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
-/// - the enclosing manifest requests `wasm-features` or a `[memory]` table the
-///   resolved `infc` cannot honor
+/// - the enclosing manifest names a `target`, requests `wasm-features`, or
+///   declares a `[memory]` table the resolved `infc` cannot honor
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     if !path.exists() {
@@ -215,6 +215,7 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     }
 
     let enclosing = enclosing_manifest(path)?;
+    let target = manifest_target(enclosing.as_ref().map(|(_, manifest)| manifest))?;
     let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
     let memory = manifest_memory(enclosing.as_ref().map(|(_, manifest)| manifest));
 
@@ -247,6 +248,7 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     let manifest_path = enclosing
         .as_ref()
         .map(|(dir, _)| dir.join(MANIFEST_FILE_NAME));
+    forward_target(&mut cmd, compat, target, manifest_path.as_deref())?;
     forward_wasm_features(&mut cmd, compat, &features, manifest_path.as_deref())?;
     forward_memory_layout(&mut cmd, compat, &memory, manifest_path.as_deref())?;
 
@@ -377,9 +379,26 @@ pub(crate) fn manifest_wasm_features(
     manifest.map_or_else(|| Ok(Vec::new()), |m| m.build.resolved_wasm_features())
 }
 
+/// Resolves the `[build] target` of an already-loaded enclosing manifest.
+///
+/// `None` — a source outside any project — names no target, which is
+/// [`TargetName::DEFAULT`]. Centralizing that default is why both single-file
+/// paths call this rather than reaching into `build.target` themselves: one
+/// project must not produce an artifact for two different runtimes depending on
+/// how the build was invoked.
+///
+/// # Errors
+///
+/// Returns an error if the manifest names a target outside the supported
+/// vocabulary. (A manifest loaded through [`enclosing_manifest`] has already been
+/// validated, so this is the programmatic-construction path.)
+pub(crate) fn manifest_target(manifest: Option<&InferenceToml>) -> Result<TargetName> {
+    manifest.map_or(Ok(TargetName::DEFAULT), |m| m.build.resolved_target())
+}
+
 /// Everything a single-file build takes from the enclosing project's manifest.
 ///
-/// Bundled rather than passed one by one because the four share a provenance:
+/// Bundled rather than passed one by one because they share a provenance:
 /// every one comes off the single [`enclosing_manifest`] load, and a build that
 /// mixed one project's features with another's dependencies would have read two
 /// manifests. Passing them as a unit is what makes that unrepresentable, and it
@@ -389,6 +408,8 @@ pub(crate) fn manifest_wasm_features(
 pub(crate) struct EnclosingSettings<'a> {
     /// `[wasm-dependencies]`, resolved to absolute paths.
     pub(crate) deps: &'a [(String, PathBuf)],
+    /// `[build] target`, resolved against the shared vocabulary.
+    pub(crate) target: TargetName,
     /// `[build] wasm-features`, resolved against the shared vocabulary.
     pub(crate) features: &'a [WasmFeatureName],
     /// The `[memory]` table as declared, keys still optional.

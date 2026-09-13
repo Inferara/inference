@@ -1,0 +1,5 @@
+// Negation, so the wrapped word carries a two's-complement pattern with the
+// sign bit set.
+pub fn negate_i32(x: i32) -> i32 {
+    return 0 - x;
+}

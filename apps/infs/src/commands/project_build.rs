@@ -55,7 +55,7 @@ use crate::project::ProjectContext;
 use crate::project::manifest::{MANIFEST_FILE_NAME, MemoryConfig, VerificationConfig};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
 use inference_compiler_interface::{
-    COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, WasmFeatureName, render_feature_list,
+    COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, TargetName, WasmFeatureName, render_feature_list,
 };
 
 /// Compiles the entry point of a discovered project (project mode).
@@ -126,6 +126,7 @@ use inference_compiler_interface::{
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
 /// - `out_dir` is requested but the resolved `infc` does not support `--out-dir`
+/// - the manifest names a `target` the resolved `infc` cannot build for
 /// - the manifest requests `wasm-features` the resolved `infc` cannot honor
 /// - the manifest declares a `[memory]` table the resolved `infc` cannot honor
 /// - the manifest asks to adopt external specifications on a proof-artifact
@@ -196,6 +197,8 @@ pub(crate) fn run_project_build(
     }
 
     let manifest_path = ctx.root.join(MANIFEST_FILE_NAME);
+    let target = ctx.manifest.build.resolved_target()?;
+    forward_target(&mut cmd, compat, target, Some(&manifest_path))?;
     let features = ctx.manifest.build.resolved_wasm_features()?;
     forward_wasm_features(&mut cmd, compat, &features, Some(&manifest_path))?;
     forward_memory_layout(&mut cmd, compat, &ctx.manifest.memory, Some(&manifest_path))?;
@@ -289,6 +292,22 @@ impl CompilerCompat {
         self.supports_abi_minor(3)
     }
 
+    /// Whether the resolved `infc` is known to be able to build for `target`.
+    ///
+    /// The one capability keyed on a value rather than on a flag: `--target`
+    /// itself landed at one minor, but each name in the vocabulary became
+    /// requestable at its own, and asking about the flag would answer the wrong
+    /// question. An `infc` that parses `--target` but predates a name would
+    /// accept the flag and emit a module for the default runtime — a wrong
+    /// artifact rather than a refusal — so the gate consults
+    /// [`TargetName::abi_minor`] for the name actually being forwarded.
+    ///
+    /// [`TargetName::DEFAULT`] is never forwarded, so its minor is never the
+    /// question in practice; it answers truthfully anyway.
+    pub fn supports_target(self, target: TargetName) -> bool {
+        self.supports_abi_minor(target.abi_minor())
+    }
+
     /// Whether the resolved `infc` is known to support the additive
     /// `--adopt-external-specs` flag, which landed at ABI minor 4.
     ///
@@ -316,6 +335,61 @@ impl CompilerCompat {
         }
         matches!(self.abi, Some((major, advertised)) if major == COMPILER_ABI_MAJOR && advertised >= minor)
     }
+}
+
+/// Appends `--target <name>` to `cmd` when the project named a non-default
+/// target, after confirming the resolved `infc` can build for it, and echoes the
+/// target to stdout.
+///
+/// Every path that spawns `infc` on behalf of a project routes through here, for
+/// the reason [`forward_wasm_features`] exists once: a project must produce an
+/// artifact for the same runtime whether it was built, run, or built from a bare
+/// source path.
+///
+/// [`TargetName::DEFAULT`] is deliberately not forwarded. `infc` resolves an
+/// absent flag to the same name, so the flag would change nothing about the
+/// artifact — and forwarding it would put a minor-5 floor under every project
+/// that never asked for a target, refusing to build against an `infc` the
+/// project needs nothing from.
+///
+/// The gate is on the *name*, not on the flag: see
+/// [`CompilerCompat::supports_target`].
+///
+/// `manifest_path` names the file the remediation tells the user to edit, which
+/// matters as soon as a walk was involved: single-file mode may have found a
+/// manifest several directories up. `None` can only accompany the default target
+/// — a target can only have been requested by some manifest — and the fallback
+/// keeps the message well-formed regardless.
+///
+/// # Errors
+///
+/// Returns a remediation-bearing error when a non-default target was named and
+/// the resolved `infc` predates it. The flag is never emitted blind.
+pub(crate) fn forward_target(
+    cmd: &mut Command,
+    compat: CompilerCompat,
+    target: TargetName,
+    manifest_path: Option<&Path>,
+) -> Result<()> {
+    if target == TargetName::DEFAULT {
+        return Ok(());
+    }
+    if !compat.supports_target(target) {
+        let manifest = manifest_path.map_or_else(
+            || String::from(MANIFEST_FILE_NAME),
+            |path| path.display().to_string(),
+        );
+        let minor = target.abi_minor();
+        bail!(
+            "the resolved infc cannot build for the `{}` target (requires infc \
+             ABI ≥ {COMPILER_ABI_MAJOR}.{minor}); update the toolchain or remove \
+             `[build] target` from {manifest}.",
+            target.as_str()
+        );
+    }
+    println!("target: {}", target.as_str());
+    cmd.arg("--target").arg(target.as_str());
+    Ok(())
 }
 
 /// Appends `--wasm-features <list>` to `cmd` when `features` is non-empty, after
@@ -1513,11 +1587,13 @@ mod tests {
     #[test]
     fn abi_minor_difference_warns_only() {
         let dir = assert_fs::TempDir::new().unwrap();
-        // Exercise the "infc minor newer than infs" path. The stub reports a
-        // far-future minor ("1.5") so the comparison resolves to Greater for
-        // any plausible local COMPILER_ABI_MINOR; the branch warns but does not
-        // hard-error.
-        let stub = write_stub(&dir, "nottherightcommit", "1.5", false);
+        // Exercise the "infc minor newer than infs" path. A hardcoded literal
+        // goes quietly vacuous the first time the local minor overtakes it —
+        // both arms warn and return Ok, so the test would keep passing while
+        // exercising the opposite branch — so the stub's minor is derived from
+        // the live constant and is newer by construction.
+        let abi = format!("{COMPILER_ABI_MAJOR}.{}", COMPILER_ABI_MINOR + 1);
+        let stub = write_stub(&dir, "nottherightcommit", &abi, false);
         let result = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE);
         assert!(result.is_ok(), "minor mismatch should not hard-error");
     }

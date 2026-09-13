@@ -1,0 +1,5 @@
+// The degenerate contract method: no arguments, no answer. The wrapper is
+// nothing but the void constant.
+pub fn tick() {
+    let _ignored: u32 = 1;
+}

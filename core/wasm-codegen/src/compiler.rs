@@ -70,6 +70,7 @@
 
 use crate::choice::{ChoiceClass, ChoiceCursor, ChoicePlan, ChoiceRun, FrameContract};
 use crate::errors::CodegenError;
+use crate::output::{AbiReturn, AbiType, ExportSignature};
 use crate::overflow_guard::{
     self, GuardKind, GuardScratchDemand, GuardScratchPool, GuardedOp, ModeSource, guard_kind,
 };
@@ -355,6 +356,16 @@ pub(crate) struct Compiler {
     types: Vec<(Vec<ValType>, Vec<ValType>)>,
     functions: Vec<u32>,
     exports: Vec<(String, ExportKind, u32)>,
+    /// The source-level signature of each exported function, recorded in the
+    /// order the exports are pushed above, which is the order the function
+    /// exports reach the export section. The section carries more than those:
+    /// `memory` and `__stack_pointer` are appended after them at assembly.
+    ///
+    /// Written only by the registration that pushes the export beside it, and
+    /// read by nothing that emits: the descriptor exists for consumers of the
+    /// finished module, and a module's bytes are the same whether or not
+    /// anybody asks for it.
+    export_signatures: Vec<ExportSignature>,
     bodies: Vec<Function>,
     func_names: Vec<(u32, String)>,
     local_names: Vec<(u32, Vec<(u32, String)>)>,
@@ -784,6 +795,7 @@ impl Compiler {
             types: Vec::new(),
             functions: Vec::new(),
             exports: Vec::new(),
+            export_signatures: Vec::new(),
             bodies: Vec::new(),
             func_names: Vec::new(),
             local_names: Vec::new(),
@@ -893,6 +905,43 @@ impl Compiler {
         keys
     }
 
+    /// The source-level signature of every exported function, in the order of
+    /// the function exports in the export section. That is not the order of the
+    /// export section itself, which also carries `memory` and
+    /// `__stack_pointer` for a module with memory; those are appended at
+    /// assembly and never enter the `exports` list.
+    ///
+    /// Read out before [`Self::finish_and_take`] consumes the compiler, the way
+    /// [`Self::guarded_functions`] is, so the descriptor travels to the output
+    /// without the assembly of the module knowing about it.
+    ///
+    /// # An export with no entry is a compiler bug, not a shape
+    ///
+    /// [`Self::export_signature`] declines fail-closed when a parameter or
+    /// return has no source-type description, and every export is registered by
+    /// the same code that records the descriptor, so the two counts agree for
+    /// every input the compiler accepts today. They are nevertheless produced by
+    /// two walks over two different representations — the descriptor over
+    /// [`TypeInfoKind`], the value types over [`TypeNode`] — whose acceptance
+    /// sets nothing but this check ties together. A nominal form taught to one
+    /// walk and not the other would otherwise emit an export the descriptor is
+    /// silent about, code generation would return `Ok`, and the first thing to
+    /// notice would be a consumer refusing a module the compiler was happy to
+    /// build. Trip here instead, where the divergence is.
+    pub(crate) fn export_signatures(&self) -> Vec<ExportSignature> {
+        debug_assert_eq!(
+            self.export_signatures.len(),
+            self.exports
+                .iter()
+                .filter(|(_, kind, _)| matches!(kind, ExportKind::Func))
+                .count(),
+            "every exported function must have a source-type descriptor; a \
+             missing one means the descriptor walk and the value-type walk \
+             disagree about which types an export may carry"
+        );
+        self.export_signatures.clone()
+    }
+
     /// The arithmetic mode this module's unannotated operators are compiled at.
     ///
     /// The specification-translation pass reads it so its diagnostics describe
@@ -961,7 +1010,7 @@ impl Compiler {
     /// Enables or disables runtime array bounds-check emission.
     ///
     /// [`crate::codegen`] enables it for every build it drives — Compile and
-    /// Proof, Debug and Release, Wasm32 and Soroban. A dynamic out-of-range
+    /// Proof, Debug and Release, Wasm32 and Stellar. A dynamic out-of-range
     /// access therefore traps cleanly instead of corrupting adjacent frame
     /// slots, and the artifact a proof is written about is byte-for-byte the
     /// artifact that ships.
@@ -1520,9 +1569,14 @@ impl Compiler {
     /// refusal rather than skipping the slot, which would silently renumber every
     /// later parameter.
     ///
-    /// Struct and enum types (named by `TypeNode::Custom` or a `::`-qualified
-    /// path, resolved against `TypedContext`) are `ValType::I32` pointers into
-    /// linear memory.
+    /// Struct and enum types are named the same two ways — by `TypeNode::Custom`
+    /// or by a `::`-qualified path, each resolved against `TypedContext` — and
+    /// both answer `ValType::I32`, but for different reasons. A struct is an
+    /// address into linear memory. An enum is a bare tag value with no memory
+    /// footprint at all, which is why an exported enum parameter is validated by
+    /// range-checking the value it arrives as rather than by reading through it,
+    /// and why [`Self::param_type_is_compound`] calls only the struct case
+    /// compound.
     pub(crate) fn val_type_from_type_id(
         arena: &AstArena,
         ty_id: TypeId,
@@ -1657,6 +1711,161 @@ impl Compiler {
             current = *element;
         }
         current
+    }
+
+    /// The source-level signature of an exported function, or `None` when one of
+    /// its parameters or its return type has no source-type description.
+    ///
+    /// The `sret` pointer of a compound return is deliberately not a parameter
+    /// here: it is a lowering artifact, and the caller of an exported function
+    /// asks what the source declared. It is the return that records the
+    /// convention, as [`AbiReturn::Sret`].
+    ///
+    /// Declining is the fail-closed answer. Every type that reaches this point
+    /// has already been lowered by [`Self::val_type_from_type_id`], so a type
+    /// with no description here means the two disagree about what lowers — and a
+    /// consumer that finds no entry for an export has to treat that export as
+    /// one it does not understand, which is the safe reading, rather than
+    /// receive a signature that describes it wrongly.
+    fn export_signature(
+        arena: &AstArena,
+        ctx: &TypedContext,
+        module_path: &[String],
+        name: &str,
+        args: &[ArgData],
+        returns: Option<TypeId>,
+        is_sret: bool,
+    ) -> Option<ExportSignature> {
+        let params = args
+            .iter()
+            .map(|arg| match &arg.kind {
+                ArgKind::Named { ty, .. } | ArgKind::Ignored { ty } | ArgKind::TypeOnly(ty) => {
+                    Self::abi_type_from_type_id(arena, *ty, ctx, module_path)
+                }
+                // A receiver is declared by the keyword `self` alone, so it
+                // names no type node to describe. The arm is unreachable: the
+                // export gate requires a non-method, and only a method has a
+                // receiver. Declining is therefore the conservative answer to a
+                // question no input asks, and not a mechanism — making methods
+                // exportable must resolve the receiver to its struct here, or
+                // every method export loses its descriptor silently and the
+                // count check in `export_signatures` is what fires.
+                ArgKind::SelfRef { .. } => None,
+            })
+            .collect::<Option<Vec<AbiType>>>()?;
+        let ret = match returns {
+            None => AbiReturn::Unit,
+            Some(ty_id) => {
+                // `-> ()` and `-> unit` are the same declaration written two
+                // ways, and both normalize to the unit kind here, so the empty
+                // result list is described once.
+                let kind = TypeInfo::from_type_id(arena, ty_id).kind;
+                if matches!(kind, TypeInfoKind::Unit) {
+                    AbiReturn::Unit
+                } else {
+                    let returned = Self::abi_type_from_kind(&kind, ctx, module_path)?;
+                    if is_sret {
+                        AbiReturn::Sret(returned)
+                    } else {
+                        AbiReturn::Scalar(returned)
+                    }
+                }
+            }
+        };
+        Some(ExportSignature {
+            name: name.to_string(),
+            params,
+            ret,
+        })
+    }
+
+    /// The source type an annotation names, as an exported signature records it.
+    ///
+    /// The companion of [`Self::val_type_from_type_id`] and the reason the
+    /// descriptor exists: that function answers `i32` for `bool`, for every
+    /// integer narrower than 64 bits, for an enum tag, for a struct pointer and
+    /// for an array pointer alike, and this one keeps the distinction those five
+    /// lose. The two must agree on what a type *is* — every annotation that
+    /// lowers to a value type has a description here — but not on how much they
+    /// say about it.
+    fn abi_type_from_type_id(
+        arena: &AstArena,
+        ty_id: TypeId,
+        ctx: &TypedContext,
+        module_path: &[String],
+    ) -> Option<AbiType> {
+        Self::abi_type_from_kind(
+            &TypeInfo::from_type_id(arena, ty_id).kind,
+            ctx,
+            module_path,
+        )
+    }
+
+    /// [`Self::abi_type_from_type_id`] over an already-derived type kind.
+    ///
+    /// Exhaustive over [`TypeInfoKind`] rather than closed with a wildcard, so a
+    /// kind added to the type checker fails to compile here instead of silently
+    /// becoming a type no export can describe. A bare name and a `::`-qualified
+    /// path are pre-resolution carriers of a struct or an enum, which is the
+    /// distinction the tag guard and the frame layout resolve the same way; the
+    /// name recorded is the one the annotation spells.
+    fn abi_type_from_kind(
+        kind: &TypeInfoKind,
+        ctx: &TypedContext,
+        module_path: &[String],
+    ) -> Option<AbiType> {
+        match kind {
+            TypeInfoKind::Bool => Some(AbiType::Bool),
+            TypeInfoKind::Number(number) => Some(match number {
+                NumberType::I8 => AbiType::I8,
+                NumberType::U8 => AbiType::U8,
+                NumberType::I16 => AbiType::I16,
+                NumberType::U16 => AbiType::U16,
+                NumberType::I32 => AbiType::I32,
+                NumberType::U32 => AbiType::U32,
+                NumberType::I64 => AbiType::I64,
+                NumberType::U64 => AbiType::U64,
+            }),
+            TypeInfoKind::Array(element, len) => Some(AbiType::Array {
+                elem: Box::new(Self::abi_type_from_kind(&element.kind, ctx, module_path)?),
+                len: *len,
+            }),
+            TypeInfoKind::Struct(name, _) => Some(AbiType::Struct { name: name.clone() }),
+            TypeInfoKind::Enum(name, _) => Some(AbiType::Enum { name: name.clone() }),
+            TypeInfoKind::Custom(name) => {
+                if ctx.lookup_struct_in(name, module_path).is_some() {
+                    Some(AbiType::Struct { name: name.clone() })
+                } else if ctx.lookup_enum_in(name, module_path).is_some() {
+                    Some(AbiType::Enum { name: name.clone() })
+                } else {
+                    None
+                }
+            }
+            TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => {
+                let segments: Vec<String> = path.split("::").map(ToString::to_string).collect();
+                if ctx
+                    .lookup_struct_by_qualified_path(&segments, module_path)
+                    .is_some()
+                {
+                    Some(AbiType::Struct { name: path.clone() })
+                } else if ctx
+                    .lookup_enum_by_qualified_path(&segments, module_path)
+                    .is_some()
+                {
+                    Some(AbiType::Enum { name: path.clone() })
+                } else {
+                    None
+                }
+            }
+            // Neither the unit type nor any of these lowers to a value an export
+            // can pass: unit occupies no slot, and the rest are refused where the
+            // signature is lowered.
+            TypeInfoKind::Unit
+            | TypeInfoKind::String
+            | TypeInfoKind::Generic(_)
+            | TypeInfoKind::Function(_)
+            | TypeInfoKind::Spec(_) => None,
+        }
     }
 
     /// The definitions the scope `site` contains: a named `spec` block's own when
@@ -2091,6 +2300,12 @@ impl Compiler {
             self.has_main = true;
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
+        }
+        if is_exportable_position
+            && let Some(signature) =
+                Self::export_signature(arena, ctx, module_path, &fn_name, &args, returns, is_sret)
+        {
+            self.export_signatures.push(signature);
         }
 
         let choice_suffix_base = self.choice_suffix_base;
@@ -10716,5 +10931,30 @@ fn f(p: S, q: S) -> i32 {{
                 "the pool must follow every local the body names"
             );
         }
+    }
+
+    /// The descriptor hand-out refuses to publish a list that does not cover
+    /// every exported function.
+    ///
+    /// No source can produce the mismatch today, which is exactly why nothing
+    /// else would notice if a future one could: the descriptor walk and the
+    /// value-type walk range over two different representations, so a nominal
+    /// form taught to one and not the other would export a function the
+    /// descriptor is silent about and still return `Ok`. The mismatch is
+    /// therefore built directly, by registering an export with no descriptor
+    /// beside it.
+    ///
+    /// A `debug_assert` fires only where debug assertions are compiled in, so
+    /// the test is compiled under the same condition rather than failing a
+    /// release run.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "source-type descriptor")]
+    fn an_exported_function_without_a_descriptor_trips_the_hand_out_check() {
+        let mut compiler = Compiler::new("output");
+        compiler
+            .exports
+            .push(("orphan".to_string(), ExportKind::Func, 0));
+        drop(compiler.export_signatures());
     }
 }

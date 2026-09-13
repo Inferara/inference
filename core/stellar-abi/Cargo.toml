@@ -1,0 +1,20 @@
+[package]
+name = "inference-stellar-abi"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Rewrites a compiled Inference module into an uploadable Soroban contract by wrapping every export in the Stellar Val ABI"
+keywords = ["compiler", "webassembly", "stellar", "soroban", "wasm"]
+categories = ["compilers", "wasm"]
+
+[dependencies]
+wasm-encoder.workspace = true
+# STOCK wasmparser, deliberately not the in-tree `inf-wasmparser` fork: the fork
+# decodes and validates the custom non-deterministic opcodes with no feature
+# gate, so it cannot testify that a module is WebAssembly 1.0 — which is the one
+# question asked of the parser here.
+wasmparser = { workspace = true }
+inference-wasm-codegen.workspace = true
+thiserror.workspace = true

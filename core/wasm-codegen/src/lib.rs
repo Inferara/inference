@@ -49,7 +49,7 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
-use inference_ast::nodes::Def;
+use inference_ast::nodes::{ArgKind, Def};
 use inference_fn_key::FnKey;
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -74,7 +74,7 @@ pub mod output;
 mod spec_section;
 pub mod target;
 
-pub use output::CodegenOutput;
+pub use output::{AbiReturn, AbiType, CodegenOutput, ExportSignature};
 pub use target::{
     CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, MemoryLayoutError,
     MemoryLayoutSource, OptLevel, Target,
@@ -142,8 +142,9 @@ pub use crate::checked_section::SECTION_VERSION as CHECKED_SECTION_VERSION;
 /// # Errors
 ///
 /// Returns an error if:
-/// - Validation fails (proof + non-Wasm32, Soroban + non-det, or a feature the
-///   target does not accept)
+/// - Validation fails (proof + non-Wasm32, Stellar + non-det, a feature the
+///   target does not accept, or an export the Stellar target cannot carry —
+///   see [`check_stellar_exports`])
 /// - Code generation fails
 pub fn codegen(
     typed_context: &TypedContext,
@@ -165,9 +166,10 @@ pub fn codegen(
         cov_mark::hit!(wasm_codegen_target_rejects_feature);
         return Err(anyhow::anyhow!(
             "{target:?} target does not support the '{feature}' WebAssembly feature. \
-             Its runtime is not known to accept those instructions, so a module using \
-             them may be rejected at deployment; drop '{feature}' from the requested \
-             features to build for {target:?}."
+             This target is pinned to the WebAssembly 1.0 instruction set, so a module \
+             using the instructions '{feature}' adds is refused here rather than at \
+             deployment; drop '{feature}' from the requested features to build for \
+             {target:?}."
         ));
     }
 
@@ -182,17 +184,17 @@ pub fn codegen(
 
     let arena = typed_context.arena();
 
-    if target == Target::Soroban {
+    if target == Target::Stellar {
         for source_file in typed_context.source_files() {
             for &def_id in &source_file.defs {
                 if arena.def_is_non_det(def_id) {
-                    cov_mark::hit!(wasm_codegen_soroban_rejects_nondet_function);
+                    cov_mark::hit!(wasm_codegen_stellar_rejects_nondet_function);
                     let fn_name = arena.def_name(def_id);
                     return Err(anyhow::anyhow!(
-                        "Soroban target does not support non-deterministic operations. \
+                        "Stellar target does not support non-deterministic operations. \
                          Function '{fn_name}' contains non-deterministic constructs (uzumaki, \
                          forall, exists, assume, or unique blocks) that produce custom \
-                         0xfc WebAssembly instructions incompatible with the Soroban VM.",
+                         0xfc WebAssembly instructions incompatible with the Stellar VM.",
                     ));
                 }
             }
@@ -242,6 +244,12 @@ pub fn codegen(
     // `inference.hspecs` section and retained here to attach to the output.
     let has_main = compiler.has_main();
     let guarded_functions = compiler.guarded_functions();
+    let export_signatures = compiler.export_signatures();
+
+    if target == Target::Stellar {
+        check_stellar_exports(&export_signatures, typed_context)?;
+    }
+
     let (wasm, spec_func_indices_by_spec, frame_sizes) = compiler.finish_and_take(&hspecs);
     debug_assert!(
         mode != CompilationMode::Compile
@@ -260,7 +268,283 @@ pub fn codegen(
     )
     .with_frame_sizes(frame_sizes)
     .with_guarded_functions(guarded_functions)
+    .with_export_signatures(export_signatures)
     .with_hspecs(hspecs))
+}
+
+/// The most parameters an exported function may take at the Stellar target.
+///
+/// The host checks an invocation's argument count against its own limit of 32.
+/// A wider method could never be called.
+const STELLAR_MAX_EXPORT_PARAMS: usize = 32;
+
+/// The longest exported name the Stellar target accepts, in bytes.
+///
+/// The host turns a method name into a symbol, and exactly 32 bytes is the
+/// largest it can hold. A longer name uploads and is then unreachable, because
+/// no caller can express it.
+const STELLAR_MAX_EXPORT_NAME_BYTES: usize = 32;
+
+/// The prefix the Stellar host reserves for itself.
+const STELLAR_RESERVED_EXPORT_PREFIX: &str = "__";
+
+/// The set an exported function may be built from at the Stellar target, as
+/// every refusal restates it.
+const STELLAR_SCALAR_SET: &str = "This target currently carries only the scalar set: an \
+     exported parameter is 'u32', 'i32' or 'bool', and an exported return is one of those \
+     or unit.";
+
+/// Why a compound type cannot cross the contract boundary, and where the work
+/// that would let it is tracked.
+const STELLAR_COMPOUND_NEXT_STEP: &str = "A compound value crosses the contract boundary as a \
+     host object, which a contract has to build and read through host functions it imports; \
+     this toolchain binds none of those yet, and issue #464 is where that work is tracked.";
+
+/// Why a 64-bit integer cannot cross it either. Same machinery, different
+/// reason for needing it.
+const STELLAR_WIDE_NEXT_STEP: &str = "A 64-bit integer needs the same machinery: the host's \
+     word is 64 bits wide and spends part of it on a tag, so no 64-bit value fits in one, \
+     and it travels as a host object built through host functions this toolchain does not \
+     bind yet — issue #464.";
+
+/// Why an integer narrower than 32 bits is held back, which is not the reason
+/// the others are.
+const STELLAR_NARROW_NEXT_STEP: &str = "An integer narrower than 32 bits is held back for a \
+     different reason: the host has no narrower word, so what an exported 'u8' does with a \
+     caller-supplied 300 is a language question rather than a layout one, and it is not \
+     settled. Widen the declaration to 'u32' or 'i32'.";
+
+/// The other way out of a type refusal, since not every `pub fn` is meant to be
+/// a contract method.
+const STELLAR_UNEXPORT_HINT: &str = "If the function is not meant to be a contract method, \
+     remove 'pub': only an entry-file top-level 'pub fn' is exported.";
+
+/// Why the Stellar target cannot carry `ty` across the contract boundary, or
+/// `None` for a type it can.
+///
+/// One exhaustive match answers both halves, so the admissibility rule and the
+/// explanation a refusal gives cannot come apart — a type added to the
+/// descriptor has to be classified here before it compiles, and whatever
+/// classification it gets is the one the message reports.
+fn stellar_refusal_reason(ty: &AbiType) -> Option<&'static str> {
+    match ty {
+        AbiType::Bool | AbiType::I32 | AbiType::U32 => None,
+        AbiType::I8 | AbiType::U8 | AbiType::I16 | AbiType::U16 => Some(STELLAR_NARROW_NEXT_STEP),
+        AbiType::I64 | AbiType::U64 => Some(STELLAR_WIDE_NEXT_STEP),
+        AbiType::Enum { .. } | AbiType::Struct { .. } | AbiType::Array { .. } => {
+            Some(STELLAR_COMPOUND_NEXT_STEP)
+        }
+    }
+}
+
+/// The source spelling of a described type, as a refusal names it back to the
+/// author.
+fn render_abi_type(ty: &AbiType) -> String {
+    match ty {
+        AbiType::Bool => "bool".to_string(),
+        AbiType::I8 => "i8".to_string(),
+        AbiType::U8 => "u8".to_string(),
+        AbiType::I16 => "i16".to_string(),
+        AbiType::U16 => "u16".to_string(),
+        AbiType::I32 => "i32".to_string(),
+        AbiType::U32 => "u32".to_string(),
+        AbiType::I64 => "i64".to_string(),
+        AbiType::U64 => "u64".to_string(),
+        AbiType::Enum { name } | AbiType::Struct { name } => name.clone(),
+        AbiType::Array { elem, len } => format!("[{}; {len}]", render_abi_type(elem)),
+    }
+}
+
+/// The name the source gave to parameter `index` of the entry-file top-level
+/// function `function`, or `None` when there is none to find.
+///
+/// Purely how a refusal names the parameter the author wrote: the verdict comes
+/// from the export descriptor alone, and this is walked only once a refusal is
+/// certain. Finding nothing degrades the message to the position by itself
+/// rather than changing any outcome — which is what happens for `_: u32`, for a
+/// caller driving code generation with no source files, and for anything else
+/// this walk does not model.
+///
+/// The search is restricted to the entry file because that is where every
+/// exported function is declared, so a same-named function in an imported file
+/// cannot lend its parameter names to an export that is not it.
+fn entry_file_parameter_name(
+    typed_context: &TypedContext,
+    function: &str,
+    index: usize,
+) -> Option<String> {
+    let arena = typed_context.arena();
+    for source_file in typed_context
+        .source_files()
+        .filter(|file| file.module_path.is_empty())
+    {
+        for &def_id in &source_file.defs {
+            let Def::Function { name, args, .. } = &arena[def_id].kind else {
+                continue;
+            };
+            if arena[*name].name != function {
+                continue;
+            }
+            return match args.get(index).map(|arg| &arg.kind) {
+                Some(ArgKind::Named { name, .. }) => Some(arena[*name].name.clone()),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// How a refusal points at one parameter: its one-based position, and the name
+/// the author gave it when there is one.
+fn stellar_parameter_label(name: Option<&str>, index: usize) -> String {
+    let position = index + 1;
+    match name {
+        Some(name) => format!("parameter {position} '{name}'"),
+        None => format!("parameter {position}"),
+    }
+}
+
+/// Refuses an exported function the Stellar target cannot carry, reading the
+/// source types off the export descriptor.
+///
+/// # The overlap with the Val-ABI rewriter is deliberate
+///
+/// `inference-stellar-abi` refuses the same shapes again, after linking. That is
+/// not a redundant check but a different one at a different vantage. This gate
+/// sees the program the author wrote, so it can name the function, the parameter
+/// and the declared type, offer the repair, and refuse before any file is
+/// produced. The rewriter sees only a linked module and a descriptor, so its
+/// messages are about exports rather than declarations — but it is the net, and
+/// it is positioned where things this gate cannot see arrive: an export
+/// introduced by linking, a descriptor that does not match the module it is
+/// paired with, a caller that reaches the rewriter without passing through here
+/// at all. Neither replaces the other, and the two must agree on the rules: a
+/// change to what is admissible has to be made in both places, or a build is
+/// accepted here and refused there with a message about bytes.
+fn check_stellar_exports(
+    exports: &[ExportSignature],
+    typed_context: &TypedContext,
+) -> anyhow::Result<()> {
+    if exports.is_empty() {
+        cov_mark::hit!(wasm_codegen_stellar_gate_no_exports);
+        return Err(anyhow::anyhow!(
+            "Stellar target: this module exports no function, so the contract would upload \
+             with no method to call. A contract's methods are the entry file's top-level \
+             'pub fn' declarations; declare at least one."
+        ));
+    }
+
+    for signature in exports {
+        check_stellar_export_name(&signature.name)?;
+        check_stellar_export_arity(signature)?;
+        check_stellar_export_types(signature, typed_context)?;
+    }
+    Ok(())
+}
+
+/// Refuses an exported name the host cannot dispatch to.
+///
+/// Every rule here is about reachability rather than taste: a name the host
+/// rejects, or reserves, produces a contract that uploads and then fails every
+/// call, which is a worse outcome than not building.
+fn check_stellar_export_name(name: &str) -> anyhow::Result<()> {
+    let refusal = if name.is_empty() {
+        "an exported function has an empty name, which the host cannot turn into a method \
+         symbol"
+            .to_string()
+    } else if name.len() > STELLAR_MAX_EXPORT_NAME_BYTES {
+        format!(
+            "the exported function '{name}' has a name of {} bytes, and the host holds a \
+             method name of at most {STELLAR_MAX_EXPORT_NAME_BYTES}. A longer one is not \
+             expressible by any caller, so the method would upload and be unreachable — \
+             rename it",
+            name.len()
+        )
+    } else if name.starts_with(STELLAR_RESERVED_EXPORT_PREFIX) {
+        format!(
+            "the exported function '{name}' starts with '{STELLAR_RESERVED_EXPORT_PREFIX}', a \
+             prefix the host reserves. Such a method uploads and then refuses every call with \
+             \"can't invoke a reserved function directly\" — rename it without the leading \
+             underscores"
+        )
+    } else if let Some(offending) = name
+        .chars()
+        .find(|ch| !ch.is_ascii_alphanumeric() && *ch != '_')
+    {
+        format!(
+            "the exported function '{name}' contains '{offending}', and a method name may hold \
+             only letters, digits and '_'. No caller can express a name with anything else, so \
+             the method would upload and be unreachable — rename it"
+        )
+    } else {
+        return Ok(());
+    };
+    cov_mark::hit!(wasm_codegen_stellar_gate_export_name);
+    Err(anyhow::anyhow!("Stellar target: {refusal}."))
+}
+
+/// Refuses an exported function with more parameters than the host will pass.
+fn check_stellar_export_arity(signature: &ExportSignature) -> anyhow::Result<()> {
+    let count = signature.params.len();
+    if count <= STELLAR_MAX_EXPORT_PARAMS {
+        return Ok(());
+    }
+    cov_mark::hit!(wasm_codegen_stellar_gate_param_count);
+    let name = &signature.name;
+    Err(anyhow::anyhow!(
+        "Stellar target: exported function '{name}' takes {count} parameters, and a contract \
+         method takes at most {STELLAR_MAX_EXPORT_PARAMS}. The host checks an invocation's \
+         argument count against that limit, so a wider method could never be called."
+    ))
+}
+
+/// Refuses an exported parameter or return outside the scalar set this target
+/// carries.
+fn check_stellar_export_types(
+    signature: &ExportSignature,
+    typed_context: &TypedContext,
+) -> anyhow::Result<()> {
+    let name = &signature.name;
+    for (index, ty) in signature.params.iter().enumerate() {
+        if let Some(next_step) = stellar_refusal_reason(ty) {
+            cov_mark::hit!(wasm_codegen_stellar_gate_param_type);
+            let declared_as = entry_file_parameter_name(typed_context, name, index);
+            let parameter = stellar_parameter_label(declared_as.as_deref(), index);
+            let declared = render_abi_type(ty);
+            return Err(anyhow::anyhow!(
+                "Stellar target: exported function '{name}' cannot be a contract method \
+                 because {parameter} is declared '{declared}'. {STELLAR_SCALAR_SET} \
+                 {next_step} {STELLAR_UNEXPORT_HINT}"
+            ));
+        }
+    }
+
+    match &signature.ret {
+        AbiReturn::Unit => Ok(()),
+        AbiReturn::Scalar(ty) => {
+            let Some(next_step) = stellar_refusal_reason(ty) else {
+                return Ok(());
+            };
+            cov_mark::hit!(wasm_codegen_stellar_gate_return_type);
+            let declared = render_abi_type(ty);
+            Err(anyhow::anyhow!(
+                "Stellar target: exported function '{name}' cannot be a contract method \
+                 because it returns '{declared}'. {STELLAR_SCALAR_SET} {next_step} \
+                 {STELLAR_UNEXPORT_HINT}"
+            ))
+        }
+        AbiReturn::Sret(ty) => {
+            cov_mark::hit!(wasm_codegen_stellar_gate_compound_return);
+            let declared = render_abi_type(ty);
+            Err(anyhow::anyhow!(
+                "Stellar target: exported function '{name}' cannot be a contract method \
+                 because it returns '{declared}', which the caller receives through a hidden \
+                 pointer into linear memory rather than as a value. A contract method hands \
+                 back one host word and has no pointer to give. {STELLAR_SCALAR_SET} \
+                 {STELLAR_COMPOUND_NEXT_STEP} {STELLAR_UNEXPORT_HINT}"
+            ))
+        }
+    }
 }
 
 /// Traverses every source file's typed AST and compiles all function and
@@ -1146,9 +1430,356 @@ mod memory_layout_tests {
 }
 
 #[cfg(test)]
+mod stellar_gate_tests {
+    use super::{
+        AbiReturn, AbiType, ExportSignature, STELLAR_MAX_EXPORT_NAME_BYTES,
+        STELLAR_MAX_EXPORT_PARAMS, check_stellar_exports, render_abi_type,
+        stellar_parameter_label,
+    };
+    use inference_type_checker::typed_context::TypedContext;
+
+    fn signature(name: &str, params: Vec<AbiType>, ret: AbiReturn) -> ExportSignature {
+        ExportSignature {
+            name: name.to_string(),
+            params,
+            ret,
+        }
+    }
+
+    /// One admissible method, as a base to vary.
+    fn admissible() -> ExportSignature {
+        signature(
+            "add",
+            vec![AbiType::U32, AbiType::I32, AbiType::Bool],
+            AbiReturn::Scalar(AbiType::U32),
+        )
+    }
+
+    /// The gate against a descriptor alone. An empty context is what a caller
+    /// with no entry-file source looks like, so these exercise the
+    /// position-only form of a parameter label; the named form needs real
+    /// source and is covered where the compiler is driven end to end.
+    fn gate(exports: &[ExportSignature]) -> anyhow::Result<()> {
+        check_stellar_exports(exports, &TypedContext::default())
+    }
+
+    fn refusal(exports: &[ExportSignature]) -> String {
+        gate(exports)
+            .expect_err("this descriptor must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn the_scalar_set_in_every_position_is_admissible() {
+        for ret in [
+            AbiReturn::Unit,
+            AbiReturn::Scalar(AbiType::U32),
+            AbiReturn::Scalar(AbiType::I32),
+            AbiReturn::Scalar(AbiType::Bool),
+        ] {
+            let sig = signature(
+                "method",
+                vec![AbiType::U32, AbiType::I32, AbiType::Bool],
+                ret.clone(),
+            );
+            assert!(gate(&[sig]).is_ok(), "{ret:?} must be admissible");
+        }
+        assert!(gate(&[signature("no_params", Vec::new(), AbiReturn::Unit)]).is_ok());
+    }
+
+    /// A contract that uploads with nothing to call is a build worth refusing:
+    /// every later stage would accept it, and the failure would surface only as
+    /// a deployed address nobody can invoke.
+    #[test]
+    fn a_module_that_exports_nothing_is_refused() {
+        cov_mark::check!(wasm_codegen_stellar_gate_no_exports);
+        assert_eq!(
+            refusal(&[]),
+            "Stellar target: this module exports no function, so the contract would upload \
+             with no method to call. A contract's methods are the entry file's top-level \
+             'pub fn' declarations; declare at least one."
+        );
+    }
+
+    /// Each name rule, pinned character for character. These messages are the
+    /// only copy of their wording and a user acts on them directly.
+    #[test]
+    fn each_name_rule_refuses_with_its_own_words() {
+        cov_mark::check_count!(wasm_codegen_stellar_gate_export_name, 4);
+        assert_eq!(
+            refusal(&[signature("", Vec::new(), AbiReturn::Unit)]),
+            "Stellar target: an exported function has an empty name, which the host cannot \
+             turn into a method symbol."
+        );
+
+        let too_long = "n".repeat(STELLAR_MAX_EXPORT_NAME_BYTES + 1);
+        assert_eq!(
+            refusal(&[signature(&too_long, Vec::new(), AbiReturn::Unit)]),
+            format!(
+                "Stellar target: the exported function '{too_long}' has a name of 33 bytes, \
+                 and the host holds a method name of at most 32. A longer one is not \
+                 expressible by any caller, so the method would upload and be unreachable — \
+                 rename it."
+            )
+        );
+
+        assert_eq!(
+            refusal(&[signature("__reserved", Vec::new(), AbiReturn::Unit)]),
+            "Stellar target: the exported function '__reserved' starts with '__', a prefix \
+             the host reserves. Such a method uploads and then refuses every call with \
+             \"can't invoke a reserved function directly\" — rename it without the leading \
+             underscores."
+        );
+
+        assert_eq!(
+            refusal(&[signature("two-words", Vec::new(), AbiReturn::Unit)]),
+            "Stellar target: the exported function 'two-words' contains '-', and a method \
+             name may hold only letters, digits and '_'. No caller can express a name with \
+             anything else, so the method would upload and be unreachable — rename it."
+        );
+    }
+
+    /// Two boundaries the host measured exactly: a name of 32 bytes is a
+    /// symbol, and a single leading underscore is not the reserved prefix.
+    /// Without these the length rule could be off by one and the prefix rule
+    /// could refuse an ordinary private-looking name, and every other test here
+    /// would still pass.
+    #[test]
+    fn the_name_rules_are_exact_at_their_boundaries() {
+        let longest = "n".repeat(STELLAR_MAX_EXPORT_NAME_BYTES);
+        assert!(
+            gate(&[signature(&longest, Vec::new(), AbiReturn::Unit)]).is_ok(),
+            "exactly {STELLAR_MAX_EXPORT_NAME_BYTES} bytes is accepted"
+        );
+        assert!(gate(&[signature("_single", Vec::new(), AbiReturn::Unit)]).is_ok());
+        assert!(gate(&[signature("a1_B2", Vec::new(), AbiReturn::Unit)]).is_ok());
+    }
+
+    #[test]
+    fn the_arity_rule_is_exact_at_its_boundary() {
+        let widest = vec![AbiType::U32; STELLAR_MAX_EXPORT_PARAMS];
+        assert!(gate(&[signature("wide", widest, AbiReturn::Unit)]).is_ok());
+
+        cov_mark::check!(wasm_codegen_stellar_gate_param_count);
+        let too_wide = vec![AbiType::U32; STELLAR_MAX_EXPORT_PARAMS + 1];
+        assert_eq!(
+            refusal(&[signature("wider", too_wide, AbiReturn::Unit)]),
+            "Stellar target: exported function 'wider' takes 33 parameters, and a contract \
+             method takes at most 32. The host checks an invocation's argument count against \
+             that limit, so a wider method could never be called."
+        );
+    }
+
+    /// The whole parameter refusal, pinned character for character on one case,
+    /// so the sentence order and the joins are fixed and not merely the clauses.
+    #[test]
+    fn a_refused_parameter_names_its_position_type_and_next_step() {
+        cov_mark::check!(wasm_codegen_stellar_gate_param_type);
+        assert_eq!(
+            refusal(&[signature(
+                "transfer",
+                vec![AbiType::U32, AbiType::U64],
+                AbiReturn::Unit
+            )]),
+            "Stellar target: exported function 'transfer' cannot be a contract method \
+             because parameter 2 is declared 'u64'. This target currently carries only the \
+             scalar set: an exported parameter is 'u32', 'i32' or 'bool', and an exported \
+             return is one of those or unit. A 64-bit integer needs the same machinery: the \
+             host's word is 64 bits wide and spends part of it on a tag, so no 64-bit value \
+             fits in one, and it travels as a host object built through host functions this \
+             toolchain does not bind yet — issue #464. If the function is not meant to be a \
+             contract method, remove 'pub': only an entry-file top-level 'pub fn' is exported."
+        );
+    }
+
+    /// Every inadmissible type reaches a refusal, each family reaches the
+    /// diagnosis that is true of it, and each says what to do next. A single
+    /// shared sentence would send the author of a `u8` parameter to a
+    /// host-object issue that is not what is stopping them.
+    #[test]
+    fn each_type_family_earns_the_next_step_that_fits_it() {
+        const WIDEN: &str = "Widen the declaration to 'u32' or 'i32'.";
+        const TRACKED: &str = "issue #464";
+        let cases = [
+            (AbiType::U64, "64-bit integer", TRACKED),
+            (AbiType::I64, "64-bit integer", TRACKED),
+            (AbiType::U8, "narrower than 32 bits", WIDEN),
+            (AbiType::I8, "narrower than 32 bits", WIDEN),
+            (AbiType::U16, "narrower than 32 bits", WIDEN),
+            (AbiType::I16, "narrower than 32 bits", WIDEN),
+            (
+                AbiType::Struct {
+                    name: "Point".to_string(),
+                },
+                "A compound value",
+                TRACKED,
+            ),
+            (
+                AbiType::Enum {
+                    name: "Colour".to_string(),
+                },
+                "A compound value",
+                TRACKED,
+            ),
+            (
+                AbiType::Array {
+                    elem: Box::new(AbiType::I32),
+                    len: 4,
+                },
+                "A compound value",
+                TRACKED,
+            ),
+        ];
+        for (ty, diagnosis, next_step) in cases {
+            let rendered = render_abi_type(&ty);
+            let message = refusal(&[signature("m", vec![ty.clone()], AbiReturn::Unit)]);
+            assert!(
+                message.contains(&format!("is declared '{rendered}'")),
+                "the refusal of {ty:?} does not name the declared type: {message}"
+            );
+            assert!(
+                message.contains(diagnosis),
+                "the refusal of {ty:?} does not carry `{diagnosis}`: {message}"
+            );
+            assert!(
+                message.contains(next_step),
+                "the refusal of {ty:?} does not point at `{next_step}`: {message}"
+            );
+        }
+    }
+
+    /// The narrow-integer refusal points at the language question rather than at
+    /// host objects, and says so — it is the one family whose next step is not
+    /// issue #464.
+    #[test]
+    fn a_narrow_integer_is_refused_for_its_own_reason() {
+        let message = refusal(&[signature("clamp", vec![AbiType::U8], AbiReturn::Unit)]);
+        assert!(message.contains("Widen the declaration to 'u32' or 'i32'."), "{message}");
+        assert!(
+            !message.contains("crosses that boundary as a host object"),
+            "a narrow integer is not a host-object problem: {message}"
+        );
+    }
+
+    #[test]
+    fn a_returned_wide_integer_is_refused() {
+        cov_mark::check!(wasm_codegen_stellar_gate_return_type);
+        let message = refusal(&[signature(
+            "total",
+            Vec::new(),
+            AbiReturn::Scalar(AbiType::U64),
+        )]);
+        assert!(message.contains("it returns 'u64'"), "{message}");
+        assert!(message.contains("#464"), "{message}");
+    }
+
+    /// A compound return arrives through a hidden pointer, which is a different
+    /// refusal from a value the host cannot encode: there is nothing for a
+    /// contract method to hand back at all.
+    #[test]
+    fn a_compound_return_is_refused_as_a_pointer_convention() {
+        cov_mark::check!(wasm_codegen_stellar_gate_compound_return);
+        let message = refusal(&[signature(
+            "corners",
+            Vec::new(),
+            AbiReturn::Sret(AbiType::Array {
+                elem: Box::new(AbiType::I32),
+                len: 4,
+            }),
+        )]);
+        assert!(message.contains("it returns '[i32; 4]'"), "{message}");
+        assert!(
+            message.contains("hidden pointer into linear memory"),
+            "{message}"
+        );
+    }
+
+    /// A descriptor that breaks several rules at once reports the name first,
+    /// then the arity, then the types. The order is what a user experiences as
+    /// "fix one thing and the next appears", so it is fixed here rather than
+    /// left to the order the checks happen to be written in.
+    #[test]
+    fn the_refusal_order_is_name_then_arity_then_type() {
+        let everything_wrong = signature(
+            "__wide-and-long",
+            vec![AbiType::U64; STELLAR_MAX_EXPORT_PARAMS + 1],
+            AbiReturn::Scalar(AbiType::U64),
+        );
+        assert!(
+            refusal(std::slice::from_ref(&everything_wrong)).contains("starts with '__'"),
+            "the name rule reports first"
+        );
+
+        let named = ExportSignature {
+            name: "wide_and_long".to_string(),
+            ..everything_wrong
+        };
+        assert!(
+            refusal(std::slice::from_ref(&named)).contains("takes 33 parameters"),
+            "the arity rule reports before the types"
+        );
+
+        let narrow = ExportSignature {
+            params: vec![AbiType::U64],
+            ..named
+        };
+        assert!(
+            refusal(&[narrow]).contains("parameter 1 is declared 'u64'"),
+            "a parameter reports before the return"
+        );
+    }
+
+    /// The first inadmissible export decides the message, so a module with a
+    /// good method and a bad one is still refused.
+    #[test]
+    fn one_bad_export_refuses_the_module() {
+        let message = refusal(&[
+            admissible(),
+            signature("wide", vec![AbiType::I64], AbiReturn::Unit),
+        ]);
+        assert!(message.contains("exported function 'wide'"), "{message}");
+    }
+
+    #[test]
+    fn a_parameter_label_falls_back_to_its_position() {
+        assert_eq!(
+            stellar_parameter_label(Some("amount"), 0),
+            "parameter 1 'amount'"
+        );
+        assert_eq!(stellar_parameter_label(None, 1), "parameter 2");
+        assert_eq!(stellar_parameter_label(None, 9), "parameter 10");
+    }
+
+    #[test]
+    fn a_nested_array_renders_as_its_source_spelling() {
+        assert_eq!(
+            render_abi_type(&AbiType::Array {
+                elem: Box::new(AbiType::Array {
+                    elem: Box::new(AbiType::U32),
+                    len: 3,
+                }),
+                len: 2,
+            }),
+            "[[u32; 3]; 2]"
+        );
+        assert_eq!(
+            render_abi_type(&AbiType::Struct {
+                name: "geom::Point".to_string()
+            }),
+            "geom::Point"
+        );
+    }
+}
+
+#[cfg(test)]
 mod feature_validation_tests {
     use super::{CodegenOptions, CompilationMode, EmitFeatures, Target, codegen};
     use inference_type_checker::typed_context::TypedContext;
+
+    /// One admissible contract method, for the acceptance cases. The Stellar
+    /// target refuses a module that exports nothing, so `compile_empty` can only
+    /// witness a refusal there, never an acceptance.
+    const ONE_EXPORT: &str = "pub fn answer() -> i32 { return 42; }";
 
     /// The refusal is reached before anything is emitted, so an empty program is
     /// enough to exercise it.
@@ -1172,31 +1803,32 @@ mod feature_validation_tests {
     }
 
     #[test]
-    fn soroban_rejects_a_bulk_memory_request() {
+    fn stellar_rejects_a_bulk_memory_request() {
         cov_mark::check!(wasm_codegen_target_rejects_feature);
         let err = compile_empty(
-            Target::Soroban,
+            Target::Stellar,
             CompilationMode::Compile,
             EmitFeatures { bulk_memory: true },
         )
-        .expect_err("Soroban does not accept bulk memory");
+        .expect_err("Stellar does not accept bulk memory");
         assert_eq!(
             err.to_string(),
-            "Soroban target does not support the 'bulk-memory' WebAssembly feature. \
-             Its runtime is not known to accept those instructions, so a module using \
-             them may be rejected at deployment; drop 'bulk-memory' from the requested \
-             features to build for Soroban."
+            "Stellar target does not support the 'bulk-memory' WebAssembly feature. \
+             This target is pinned to the WebAssembly 1.0 instruction set, so a module \
+             using the instructions 'bulk-memory' adds is refused here rather than at \
+             deployment; drop 'bulk-memory' from the requested features to build for \
+             Stellar."
         );
     }
 
     /// The feature check sits ahead of the mode checks deliberately: a build that
     /// is wrong about its instruction set should be told that, not sent to fix an
-    /// unrelated mode conflict first. `Soroban` + `Proof` violates both rules at
+    /// unrelated mode conflict first. `Stellar` + `Proof` violates both rules at
     /// once, so the message that comes back is what pins the order.
     #[test]
     fn the_feature_refusal_precedes_the_proof_mode_refusal() {
         let err = compile_empty(
-            Target::Soroban,
+            Target::Stellar,
             CompilationMode::Proof,
             EmitFeatures { bulk_memory: true },
         )
@@ -1208,13 +1840,28 @@ mod feature_validation_tests {
         );
     }
 
+    /// Parses and type-checks `source` into the context `codegen` takes.
+    fn type_check(source: &str) -> TypedContext {
+        let parsed = inference_parser::parse(source);
+        assert!(parsed.errors.is_empty(), "fixture does not parse: {source}");
+        inference_type_checker::TypeCheckerBuilder::build_typed_context(parsed.arena)
+            .expect("fixture does not type-check")
+            .typed_context()
+    }
+
     #[test]
-    fn soroban_accepts_the_default_feature_set() {
+    fn stellar_accepts_the_default_feature_set() {
         assert!(
-            compile_empty(
-                Target::Soroban,
-                CompilationMode::Compile,
-                EmitFeatures::default()
+            codegen(
+                &type_check(ONE_EXPORT),
+                "output",
+                CodegenOptions {
+                    target: Target::Stellar,
+                    mode: CompilationMode::Compile,
+                    opt_level: Target::Stellar.default_opt_level(),
+                    features: EmitFeatures::default(),
+                    layout: crate::MemoryLayout::default(),
+                },
             )
             .is_ok(),
             "the WebAssembly 1.0 default must be accepted by every target"

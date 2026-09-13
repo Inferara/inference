@@ -2,7 +2,7 @@
 //
 // Every build precedes a dynamic-index array load or store with the guard
 // `index >= length -> unreachable`: Compile and Proof mode, Debug and Release,
-// Wasm32 and Soroban. The deployed artifact is always checked, and the artifact
+// Wasm32 and Stellar. The deployed artifact is always checked, and the artifact
 // a proof is written about is the artifact that ships. Constant indices are
 // validated statically by analysis rule A037 and get no runtime guard.
 //
@@ -128,6 +128,50 @@ mod bounds_check_tests {
             wat.contains("unreachable"),
             "Proof-mode WAT must contain the trap on out-of-bounds:\n{wat}"
         );
+    }
+
+    /// `same` here means the bytes, not merely the presence of a guard: the two
+    /// default builds are compared whole.
+    ///
+    /// The guard belongs to the lowering, not to the target -- nothing on the
+    /// emission path reads a `Target`, so the target's own default level (`Oz`)
+    /// buys no elision and the contract that ships is checked exactly as the
+    /// Wasm32 build is. Both variables that separate the two builds move here:
+    /// the target and the optimization level each takes by default. Neither is
+    /// read during emission (no optimization pass runs in any mode, see
+    /// `OptLevel`), so the artifacts coincide byte for byte, and this test is
+    /// what would report it if either ever started to matter.
+    #[test]
+    fn stellar_target_emits_the_same_guard_as_wasm32() {
+        // Two builds of the same two dynamic accesses, so the shared
+        // `emit_index_offset` choke point fires four times in total.
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 4);
+        let stellar = codegen_with_full_config(
+            READ_WRITE_SOURCE,
+            Target::Stellar,
+            CompilationMode::Compile,
+            Target::Stellar.default_opt_level(),
+        )
+        .expect("Stellar codegen failed");
+        let wasm32 = codegen_with_full_config(
+            READ_WRITE_SOURCE,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            Target::Wasm32.default_opt_level(),
+        )
+        .expect("Wasm32 codegen failed");
+
+        let wat = wasmprinter::print_bytes(stellar.wasm()).expect("failed to print WAT");
+        assert!(
+            wat.contains("i32.ge_u"),
+            "Stellar WAT must contain the bounds-check comparison:\n{wat}"
+        );
+        assert!(
+            wat.contains("unreachable"),
+            "Stellar WAT must contain the trap on out-of-bounds:\n{wat}"
+        );
+
+        assert_wasms_modules_equivalence(wasm32.wasm(), stellar.wasm());
     }
 
     #[test]

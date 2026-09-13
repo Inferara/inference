@@ -364,16 +364,15 @@ fn abi_version_flag_prints_and_exits() {
     assert_eq!(version, expected);
 }
 
-/// Pins the ABI version string to the literal value introduced for the
-/// `--adopt-external-specs` flag. The `abi_version_flag_prints_and_exits`
-/// test above checks the binary against the shared constant; this one
-/// additionally asserts the concrete `1.4` so an accidental constant change is
-/// caught here too.
+/// Pins the ABI version string to the literal value the `stellar` target became
+/// requestable at. The `abi_version_flag_prints_and_exits` test above checks the
+/// binary against the shared constant; this one additionally asserts the concrete
+/// `1.6` so an accidental constant change is caught here too.
 ///
 /// Uses an exact trimmed equality (not `contains`) so a near-miss such as
-/// "11.4" or "1.40" — which would satisfy a substring match — cannot pass.
+/// "11.6" or "1.60" — which would satisfy a substring match — cannot pass.
 #[test]
-fn abi_version_is_one_dot_four() {
+fn abi_version_is_one_dot_six() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.arg("--abi-version");
     let assert = cmd.assert().success();
@@ -381,8 +380,8 @@ fn abi_version_is_one_dot_four() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.trim(),
-        "1.4",
-        "ABI version must be exactly 1.4, not merely contain it"
+        "1.6",
+        "ABI version must be exactly 1.6, not merely contain it"
     );
 }
 
@@ -477,6 +476,705 @@ fn unknown_wasm_feature_is_rejected_before_any_output() {
     assert!(
         !temp.child("out").child("trivial.wasm").path().exists(),
         "a rejected feature request must leave no artifact"
+    );
+}
+
+// Target selection ---
+
+/// Runs `infc` with the given `--target` value against a real source file and
+/// returns the rejection's stderr, having first checked that nothing was written.
+///
+/// A target the compiler does not build for must be refused before any phase
+/// runs, so the failure is about the request rather than about a program the
+/// user then has to re-read.
+fn reject_target(entry: &str) -> String {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--target")
+        .arg(entry);
+
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    assert!(
+        !temp.child("out").child("trivial.wasm").path().exists(),
+        "a rejected target must leave no artifact"
+    );
+    stderr
+}
+
+/// Naming the default target explicitly must produce the same bytes as naming
+/// none. The flag selects a target; it is not itself an input to emission, and a
+/// build that differed here would mean the plumbing had reached the emitter.
+#[test]
+fn naming_the_default_target_changes_no_byte() {
+    let implicit = compile_source_with(&[], COMPOUND_COPY_SOURCE);
+    let explicit = compile_source_with(&["--target", "wasm32"], COMPOUND_COPY_SOURCE);
+    assert_eq!(
+        implicit, explicit,
+        "`--target wasm32` must be byte-identical to omitting the flag"
+    );
+}
+
+/// A former spelling of a target that is now requestable earns the dedicated
+/// sentence redirecting to the current one. A generic "unknown target" would be
+/// misleading about a name that does exist in the code, and the old spelling is
+/// guessable.
+///
+/// Driven from the slice rather than from a literal, so promoting a name out of
+/// it cannot leave this test asserting about something that is no longer there.
+#[test]
+fn a_reserved_target_is_refused_with_the_spelling_that_replaced_it() {
+    for reserved in inference_compiler_interface::RESERVED_TARGET_NAMES {
+        let stderr = reject_target(reserved);
+        assert!(
+            stderr.contains("is the former name of the `stellar` target")
+                && stderr.contains("write `stellar` instead"),
+            "`{reserved}` must be refused with the redirect, got: {stderr}"
+        );
+    }
+}
+
+/// An unrecognized name lists what is accepted, rather than falling back to the
+/// default: a build that quietly targeted something other than what was asked
+/// for is the failure this rejects.
+#[test]
+fn an_unknown_target_is_refused_listing_the_supported_set() {
+    let stderr = reject_target("nope");
+    assert!(
+        stderr.contains("unknown compilation target"),
+        "the rejection must say what went wrong, got: {stderr}"
+    );
+    for target in inference_compiler_interface::TargetName::ALL {
+        assert!(
+            stderr.contains(&format!("`{}`", target.as_str())),
+            "the rejection must list `{}`, got: {stderr}",
+            target.as_str()
+        );
+    }
+    assert!(
+        stderr.contains("`--target`"),
+        "the rejection must name the surface, got: {stderr}"
+    );
+}
+
+/// Whitespace is rejected, never trimmed — and the message says so, because a
+/// space around the name is invisible in the echoed value and the user would
+/// otherwise read their own correct spelling reported back as unknown.
+#[test]
+fn whitespace_around_a_target_name_is_refused_naming_the_cause() {
+    let stderr = reject_target(" wasm32");
+    assert!(
+        stderr.contains("surrounding whitespace") && stderr.contains("write `wasm32`"),
+        "the rejection must name the whitespace, got: {stderr}"
+    );
+}
+
+// The Stellar target ---
+
+/// A contract whose three methods cover every admissible shape at once: two
+/// parameters and a value return, a `bool` in both positions, and a method that
+/// returns nothing.
+const STELLAR_CONTRACT_SOURCE: &str = "\
+pub fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+pub fn flip(v: bool) -> bool {
+    if v { return false; }
+    return true;
+}
+
+pub fn nothing() {
+    return;
+}
+";
+
+/// Compiles `source` at the Stellar target and returns the written module
+/// alongside the run's stdout, so the artifact and the line describing it are
+/// asserted against one build.
+fn compile_stellar(source: &str) -> (Vec<u8>, String) {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), source).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--target")
+        .arg("stellar");
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    let wasm = std::fs::read(temp.child("out").child("prog.wasm").path())
+        .expect("infc must have written out/prog.wasm");
+    (wasm, stdout)
+}
+
+/// Compiles `source` at the Stellar target expecting a refusal, and returns the
+/// stderr having first checked that no artifact survives.
+///
+/// The absence check is the load-bearing half. `infc` holds every output in
+/// memory until the whole pipeline has succeeded precisely so a late rejection —
+/// and the Val-ABI rewrite is the latest one there is — cannot leave a module on
+/// disk that no host would accept.
+fn reject_stellar(source: &str) -> String {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), source).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--target")
+        .arg("stellar");
+    let assert = cmd.assert().failure();
+
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a refused Stellar build must leave no artifact"
+    );
+    String::from_utf8_lossy(&assert.get_output().stderr).into_owned()
+}
+
+/// The declaration line of the function `name` is exported as, in `wat`.
+///
+/// Resolved through the export entry rather than by guessing the function's
+/// symbol, so the assertion is about what a host reaches when it calls `name`
+/// and not about how the rewriter chose to label the body.
+fn exported_function_declaration(wat: &str, name: &str) -> String {
+    let export = format!("(export \"{name}\" (func ");
+    let rest = wat
+        .split_once(&export)
+        .unwrap_or_else(|| panic!("`{name}` must be exported:\n{wat}"))
+        .1;
+    let symbol = rest
+        .split_once(')')
+        .unwrap_or_else(|| panic!("the export of `{name}` must name a function:\n{wat}"))
+        .0;
+    let declaration = format!("(func {symbol} ");
+    wat.lines()
+        .find(|line| line.trim_start().starts_with(&declaration))
+        .unwrap_or_else(|| panic!("`{name}` is exported as {symbol}, which no function declares:\n{wat}"))
+        .trim()
+        .to_string()
+}
+
+/// The whole point of the target: every contract method is reached through the
+/// host's calling convention.
+///
+/// Asserted through the rendered module rather than through raw bytes, because
+/// the claim is about the exported functions' *types* — one 64-bit word per
+/// declared parameter, and one back — including for the method whose source
+/// returns nothing, since the host's void is a value like any other. A byte
+/// assertion here would pin the rewriter's encoding, which is the rewriter
+/// crate's own business.
+#[test]
+fn a_stellar_build_exports_every_method_in_the_value_abi() {
+    let (wasm, _) = compile_stellar(STELLAR_CONTRACT_SOURCE);
+    let wat = wat_of(&wasm);
+
+    for (method, params) in [("add", 2), ("flip", 1), ("nothing", 0)] {
+        let declaration = exported_function_declaration(&wat, method);
+        let expected = if params == 0 {
+            String::from("(result i64)")
+        } else {
+            format!("(param{}) (result i64)", " i64".repeat(params))
+        };
+        assert!(
+            declaration.ends_with(&expected),
+            "`{method}` must be exported as a function taking {params} value \
+             word(s) and returning one — expected a declaration ending \
+             `{expected}`, got `{declaration}`"
+        );
+    }
+
+    let plain = wat_of(&compile_source_with(&[], STELLAR_CONTRACT_SOURCE));
+    let plain_add = exported_function_declaration(&plain, "add");
+    assert!(
+        plain_add.ends_with("(result i32)") && !plain_add.contains("i64"),
+        "the default build must export the source signature, untouched — \
+         otherwise the assertions above are about code generation rather than \
+         about the rewrite, got `{plain_add}`"
+    );
+}
+
+/// A module with no `contractenvmetav0` section is refused at upload by every
+/// Soroban host there has ever been, so its presence is not a detail of the
+/// encoding — it is the difference between an artifact and a deployable one.
+///
+/// Searched for as bytes rather than in the rendered text: a custom section's
+/// name survives disassembly, but pinning the *bytes* is what proves the section
+/// reached the file rather than merely the printer.
+#[test]
+fn a_stellar_build_carries_the_environment_metadata_section() {
+    let (wasm, _) = compile_stellar(STELLAR_CONTRACT_SOURCE);
+    assert!(
+        wasm.windows(17).any(|w| w == b"contractenvmetav0"),
+        "the written module must carry the environment metadata section"
+    );
+
+    let plain = compile_source_with(&["--target", "wasm32"], STELLAR_CONTRACT_SOURCE);
+    assert!(
+        !plain.windows(17).any(|w| w == b"contractenvmetav0"),
+        "the default target must not carry it — otherwise the check above is \
+         about code generation rather than about the rewrite"
+    );
+}
+
+/// The summary line is the only place a build says what it just made
+/// deployable, and each field earns its place: a Soroban host reports a
+/// wrong-arity call without naming the arity it expected, and reports a
+/// wrong-typed argument as an undiscriminated trap, so the build log is where a
+/// caller finds out what to send.
+#[test]
+fn a_stellar_build_summarizes_the_contract_it_wrote() {
+    let (wasm, stdout) = compile_stellar(STELLAR_CONTRACT_SOURCE);
+    let summary = stdout
+        .lines()
+        .find(|line| line.starts_with("Stellar contract:"))
+        .unwrap_or_else(|| panic!("the build must summarize the contract, got:\n{stdout}"));
+
+    for method in ["add/2", "flip/1", "nothing/0"] {
+        assert!(
+            summary.contains(method),
+            "the summary must name `{method}`, got: {summary}"
+        );
+    }
+    assert!(
+        summary.contains("env protocol 20"),
+        "the summary must declare the environment protocol, got: {summary}"
+    );
+    assert!(
+        summary.contains(&format!("{} bytes", wasm.len())),
+        "the summary must report the size of the module actually written \
+         ({} bytes), got: {summary}",
+        wasm.len()
+    );
+}
+
+/// Every shape the target refuses, refused through the CLI with no artifact left
+/// behind, each naming the thing the author has to change.
+///
+/// The library gate is covered in the `inference-tests` crate; what is exercised
+/// here is that the refusal survives the CLI — that `infc` reports it, exits
+/// non-zero, and leaves nothing on disk. The over-long name and the empty module
+/// are included because they are refusals about the *module*, not about a
+/// declaration, and a gate that only inspected parameter types would pass them.
+#[test]
+fn every_inadmissible_contract_shape_is_refused_with_no_artifact() {
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "a 64-bit parameter",
+            "pub fn f(a: u64) -> u32 { return 1; }\n",
+            &["'f'", "parameter 1 'a'", "'u64'"],
+        ),
+        (
+            "a narrow parameter",
+            "pub fn f(a: u8) -> u32 { return 1; }\n",
+            &["'f'", "parameter 1 'a'", "'u8'"],
+        ),
+        (
+            "a struct parameter",
+            "struct Point { x: i32; y: i32; }\n\
+             pub fn f(p: Point) -> u32 { return 1; }\n",
+            &["'f'", "parameter 1 'p'", "Point"],
+        ),
+        (
+            "an array return",
+            "pub fn f() -> [i32; 2] { return [1, 2]; }\n",
+            &["'f'"],
+        ),
+        (
+            "an over-long export name",
+            "pub fn aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa() -> u32 { return 1; }\n",
+            &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "32"],
+        ),
+        (
+            "no exported function",
+            "fn f() -> u32 { return 1; }\n",
+            &["exports no function"],
+        ),
+    ];
+
+    for (label, source, fragments) in cases {
+        let stderr = reject_stellar(source);
+        for fragment in *fragments {
+            assert!(
+                stderr.contains(fragment),
+                "{label}: the refusal must name `{fragment}`, got: {stderr}"
+            );
+        }
+    }
+}
+
+/// `--mode compile -v` is the one spelling that keeps compile mode and still asks
+/// for a Rocq artifact, and at this target the two would describe different
+/// modules: the translation reads the linked bytes, the rewrite happens after
+/// them, and the `.v` would be about a module that is not the one on disk.
+///
+/// Refused before any phase runs, so neither artifact appears.
+#[test]
+fn a_proof_artifact_is_refused_at_the_stellar_target() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), STELLAR_CONTRACT_SOURCE).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--target")
+        .arg("stellar")
+        .arg("--mode")
+        .arg("compile")
+        .arg("-v");
+
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("-v cannot be combined with --target stellar")
+            && stderr.contains("pre-rewrite"),
+        "the refusal must name the divergence, got: {stderr}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists()
+            && !temp.child("out").child("prog.v").path().exists(),
+        "the refusal must leave neither artifact"
+    );
+}
+
+/// Proof mode itself is refused at this target too, and by code generation
+/// rather than by the check above: the target cannot decode the custom
+/// non-deterministic instructions proof mode emits at all. Pinned here because
+/// the two refusals are one user-facing rule — no Rocq artifact from a Stellar
+/// build — reached by two different spellings, and a change that dropped either
+/// would leave the other looking like full coverage.
+///
+/// Both spellings of proof mode are run, and the bare `-v` is the load-bearing
+/// one. The refusal above is deliberately narrowed to compile mode *because*
+/// `-v` alone normalizes to proof mode and lands here instead; if that
+/// normalization ever changed, the narrow refusal would stop covering it in
+/// silence and `infc file.inf -v --target stellar` would write a `.v`
+/// describing the pre-rewrite module beside the contract. Nothing else in the
+/// suite would notice.
+#[test]
+fn proof_mode_is_refused_at_the_stellar_target_in_both_spellings() {
+    for spelling in [&["--mode", "proof"][..], &["-v"][..]] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let dest = temp.child("prog.inf");
+        std::fs::write(dest.path(), STELLAR_CONTRACT_SOURCE).unwrap();
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path())
+            .arg(dest.path())
+            .arg("--target")
+            .arg("stellar")
+            .args(spelling);
+
+        let assert = cmd.assert().failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains("Proof mode requires Wasm32 target")
+                && stderr.contains("Stellar target cannot process these"),
+            "{spelling:?}: the refusal must name the mode and the target, got: {stderr}"
+        );
+        assert!(
+            !temp.child("out").child("prog.wasm").path().exists()
+                && !temp.child("out").child("prog.v").path().exists(),
+            "{spelling:?}: the refusal must leave neither artifact"
+        );
+    }
+}
+
+/// The static-merge linker renumbers functions, so the export descriptor's
+/// indices are stale by the time the rewriter runs — which is why the rewriter
+/// matches an export by *name*. That is load-bearing and nothing before this
+/// exercises it: every other Stellar fixture links nothing, so no index moves.
+///
+/// The fixture is the committed foreign-toolchain artifact, an unmodified
+/// `cargo build --target wasm32-unknown-unknown` output whose function
+/// numbering owes nothing to this compiler.
+#[test]
+fn a_stellar_build_that_links_an_external_still_resolves_its_exports_by_name() {
+    let wasmlib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests")
+        .join("test_data")
+        .join("wasmlib");
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(
+        dest.path(),
+        "external fn clamp_add(a: i32, b: i32) -> i32;\n\
+         use { clamp_add } from rustlib;\n\n\
+         pub fn saturating_add(a: i32, b: i32) -> i32 {\n\
+         \x20   return clamp_add(a, b);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("-L")
+        .arg(&wasmlib)
+        .arg("--memory-pages")
+        .arg("16")
+        .arg("--target")
+        .arg("stellar");
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("Linked 1 external module(s)"),
+        "the fixture must actually link, or the renumbering never happens:\n{stdout}"
+    );
+
+    let wasm = std::fs::read(temp.child("out").child("prog.wasm").path())
+        .expect("infc must have written out/prog.wasm");
+    let wat = wat_of(&wasm);
+    assert!(
+        exported_function_declaration(&wat, "saturating_add")
+            .ends_with("(param i64 i64) (result i64)"),
+        "the wrapper must have been attached to the right function after the \
+         merge renumbered everything:\n{wat}"
+    );
+    assert!(
+        wasm.windows(17).any(|w| w == b"contractenvmetav0"),
+        "a linked build is a contract like any other"
+    );
+}
+
+/// A foreign artifact whose only post-WebAssembly-1.0 content is one
+/// sign-extension instruction, which is what a stock Rust
+/// `wasm32-unknown-unknown` build emits by default. Everything else about it is
+/// ordinary: it exports one function with a signature an `external fn` can
+/// declare.
+const SIGN_EXTENDING_EXTERNAL: &str = r#"(module
+  (func (export "clamp_add") (param i32 i32) (result i32)
+    local.get 0
+    i32.extend8_s
+    local.get 1
+    i32.add))
+"#;
+
+/// A program binding that export.
+const CALLS_SIGN_EXTENDING_EXTERNAL: &str = "\
+external fn clamp_add(a: i32, b: i32) -> i32;
+use { clamp_add } from rustlib;
+
+pub fn saturating_add(a: i32, b: i32) -> i32 {
+    return clamp_add(a, b);
+}
+";
+
+/// Stages the sign-extending external under a `-L` directory beside a program
+/// that binds it, returning the temp directory, the entry path and the search
+/// directory.
+fn sign_extending_project() -> (assert_fs::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", CALLS_SIGN_EXTENDING_EXTERNAL);
+    let lib = temp.child("lib");
+    std::fs::create_dir_all(lib.path()).unwrap();
+    let bytes = wat::parse_str(SIGN_EXTENDING_EXTERNAL).expect("the external fixture is valid WAT");
+    std::fs::write(lib.child("rustlib.wasm").path(), bytes).unwrap();
+    let dir = lib.path().to_path_buf();
+    (temp, entry, dir)
+}
+
+/// A contract is WebAssembly 1.0 throughout, so an external outside it is
+/// refused — by name, by path, and before the merge.
+///
+/// The linker accepts sign extension, so nothing before the Val-ABI rewrite
+/// objects, and the rewrite sees one merged module: its refusal names a byte
+/// offset into bytes no file holds, says nothing about which artifact is at
+/// fault, and offers nothing to do about it. Every committed external fixture
+/// happens to be within 1.0, so the whole suite passed over this.
+///
+/// The negative control is the same external at the default target, which links
+/// it and writes the artifact — which is what makes the advertised remedy an
+/// actual remedy rather than a sentence.
+#[test]
+fn a_foreign_module_outside_webassembly_one_is_refused_before_the_merge() {
+    let (temp, entry, lib) = sign_extending_project();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("-L")
+        .arg(&lib)
+        .arg("--target")
+        .arg("stellar");
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    let resolved = lib.join("rustlib.wasm");
+    for fragment in [
+        "`rustlib`",
+        resolved.to_str().expect("temp paths are UTF-8"),
+        "not a WebAssembly 1.0 module",
+        "sign extension",
+        "Rebuild `rustlib`",
+        "--target wasm32",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the refusal must carry `{fragment}`, got: {stderr}"
+        );
+    }
+    assert!(
+        !stdout.contains("Linked"),
+        "the refusal must come before the merge, or it cannot name a file: {stdout}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a refused build must leave no artifact"
+    );
+
+    let (temp, entry, lib) = sign_extending_project();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-L").arg(&lib);
+    let assert = cmd.assert().success();
+    assert!(
+        String::from_utf8_lossy(&assert.get_output().stdout).contains("Linked 1 external module(s)"),
+        "the default target must link the very same module, or the refusal above \
+         is about a broken fixture rather than about the instruction set"
+    );
+    assert!(
+        temp.child("out").child("prog.wasm").path().exists(),
+        "the default target must write the artifact it linked"
+    );
+}
+
+/// `--codegen` without `-o` writes nothing, so it has no contract to describe
+/// and no size to report — and it still refuses a program that could not be a
+/// contract.
+///
+/// Both halves are one test because silencing the summary and silencing the
+/// checks are the same edit away from each other: a gate on the whole target
+/// branch rather than on the one line would turn `--codegen --target stellar`
+/// from a check into a no-op that reports success for a program no host would
+/// accept.
+///
+/// What the second half observes is the source-level export gate, which runs
+/// inside code generation. The Val-ABI rewrite is left unconditional too, but
+/// nothing here can see that: every refusal the rewrite owns that a user can
+/// reach from source is already refused by an earlier gate — the export shapes
+/// by that same gate, a post-1.0 external before the merge, an external's own
+/// unsatisfied import by the linker — so in a build that writes no file the
+/// rewrite has no observable effect at all. It stays unconditional because the
+/// day one of its refusals stops being shadowed is not the day to discover that
+/// half the invocations skip it.
+#[test]
+fn a_phase_only_stellar_build_describes_no_artifact_and_still_refuses() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", STELLAR_CONTRACT_SOURCE);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--codegen")
+        .arg("--target")
+        .arg("stellar");
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        !stdout.contains("Stellar contract:"),
+        "a build that writes no file must not report the size of one: {stdout}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "--codegen alone writes nothing"
+    );
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "prog.inf",
+        "pub fn f(a: u64) -> u32 { return 1; }\n",
+    );
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--codegen")
+        .arg("--target")
+        .arg("stellar");
+    let assert = cmd.assert().failure();
+    assert!(
+        String::from_utf8_lossy(&assert.get_output().stderr).contains("parameter 1 'a'"),
+        "a phase-only build must hold a contract to the same admissible set as a \
+         writing one"
+    );
+}
+
+/// The artifact `infc` wrote for [`STELLAR_CONTRACT_SOURCE`] at the default
+/// target *before this target existed* — produced by the binary built from the
+/// commit this work branched from, which had no `--target` flag at all.
+///
+/// Committed as bytes rather than pinned as a hash because `inference-cli` has
+/// no hashing crate among its dev-dependencies, and adding one would stale the
+/// tracked `ci/rocq-discharge.cargo-lock`, which aborts that CI lane before it
+/// compiles anything. The bytes are 186 of them; a hash would save nothing and
+/// tell a reader less.
+///
+/// To regenerate after a deliberate change to code generation or to the write
+/// path, from a scratch directory, with `$SOURCE` holding
+/// `STELLAR_CONTRACT_SOURCE` verbatim:
+///
+/// ```text
+/// printf '%s' "$SOURCE" > prog.inf
+/// infc prog.inf
+/// cp out/prog.wasm core/cli/tests/artifacts/three_methods_default_target.wasm
+/// ```
+///
+/// The file name matters: it reaches the module's name section.
+const DEFAULT_TARGET_ARTIFACT: &[u8] =
+    include_bytes!("artifacts/three_methods_default_target.wasm");
+
+/// Selecting the Stellar target must change nothing about a *default* build.
+///
+/// The rewrite is a branch in the write path, and a branch is exactly the kind of
+/// edit that can leak: the 160 golden artifacts in the `inference-tests` crate
+/// cover `codegen()` and never reach this code at all.
+///
+/// The pin is the committed pre-campaign artifact. Comparing two builds of the
+/// *current* binary against each other cannot do this job: an edit that changed
+/// what every default build writes would move both sides together and pass, and
+/// so would one that changed only what a build naming no target writes. Only
+/// bytes produced before the branch existed can tell either of those from a
+/// build that is genuinely unchanged.
+#[test]
+fn the_stellar_branch_leaves_the_default_write_path_untouched() {
+    let implicit = compile_source_with(&[], STELLAR_CONTRACT_SOURCE);
+    assert_eq!(
+        implicit.as_slice(),
+        DEFAULT_TARGET_ARTIFACT,
+        "a build naming no target must write the {} bytes it wrote before this \
+         target existed, and wrote {} instead",
+        DEFAULT_TARGET_ARTIFACT.len(),
+        implicit.len()
+    );
+
+    let explicit = compile_source_with(&["--target", "wasm32"], STELLAR_CONTRACT_SOURCE);
+    assert_eq!(
+        implicit, explicit,
+        "a default build must not depend on whether the default was named"
+    );
+
+    let (stellar, _) = compile_stellar(STELLAR_CONTRACT_SOURCE);
+    assert_ne!(
+        implicit, stellar,
+        "the Stellar build must differ — otherwise the comparison above is \
+         vacuous because the rewrite never ran"
     );
 }
 
