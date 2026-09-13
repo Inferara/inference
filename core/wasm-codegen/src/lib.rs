@@ -139,6 +139,10 @@ pub use crate::checked_section::SECTION_VERSION as CHECKED_SECTION_VERSION;
 /// a stronger guarantee than a refusal at this boundary was — it holds for every
 /// caller, including one that never passes through here.
 ///
+/// The target-specific export check runs on what [`emit`] returns rather than
+/// on a half-built module; [`emit`] carries why that position changes no
+/// outcome.
+///
 /// # Errors
 ///
 /// Returns an error if:
@@ -201,12 +205,93 @@ pub fn codegen(
         }
     }
 
+    let emitted = emit(typed_context, module_name, mode, features, layout)?;
+
+    if target == Target::Stellar {
+        check_stellar_exports(&emitted.export_signatures, typed_context)?;
+    }
+
+    Ok(CodegenOutput::new(
+        emitted.wasm,
+        target,
+        mode,
+        opt_level,
+        module_name.to_string(),
+        emitted.has_main,
+        emitted.spec_func_indices_by_spec,
+    )
+    .with_frame_sizes(emitted.frame_sizes)
+    .with_guarded_functions(emitted.guarded_functions)
+    .with_export_signatures(emitted.export_signatures)
+    .with_hspecs(emitted.hspecs))
+}
+
+/// One run of [`emit`]: the module bytes, and the metadata the traversal
+/// produced alongside them.
+///
+/// Named fields rather than a seven-wide tuple: four are handed to
+/// differently-named `with_*` calls in [`codegen`] and three become positional
+/// arguments of [`CodegenOutput::new`], where a name at both ends is what keeps
+/// the mapping checkable without counting positions.
+struct Emitted {
+    wasm: Vec<u8>,
+    spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
+    frame_sizes: FxHashMap<FnKey, u32>,
+    hspecs: HSpecMap,
+    has_main: bool,
+    guarded_functions: Vec<FnKey>,
+    export_signatures: Vec<ExportSignature>,
+}
+
+/// Assembles the WASM module for `typed_context`, with the emission metadata
+/// that travels with it.
+///
+/// The parameter list is the contract. Emitted bytes are a function of the
+/// typed context, the module name, the compilation mode, the requested
+/// features and the memory layout — and of nothing else: no parameter carries
+/// the target a build asked for, and this crate holds no ambient state one
+/// could be read from. A proof is written about the bytes the default target
+/// produces, and a module deployed to any other target has to be those same
+/// bytes; an emission path that could consult the requested target would
+/// separate the artifact that was proven from the artifact that ships, and
+/// would do it silently. A target read in here would therefore have to be
+/// conjured rather than handed in — which is what the signature buys, not an
+/// impossibility: [`Target`] is in scope for every item in this module, so the
+/// backstop for the hard way is the identity test that builds one set of
+/// sources at another target and compares the bytes with the default build:
+/// `a_stellar_build_is_byte_identical_to_the_default_build`, in
+/// `tests/src/codegen/wasm/stellar_gate.rs`.
+///
+/// A target-specific acceptance check therefore runs in [`codegen`], on what
+/// this function returns rather than on a half-built module: see
+/// [`check_stellar_exports`], which reads the export descriptor and the typed
+/// context and emits nothing. Which program it refuses does not depend on
+/// where it sits: it still runs after the two refusals that follow a
+/// traversal — the spec name cap and the `inference.hspecs` payload check,
+/// both inside this function — and the steps between those and it, reading the
+/// descriptor off the compiler and assembling the module, cannot fail. Placing
+/// the check before those steps instead would change no outcome and would put a
+/// target read inside the one region this signature exists to keep free of one.
+///
+/// # Errors
+///
+/// Returns an error if the traversal cannot lower the program, if a spec name
+/// exceeds the byte cap both `inference.spec_funcs` decoders enforce, or if an
+/// obligation would not survive the `inference.hspecs` decoder.
+fn emit(
+    typed_context: &TypedContext,
+    module_name: &str,
+    mode: CompilationMode,
+    features: EmitFeatures,
+    layout: MemoryLayout,
+) -> anyhow::Result<Emitted> {
     let mut compiler = Compiler::new(module_name);
     compiler.set_emit_features(features);
     compiler.set_memory_layout(layout);
 
-    // Every build this function drives is bounds-checked, whatever its mode,
-    // profile, or target. `Compiler::set_emit_bounds_checks` carries why.
+    // Bounds checks are on for every build, in either compilation mode and at
+    // every target and optimization level: no input reaching here can turn them
+    // off. `Compiler::set_emit_bounds_checks` carries why.
     compiler.set_emit_bounds_checks(true);
 
     let hspecs = if typed_context.source_files().next().is_some() {
@@ -246,10 +331,6 @@ pub fn codegen(
     let guarded_functions = compiler.guarded_functions();
     let export_signatures = compiler.export_signatures();
 
-    if target == Target::Stellar {
-        check_stellar_exports(&export_signatures, typed_context)?;
-    }
-
     let (wasm, spec_func_indices_by_spec, frame_sizes) = compiler.finish_and_take(&hspecs);
     debug_assert!(
         mode != CompilationMode::Compile
@@ -257,19 +338,15 @@ pub fn codegen(
         "compile mode must not record any spec function indices or hspec obligations"
     );
 
-    Ok(CodegenOutput::new(
+    Ok(Emitted {
         wasm,
-        target,
-        mode,
-        opt_level,
-        module_name.to_string(),
-        has_main,
         spec_func_indices_by_spec,
-    )
-    .with_frame_sizes(frame_sizes)
-    .with_guarded_functions(guarded_functions)
-    .with_export_signatures(export_signatures)
-    .with_hspecs(hspecs))
+        frame_sizes,
+        hspecs,
+        has_main,
+        guarded_functions,
+        export_signatures,
+    })
 }
 
 /// The most parameters an exported function may take at the Stellar target.
@@ -1841,7 +1918,7 @@ mod feature_validation_tests {
     }
 
     /// Parses and type-checks `source` into the context `codegen` takes.
-    fn type_check(source: &str) -> TypedContext {
+    pub(super) fn type_check(source: &str) -> TypedContext {
         let parsed = inference_parser::parse(source);
         assert!(parsed.errors.is_empty(), "fixture does not parse: {source}");
         inference_type_checker::TypeCheckerBuilder::build_typed_context(parsed.arena)
@@ -1884,8 +1961,13 @@ mod feature_validation_tests {
 
 #[cfg(test)]
 mod spec_name_tests {
-    use super::{check_spec_name_collisions, check_spec_names_valid, qualified_spec_name, VisitedSpec};
+    use super::feature_validation_tests::type_check;
+    use super::{
+        check_spec_name_collisions, check_spec_names_valid, codegen, qualified_spec_name,
+        CodegenOptions, CompilationMode, VisitedSpec,
+    };
     use crate::errors::CodegenError;
+    use crate::spec_section::MAX_SPEC_NAME_LEN;
 
     fn visited(segments: &[&str], spec: &str) -> VisitedSpec {
         VisitedSpec {
@@ -2136,6 +2218,44 @@ mod spec_name_tests {
             }
             other => panic!("expected SpecNameInvalid, got {other:?}"),
         }
+    }
+
+    /// The byte cap both `inference.spec_funcs` decoders enforce is checked on
+    /// the way out of emission, so an over-long spec name comes back as a
+    /// codegen diagnostic instead of an artifact that fails its own downstream
+    /// decode. Falsified by dropping the early return that raises
+    /// `SpecNameTooLong`, or by changing the message or the length it reports.
+    /// Where the check sits relative to section encoding is not pinned here and
+    /// cannot be — this entry point hands back no bytes on either error path, so
+    /// the ordering is unobservable from outside it.
+    #[test]
+    fn a_spec_name_over_the_byte_cap_is_refused() {
+        cov_mark::check!(wasm_codegen_spec_name_too_long);
+        let name = "S".repeat(MAX_SPEC_NAME_LEN + 1);
+        let source = format!(
+            "fn helper() -> i32 {{ return 2; }}
+             spec {name} {{
+                 fn claim() forall {{ assert(helper() == 2); }}
+             }}"
+        );
+        let typed_context = type_check(&source);
+        let err = codegen(
+            &typed_context,
+            "output",
+            CodegenOptions {
+                mode: CompilationMode::Proof,
+                ..CodegenOptions::default()
+            },
+        )
+        .expect_err("a spec name past the cap must be refused");
+        let len = MAX_SPEC_NAME_LEN + 1;
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "spec name is {len} bytes, which exceeds the maximum of \
+                 {MAX_SPEC_NAME_LEN} bytes: '{name}'"
+            )
+        );
     }
 
     #[test]
