@@ -1124,8 +1124,9 @@ fn project_run_from_subdir_runs_root_wasm() {
 /// `infs run` with no manifest anywhere up the tree fails with the remediation
 /// error naming `Inference.toml`.
 ///
-/// wasmtime availability is checked first (fail-fast parity with single-file
-/// mode), so the discovery error is only reachable when wasmtime is present.
+/// Project discovery runs before the wasmtime probe, so this error is reachable
+/// whether or not wasmtime is installed; the gate below only keeps the rest of the
+/// suite's environment assumptions uniform.
 #[test]
 fn project_run_without_manifest_errors() {
     if !require_wasmtime() {
@@ -1143,7 +1144,7 @@ fn project_run_without_manifest_errors() {
 }
 
 /// A project whose manifest exists but `src/main.inf` is missing fails with the
-/// entry-point remediation error. Gated on wasmtime (checked before discovery).
+/// entry-point remediation error.
 #[test]
 fn project_run_missing_entry_point_errors() {
     if !require_wasmtime() {
@@ -7737,5 +7738,295 @@ fn infs_build_on_an_adopting_project_succeeds_end_to_end() {
     assert!(
         temp.child("proofs").child("main.v").path().exists(),
         "a proof-mode project build must still write its .v"
+    );
+}
+
+// The Stellar target ---
+
+/// A contract method, which is what a Stellar project's entry file has instead
+/// of a `main` that returns a status code.
+const PROJECT_CONTRACT_SRC: &str = "pub fn add(a: u32, b: u32) -> u32 {\n    return a + b;\n}\n";
+
+/// The `[build]` table of a project that names the Stellar target and nothing
+/// else — no features, no `[memory]`, no optimizer. That combination is
+/// deliberate: it is the manifest under which a forward gated on some *other*
+/// setting would be dropped.
+const STELLAR_BUILD_TABLE: &str = "[build]\ntarget = \"stellar\"\n";
+
+/// A project naming a target must have that target reach `infc`, and must say so
+/// on stdout.
+///
+/// The echo matters as much as the flag: the manifest is the only place a target
+/// can be named, so the build log is the only place a user finds out which
+/// runtime the artifact in `out/` was built for.
+#[cfg(unix)]
+#[test]
+fn a_project_target_reaches_infc_and_is_echoed() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("target: stellar"));
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+    assert_eq!(
+        argv_values_after(&argv, "--target"),
+        vec![Some("stellar")],
+        "`--target` must be forwarded exactly once, with its value adjacent, \
+         got argv: {argv:?}"
+    );
+}
+
+/// A project that names no target forwards no flag.
+///
+/// `infc` resolves an absent `--target` to the same default, so the flag would
+/// change no byte — but forwarding it would put the target's ABI floor under
+/// every project that never asked for one, refusing to build against an older
+/// compiler the project needs nothing from.
+#[cfg(unix)]
+#[test]
+fn a_project_naming_no_target_forwards_no_target_flag() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("target:").not());
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+    assert!(
+        !argv.contains(&"--target"),
+        "a default-target project must not forward the flag, got argv: {argv:?}"
+    );
+}
+
+/// Single-file `infs build` inside a project honors the project's target, for
+/// the same reason it honors the project's features: one project must not
+/// produce artifacts for two runtimes depending on how the build was invoked —
+/// and this path overwrites the very artifact `infs build` produces.
+#[cfg(unix)]
+#[test]
+fn single_file_build_forwards_the_enclosing_project_target() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(joined(&["src", "main.inf"]));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("target: stellar"));
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+    assert_eq!(
+        argv_values_after(&argv, "--target"),
+        vec![Some("stellar")],
+        "the enclosing project's target must reach infc, got argv: {argv:?}"
+    );
+}
+
+/// An `infc` older than the target it is being asked for is refused with
+/// remediation rather than handed the flag.
+///
+/// The gate is on the *name*, not on `--target` itself: a compiler that parses
+/// the flag but predates this name would accept it and emit a module for the
+/// default runtime, which is a wrong artifact rather than a refusal.
+#[cfg(unix)]
+#[test]
+fn an_infc_predating_the_target_is_refused_with_the_abi_text() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+
+    let minor = inference_compiler_interface::TargetName::Stellar.abi_minor() - 1;
+    let stub = temp.child("infc_stub");
+    stub.write_str(&format!(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '{}.{minor}\\n'; exit 0 ;;\n\
+           *) exit 0 ;;\n\
+         esac\n",
+        inference_compiler_interface::COMPILER_ABI_MAJOR,
+    ))
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot build for the `stellar` target",
+        ))
+        .stderr(predicate::str::contains("[build] target"));
+}
+
+/// `infs run` refuses a Stellar project rather than handing the contract to
+/// wasmtime.
+///
+/// wasmtime would invoke the export and pass each argument as a decimal, which a
+/// value-ABI wrapper decodes as a tagged word — a different value, reported as a
+/// success. A wrong answer is not a missing feature, so this is a refusal.
+///
+/// Deliberately not guarded on wasmtime being installed: the refusal is decided
+/// from the manifest, before the runtime is looked for, so a guard here would
+/// skip the pin on exactly the machines where the ordering is observable.
+#[test]
+fn infs_run_refuses_a_stellar_project() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("run");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot run a `stellar` build"))
+        .stderr(predicate::str::contains("Soroban host"));
+
+    assert!(
+        !temp.child("out").path().exists(),
+        "the refusal must precede the build, so nothing is compiled"
+    );
+}
+
+/// The same refusal on the single-file path: the enclosing manifest decides the
+/// target there too, so running a file inside a Stellar project would have the
+/// same wrong outcome. Unguarded on wasmtime for the same reason as the project
+/// pin above.
+#[test]
+fn infs_run_refuses_a_file_inside_a_stellar_project() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("run")
+        .arg(joined(&["src", "main.inf"]));
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot run a `stellar` build"));
+}
+
+/// The refusal is decided before `wasmtime` is looked for, on both paths.
+///
+/// The bug this pins sent a user with no `wasmtime` to install one — with a
+/// download page — for a build `wasmtime` can never invoke: they install it,
+/// retry, and only then learn it is impossible. `PATH` is emptied so the probe
+/// can only fail, which is the one condition under which the two messages are
+/// distinguishable; with a runtime installed either ordering looks identical.
+///
+/// Unix-only because emptying `PATH` is only reliably harmless there: `infs` is
+/// spawned by absolute path and needs no lookup, and everything the refusal
+/// reads is on disk.
+#[cfg(unix)]
+#[test]
+fn the_stellar_run_refusal_precedes_the_wasmtime_probe() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+
+    let assert_refused = |mut cmd: Command| {
+        cmd.env("PATH", "").current_dir(temp.path());
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("cannot run a `stellar` build"))
+            .stderr(predicate::str::contains("wasmtime not found in PATH").not());
+    };
+
+    let mut project = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    project.arg("run");
+    assert_refused(project);
+
+    let mut single_file = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    single_file.arg("run").arg(joined(&["src", "main.inf"]));
+    assert_refused(single_file);
+}
+
+/// The Stellar target and `[build.wasm-opt]` are individually valid and together
+/// a manifest that fails to load, for every command.
+///
+/// Both commands are asserted because the refusal is a load-time one: a
+/// build-time check would let `infs run` past it, and `run`'s own target refusal
+/// would then hide the omission.
+#[test]
+fn a_stellar_project_declaring_the_optimizer_fails_to_load() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_CONTRACT_SRC,
+        "[build]\ntarget = \"stellar\"\n\n[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    for command in ["build", "run"] {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.current_dir(temp.path()).arg(command);
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("`[build.wasm-opt]`"))
+            .stderr(predicate::str::contains(
+                "`[build] target = \"stellar\"`",
+            ));
+    }
+}
+
+/// A Stellar project builds end to end against the real compiler, and what lands
+/// in `out/` is a contract: the metadata section a Soroban host refuses a module
+/// without.
+///
+/// This is the chain the stub tests cannot cover — manifest, forward, and an
+/// `infc` that acts on the flag. A forward that reached a compiler which ignored
+/// it would produce a perfectly valid module with none of this in it.
+#[test]
+fn infs_build_on_a_stellar_project_writes_a_contract() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("target: stellar"))
+        .stdout(predicate::str::contains("Stellar contract: add/2"));
+
+    let wasm = std::fs::read(temp.child("out").child("main.wasm").path())
+        .expect("the project build must write out/main.wasm");
+    assert!(
+        wasm.windows(17).any(|w| w == b"contractenvmetav0"),
+        "the artifact must be a contract, not merely a module"
     );
 }

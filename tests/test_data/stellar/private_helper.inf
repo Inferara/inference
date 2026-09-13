@@ -1,0 +1,15 @@
+// A private function ahead of the exported ones, so the exported indices do
+// not start at zero and are not contiguous with them. A rewrite that matched
+// an export positionally, or derived a wrapper's inner call index from the
+// export's position, answers wrongly here and nowhere else.
+fn triple(x: u32) -> u32 {
+    return x + x + x;
+}
+
+pub fn tripled(x: u32) -> u32 {
+    return triple(x);
+}
+
+pub fn plain(x: u32) -> u32 {
+    return x;
+}

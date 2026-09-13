@@ -1428,30 +1428,30 @@ mod base_codegen_tests {
     }
 
     #[test]
-    fn soroban_produces_valid_wasm() {
+    fn stellar_produces_valid_wasm() {
         let source = "pub fn hello_world() -> i32 { return 42; }";
-        let wasm_bytes = wasm_codegen_with_target(source, inference_wasm_codegen::Target::Soroban);
+        let wasm_bytes = wasm_codegen_with_target(source, inference_wasm_codegen::Target::Stellar);
         // Validate with inf_wasmparser (superset of standard wasmparser).
-        // Soroban WASM should be valid standard WASM without custom opcodes.
+        // Stellar WASM should be valid standard WASM without custom opcodes.
         inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("Soroban WASM is invalid: {e}"));
+            .unwrap_or_else(|e| panic!("Stellar WASM is invalid: {e}"));
         // Verify the binary is non-empty and starts with the WASM magic number
-        assert!(wasm_bytes.len() > 8, "Soroban WASM should be non-trivial");
+        assert!(wasm_bytes.len() > 8, "Stellar WASM should be non-trivial");
         assert_eq!(
             &wasm_bytes[0..4],
             b"\0asm",
-            "Soroban output should start with WASM magic number"
+            "Stellar output should start with WASM magic number"
         );
     }
 
     #[test]
-    fn soroban_accepts_assert() {
+    fn stellar_accepts_assert() {
         // `assert` lowers to baseline `i32.eqz; if; unreachable; end`, none of which
-        // live in the custom 0xfc non-det prefix space. Soroban should accept it.
+        // live in the custom 0xfc non-det prefix space. Stellar should accept it.
         let source = "pub fn check(x: i32) -> i32 { assert(x > 0); return x; }";
-        let wasm_bytes = wasm_codegen_with_target(source, inference_wasm_codegen::Target::Soroban);
+        let wasm_bytes = wasm_codegen_with_target(source, inference_wasm_codegen::Target::Stellar);
         inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("Soroban WASM with assert is invalid: {e}"));
+            .unwrap_or_else(|e| panic!("Stellar WASM with assert is invalid: {e}"));
     }
 
     #[test]

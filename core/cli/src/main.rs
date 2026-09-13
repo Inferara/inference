@@ -167,7 +167,7 @@ mod parser;
 pub(crate) mod toolchain;
 use clap::Parser;
 use inference::wasm_link::{
-    resolve_external_modules, ManifestDeps, ResolvedExternals, SearchPath,
+    resolve_external_modules, ManifestDeps, ResolvedExternalModule, ResolvedExternals, SearchPath,
 };
 use inference::{
     AnalysisOptions, ExternalSpecPolicy, LinkOptions, analyze_with_options, link_with_options,
@@ -349,6 +349,134 @@ fn resolve_emit_features(entries: &[String]) -> anyhow::Result<EmitFeatures> {
         }
     }
     Ok(features)
+}
+
+/// Resolves the `--target` name into the emission target code generation takes.
+///
+/// Validation is [`inference_compiler_interface::resolve_target`] — the same
+/// vocabulary and the same wording `infs` uses for the `[build] target` key, so a
+/// name rejected in one place is rejected identically in the other. Its
+/// `TargetError` carries the whole diagnostic, so this surfaces it unchanged.
+///
+/// The mapping is an exhaustive match with no wildcard arm: a name cannot be
+/// added to the shared vocabulary without an emission target being decided for it
+/// here, which is why there is no "recognized but unsupported" state to report.
+/// A wildcard would let a new name silently resolve to the default and ship an
+/// artifact built for the wrong runtime.
+///
+/// # Errors
+///
+/// Returns the shared diagnostic when `requested` names no target this compiler
+/// builds for.
+fn resolve_target_flag(requested: Option<&str>) -> anyhow::Result<inference_wasm_codegen::Target> {
+    use inference_compiler_interface::{TargetName, TargetSource};
+
+    let name = match requested {
+        Some(entry) => inference_compiler_interface::resolve_target(entry, TargetSource::Flag)?,
+        None => TargetName::DEFAULT,
+    };
+    Ok(match name {
+        TargetName::Wasm32 => inference_wasm_codegen::Target::Wasm32,
+        TargetName::Stellar => inference_wasm_codegen::Target::Stellar,
+    })
+}
+
+/// The one line a Stellar build prints beside its progress lines: what the
+/// contract exposes, at which environment protocol, and how large it is.
+///
+/// Printed only by a build that writes the module. The size is the size of a
+/// file, and a build asked for no file has none to report — while the rewrite
+/// itself still runs, so a phase-only build is held to everything a writing one
+/// is held to.
+///
+/// The arity is the *value* arity — the number of 64-bit words a host passes —
+/// which is the source parameter count, since every admissible parameter takes
+/// exactly one word and a returned value takes none. Printing it is what makes
+/// a wrong call site diagnosable from the build log: a Soroban host reports an
+/// arity mismatch without naming the arity it expected, and it reports a wrong
+/// argument type as an undiscriminated trap.
+fn stellar_summary(exports: &[inference_wasm_codegen::ExportSignature], size: usize) -> String {
+    let methods = exports
+        .iter()
+        .map(|export| format!("{}/{}", export.name, export.params.len()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Stellar contract: {methods}; env protocol {}; {size} bytes",
+        inference_stellar_abi::STELLAR_ENV_PROTOCOL,
+    )
+}
+
+/// The refusal owed to a foreign module a contract build cannot carry, or
+/// `None` when every external clears the instruction set a contract is held to.
+///
+/// A contract is WebAssembly 1.0 throughout: the Val-ABI rewrite validates the
+/// module it produces, and that module is the program *and* every external
+/// merged into it. The linker is deliberately more permissive — it accepts
+/// sign extension, bulk memory and mutable globals, which is what an ordinary
+/// foreign toolchain emits — so the first thing to notice a post-1.0 external
+/// is the rewrite, by which point the offending instruction sits at an offset
+/// into merged bytes that came from no single file, and the message can neither
+/// name the artifact nor suggest anything to do about it.
+///
+/// Asked of each external before the merge, the same question names the module,
+/// the file it resolved to and a remedy, and the validator's offset points into
+/// that file.
+fn foreign_module_refusal(externals: &[ResolvedExternalModule]) -> Option<String> {
+    externals.iter().find_map(|external| {
+        let reason = inference_stellar_abi::check_wasm1(&external.bytes).err()?;
+        let logical = &external.logical_module;
+        Some(format!(
+            "Stellar target: the external module `{logical}`, resolved to {}, is not a \
+             WebAssembly 1.0 module: {reason}. A contract is WebAssembly 1.0 throughout and this \
+             module is merged into it, so the artifact is refused as a whole rather than in \
+             part. Rebuild `{logical}` for the WebAssembly 1.0 instruction set — a stock Rust \
+             `wasm32-unknown-unknown` build emits sign-extension instructions by default — or \
+             build this program at --target {}, which links the module as it is.",
+            external.path.display(),
+            inference_compiler_interface::TargetName::DEFAULT.as_str(),
+        ))
+    })
+}
+
+/// The refusal owed to a `.v` request whose target rewrites the module after the
+/// translation would have read it, or `None` when the pairing is sound.
+///
+/// The Stellar target ships a module the Val-ABI rewriter produced, and that
+/// pass runs after linking — after the only bytes `wasm_to_v` ever sees. A proof
+/// artifact written from those bytes would describe a module with a different
+/// export section, different function bodies and a metadata section it does not
+/// mention, while claiming to be about the artifact beside it on disk. That is
+/// worse than no `.v` at all, so the pairing is refused rather than qualified.
+///
+/// Only compile mode reaches here. `--mode proof` and a bare `-v` both resolve
+/// to proof mode in [`normalize_args`], and a proof-mode build for a target that
+/// does not support it is refused by code generation in its own words; adding a
+/// second refusal for the same thing would be a second wording to keep in step.
+/// What is left is `--mode compile -v`, the one spelling that keeps compile mode
+/// and still asks for a translation.
+fn proof_artifact_refusal(
+    target: inference_wasm_codegen::Target,
+    mode: Option<CliMode>,
+    generate_v_output: bool,
+) -> Option<String> {
+    if target != inference_wasm_codegen::Target::Stellar
+        || !generate_v_output
+        || !matches!(mode, Some(CliMode::Compile))
+    {
+        return None;
+    }
+    Some(format!(
+        "Error: -v cannot be combined with --target {}. The module this target \
+         ships is rewritten into the Stellar value ABI after linking, and the \
+         Rocq translation reads the pre-rewrite bytes: the .v would describe a \
+         module with different exports, different bodies and no environment \
+         metadata, not the .wasm written beside it. Build the same source at \
+         --target {} to obtain a .v — code generation is target-blind, so the \
+         pre-rewrite bytes of the two builds are the same module.",
+        inference_compiler_interface::TargetName::Stellar.as_str(),
+        inference_compiler_interface::TargetName::DEFAULT.as_str(),
+    ))
 }
 
 /// Renders a `wasm_to_v` failure with the user-facing diagnostic shape
@@ -658,6 +786,27 @@ fn run() {
         }
     };
 
+    // Resolve the target for the same reason and at the same point: naming a
+    // runtime this compiler does not build for is a mistake about the artifact,
+    // and it must be reported before a parse and a type check the user then has
+    // to discard.
+    let target = match resolve_target_flag(args.target.as_deref()) {
+        Ok(target) => target,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    };
+
+    // Refuse a proof artifact for a target whose shipped module is not the one
+    // the translation would read, before any phase runs. See
+    // `proof_artifact_refusal` for why compile mode is the only spelling this
+    // has to catch.
+    if let Some(message) = proof_artifact_refusal(target, args.mode, args.generate_v_output) {
+        eprintln!("{message}");
+        process::exit(1);
+    }
+
     // Resolve the memory layout here for the same reason, and because both the
     // analysis phase and code generation need it: A036 measures call chains
     // against this stack size and the emitter lays every frame out in it, so the
@@ -790,7 +939,6 @@ fn run() {
             process::exit(1);
         };
         let profile = BuildProfile::default();
-        let target = inference_wasm_codegen::Target::default();
         let mode: inference_wasm_codegen::CompilationMode =
             args.mode.unwrap_or(CliMode::Compile).into();
         let opt_level = profile.resolve_opt_level(target, mode);
@@ -813,6 +961,16 @@ fn run() {
             }
         };
         println!("Codegen complete");
+
+        // Held to the contract instruction set one file at a time, while each
+        // artifact is still its own file and a refusal can say which one it is
+        // about. After the merge there is only one module.
+        if target == inference_wasm_codegen::Target::Stellar
+            && let Some(refusal) = foreign_module_refusal(external_modules)
+        {
+            eprintln!("{refusal}");
+            process::exit(1);
+        }
 
         // Fold the resolved external modules into the codegen output: a single
         // self-contained module with no cross-module imports. Each external is
@@ -852,6 +1010,39 @@ fn run() {
         if !external_modules.is_empty() {
             println!("Linked {} external module(s)", external_modules.len());
         }
+
+        // The Stellar value ABI is a post-link rewrite, not an emission: the
+        // bytes above are the same module the default target produces, and this
+        // is the only step that makes them a contract. It runs before any file
+        // is written so a refusal here leaves no artifact, exactly like the
+        // translation below.
+        //
+        // The rewrite runs whether or not a file is asked for, so no refusal it
+        // owns is skipped by a build that writes nothing; only the summary is
+        // withheld, because it describes an artifact and reports its size.
+        let wasm_owned = if target == inference_wasm_codegen::Target::Stellar {
+            match inference_stellar_abi::rewrite(
+                &wasm_owned,
+                codegen_output.export_signatures(),
+                inference_stellar_abi::STELLAR_ENV_PROTOCOL,
+            ) {
+                Ok(contract) => {
+                    if args.generate_wasm_output {
+                        println!(
+                            "{}",
+                            stellar_summary(codegen_output.export_signatures(), contract.len())
+                        );
+                    }
+                    contract
+                }
+                Err(e) => {
+                    eprintln!("Stellar contract rewrite failed: {e}");
+                    process::exit(1);
+                }
+            }
+        } else {
+            wasm_owned
+        };
         let wasm_bytes = wasm_owned.as_slice();
 
         // Run the Rocq translation *before* writing any file: a `wasm_to_v`
@@ -949,6 +1140,7 @@ mod tests {
             mode: None,
             wasm_lib_dirs: Vec::new(),
             wasm_deps: Vec::new(),
+            target: None,
             wasm_features: Vec::new(),
             memory_pages: None,
             stack_size: None,
@@ -1230,6 +1422,42 @@ mod tests {
     fn duplicate_feature_is_rejected() {
         let err = feature_error(&["bulk-memory", "bulk-memory"]);
         assert!(err.contains("listed more than once"), "{err}");
+    }
+
+    /// Omitting `--target` must land on the same emission target the flag's
+    /// default name selects, not on a second idea of what the default is.
+    #[test]
+    fn an_absent_target_flag_resolves_like_the_default_name() {
+        use inference_compiler_interface::TargetName;
+
+        let absent = resolve_target_flag(None).expect("no target named");
+        let named = resolve_target_flag(Some(TargetName::DEFAULT.as_str()))
+            .expect("the default name is requestable");
+        assert_eq!(absent, named);
+        assert_eq!(absent, inference_wasm_codegen::Target::Wasm32);
+    }
+
+    /// Every requestable name must reach an emission target through this
+    /// function, or the flag accepts a name the compiler then cannot build for.
+    #[test]
+    fn every_requestable_target_resolves_through_the_flag() {
+        use inference_compiler_interface::TargetName;
+
+        for name in TargetName::ALL {
+            let target = resolve_target_flag(Some(name.as_str()))
+                .unwrap_or_else(|e| panic!("`{}` must resolve: {e}", name.as_str()));
+            assert_eq!(name.as_str(), target.as_str());
+        }
+    }
+
+    #[test]
+    fn an_unknown_target_is_rejected_with_the_shared_wording() {
+        let err = resolve_target_flag(Some("wasm64"))
+            .expect_err("`wasm64` names no target")
+            .to_string();
+        assert!(err.contains("unknown compilation target"), "{err}");
+        // The flag, not the manifest key, is what an `infc` caller must edit.
+        assert!(err.contains("`--target`"), "{err}");
     }
 
     /// Both accepted spellings reach the same flags: `--wasm-features a,b` is the

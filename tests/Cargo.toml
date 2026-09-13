@@ -20,6 +20,10 @@ inference-analysis.workspace = true
 inference-ast.workspace = true
 inference-hassert.workspace = true
 inference-parser.workspace = true
+# A NORMAL dependency, not a dev-dependency: `src/corpus.rs` is compiled into
+# the library, and the Stellar host tier is an integration binary that reaches
+# the compile helpers through it.
+inference-stellar-abi.workspace = true
 inference-wasm-codegen.workspace = true
 inference-wasm-to-v-translator.workspace = true
 inference-type-checker = { workspace = true, features = ["test-utils"] }
@@ -38,3 +42,11 @@ windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 cov-mark = { workspace = true, features = ["enable"] }
 wasmparser = "0.245.1"
 wat = "1.225.0"
+wasm-encoder.workspace = true
+
+# The Soroban contract host, used only by the `stellar` integration binary to
+# upload and invoke hand-assembled modules in-process. The host is chosen over
+# `soroban-sdk` deliberately: it is Apache-2.0, its MSRV sits well under this
+# workspace's, it accepts raw `&[u8]` module bytes, and it never writes test
+# snapshot files into the crate directory.
+soroban-env-host = { version = "=28.0.2", features = ["testutils"] }

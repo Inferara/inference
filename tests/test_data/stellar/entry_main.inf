@@ -1,0 +1,10 @@
+// `main` is a contract method like any other public function, and the emitter
+// reaches its export through a branch of its own. A second method sits beside
+// it so that branch is measured in a module where it is not the only export.
+pub fn main() -> i32 {
+    return 3;
+}
+
+pub fn beside(x: u32) -> u32 {
+    return x;
+}

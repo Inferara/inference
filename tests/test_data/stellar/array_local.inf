@@ -1,0 +1,9 @@
+// An exported signature inside the scalar set whose body needs a frame. The
+// array local is what forces the emitter's memory flag, so the contract this
+// fixture compiles to carries a memory section, the `memory` export and the
+// `__stack_pointer` export beside the wrapped method — the shape every
+// scalar-only fixture beside it leaves out.
+pub fn pick(index: i32) -> u32 {
+    let table: [u32; 4] = [10, 20, 30, 40];
+    return table[index];
+}

@@ -1,0 +1,7 @@
+// Every parameter shape the ABI admits, with nothing coming back: three
+// unwraps followed by the void wrap.
+pub fn record(a: u32, b: i32, c: bool) {
+    let _count: u32 = a;
+    let _delta: i32 = b;
+    let _flag: bool = c;
+}

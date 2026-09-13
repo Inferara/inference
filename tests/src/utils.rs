@@ -230,7 +230,7 @@ pub(crate) fn codegen_output_with_mode(
 
 /// Generates codegen output from source code with explicit target and mode.
 ///
-/// Returns `Result` to allow testing error cases (e.g., proof + Soroban rejection).
+/// Returns `Result` to allow testing error cases (e.g., proof + Stellar rejection).
 pub(crate) fn codegen_with_target_mode(
     source_code: &str,
     target: inference_wasm_codegen::Target,

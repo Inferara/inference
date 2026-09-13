@@ -1,0 +1,5 @@
+// The most negative i32, passed straight through. Nothing computes it: the
+// value exists only to be marshalled, which is the point.
+pub fn passthrough(x: i32) -> i32 {
+    return x;
+}

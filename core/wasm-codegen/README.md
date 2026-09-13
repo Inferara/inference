@@ -174,8 +174,10 @@ A build may opt back into the instructions by setting `EmitFeatures { bulk_memor
 in the `CodegenOptions` passed to `codegen()` (`infc --wasm-features bulk-memory`), which restores the single
 `memory.fill`/`memory.copy` at each of those sites. The feature set applies identically
 in both compilation modes, so the Rocq translation always describes the same program as
-the emitted binary, and the `Soroban` target rejects it because its runtime's acceptance
-of the opcodes is unverified.
+the emitted binary. The `Stellar` target rejects the opt-in deliberately, not for want of
+evidence about its runtime, which does accept the opcodes. Keeping that target's output
+inside the WebAssembly 1.0 instruction set is the conservative choice: it is what every
+deployment path accepts, and no lowering the target can reach needs the instructions.
 
 ## Non-Deterministic Extensions
 
@@ -436,7 +438,7 @@ Detailed design documents live in `docs/`:
 - `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `CompoundFieldLayout`, `compute_struct_field_layout`, `type_byte_size`, `natural_alignment_for_type`, `emit_ptr_offset_addr`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`, `RegionEmit` and the region fill/copy lowering (`emit_memcpy_via_locals`, `emit_memcpy_via_stack`) that avoids bulk-memory instructions unless the build permits them
 - `errors.rs` - `CodegenError` enum for function call lowering failures, spec-name validation, and proof-mode `hassert` translation failures (`UntranslatableSpec`, `HspecTreeTooDeep`)
 - `output.rs` - `CodegenOutput` containing WASM bytes, metadata, and (proof mode only) the per-spec `hassert` obligation map (`hspecs()`)
-- `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`) and the requestable post-MVP instruction families (`EmitFeatures`)
+- `target.rs` - Compilation target definitions (`Wasm32`, `Stellar`) and the requestable post-MVP instruction families (`EmitFeatures`)
 - `overflow_guard.rs` - The overflow-guard catalogue: `guard_kind`, the single classifier both the two arithmetic lowering sites and the pre-body scratch reservation ask about a `+`, `-`, `*` or unary `-`; the per-row instruction sequences, every one of which traps through `unreachable`; and `GuardScratchPool`, the per-function scratch shared by all of a body's guards
 - `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation — kind-tagged, so a `forall`/plain body yields a `ValidSpec` payload and an `exists`/`unique` body a reachability payload with its entry arity and source-visible slots — read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator with its `Univ`/`UnivLvl`/`Exist`/`Reach` modes, the `AggValue` leaf tree that aggregate values translate to, and the pinned-witness machinery short-circuit operators and non-constant indices share; `reach.rs`: the reachability pre-scan whose `ChoicePlan` maps each scalar `@` to its appended choice parameter, shared by signature registration, body lowering, and payload translation; `overflow_reach.rs`: the per-hop re-scoped call walk that decides whether a reachability body reaches a function carrying an overflow guard, reusing code generation's own call resolution, counting an unresolvable callee as guarded and skipping `external fn` callees for the linker to judge; `diag.rs`: the `P001`–`P018` diagnostic registry). See [`docs/specification-obligations.md`](docs/specification-obligations.md) for the obligation shapes a specification author reads, and [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
 - `hspecs_section.rs` - Encodes the obligation map into the `inference.hspecs` custom WASM section (via the shared `inference-hassert` codec) and the fail-closed pre-encode depth guard

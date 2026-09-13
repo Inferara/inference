@@ -1,0 +1,9 @@
+// Two methods in one contract, so the rewrite is exercised on a module with
+// more than one wrapper.
+pub fn identity(x: u32) -> u32 {
+    return x;
+}
+
+pub fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}

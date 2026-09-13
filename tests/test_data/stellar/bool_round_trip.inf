@@ -1,0 +1,8 @@
+// A boolean in and a boolean out, through the tag-range guard and the
+// normalizing wrap.
+pub fn negate(b: bool) -> bool {
+    if b {
+        return false;
+    }
+    return true;
+}

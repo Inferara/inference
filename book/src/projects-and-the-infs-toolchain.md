@@ -61,12 +61,16 @@ infc_version = "0.1.0"
 # license = "MIT"
 
 [build]
+# The runtime the module is built for; "wasm32" (the default) is generic
+# WebAssembly and "stellar" builds a Soroban smart contract. Validated on load:
+# an unrecognized name is an error.
+# target = "wasm32"
 # "compile" (default) or "proof"
 mode = "compile"
 # Post-MVP WebAssembly proposals to opt into; empty (the default) keeps the
 # output pure WebAssembly 1.0. Currently supported: "bulk-memory".
 # wasm-features = ["bulk-memory"]
-# target and optimize are recognized but not yet consumed.
+# optimize is recognized but not yet consumed.
 
 [verification]
 # Output directory for proof artifacts (honored only in proof mode).
@@ -88,24 +92,39 @@ The fields:
 | `description` | `[package]` | string | absent | Optional description |
 | `authors` | `[package]` | array | absent | Optional author list |
 | `license` | `[package]` | string | absent | Optional SPDX identifier |
+| `target` | `[build]` | target name | `"wasm32"` | The runtime the module is built for; `"wasm32"` is generic WebAssembly and `"stellar"` a Soroban smart contract. Accepted: `"wasm32"`, `"stellar"` |
 | `mode` | `[build]` | `"compile"` \| `"proof"` | `"compile"` | Build mode (see below) |
 | `wasm-features` | `[build]` | array of proposal names | `[]` | Post-MVP WebAssembly proposals the artifact may use; `[]` = pure Wasm 1.0. Supported: `"bulk-memory"` |
 | `output-dir` | `[verification]` | path string | `"proofs/"` | Proof artifact directory; proof mode only |
 | `<name>` | `[wasm-dependencies]` | `{ path = "…" }` | — | External `.wasm` module dependency |
 
-`mode` is case-sensitive: `"Proof"` is rejected. The field is validated on
-load; an invalid value is an immediate error with the allowed set named in the
-message. The same load-time strictness applies to keys: every fixed-schema
-table rejects a key it does not recognize, naming the offending key and the
-fields the table accepts — a misspelled `wasm_features` fails the build rather
-than silently shipping a differently-configured artifact. Only
-`[dependencies]` and `[wasm-dependencies]` accept arbitrary keys, because their
-keys name the dependencies. `wasm-features` entries are WebAssembly *proposal* names
-(`"bulk-memory"`), not instruction names, and the setting is honored in project
-builds, single-file builds, and single-file `infs run`. `[wasm-dependencies]`
-entries have the same reach: project `build`, project `run`, single-file
-`build`, and single-file `run` all forward every declared entry to `infc`. See
-`apps/infs/docs/inference-toml.md` for the full reference.
+`target` and `mode` are case-sensitive: `"Wasm32"` and `"Proof"` are both
+rejected, and neither trims whitespace. Both are validated on load; an invalid
+value is an immediate error with the allowed set named in the message, never a
+fall back to the default. `target` names the same vocabulary as `infc --target`
+and is rejected with the same wording; `"soroban"`, the former name of
+`"stellar"`, earns a message redirecting to the current spelling rather than the
+generic unknown-target one.
+
+`target = "stellar"` narrows the rest of the manifest. It cannot be combined
+with a `[build.wasm-opt]` table — that pairing is itself a load error, because
+whether an external Binaryen preserves a contract's metadata section depends on
+a version nothing here pins — it admits no `wasm-features`, `mode = "proof"`
+fails the build, and `infs run` refuses the project outright, since a contract is
+invoked by a Soroban host and not by a plain WebAssembly runtime. What an
+exported function may declare is narrowed too; see
+[Compilation Targets](compilation_targets.md). The same load-time strictness applies to
+keys: every fixed-schema table rejects a key it does not recognize, naming the
+offending key and the fields the table accepts — a misspelled `wasm_features`
+fails the build rather than silently shipping a differently-configured
+artifact. Only `[dependencies]` and `[wasm-dependencies]` accept arbitrary
+keys, because their keys name the dependencies. `wasm-features` entries are
+WebAssembly *proposal* names (`"bulk-memory"`), not instruction names, and the
+setting is honored in project builds, single-file builds, and single-file
+`infs run`. `[wasm-dependencies]` entries have the same reach: project `build`,
+project `run`, single-file `build`, and single-file `run` all forward every
+declared entry to `infc`. See `apps/infs/docs/inference-toml.md` for the full
+reference.
 
 ### Reserved Project Names
 
@@ -448,10 +467,15 @@ infs run <path> (single-file mode)
 | `--out-dir <path>` | Override output directory (default `out/` relative to CWD); both `.wasm` and `.v` land here |
 | `-L <dir>` / `--wasm-lib-dir <dir>` | Add external `.wasm` search directory; repeatable |
 | `--wasm-dep <name>=<path>` | Bind a logical module name directly to a `.wasm` file; takes precedence over `-L` |
+| `--target <name>` | Name the runtime the module is built for; matched exactly against the same vocabulary `[build] target` uses (`wasm32`, `stellar`). Omitted selects `wasm32` |
+| `--wasm-features <names>` | Post-MVP WebAssembly proposals emission may use; comma separated, proposal names only |
+| `--memory-pages <n>` | Linear memory size of the emitted module, in 64 KiB pages |
+| `--stack-size <bytes>` | Shadow stack size, and the budget A036 measures call-chain frame usage against |
+| `--adopt-external-specs` | Carry a linked library's universal proof obligations into the program's proof artifact; proof mode only |
 | `--commit-hash` | Print the build commit hash and exit; used by the `infs` handshake |
 | `--abi-version` | Print `<major>.<minor>` ABI version and exit; used by the `infs` handshake |
 
-> **Note:** The current ABI version is `1.2`.
+> **Note:** The current ABI version is `1.6`.
 
 The default behavior when no phase flag is supplied is full compilation with
 WASM output written to disk — equivalent to `--codegen -o`.
@@ -469,14 +493,21 @@ is parsed as `<major>.<minor>`:
 - **Unknown/old** (`infc` exits non-zero or prints `unknown`): silent; treated
   as graceful skip, equivalent to ABI unknown.
 
-The current ABI is `1.2` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 2`
-in `core/compiler-interface/src/lib.rs`). Each additive flag is gated at the
-minor it was introduced at, independently: `--out-dir` landed at minor 1, and
-`--wasm-features` at minor 2. `infs` forwards each only to an `infc` that
-reports an ABI minor at or above the flag's own (or matches by commit hash) —
-an `infc` that reports minor 1, for instance, supports `--out-dir` but not
-`--wasm-features`. Pairing a manifest with a non-default `[verification]
-output-dir` against an older `infc` is a hard error:
+The current ABI is `1.6` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 6` in
+`core/compiler-interface/src/lib.rs`). Each additive flag is gated at the minor
+it was introduced at, independently: `--out-dir` landed at minor 1,
+`--wasm-features` at minor 2, `--memory-pages` and `--stack-size` at minor 3,
+`--adopt-external-specs` at minor 4, and `--target` at minor 5. `infs` forwards
+each only to an `infc` that reports an ABI minor at or above the flag's own (or
+matches by commit hash) — an `infc` that reports minor 1, for instance,
+supports `--out-dir` but not `--wasm-features`. `--target` is gated on the
+*name* rather than on the flag: each target became requestable at its own minor
+(`wasm32` at 5, `stellar` at 6), and an `infc` that parses the flag but predates
+a name would accept it and build for the default runtime — a wrong artifact
+rather than a refusal. The default target is never forwarded at all, so a
+project that names none puts no floor under its compiler. Pairing a manifest
+with a non-default `[verification] output-dir` against an older `infc` is a hard
+error:
 
 ```text
 error: the resolved infc does not support `--out-dir` (requires infc ABI ≥ 1.1);

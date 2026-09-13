@@ -94,14 +94,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::build::{
-    EnclosingSettings, enclosing_manifest, format_wasm_dep_arg, manifest_memory,
+    EnclosingSettings, enclosing_manifest, format_wasm_dep_arg, manifest_memory, manifest_target,
     manifest_wasm_dependencies, manifest_wasm_features,
 };
 use crate::commands::project_build::{
-    forward_memory_layout, forward_wasm_features, probe_compiler_compatibility, run_project_build,
+    forward_memory_layout, forward_target, forward_wasm_features, probe_compiler_compatibility,
+    run_project_build,
 };
 use crate::errors::InfsError;
 use crate::project::manifest::MANIFEST_FILE_NAME;
+use inference_compiler_interface::TargetName;
 use crate::project::{self, ProjectContext};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
 
@@ -206,14 +208,16 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 /// ## Execution Flow
 ///
 /// 1. Validates source file exists
-/// 2. Checks for wasmtime availability
-/// 3. Resolves the enclosing project's `[build] wasm-features` and
-///    `[wasm-dependencies]`, if any
-/// 4. Locates the infc compiler
-/// 5. Compiles source to WASM via infc subprocess, forwarding those settings
+/// 2. Resolves the enclosing project's `[build] target` and refuses one whose
+///    artifact wasmtime cannot invoke
+/// 3. Checks for wasmtime availability
+/// 4. Resolves the rest of the enclosing project's settings — `[build]
+///    wasm-features`, `[memory]`, `[wasm-dependencies]` — if any
+/// 5. Locates the infc compiler
+/// 6. Compiles source to WASM via infc subprocess, forwarding those settings
 ///    alongside every `-L` the user passed
-/// 6. Executes WASM with wasmtime, invoking `--entry-point`
-/// 7. Propagates exit code from wasmtime
+/// 7. Executes WASM with wasmtime, invoking `--entry-point`
+/// 8. Propagates exit code from wasmtime
 ///
 /// The enclosing manifest is honored here for the same reason `infs build
 /// <path>` honors it: one project must not emit modules at two different
@@ -223,18 +227,23 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 ///
 /// Every manifest-derived setting comes off the single [`enclosing_manifest`]
 /// call above, and that resolution happens *before* the compiler lookup so a
-/// malformed manifest is reported without first probing the toolchain.
+/// malformed manifest is reported without first probing the toolchain. The
+/// target read off it is ordered ahead of the wasmtime probe for a sharper
+/// reason: the refusal below applies to a build wasmtime could never invoke, so
+/// a user who lacks the runtime must not first be sent to install it.
 ///
 /// ## Errors
 ///
 /// Returns an error if:
 /// - The source file does not exist
+/// - the enclosing manifest names a target whose artifact wasmtime cannot invoke
 /// - wasmtime is not found in PATH
 /// - a `[wasm-dependencies]` key is not a well-formed logical module name, or a
 ///   resolved dependency path is not valid UTF-8
 /// - infc compiler cannot be found
-/// - the enclosing manifest requests `wasm-features` the resolved `infc` cannot
-///   honor (which is also the only case that runs the ABI handshake here)
+/// - the enclosing manifest names a `target`, requests `wasm-features`, or
+///   declares a `[memory]` table the resolved `infc` cannot honor (which are
+///   also the only cases that run the ABI handshake here)
 /// - Compilation fails
 /// - WASM execution fails
 fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
@@ -242,9 +251,12 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
         bail!("Path not found: {}", path.display());
     }
 
+    let enclosing = enclosing_manifest(path)?;
+    let target = manifest_target(enclosing.as_ref().map(|(_, manifest)| manifest))?;
+    refuse_target_wasmtime_cannot_invoke(target)?;
+
     check_wasmtime_availability()?;
 
-    let enclosing = enclosing_manifest(path)?;
     let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
     let memory = manifest_memory(enclosing.as_ref().map(|(_, manifest)| manifest));
     let deps = manifest_wasm_dependencies(enclosing.as_ref())?;
@@ -261,6 +273,7 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
         &args.wasm_lib_dirs,
         &EnclosingSettings {
             deps: &deps,
+            target,
             features: &features,
             memory: &memory,
             manifest_path: manifest_path.as_deref(),
@@ -281,15 +294,21 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 /// policy. `-L` is the one flag that *can* reach here, since it takes its own
 /// value rather than a bare token.
 ///
-/// wasmtime availability is checked *first* — before any compilation — so an
-/// environment lacking the runtime fails fast, matching single-file mode.
+/// The project is discovered and its target refused before wasmtime is looked
+/// for, because a target this command cannot run is not a missing-runtime
+/// problem: installing wasmtime would not make the build invokable, so pointing
+/// a user at its download page would cost them an install and leave them exactly
+/// where they were. wasmtime availability is then checked before any
+/// compilation, so an environment lacking the runtime fails fast without first
+/// spending a build, matching single-file mode.
 ///
 /// ## Errors
 ///
 /// Returns an error if:
 /// - `--entry-point` is set to a non-`main` value (project mode invokes `main`)
-/// - wasmtime is not found in PATH
 /// - No `Inference.toml` is found in the current directory or any ancestor
+/// - The project names a target whose artifact wasmtime cannot invoke
+/// - wasmtime is not found in PATH
 /// - The project build fails (missing entry point, ABI handshake,
 ///   external-module forwarding, infc error)
 /// - The build succeeds but `<root>/out/main.wasm` is absent
@@ -312,11 +331,12 @@ fn execute_project(args: &RunArgs) -> Result<()> {
         );
     }
 
-    check_wasmtime_availability()?;
-
     let cwd =
         std::env::current_dir().context("Failed to determine the current working directory")?;
     let ctx = project::discover_and_load(&cwd)?;
+    refuse_target_wasmtime_cannot_invoke(ctx.manifest.build.resolved_target()?)?;
+
+    check_wasmtime_availability()?;
 
     // Project `run` always builds an executable (compile mode) in `out/`,
     // regardless of `[build] mode` in the manifest: proof-mode WASM embeds the
@@ -356,6 +376,50 @@ fn project_wasm_path(ctx: &ProjectContext) -> PathBuf {
     ctx.root.join("out").join("main.wasm")
 }
 
+/// Refuses a target whose artifact is not something `wasmtime --invoke` can
+/// meaningfully call.
+///
+/// `run` compiles and then executes through the `wasmtime` CLI, which invokes an
+/// export by name and passes each argument as a decimal it parses into the
+/// export's declared parameter type. A Stellar contract's exports are not that
+/// shape: every method takes and returns the host's 64-bit tagged word, so a
+/// `5` typed on the command line arrives as a word whose low byte is read as the
+/// tag and whose payload is empty — decoding, silently, to a zero-valued
+/// integer rather than to five. `main` is worse: this path hands it the
+/// `argc, argv` pair a C entry point takes, which a value-ABI wrapper does not
+/// have, and the call fails on arity for a reason that says nothing about why.
+///
+/// Both outcomes are wrong answers rather than missing features, which is why
+/// this is a refusal and not a warning. Nothing here can be fixed by passing
+/// different arguments: a contract is invoked by a Soroban host, which encodes
+/// its arguments into that word, and by nothing else.
+///
+/// # Errors
+///
+/// Returns the refusal when `target` names a runtime whose calling convention
+/// `wasmtime` does not implement.
+///
+/// Both call sites run this *before* probing for `wasmtime` itself. The refusal
+/// is about what was built, not about what is installed, so a machine without
+/// the runtime must hear the refusal rather than an install prompt for a tool
+/// that would change nothing.
+fn refuse_target_wasmtime_cannot_invoke(target: TargetName) -> Result<()> {
+    if target != TargetName::Stellar {
+        return Ok(());
+    }
+    bail!(
+        "`infs run` cannot run a `{}` build. A Stellar contract is invoked by a \
+         Soroban host, which encodes each argument into the host's 64-bit tagged \
+         word; a plain WebAssembly runtime such as wasmtime passes a decimal \
+         instead, which the contract decodes as a different value entirely — a \
+         wrong answer rather than an error. Build it with `infs build` and \
+         deploy it, or run the same source at the `{}` target to execute it \
+         locally. See the book's Compilation Targets chapter.",
+        TargetName::Stellar.as_str(),
+        TargetName::DEFAULT.as_str(),
+    )
+}
+
 /// Checks if wasmtime is available in PATH.
 fn check_wasmtime_availability() -> Result<()> {
     if which::which("wasmtime").is_err() {
@@ -378,7 +442,7 @@ fn check_wasmtime_availability() -> Result<()> {
 /// executes must be built with. The wire order is
 ///
 /// ```text
-/// <source> --parse --codegen -o [--wasm-lib-dir <dir>]* [--wasm-dep <name>=<path>]* [--wasm-features <list>]
+/// <source> --parse --codegen -o [--wasm-lib-dir <dir>]* [--wasm-dep <name>=<path>]* [--target <name>] [--wasm-features <list>]
 /// ```
 ///
 /// which is the relative order single-file `infs build` uses, so the two
@@ -393,10 +457,12 @@ fn check_wasmtime_availability() -> Result<()> {
 /// `deps` arrives already resolved to absolute paths, so it needs no anchoring
 /// under any working directory.
 ///
-/// The compatibility handshake runs only when there is a feature request to gate.
-/// Single-file `run` otherwise keeps its historical handshake-free behavior: the
-/// probe exists to refuse an unhonorable request, and paying for it on every run
-/// would add ABI warnings to invocations that ask nothing of the compiler.
+/// The compatibility handshake runs only when the manifest asks the compiler for
+/// something an older one could refuse: a non-default target, a feature request,
+/// or a `[memory]` table. Single-file `run` otherwise keeps its historical
+/// handshake-free behavior: the probe exists to refuse an unhonorable request,
+/// and paying for it on every run would add ABI warnings to invocations that ask
+/// nothing of the compiler.
 /// Neither `--wasm-lib-dir` nor `--wasm-dep` is gated: both arrived with
 /// external-module support itself rather than at a distinguishable ABI minor, so
 /// there is no capability to probe. An `infc` too old to accept them is therefore
@@ -418,6 +484,7 @@ fn compile_to_wasm(
 ) -> Result<PathBuf> {
     let EnclosingSettings {
         deps,
+        target,
         features,
         memory,
         manifest_path,
@@ -437,8 +504,16 @@ fn compile_to_wasm(
         cmd.arg("--wasm-dep").arg(format_wasm_dep_arg(name, path)?);
     }
 
-    if !features.is_empty() || !memory.is_default() {
+    // Each disjunct is one thing this build asks of `infc` that an older one
+    // could not honor. The target belongs here for the same reason the other two
+    // do, and it is the disjunct a reader is most likely to leave out: without
+    // it a project naming a target but declaring neither a feature nor a
+    // `[memory]` table would skip the whole block, and the target would be
+    // dropped silently — producing an artifact for the default runtime under a
+    // manifest that named another.
+    if !features.is_empty() || !memory.is_default() || target != TargetName::DEFAULT {
         let compat = probe_compiler_compatibility(infc_path, infc_source)?;
+        forward_target(&mut cmd, compat, target, manifest_path)?;
         forward_wasm_features(&mut cmd, compat, features, manifest_path)?;
         forward_memory_layout(&mut cmd, compat, memory, manifest_path)?;
     }
@@ -715,5 +790,112 @@ mod tests {
                 "explicit `main` must not hit the custom-entry-point bail; got: {msg}"
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod forwarding_tests {
+    use super::*;
+    use assert_fs::prelude::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Writes an executable `infc` stub under `dir` that reports a mismatched
+    /// commit and the current ABI, and appends every non-probe argv entry to
+    /// `log`.
+    ///
+    /// The mismatched commit is what makes the stub useful: it forces the ABI
+    /// probe to run, which is the branch a gated forward depends on.
+    fn write_stub(dir: &assert_fs::TempDir, log: &Path) -> PathBuf {
+        let stub = dir.child("infc_stub");
+        stub.write_str(&format!(
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+               --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+               --abi-version) printf '{}.{}\\n'; exit 0 ;;\n\
+               *) printf '%s\\n' \"$@\" >> '{}'; exit 0 ;;\n\
+             esac\n",
+            inference_compiler_interface::COMPILER_ABI_MAJOR,
+            inference_compiler_interface::COMPILER_ABI_MINOR,
+            log.display()
+        ))
+        .unwrap();
+        let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(stub.path(), perms).unwrap();
+        stub.path().to_path_buf()
+    }
+
+    /// Runs the single-file compile step for a project whose only manifest
+    /// setting is `target`, and returns the argv the compiler was handed.
+    ///
+    /// The stub cannot compile, so the call returns the missing-artifact error;
+    /// the log is written before that and is what the assertion reads.
+    fn compile_argv(target: TargetName) -> Vec<String> {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let log = temp.child("argv.log");
+        let stub = write_stub(&temp, log.path());
+
+        let memory = crate::project::manifest::MemoryConfig::default();
+        let _ = compile_to_wasm(
+            &stub,
+            ResolutionSource::InfcPathEnv,
+            Path::new("main.inf"),
+            &[],
+            &EnclosingSettings {
+                deps: &[],
+                target,
+                features: &[],
+                memory: &memory,
+                manifest_path: None,
+            },
+        );
+
+        std::fs::read_to_string(log.path())
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The regression the third disjunct of the handshake condition exists to
+    /// prevent: a project that names a target and declares neither a feature nor
+    /// a `[memory]` table must still have its target forwarded.
+    ///
+    /// The condition originally read `!features.is_empty() || !memory.is_default()`,
+    /// under which this build skips the whole block — no probe, no forward — and
+    /// silently produces an artifact for the default runtime under a manifest
+    /// that named another. Nothing else can catch it: every other forwarding
+    /// fixture declares a feature or a memory table, so the block runs for some
+    /// other reason and the target rides along.
+    ///
+    /// Driven through `compile_to_wasm` directly rather than through `infs run`,
+    /// because `run` refuses the only non-default target there is today before
+    /// reaching this code. That refusal is about how a contract is invoked; the
+    /// forward is about what gets built, and the next target to enter the
+    /// vocabulary will reach here.
+    #[test]
+    fn a_non_default_target_is_forwarded_with_nothing_else_declared() {
+        let argv = compile_argv(TargetName::Stellar);
+        let position = argv
+            .iter()
+            .position(|entry| entry == "--target")
+            .unwrap_or_else(|| panic!("`--target` must be forwarded, got argv: {argv:?}"));
+        assert_eq!(
+            argv.get(position + 1).map(String::as_str),
+            Some(TargetName::Stellar.as_str()),
+            "the flag's value must be the next argv entry, got argv: {argv:?}"
+        );
+    }
+
+    /// The control for the test above: with the default target and nothing else
+    /// declared, no flag is forwarded — so the assertion there is about the
+    /// target having been read, not about a flag that is always present.
+    #[test]
+    fn the_default_target_is_not_forwarded() {
+        let argv = compile_argv(TargetName::DEFAULT);
+        assert!(
+            !argv.iter().any(|entry| entry == "--target"),
+            "the default target must not be forwarded, got argv: {argv:?}"
+        );
     }
 }

@@ -5,6 +5,7 @@
 mod analysis;
 mod ast;
 mod codegen;
+pub mod corpus;
 mod diagnostics_file_context;
 mod hassert_translation;
 mod panic_free;

@@ -61,7 +61,8 @@
 
 use anyhow::{Context, Result, bail};
 use inference_compiler_interface::{
-    MemoryLayout, MemoryLayoutSource, WasmFeatureName, WasmFeatureSource, resolve_wasm_features,
+    MemoryLayout, MemoryLayoutSource, TargetName, TargetSource, WasmFeatureName, WasmFeatureSource,
+    resolve_target, resolve_wasm_features,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -288,7 +289,19 @@ pub struct WasmDependency {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BuildConfig {
-    /// Target platform for compilation.
+    /// The runtime the emitted module is built for.
+    ///
+    /// The axis is the runtime, not a compiler back end and not a target triple:
+    /// `"wasm32"` — the default — is the generic value, a module for any
+    /// WebAssembly embedder that imposes no ABI of its own.
+    ///
+    /// A validated `String` for the same reason [`mode`](Self::mode) is: the
+    /// vocabulary is already modelled by
+    /// `inference_compiler_interface::TargetName`, and a serde enum here would be
+    /// a second spelling of it. Resolved against that vocabulary by
+    /// [`Self::resolved_target`]; validation runs on load, so a manifest that
+    /// reached a caller has already been checked, and matching is exact and
+    /// case-sensitive with no whitespace trimmed.
     #[serde(default = "default_target")]
     pub target: String,
 
@@ -367,6 +380,25 @@ impl BuildConfig {
             && self.wasm_opt.is_none()
     }
 
+    /// The `target` field resolved into the shared compiler vocabulary.
+    ///
+    /// Callers get a typed target without knowing how the raw string is spelled
+    /// or validated. The resolution is the same call [`Self::validate`] makes on
+    /// load, so this cannot disagree with what the loader accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns the diagnostic rejecting a name that is not a supported target.
+    /// For a manifest that came from [`InferenceToml::from_toml`] this cannot
+    /// fail — validation already ran. The fallible signature is for the other
+    /// constructor: [`Self::target`] is a public `String` field, so a test or
+    /// tool that builds a `BuildConfig` in memory can set it without ever passing
+    /// through the loader, and this is where such a value is checked.
+    pub fn resolved_target(&self) -> Result<TargetName> {
+        resolve_target(&self.target, TargetSource::Manifest)
+            .map_err(|message| anyhow::anyhow!("{message}"))
+    }
+
     /// The `wasm-features` entries resolved into the shared compiler vocabulary.
     ///
     /// Callers get typed features without knowing how the raw strings are spelled
@@ -387,18 +419,37 @@ impl BuildConfig {
             .map_err(|message| anyhow::anyhow!("{message}"))
     }
 
-    /// Validates the `mode` field, accepting only `"compile"` or `"proof"`
-    /// (case-sensitive — TOML config values are conventionally lowercase, and
-    /// matching the exact `infc --mode` flag spelling avoids surprising
-    /// near-misses like `"Proof"`), then the `wasm-features` entries and the
-    /// `[build.wasm-opt]` sub-table.
+    /// Validates the `target` field against the shared vocabulary, then the
+    /// `mode` field, accepting only `"compile"` or `"proof"` (case-sensitive —
+    /// TOML config values are conventionally lowercase, and matching the exact
+    /// `infc --mode` flag spelling avoids surprising near-misses like
+    /// `"Proof"`), then the `wasm-features` entries and the `[build.wasm-opt]`
+    /// sub-table.
+    ///
+    /// The checking order is fixed — `target`, then `mode`, then
+    /// `wasm-features`, then the `[build.wasm-opt]` sub-table, then the pairings
+    /// two individually-valid keys are not allowed to form — and is independent
+    /// of the order the keys appear in the file: TOML leaves that order free and
+    /// nothing here can see it. A manifest with more than one mistake therefore
+    /// reports whichever field comes first in *this* order, not the first mistake
+    /// written. That is a contract, pinned by a test, so a caller may rely on
+    /// which of two errors it sees. The pairing check comes last so a manifest
+    /// whose optimizer table is itself malformed is told that first, rather than
+    /// being told to delete a table it would have to fix anyway.
+    ///
+    /// [`optimize`](Self::optimize) is deliberately not checked: the value is
+    /// recorded and not yet consumed, so there is no behavior for a wrong one to
+    /// change and nothing to name in a message.
     ///
     /// # Errors
     ///
-    /// Returns an error naming the field and the allowed values when `mode` is
-    /// neither `"compile"` nor `"proof"`, when a `wasm-features` entry is not a
-    /// supported proposal name, or when `[build.wasm-opt]` is invalid.
+    /// Returns an error naming the field and the allowed values when `target` is
+    /// not a supported target, when `mode` is neither `"compile"` nor `"proof"`,
+    /// when a `wasm-features` entry is not a supported proposal name, when
+    /// `[build.wasm-opt]` is invalid, or when the resolved target refuses the
+    /// mode, a requested feature, or the optimizer.
     fn validate(&self) -> Result<()> {
+        let target = self.resolved_target()?;
         if self.mode != "compile" && self.mode != "proof" {
             bail!(
                 "Invalid `[build] mode` value `{}`: expected `compile` or `proof`.",
@@ -408,6 +459,92 @@ impl BuildConfig {
         self.resolved_wasm_features()?;
         if let Some(wasm_opt) = &self.wasm_opt {
             wasm_opt.validate()?;
+        }
+        self.validate_target_pairings(target)
+    }
+
+    /// Refuses a `[build] target` paired with another key the target cannot
+    /// honor: `mode = "proof"`, a non-empty `wasm-features` list, or a
+    /// `[build.wasm-opt]` table.
+    ///
+    /// The first two arms ask [`TargetName`] rather than naming a target, so the
+    /// fact of what a target narrows is stated once, in the vocabulary both
+    /// surfaces share, and a name added there arrives here already answered. The
+    /// optimizer arm names the Stellar target because no predicate models it:
+    /// what it refuses is not a property of the emitted instruction set but of
+    /// whichever external Binaryen the machine happens to have.
+    ///
+    /// Why refuse a pairing the compiler would refuse anyway: without these the
+    /// build spawns `infc`, which fails on the emission-side mirror of the same
+    /// fact — in a message that names neither the manifest nor the key to edit,
+    /// because at that point the request has become a flag. A key the user wrote
+    /// is a key the diagnostic can point at.
+    ///
+    /// Each refusal in turn:
+    ///
+    /// - **Proof mode.** Proof-mode output carries Inference's custom `0xfc`
+    ///   non-deterministic instructions, which nothing outside Inference's own
+    ///   tooling decodes; a target that refuses them refuses the mode.
+    /// - **`wasm-features`.** A target that permits no post-MVP proposal permits
+    ///   no entry in the list, and honoring one would emit an instruction family
+    ///   the target's rule set excludes. The predicate is per-proposal and the
+    ///   vocabulary holds exactly one proposal, so a single question answers the
+    ///   whole list; a second proposal turns this into a per-entry question.
+    /// - **`[build.wasm-opt]`.** A Stellar artifact carries two things nothing
+    ///   else in the toolchain produces: the value-ABI wrappers every exported
+    ///   method is reached through, and the `contractenvmetav0` custom section a
+    ///   host refuses to upload a module without. Whether an external Binaryen
+    ///   preserves a custom section, and what it does to the wrappers, is a
+    ///   property of whichever `wasm-opt` the machine happens to have — the
+    ///   version is not pinned by anything here — and a module that lost either
+    ///   is refused at upload or, worse, uploads and misdecodes its arguments. A
+    ///   build-time refusal costs a manifest edit; the alternative costs a
+    ///   deployment.
+    ///
+    /// The arms run in the order the per-key checks in [`Self::validate`] run —
+    /// `mode`, then `wasm-features`, then the optimizer sub-table — so a manifest
+    /// wrong in two ways is told about the same key either kind of check would
+    /// have reported first.
+    ///
+    /// A load-time error rather than a build-time one because it is invalid for
+    /// every command: `infs run`, a proof build and a plain `infs build` all read
+    /// a manifest that describes an artifact the toolchain will not make.
+    fn validate_target_pairings(&self, target: TargetName) -> Result<()> {
+        if self.mode == "proof" && !target.supports_proof_mode() {
+            bail!(
+                "`[build] target = \"{}\"` cannot be combined with \
+                 `[build] mode = \"proof\"`. Proof mode emits Inference's \
+                 custom non-deterministic instructions (the `0xfc` family), \
+                 which no runtime outside Inference's own tooling decodes, so \
+                 the artifact this manifest describes is one the runtime it \
+                 names could not load. Set `mode = \"compile\"`, or build for \
+                 a target that supports proof mode.",
+                target.as_str()
+            );
+        }
+        if !self.wasm_features.is_empty() && !target.permits_bulk_memory() {
+            bail!(
+                "`[build] target = \"{}\"` cannot be combined with a \
+                 non-empty `[build] wasm-features` list. This target narrows \
+                 what a build may contain to the WebAssembly 1.0 instruction \
+                 set, so no post-MVP proposal may be requested for it. Remove \
+                 the `wasm-features` entries, or build for a target that \
+                 permits them.",
+                target.as_str()
+            );
+        }
+        if target == TargetName::Stellar && self.wasm_opt.is_some() {
+            bail!(
+                "`[build] target = \"{}\"` cannot be combined with a \
+                 `[build.wasm-opt]` table. A Stellar contract's value-ABI \
+                 wrappers and its `contractenvmetav0` metadata section are the \
+                 layer a host is trusted to decode, and whether an external \
+                 `wasm-opt` preserves them depends on the Binaryen version \
+                 installed, which nothing here pins. Remove the \
+                 `[build.wasm-opt]` table, or build for a target that permits \
+                 it.",
+                TargetName::Stellar.as_str()
+            );
         }
         Ok(())
     }
@@ -713,8 +850,10 @@ fn default_infc_version() -> String {
     detect_infc_version()
 }
 
+/// Derived from the shared vocabulary rather than spelled here, so the manifest
+/// default and the `infc --target` default cannot drift into two answers.
 fn default_target() -> String {
-    String::from("wasm32")
+    TargetName::DEFAULT.as_str().to_string()
 }
 
 fn default_optimize() -> String {
@@ -999,19 +1138,49 @@ mod tests {
         assert!(!deps.is_empty());
     }
 
+    /// `is_default` is the round-trip gate: a config it reports as default is
+    /// dropped from the serialized manifest entirely, so every field that can
+    /// hold a value other than the default has to make it answer `false`.
+    ///
+    /// The values are built in memory on purpose, and that is all this test
+    /// claims. It is not evidence that a manifest carrying them loads —
+    /// `target = "wasm64"` in particular is refused by [`BuildConfig::validate`]
+    /// and never reaches a round trip, which
+    /// `a_target_outside_the_vocabulary_fails_to_load` is what pins. What is
+    /// covered here is the totality of `is_default` over the public fields, which
+    /// a caller can still set without ever going through the loader.
     #[test]
     fn test_build_config_is_default() {
-        let config = BuildConfig::default();
-        assert!(config.is_default());
+        assert!(BuildConfig::default().is_default());
 
-        let config = BuildConfig {
-            target: String::from("wasm64"),
-            optimize: String::from("debug"),
-            mode: default_mode(),
-            wasm_features: Vec::new(),
-            wasm_opt: None,
-        };
-        assert!(!config.is_default());
+        let non_defaults = [
+            BuildConfig {
+                target: String::from("wasm64"),
+                ..BuildConfig::default()
+            },
+            BuildConfig {
+                optimize: String::from("release"),
+                ..BuildConfig::default()
+            },
+            BuildConfig {
+                mode: String::from("proof"),
+                ..BuildConfig::default()
+            },
+            BuildConfig {
+                wasm_features: vec![String::from("bulk-memory")],
+                ..BuildConfig::default()
+            },
+            BuildConfig {
+                wasm_opt: Some(WasmOptConfig::default()),
+                ..BuildConfig::default()
+            },
+        ];
+        for config in non_defaults {
+            assert!(
+                !config.is_default(),
+                "a non-default field must be reported: {config:?}"
+            );
+        }
     }
 
     #[test]
@@ -2228,6 +2397,247 @@ target = "wasm32"
         assert!(
             key < header,
             "wasm-features must precede the [build.wasm-opt] header, got:\n{serialized}"
+        );
+        assert_eq!(
+            InferenceToml::from_toml(&serialized).expect("reparses"),
+            manifest
+        );
+    }
+
+    // `[build] target` ---
+
+    #[test]
+    fn the_default_target_loads_and_survives_a_round_trip() {
+        let manifest = InferenceToml::from_toml(&manifest_with_build(
+            "target = \"wasm32\"\nmode = \"proof\"\n",
+        ))
+        .expect("`wasm32` is the supported target");
+        assert_eq!(manifest.build.target, "wasm32");
+        assert_eq!(
+            manifest.build.resolved_target().expect("resolves"),
+            TargetName::Wasm32
+        );
+
+        let serialized = manifest.to_toml().expect("serializes");
+        assert_eq!(
+            InferenceToml::from_toml(&serialized).expect("reparses"),
+            manifest
+        );
+    }
+
+    /// The key used to be accepted whatever it said, so a project could declare a
+    /// target that did not exist and get a default build with no sign of it. It
+    /// is now validated on load, against the same vocabulary `infc --target`
+    /// uses.
+    #[test]
+    fn a_target_outside_the_vocabulary_fails_to_load() {
+        let err = InferenceToml::from_toml(&manifest_with_build("target = \"wasm64\"\n"))
+            .expect_err("`wasm64` names no target");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown compilation target") && msg.contains("`wasm32`"),
+            "the error must name the supported set, got: {msg}"
+        );
+        assert!(
+            msg.contains("`[build] target`"),
+            "the error must name the manifest surface, got: {msg}"
+        );
+    }
+
+    /// A former spelling of a target that is now requestable earns the sentence
+    /// redirecting to the current one, on the manifest surface as much as on the
+    /// flag.
+    #[test]
+    fn a_reserved_target_fails_to_load_as_one() {
+        for reserved in inference_compiler_interface::RESERVED_TARGET_NAMES {
+            let err =
+                InferenceToml::from_toml(&manifest_with_build(&format!("target = \"{reserved}\"\n")))
+                    .expect_err("a reserved name is not requestable");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("is the former name of the `stellar` target"),
+                "`{reserved}` must be refused as reserved, got: {msg}"
+            );
+        }
+    }
+
+    /// Every requestable target loads from the manifest surface, which is what
+    /// makes the reserved-name test above non-vacuous: the two slices are
+    /// disjoint and this one is the half that must succeed.
+    #[test]
+    fn every_requestable_target_loads_from_the_manifest() {
+        for target in TargetName::ALL {
+            let manifest = InferenceToml::from_toml(&manifest_with_build(&format!(
+                "target = \"{}\"\n",
+                target.as_str()
+            )))
+            .unwrap_or_else(|err| panic!("`{}` must load: {err}", target.as_str()));
+            assert_eq!(
+                manifest.build.resolved_target().expect("resolves"),
+                target,
+                "the loaded manifest must resolve to the target it named"
+            );
+        }
+    }
+
+    /// The optimizer table is refused *for the Stellar target only*, so both
+    /// halves are asserted: the pairing fails, and each key on its own still
+    /// loads. Without the second half this would pass just as well if
+    /// `[build.wasm-opt]` had been broken outright.
+    #[test]
+    fn the_stellar_target_refuses_the_optimizer_table() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "target = \"stellar\"\n\n[build.wasm-opt]\nlevel = \"z\"\n",
+        ))
+        .expect_err("the pairing is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`[build] target = \"stellar\"`") && msg.contains("`[build.wasm-opt]`"),
+            "the refusal must name both keys, got: {msg}"
+        );
+
+        InferenceToml::from_toml(&manifest_with_build("target = \"stellar\"\n"))
+            .expect("the Stellar target alone loads");
+        InferenceToml::from_toml(&manifest_with_build(
+            "[build.wasm-opt]\nlevel = \"z\"\n",
+        ))
+        .expect("the optimizer table alone loads");
+    }
+
+    /// Proof mode is refused *for the Stellar target only*, and both halves are
+    /// asserted: the pairing fails, and each key on its own still loads. Without
+    /// the second half this would pass just as well if `mode = "proof"` had been
+    /// broken outright.
+    ///
+    /// Left to `infc`, this manifest dies on the emission-side mirror of the same
+    /// rule, in a message naming a `--mode` flag the user never typed rather than
+    /// the manifest key they did.
+    #[test]
+    fn the_stellar_target_refuses_proof_mode() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "target = \"stellar\"\nmode = \"proof\"\n",
+        ))
+        .expect_err("the pairing is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`[build] target = \"stellar\"`") && msg.contains("`[build] mode"),
+            "the refusal must name both keys, got: {msg}"
+        );
+
+        InferenceToml::from_toml(&manifest_with_build("target = \"stellar\"\n"))
+            .expect("the Stellar target alone loads");
+        InferenceToml::from_toml(&manifest_with_build("mode = \"proof\"\n"))
+            .expect("proof mode alone loads");
+    }
+
+    /// A `wasm-features` request is refused for the Stellar target, with the same
+    /// both-halves assertion: an empty list is not what is being refused, a
+    /// non-empty one is.
+    #[test]
+    fn the_stellar_target_refuses_a_wasm_features_request() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "target = \"stellar\"\nwasm-features = [\"bulk-memory\"]\n",
+        ))
+        .expect_err("the pairing is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`[build] target = \"stellar\"`")
+                && msg.contains("`[build] wasm-features`"),
+            "the refusal must name both keys, got: {msg}"
+        );
+
+        InferenceToml::from_toml(&manifest_with_build("target = \"stellar\"\n"))
+            .expect("the Stellar target alone loads");
+        InferenceToml::from_toml(&manifest_with_build("wasm-features = [\"bulk-memory\"]\n"))
+            .expect("the feature request alone loads");
+
+        InferenceToml::from_toml(&manifest_with_build(
+            "target = \"stellar\"\nwasm-features = []\n",
+        ))
+        .expect("an empty list asks for nothing and is not a pairing");
+    }
+
+    /// The pairing check runs after the per-key checks, so a manifest that is
+    /// wrong in both ways is told about the malformed table rather than about a
+    /// pairing it would still have to fix afterwards.
+    #[test]
+    fn a_malformed_optimizer_table_outranks_the_pairing_refusal() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "target = \"stellar\"\n\n[build.wasm-opt]\nlevel = \"nope\"\n",
+        ))
+        .expect_err("the malformed level is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("level"),
+            "the malformed level must be reported first, got: {msg}"
+        );
+    }
+
+    /// Whitespace is rejected, never trimmed, and the message names it — inside a
+    /// TOML string a trailing space is invisible in the echoed value.
+    #[test]
+    fn target_matching_is_exact_on_the_manifest_surface() {
+        for near_miss in ["Wasm32", "wasm32 ", " wasm32"] {
+            let err = InferenceToml::from_toml(&manifest_with_build(&format!(
+                "target = \"{near_miss}\"\n"
+            )))
+            .expect_err("near-misses do not resolve");
+            assert!(
+                err.to_string().contains("unknown compilation target"),
+                "`{near_miss}` must be refused, got: {err}"
+            );
+        }
+
+        let err = InferenceToml::from_toml(&manifest_with_build("target = \"wasm32 \"\n"))
+            .expect_err("whitespace is rejected");
+        assert!(
+            err.to_string().contains("surrounding whitespace"),
+            "the space must be named as the cause, got: {err}"
+        );
+    }
+
+    /// The documented checking order is a contract, and the manifest that could
+    /// falsify it is one whose keys are written in the opposite order: TOML fixes
+    /// no key order and validation never looks at the source text, so the
+    /// `target` error must surface even though the `mode` mistake is written
+    /// first.
+    #[test]
+    fn two_mistakes_report_the_field_checked_first() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "mode = \"release\"\ntarget = \"wasm64\"\n",
+        ))
+        .expect_err("both values are invalid");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown compilation target"),
+            "`target` is checked before `mode`, got: {msg}"
+        );
+        assert!(
+            !msg.contains("`[build] mode`"),
+            "only the first failing field is reported, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn target_round_trip_keeps_the_key_above_the_wasm_opt_header() {
+        // Field declaration order is load-bearing: serialized *after* the
+        // `[build.wasm-opt]` header, the key would reparse as one of that
+        // sub-table's keys and the manifest would be rejected for an unknown key.
+        let src = manifest_with_build(
+            "target = \"wasm32\"\nmode = \"proof\"\n\n[build.wasm-opt]\nlevel = \"z\"\n",
+        );
+        let manifest = InferenceToml::from_toml(&src).expect("parses");
+        let serialized = manifest.to_toml().expect("serializes");
+
+        let key = serialized
+            .find("target =")
+            .expect("the key must be serialized");
+        let header = serialized
+            .find("[build.wasm-opt]")
+            .expect("the sub-table must be serialized");
+        assert!(
+            key < header,
+            "target must precede the [build.wasm-opt] header, got:\n{serialized}"
         );
         assert_eq!(
             InferenceToml::from_toml(&serialized).expect("reparses"),

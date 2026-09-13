@@ -9,7 +9,10 @@
 
 use thiserror::Error;
 
-use crate::{MemoryLayoutSource, WasmFeatureName, WasmFeatureSource, supported_features_listing};
+use crate::{
+    MemoryLayoutSource, RESERVED_TARGET_NAMES, TargetName, TargetSource, WasmFeatureName,
+    WasmFeatureSource, supported_features_listing, supported_targets_listing,
+};
 
 /// A requested WebAssembly feature set that cannot be honored.
 ///
@@ -67,6 +70,40 @@ pub enum WasmFeatureError {
     },
 }
 
+/// A named compilation target that cannot be honored.
+///
+/// The `surface` field is deliberately not named `source`, for the reason given
+/// on [`WasmFeatureError`]: `thiserror` reserves that name for a wrapped causal
+/// error, which a [`TargetSource`] is not.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TargetError {
+    /// A name that is not in the requestable vocabulary.
+    #[error(
+        "Invalid {} value `{entry}`: unknown compilation target. Supported targets: {}.{}",
+        surface.label(),
+        supported_targets_listing(),
+        target_whitespace_hint(entry)
+    )]
+    UnknownTarget {
+        entry: String,
+        surface: TargetSource,
+    },
+
+    /// A former name of a target that is now requestable under a different
+    /// spelling. See [`RESERVED_TARGET_NAMES`] for the obligation this wording
+    /// puts on anything added to that slice.
+    #[error(
+        "Invalid {} value `{entry}`: `{entry}` is the former name of the `stellar` target and \
+         is not accepted; write `stellar` instead. Supported targets: {}.",
+        surface.label(),
+        supported_targets_listing()
+    )]
+    ReservedTarget {
+        entry: String,
+        surface: TargetSource,
+    },
+}
+
 /// A requested linear memory that cannot be honored.
 ///
 /// A struct rather than an enum because there is exactly one way a layout
@@ -98,6 +135,28 @@ fn whitespace_hint(entry: &str) -> String {
             " Feature names are matched exactly and this entry has surrounding whitespace: \
              write `{}`.",
             entry.trim()
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// The extra sentence an unknown target earns when it is a supported target with
+/// whitespace around it, or a reserved name with whitespace around it.
+///
+/// The reserved half matters as much as the supported one: without it a
+/// `"soroban "` written in a manifest is reported as an unknown name, which is
+/// the message the reserved sentence exists to avoid, and the user cannot see
+/// the space that caused it. Mirrors [`whitespace_hint`] for the same reason it
+/// exists — whitespace is rejected, never trimmed.
+fn target_whitespace_hint(entry: &str) -> String {
+    let trimmed = entry.trim();
+    let recognized =
+        TargetName::from_name(trimmed).is_some() || RESERVED_TARGET_NAMES.contains(&trimmed);
+    if trimmed != entry && recognized {
+        format!(
+            " Target names are matched exactly and this entry has surrounding whitespace: \
+             write `{trimmed}`."
         )
     } else {
         String::new()

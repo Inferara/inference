@@ -1,0 +1,8 @@
+// A boolean answer computed from an unsigned argument, so the wrap sees a
+// value the comparison produced rather than one a parameter carried in.
+pub fn is_zero(x: u32) -> bool {
+    if x == 0 {
+        return true;
+    }
+    return false;
+}
