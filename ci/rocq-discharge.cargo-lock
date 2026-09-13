@@ -2427,6 +2427,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "soroban-env-host",
+ "spacewasm",
  "tempfile",
  "wasm-encoder 0.254.0",
  "wasmparser 0.245.1",
@@ -4472,6 +4473,15 @@ dependencies = [
  "wasmi_arena",
  "wasmi_core",
  "wasmparser-nostd",
+]
+
+[[package]]
+name = "spacewasm"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53f8bfaf73590037468fc77f1a5d4baa3389e3aa73f72f18cc0f463c42c74d2e"
+dependencies = [
+ "libm",
 ]
 
 [[package]]

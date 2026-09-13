@@ -223,3 +223,79 @@ pub fn single_file_corpus_sources() -> Vec<(String, String)> {
         })
         .collect()
 }
+
+/// `path` as a committed list spells it: relative to `test_data`, and
+/// `/`-separated so one list reads the same on every platform.
+///
+/// A sweep that names the fixtures it excludes has to spell them the way a
+/// reviewer reads them, and two sweeps naming the same fixture differently is
+/// how one list stops being comparable with the other.
+///
+/// # Panics
+///
+/// Panics if `path` is not under `test_data`.
+#[must_use]
+pub fn relative_to_test_data(path: &std::path::Path) -> String {
+    path.strip_prefix(test_data_path())
+        .unwrap_or_else(|_| panic!("{} is not under test_data", path.display()))
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Whether `wasm` carries one of the compiler's custom verification operators.
+///
+/// Fixture names do not answer this — `nondet` and `array_nondet` are compiled
+/// in compile mode with analysis skipped, and a proof-mode module need not be
+/// named for it — so the classification reads the operators themselves.
+///
+/// It lives beside the walkers for the reason they do: more than one sweep
+/// partitions the corpus on this question, and a second copy is how two sweeps'
+/// notions of "carries a verification operator" drift apart.
+///
+/// Read with the fork rather than with the stock parser, because only the fork
+/// can name these operators positively: to a stock parser they are an unknown
+/// `0xfc` sub-opcode and a parse error indistinguishable from any other.
+#[must_use]
+pub fn carries_verification_operator(wasm: &[u8]) -> bool {
+    use inf_wasmparser::{Operator, Parser, Payload};
+
+    for payload in Parser::new(0).parse_all(wasm) {
+        let Ok(Payload::CodeSectionEntry(body)) = payload else {
+            continue;
+        };
+        let Ok(operators) = body.get_operators_reader() else {
+            continue;
+        };
+        for operator in operators {
+            let Ok(operator) = operator else { continue };
+            if matches!(
+                operator,
+                Operator::Forall { .. }
+                    | Operator::Exists { .. }
+                    | Operator::Assume { .. }
+                    | Operator::Unique { .. }
+                    | Operator::I32Uzumaki { .. }
+                    | Operator::I64Uzumaki { .. }
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether `wasm` declares an import section.
+///
+/// The companion classification to [`carries_verification_operator`], and here
+/// for the same reason: a sweep that runs a module against a runtime with no
+/// host module registered has to know which artifacts have something to bind.
+#[must_use]
+pub fn has_import_section(wasm: &[u8]) -> bool {
+    use inf_wasmparser::{Parser, Payload};
+
+    Parser::new(0)
+        .parse_all(wasm)
+        .any(|payload| matches!(payload, Ok(Payload::ImportSection(_))))
+}
