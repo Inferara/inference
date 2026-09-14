@@ -200,20 +200,22 @@ pub fn codegen(
     let arena = typed_context.arena();
 
     if !target.supports_non_det_functions() {
-        // Analysis rules A006 and A042 are the primary rejection and report the
-        // source location -- A042 refuses a non-deterministic block outside a
-        // `spec`, and A006 the bare `@`, which A042 leaves to it. This is the
-        // backstop for a caller reaching code generation without having run
-        // analysis, and it is total in one direction only. Over definitions it
-        // descends a struct's methods, so a function in no file's top-level
-        // `defs` is asked about too, and it stops only at `Def::Spec`, whose body
-        // compile mode strips before emission. Within a definition it is partial:
-        // it covers the statement kinds `AstArena::stmt_is_non_det` handles and
-        // recognizes only a bare `@` in an expression, where analysis descends
-        // every block and every operand. So a `forall` in a loop body, or a `@`
-        // under any operator, is analysis's to catch and not this gate's.
+        // Analysis rules A006 and A042 are the primary rejection and are the only
+        // reading that reports a source location -- A042 refuses a
+        // non-deterministic block outside a `spec`, and A006 the bare `@`, which
+        // A042 leaves to it. This is the backstop for a caller reaching code
+        // generation without having run analysis, and it is total: over
+        // definitions it descends a struct's methods, so a function in no file's
+        // top-level `defs` is asked about too, and within one it descends every
+        // block of every kind, every statement and every operand of every
+        // expression. A `false` from it is therefore a decision and not an
+        // approximation, which is what a backstop against instructions the
+        // runtime cannot decode has to be. It stops at two definitions that ship
+        // no instruction for it to be wrong about: a `Def::Spec`, whose body
+        // compile mode strips before emission, and a module-scope `const`, which
+        // emission drops rather than lowering.
         for source_file in typed_context.source_files() {
-            if let Some(def_id) = arena.first_non_det_def(&source_file.defs) {
+            if let Some(def_id) = arena.first_non_det_def_deep(&source_file.defs) {
                 cov_mark::hit!(wasm_codegen_target_rejects_nondet_function);
                 let name = target.as_str();
                 let proof_target = Target::Wasm32.as_str();

@@ -76,6 +76,8 @@ width, while a function's recorded stack usage is in **words**, where `i64` and
 | `MAX_LOCAL_WORDS` | 65 535 | words | `src/code.rs:142-145`; `Func::local_size: u16`, `src/code.rs:69` | decode |
 | `MAX_FRAME_WORDS` | 65 535 | words | `src/code.rs:157-160` | decode |
 | `MAX_LOCALS_GROUP_COUNT` | 65 535 | locals per group | `src/code.rs:126-127` | decode |
+| `MAX_IR_INDEX` | 65 535 | a value in one 16-bit IR immediate | `src/text.rs:1099-1102` (`instr_imm_8_or_16`); `src/compiler.rs:281-283` | decode |
+| `MAX_BRANCH_UNWIND_WORDS` | 255 | words | `src/text.rs:741-748` | decode |
 | `MAX_IMPORT_NAME_BYTES` | 31 | bytes | `src/host.rs:327,352` (`HOST_FUNCTION_NAME_CAP`, `HOST_MODULE_NAME_CAP`) | registration |
 | `MAX_HOST_FUNCTION_PARAMS` | 9 | parameters | `src/host.rs:168` | registration |
 | `MAX_HOST_FUNCTION_RESULTS` | 1 | results | `src/host.rs:180` | registration |
@@ -97,6 +99,35 @@ Two of the decode limits interact, and which one a function reaches first is
 worth knowing: `MAX_FRAME_WORDS` bounds two words of header plus the locals plus
 the operand peak, so a function with an empty operand stack may declare 65 533
 local words and no more — two fewer than `MAX_LOCAL_WORDS` alone would allow.
+
+The last two are of a different kind again. Every other row bounds something a
+section *declares*, and the decoder meets it while reading that section. These
+two bound the bytecode the interpreter compiles the module into, and it meets
+them while walking a function body:
+
+- `MAX_IR_INDEX` is one 16-bit immediate. Two operators can present a value over
+  it — a `call_indirect`'s type index and a `br_table`'s target count — so one
+  violation covers both and says which. They meet the cap in two different
+  places, which is worth knowing when reading upstream: the target count goes
+  through the shared emitter `instr_imm_8_or_16`, and the type index is checked
+  by hand before its `write_16`. Nothing else reaches the refusal — a global and
+  a function index arrive already narrowed to `u16`, which is a defect rather
+  than a safeguard and is what the residue section below is about; a local index
+  is a frame offset bounded by `MAX_FRAME_WORDS`; and a label index is refused
+  as `InvalidLabelIndex` before it can be one.
+- `MAX_BRANCH_UNWIND_WORDS` is the operands one branch discards, counted in
+  words from the bottom of the live stack up to the target frame's own height —
+  the same word convention and the same stop-at-the-first-untracked-slot rule
+  the operand peak uses, and for the same reason. It is measured at `br`, at
+  `br_if` after its condition comes off, and at every target of a `br_table`
+  including the default, each against the frame that target leaves. A branch to
+  the function's own outermost frame is not measured at all: the interpreter
+  compiles it as an early return, which discards the frame wholesale, and so
+  does `return`. Those four are four of the five branches the interpreter
+  measures; the fifth is the implicit one an `else` emits over its own arm, and
+  it is exempt because it cannot reach the bound at WebAssembly 1.0 — what
+  stands above the `if` frame's floor there is the block's result, and 1.0
+  admits at most one, so the unwind is at most two words.
 
 ### What the report carries
 
@@ -168,12 +199,20 @@ variant, the maxima each quotes, the two sentences under it and the header above
 them all name one runtime — and the module is split out for length rather than
 because anything in it is target-neutral.
 
-Four of the violations describe module shapes this compiler cannot produce —
-`MemoryTooLarge`, `LocalsGroupTooLarge`, `CustomSectionNameTooLong` and
-`ImportMultipleResults`. "Shorten the custom section name" would be advice about
-a file the user did not write, so their remedy splits on provenance instead:
-report a compiler bug, or rebuild the external module, because only the person
-holding the build knows which half applies.
+Five of the violations describe module shapes this compiler cannot produce. Four
+of them share one sentence — `MemoryTooLarge`, `LocalsGroupTooLarge`,
+`CustomSectionNameTooLong` and `ImportMultipleResults`. "Shorten the custom
+section name" would be advice about a file the user did not write, so their
+remedy splits on provenance instead: report a compiler bug, or rebuild the
+external module, because only the person holding the build knows which half
+applies.
+
+`IndexTooLarge` is the fifth — code generation emits no `call_indirect` and no
+`br_table` at any target — and its remedy splits the same way while still naming
+the edit, because there is one and it differs by instruction: fewer function
+types, or a narrower jump table. `BranchUnwindTooDeep` is not in that family: a
+branch over a deep stack is a shape a body can be written into, so its remedy is
+the source edit that shortens it.
 
 ### What `check` does not refuse, and why
 
@@ -186,14 +225,20 @@ kind of residue that never turns red is the kind nobody wrote down.
 **Modelled here, each as a `Violation`.** `FunctionParametersTooLarge`
 (`src/module.rs:594`), `TooManyLocals` (`src/code.rs:127,140,145`),
 `StackTooLarge` (`src/code.rs:46,160`), `MemoryTooLarge`
-(`src/types.rs:329-343`), and the `VecTooLong` (`src/reader.rs:478-480`) raised
-by the two fixed 32-byte reads an import's names and a custom section's name go
-through. `FunctionReturnsTooLarge` (`src/types.rs:196`, `src/module.rs:586`) is
-modelled for an import; on a defined function it is the standard's own
-multi-value rule and stock validation reaches it first. Two of this crate's
-refusals are not `ValidationError`s at all — the 31-byte registration cap and
-the nine-parameter host list are `src/host.rs`'s, met after the module has
-already decoded.
+(`src/types.rs:329-343`), `IdxTooLarge` (`src/text.rs:1099-1102`,
+`src/compiler.rs:281-283`), `LabelStackJumpTooDeep` (`src/text.rs:744-748`), and
+the `VecTooLong` (`src/reader.rs:478-480`) raised by the two fixed 32-byte reads
+an import's names and a custom section's name go through.
+`FunctionReturnsTooLarge` (`src/types.rs:196`, `src/module.rs:586`) is modelled
+for an import; on a defined function it is the standard's own multi-value rule
+and stock validation reaches it first. `LabelStackJumpTooDeep` is modelled at
+four of the five branches the interpreter measures — the fifth, an `else`'s
+implicit branch over its own arm (`src/compiler.rs:129-134`), is exempt for the
+reason given with `MAX_BRANCH_UNWIND_WORDS` above: at WebAssembly 1.0 what
+stands above the `if` frame there is one result at most, so that unwind is at
+most two words and cannot reach 255. Two of this crate's refusals are not
+`ValidationError`s at all — the 31-byte registration cap and the nine-parameter
+host list are `src/host.rs`'s, met after the module has already decoded.
 
 **Refused by the WebAssembly 1.0 validation that runs first**, so they arrive as
 `OutsideWasm1` carrying the stock validator's wording rather than the
@@ -235,13 +280,21 @@ verifier's two stacks are const generics, and overflowing either is a
 0.7.1. There is no fixed number to refuse against, so `Report` measures both
 axes and the build prints them. `IllegalMemoryGrow` (`src/compiler.rs:443`) is a
 `CompilerOptions` choice in the same way; `GuestMemoryAllocationFailure` and
-`MemoryError` are the embedder's own allocation at load.
+`MemoryError` are the embedder's own allocation at load. So is the code-page
+budget `CompilerOptions::max_code_pages` sets, and it is worth naming because it
+bites *before* one of the modelled limits: a `br_table` of 65,535 targets is
+inside `MAX_IR_INDEX` and costs 131,070 IR words, which the reference
+configuration cannot hold — so the accepting side of that particular boundary is
+out of reach of any plausible embedder, and the oracle says so rather than
+pretending otherwise.
 
-**Properties of the interpreter's compiled IR rather than of the module.**
-Reproducing them means reproducing the code builder, which is the interpreter
-itself and not a description of it: `LabelJumpTooLarge` (`src/text.rs:53-60`, a
-22-bit jump immediate), `PageFault` (`src/text.rs:390-415`, its code pages) and
-`PossibleBackpatchCycle` (`src/text.rs:321`, an embedder-set iteration budget).
+**Properties of the interpreter's compiled IR that a description cannot
+reproduce.** Two IR properties *are* modelled above, because both are decided by
+reading one instruction. These three are not, because reproducing them means
+reproducing the code builder, which is the interpreter itself: `LabelJumpTooLarge`
+(`src/text.rs:53-60`, a 22-bit jump immediate into emitted code),
+`PageFault` (`src/text.rs:390-415`, its code pages) and `PossibleBackpatchCycle`
+(`src/text.rs:321`, an embedder-set iteration budget).
 
 **Constructed nowhere in 0.7.1**, so no module can earn them:
 `ModuleIdxTooLarge`, `I33IsNegative`, `FunctionTextOutOfRange`, and
@@ -259,18 +312,36 @@ merge. Stock validation at WebAssembly 1.0 admits a table up to `u32::MAX`, so
 nothing else would catch it — if any of those three facts changes, this is the
 refusal to add.
 
-**Not modelled, and reachable in principle.** Two, both in the permissive
-direction, so they are named here rather than left to be met on hardware:
+**Not modelled.** None. Every variant of `ValidationError` is in one of the
+classes above.
 
-- `IdxTooLarge` (`src/compiler.rs:283`, `src/text.rs:1099-1102`) — an index the
-  interpreter's IR stores in 16 bits, so a module with more than 65,535 of some
-  entity a body names is refused at decode. Nothing this compiler emits comes
-  near it, and a linked program large enough to would meet it.
-- `LabelStackJumpTooDeep` (`src/text.rs:747`) — a branch unwinding more than 255
-  **words** of operands. It needs a per-branch operand height, which is a
-  different reading from the module-wide peak this pass records. Out of reach
-  for anything code generation emits; a foreign body merged into the artifact
-  could carry one.
+**The residue that is left, and it is not a refusal.** Two index spaces
+`spacewasm` 0.7.1 **truncates** rather than refusing. `Module::get_func_ref`
+(`src/module.rs:383-389`) and `Module::get_global_ref` (`src/module.rs:423-429`)
+narrow a function index and a global index to `u16` with an `as` cast, and the
+IR emitter is then handed a value that cannot be over the cap — which is why
+`IdxTooLarge` is unreachable through `call`, `global.get` and `global.set`, and
+why the modelled arms are the two operators that reach the emitter with an
+un-narrowed value.
+
+What the cast costs is measured rather than argued, and the measurement is
+committed: a module declaring 65,537 globals whose exported function returns
+`global.get 65536` decodes, loads and returns global **0**'s value — pinned by
+`a_global_index_over_the_ir_immediate_is_truncated_rather_than_refused` in the
+oracle suite, which runs the module and reads the answer, against the 65,535
+neighbour as its control. `check` does not refuse it. The question this crate
+answers is what the decoder's verdict would be, and the decoder's verdict is
+"accepted" — a refusal here would be this crate disagreeing with the runtime it
+describes, which is a policy change and not a transcription, and every row of the
+oracle suite is built on the two agreeing. Whether a build ought nonetheless to be
+stricter than the decoder here — refusing a module the interpreter would load, on
+the grounds that it would load it and call the wrong function — is a policy
+question this crate deliberately leaves undecided. It is written down because a
+residue nobody wrote down is one nothing turns red about, and because the shape is
+reachable in principle: a linked program declaring more than 65,536 globals. The
+function-index half needs an embedder whose code-page budget survives 65,536
+function bodies as well; the reference configuration does not, and refuses such a
+module with `AllocError(OutOfMemory)` before the truncation can matter.
 
 ## How it is held to being right
 
@@ -281,3 +352,14 @@ puts a hand-written module on *both* sides of every boundary, in front of this
 crate and in front of the real interpreter, and requires the two verdicts to be
 the same. `MAX_FRAME_WORDS` is in the table above because that oracle found it:
 the crate accepted a 65 535-word local declaration the decoder refused.
+
+The two IR limits are pinned the same way, and their rows assert the decoder's
+*reason* rather than only its verdict, since every module that reaches them is
+either large or deep and a refusal for a page budget would otherwise satisfy the
+row while saying nothing. Three of those rows exist because a boundary alone
+would not have caught the model being wrong in the permissive direction: a `br`
+carries its condition-free stack and a `br_if` does not, so only the conditional
+row separates a model that forgets the selector from one that does not; a
+`br_table`'s default target is the one a model measuring "the targets" would
+skip; and a branch to the function's own frame is compiled as an early return, so
+a model measuring every branch alike would refuse a module the decoder runs.

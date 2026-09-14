@@ -339,12 +339,18 @@ build asks the same questions first — see [Conformance](#conformance) below. T
 fixed limits are refusals: a module this target accepts meets every one of them,
 so its declarations fit the fields the decoder reads them into and not merely its
 instruction set. That is a claim about this table rather than a proof of
-decodability — the interpreter refuses a handful of shapes beyond it, and
-`core/target-conformance`'s README classifies every one of them with the reason
-it is out of reach or, for two, that it is not modelled. The two
-embedder-configured rows cannot be refusals, because their values belong to a
-deployment rather than to the interpreter; the build measures them instead and
-prints what they have to be.
+decodability — `core/target-conformance`'s README classifies every refusal the
+interpreter can raise, either as one of the rows here or with the reason it is
+out of reach, and nothing is left unclassified. The two embedder-configured rows
+cannot be refusals, because their values belong to a deployment rather than to
+the interpreter; the build measures them instead and prints what they have to be.
+One shape is neither refused nor executed faithfully and is therefore outside
+what this table promises: a module declaring more than 65,536 functions or
+globals is *loaded*, because the interpreter narrows those two index spaces to
+sixteen bits, so an access past the cap reads the wrong entry rather than failing
+— `core/target-conformance`'s README records that residue and the measurement
+behind it. This compiler emits one global and no build approaches either count,
+which is why it is a sentence here rather than a row above.
 
 | Limit | Value | Where it comes from |
 |-------|-------|---------------------|
@@ -355,6 +361,8 @@ prints what they have to be.
 | Host-registered module and function name | 31 bytes each | `HOST_MODULE_NAME_CAP` / `HOST_FUNCTION_NAME_CAP` — the registration side is one byte tighter than the decode side, so 31 is the cap an import name has to meet to be bindable at all |
 | Host function parameters | 9, and a single result | `MAX_HOST_FUNCTION_PARAMS`; more than one result is `MultiReturnNotAllowed` |
 | Custom section name | 32 bytes | Compile mode emits at most `inference.checked` and `name`, both well inside it |
+| A `call_indirect`'s type index, and a `br_table`'s target count | 65,535 | The interpreter compiles a module into a bytecode of its own, and holds both in one 16-bit immediate. Code generation emits neither instruction, so this is a bound on a linked module |
+| Operands one branch discards | 255 words | Counted in words from the bottom of the live stack to the frame the branch leaves, so an `i64` held across it costs two. Leaving the *function* — `return`, or a branch to its own outermost label — is an early return and is not counted at all |
 | Control-frame nesting | Embedder-configured; 64 in the `spacewasm_std` reference embedding | `MAX_CONTROL_FRAMES`, a const generic of `Module::new` — a *deployment's* number, not the interpreter's |
 | Operand-stack depth | Embedder-configured; 256 in `spacewasm_std` | `MAX_STACK_DEPTH`, the same const generic |
 | Linear memory | 4 GiB | The WebAssembly 32-bit address space |
@@ -413,13 +421,16 @@ WASM generated at: out/main.wasm
 for a linked build means a post-1.0 instruction in a foreign module, refused
 earlier and by name, see [Foreign modules](#foreign-modules)
 — and each decode-time and registration-time limit in the table: parameter words,
-local words, call-frame words, a locals group, an import module or field name over
-31 bytes, a host function over nine parameters or one result, a custom section name
-over 32 bytes, and a memory over the address space. Every refusal names the two
-numbers, says which cap it met, and gives one thing to change. Four of them
-describe module shapes this compiler cannot produce; those say so, and ask you to
-rebuild the external module or report a compiler bug, because there is no source
-edit that would have avoided them.
+local words, call-frame words, a locals group, a `call_indirect` type index or
+`br_table` width over the interpreter's 16-bit IR immediate, a branch discarding
+more than 255 operand words, an import module or field name over 31 bytes, a host
+function over nine parameters or one result, a custom section name over 32 bytes,
+and a memory over the address space. Every refusal names the two numbers, says
+which cap it met, and gives one thing to change. Five of them describe module
+shapes this compiler cannot produce; those say so, and ask you to rebuild the
+external module or report a compiler bug, because you did not write the file the
+shape is in — the two IR-immediate ones still name the edit that would shorten
+it, since for those there is one.
 
 **What is reported.** Three numbers, and each carries its unit because two of
 them sound alike and are not the same quantity:
@@ -590,7 +601,7 @@ output is otherwise the default target's. Named rather than counted, because
 only two of the three are rows in the settings table above: a build for this
 target refuses proof mode, refuses every post-MVP instruction family, and
 refuses a non-deterministic construct — a `forall`, `exists`, `assume` or
-`unique` block, or a bare `@` — in a function that ships.
+`unique` block, or an `@` — anywhere in a function that ships.
 
 The third is not a narrowing this target introduces. Analysis rules A042 and
 A006 refuse non-determinism outside a `spec` in every build at every target,
@@ -599,10 +610,13 @@ is that code generation asks the question again, as a backstop for a caller that
 reached it without running analysis; the default target does not ask it, because
 there the custom `0xfc` instructions are ones Inference's own tooling decodes —
 no general-purpose embedder does — which is what makes this a target-specific
-question rather than a second copy of A042. Either way the refusal is about
-executable code only: `compile` mode strips `spec` bodies before either check
-looks at them, so a specification written in those constructs costs a SpaceWasm
-build nothing.
+question rather than a second copy of A042. The backstop reaches the same
+programs the rules do: it descends every nested block, every statement and every
+operand, so a `forall` in a loop body and an `@` under an operator are refused
+here as surely as a `return @` is. What the rules have that it does not is the
+source location. Either way the refusal is about executable code only: `compile`
+mode strips `spec` bodies before either check looks at them, so a specification
+written in those constructs costs a SpaceWasm build nothing.
 
 The conformance report against the decode-time limits is what makes the envelope
 buy more, and every build produces one: see [Conformance](#conformance) above

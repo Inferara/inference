@@ -8,14 +8,18 @@
 //! in a function that ships — and each of the three is refused before a byte is
 //! emitted. The third is the one whose code-generation gate is a backstop rather
 //! than the decision: analysis rules A042 and A006 are what refuse
-//! non-determinism totally and with a source location — A042 the
-//! non-deterministic blocks, A006 the bare `@` A042 leaves to it — and every
-//! `infc` build runs both.
+//! non-determinism with a source location — A042 the non-deterministic blocks,
+//! A006 the bare `@` A042 leaves to it — and every `infc` build runs both. The
+//! gate reaches the same programs and says nothing about where in them, which is
+//! what "backstop" means here: it is for the caller that drove code generation
+//! without running analysis, and it is a decision rather than an approximation,
+//! because a module carrying instructions this runtime cannot decode is not a
+//! thing to write and then hope somebody notices.
 //!
 //! What is pinned here is the matrix of that envelope: the metadata an accepted
-//! build records, the exact text of each refusal, the two shapes that prove the
-//! non-determinism walk descends a struct and stops at a `spec`, and that the
-//! bytes an accepted build produces actually decode.
+//! build records, the exact text of each refusal, the slots the walk descends
+//! and the two it deliberately does not — into a struct's methods, and not into
+//! a `spec` — and that the bytes an accepted build produces actually decode.
 //!
 //! The byte-identity claim — that this target's module *is* the default
 //! target's — is not here. It is the corpus-wide sweep in `target_identity`,
@@ -199,7 +203,145 @@ pub fn twice(n: i32) -> i32 { return double(n); }
         );
     }
 
-    // Rows 6 and 7: the shape of the walk ---
+    // Row 6: the walk is total inside a body ---
+
+    /// Every shape a partial walk would have let through.
+    ///
+    /// The gate is a backstop, and a backstop that covers the statement kinds
+    /// somebody enumerated is not one: analysis is what refuses these with a
+    /// source location, and the whole point of asking again in `codegen` is the
+    /// caller that did not run analysis. Every row is refused here with no
+    /// analysis run at all.
+    ///
+    /// Most of them are slots the earlier, partial walk did not read: every
+    /// operand of every expression — an `@` under an operator, in a call
+    /// argument, in an array or struct literal, as an index, on the right of an
+    /// assignment — and a non-deterministic block in a loop body, which that
+    /// walk skipped along with the whole loop. Two are not new, and are here as
+    /// regression guards rather than as evidence: the partial walk already
+    /// descended a nested plain block and both arms of an `if`, and the deep
+    /// walk re-implements those arms rather than reusing them, so a row that
+    /// would have passed before is still a row that can fail now.
+    ///
+    /// Driven as a table because the failure mode is a slot being forgotten, and
+    /// a slot forgotten is invisible in a test that exercises the three somebody
+    /// thought of. The exhaustive matches in `core/ast` are what make a *new*
+    /// node kind a compile error; this table is what covers the kinds that
+    /// already exist, at the source level where they can be written down.
+    ///
+    /// Two slots are covered in `core/ast`'s own tables instead of here, because
+    /// no source spells them: an `@` directly under `assert` has no type the
+    /// checker can give it and never reaches code generation, and a local
+    /// `const` whose initializer is non-deterministic is refused the same way.
+    /// Both arms are driven against a hand-built arena there.
+    ///
+    /// The coverage mark is checked once per row rather than once for the test,
+    /// so each row pins the gate as the site that refused it and not merely the
+    /// sentence it was refused with.
+    ///
+    /// Fails if the walk stops descending any of these slots: the program would
+    /// compile, and a module carrying custom `0xfc` instructions would be
+    /// written for a runtime that decodes WebAssembly 1.0 and nothing else.
+    #[test]
+    fn non_determinism_below_a_statement_or_an_operand_is_refused_too() {
+        for (label, source) in [
+            (
+                "an uzumaki under a binary operator",
+                "pub fn sum() -> i32 { let n: i32 = @ + 1; return n; }",
+            ),
+            (
+                "an uzumaki as a call argument",
+                "fn id(n: i32) -> i32 { return n; } \
+                 pub fn call() -> i32 { let v: i32 = id(@); return v; }",
+            ),
+            (
+                "an uzumaki in an array literal",
+                "pub fn arr() -> i32 { let xs: [i32; 2] = [1, @]; return xs[0]; }",
+            ),
+            (
+                "an uzumaki as an array index",
+                "pub fn ix() -> i32 { let xs: [i32; 2] = [1, 2]; return xs[@]; }",
+            ),
+            (
+                "an uzumaki in a struct literal field",
+                "struct P { x: i32; } pub fn f() -> i32 { let p: P = P { x: @ }; return p.x; }",
+            ),
+            (
+                "an uzumaki in an assignment's right side",
+                "pub fn assign() -> i32 { let mut n: i32 = 0; n = @ + 1; return n; }",
+            ),
+            (
+                "a forall block inside a loop body",
+                "pub fn looped() { let mut i: i32 = 0; loop (i < 1) { forall { let n: i32 = @; \
+                 assert(n == n); } i = i + 1; } }",
+            ),
+            (
+                "an assume block inside an if branch",
+                "pub fn branched(c: bool) { if c { assume { let n: i32 = @; assert(n == n); } } }",
+            ),
+            (
+                "an exists block inside a nested plain block",
+                "pub fn nested() { { exists { let n: i32 = @; assert(n == n); } } }",
+            ),
+            (
+                "a unique block inside a struct method's loop",
+                "struct Holder { v: i32; \
+                 fn hidden(self) { let mut i: i32 = 0; loop (i < 1) { \
+                 unique { let n: i32 = @; assert(n == n); } i = i + 1; } } } \
+                 pub fn use_it() { let h: Holder = Holder { v: 1 }; h.hidden(); }",
+            ),
+        ] {
+            cov_mark::check!(wasm_codegen_target_rejects_nondet_function);
+            let message = refused(source);
+            assert!(
+                message.contains("does not support non-deterministic operations"),
+                "{label} must be refused by the non-determinism gate: {message}"
+            );
+        }
+    }
+
+    /// The row above would be satisfied by a gate that refused everything, so
+    /// this is what says it is not: the same shapes with the non-determinism
+    /// taken out compile.
+    ///
+    /// Committed rather than argued, because "the gate got wider" and "the gate
+    /// refuses everything" produce the same green table one test up.
+    ///
+    /// Fails if the deep walk ever answers `true` for a deterministic body.
+    #[test]
+    fn the_same_shapes_without_non_determinism_still_compile() {
+        for (label, source) in [
+            ("an operand under an operator", "pub fn sum() -> i32 { return 1 + 1; }"),
+            (
+                "a call argument",
+                "fn id(n: i32) -> i32 { return n; } pub fn call() -> i32 { return id(2); }",
+            ),
+            (
+                "an array literal",
+                "pub fn arr() -> i32 { let xs: [i32; 2] = [1, 2]; return xs[0]; }",
+            ),
+            (
+                "a plain block inside a loop body",
+                "pub fn looped() { let mut i: i32 = 0; loop (i < 1) { { i = i + 1; } } }",
+            ),
+            (
+                "a struct method's loop",
+                "struct Holder { v: i32; \
+                 fn hidden(self) { let mut i: i32 = 0; loop (i < 1) { i = i + 1; } } } \
+                 pub fn use_it() { let h: Holder = Holder { v: 1 }; h.hidden(); }",
+            ),
+        ] {
+            let output = codegen_with_target_mode_no_analysis(
+                source,
+                Target::SpaceWasm,
+                CompilationMode::Compile,
+            )
+            .unwrap_or_else(|e| panic!("{label} is deterministic and must compile: {e}"));
+            assert!(!output.wasm().is_empty(), "{label} must produce a module");
+        }
+    }
+
+    // Rows 7 and 8: the shape of the walk ---
 
     /// A struct's methods are ordinary functions that appear in no file's
     /// top-level `defs` list, so a gate that looked only at that list would
@@ -233,9 +375,9 @@ pub fn twice(n: i32) -> i32 { return double(n); }
     /// A `spec` *inside* a struct method is unspellable: a struct body admits
     /// fields and functions only, so `spec` inside one is a parse error. The
     /// nested arena is therefore pinned where it can be built directly —
-    /// `first_non_det_def`'s own unit tests in `core/ast` construct a spec under
-    /// a struct's methods and assert the walk returns `None`. This row is the
-    /// reachable half.
+    /// `the_deep_walk_keeps_both_of_the_shallow_walk_s_carve_outs`, in
+    /// `core/ast`, constructs a spec under a struct's methods and asserts
+    /// `first_non_det_def_deep` returns `None`. This row is the reachable half.
     #[test]
     fn a_spec_beside_a_struct_leaves_both_untouched() {
         let source = "\
@@ -263,7 +405,7 @@ pub fn run() -> i32 { let c: Counter = Counter { v: 1 }; return c.bump(); }
         assert!(!output.wasm().is_empty());
     }
 
-    // Row 8: the bytes decode ---
+    // Row 9: the bytes decode ---
 
     /// The target's whole premise is that its output survives a strict
     /// WebAssembly 1.0 decoder, and every row above asserts only what the

@@ -18,9 +18,9 @@ use core::fmt;
 use core::fmt::Write as _;
 
 use crate::spacewasm::{
-    MAX_CUSTOM_SECTION_NAME_BYTES, MAX_FRAME_WORDS, MAX_HOST_FUNCTION_PARAMS,
-    MAX_HOST_FUNCTION_RESULTS, MAX_IMPORT_NAME_BYTES, MAX_LOCAL_WORDS, MAX_LOCALS_GROUP_COUNT,
-    MAX_MEMORY_PAGES, MAX_PARAM_WORDS,
+    MAX_BRANCH_UNWIND_WORDS, MAX_CUSTOM_SECTION_NAME_BYTES, MAX_FRAME_WORDS,
+    MAX_HOST_FUNCTION_PARAMS, MAX_HOST_FUNCTION_RESULTS, MAX_IMPORT_NAME_BYTES, MAX_IR_INDEX,
+    MAX_LOCAL_WORDS, MAX_LOCALS_GROUP_COUNT, MAX_MEMORY_PAGES, MAX_PARAM_WORDS,
 };
 
 /// Which half of an import's two names a length refusal is about.
@@ -37,6 +37,31 @@ impl fmt::Display for NamePart {
         match self {
             Self::Module => f.write_str("module"),
             Self::Field => f.write_str("field"),
+        }
+    }
+}
+
+/// Which of the interpreter's two 16-bit IR immediates a body overflowed.
+///
+/// Both meet the same cap, in two places rather than one: a `br_table`'s target
+/// count goes through the shared emitter (`src/text.rs:1099-1102`,
+/// `instr_imm_8_or_16`, called at `src/compiler.rs:166`), and a `call_indirect`'s
+/// type index is checked by hand before its `write_16` (`src/compiler.rs:281-287`).
+/// One is an index into the type section and the other is the width of a jump
+/// table, and a reader told the wrong one edits the wrong thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexKind {
+    /// The type index a `call_indirect` names.
+    CallIndirectType,
+    /// The number of non-default targets a `br_table` lists.
+    BranchTableTargets,
+}
+
+impl fmt::Display for IndexKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CallIndirectType => f.write_str("the type index of a `call_indirect`"),
+            Self::BranchTableTargets => f.write_str("the target count of a `br_table`"),
         }
     }
 }
@@ -103,6 +128,33 @@ pub enum Violation {
         function: String,
         /// The declared group count.
         count: u32,
+    },
+    /// A body names a value wider than one of the interpreter's 16-bit IR
+    /// immediates.
+    #[error(
+        "IR index too large: in function `{function}`, {kind} is {index}; SpaceWasm holds it \
+         in a 16-bit IR immediate and accepts at most {MAX_IR_INDEX}"
+    )]
+    IndexTooLarge {
+        /// The function, named from the `name` section where it has one.
+        function: String,
+        /// Which immediate it is, since the two are edited differently.
+        kind: IndexKind,
+        /// The value that has to fit: an index for a `call_indirect`, a count
+        /// for a `br_table`, because the decoder writes both into the same
+        /// field. The largest one the function names is the one reported.
+        index: u32,
+    },
+    /// A branch discards more operand words than the jump target's field holds.
+    #[error(
+        "branch unwinds too many operands: a branch in function `{function}` discards \
+         {words} operand words; SpaceWasm accepts at most {MAX_BRANCH_UNWIND_WORDS}"
+    )]
+    BranchUnwindTooDeep {
+        /// The function, named from the `name` section where it has one.
+        function: String,
+        /// The deepest unwind in that function, in words.
+        words: u32,
     },
     /// An import name is longer than an embedder can register a host under.
     #[error(
@@ -203,6 +255,19 @@ impl Violation {
                 "A code section declares locals as run-length groups, and SpaceWasm stores \
                  each group's count in a 16-bit field."
             }
+            Self::IndexTooLarge { .. } => {
+                "SpaceWasm compiles a module into a bytecode of its own before running it, and \
+                 that bytecode holds a `call_indirect`'s type index and a `br_table`'s target \
+                 count in one 16-bit immediate. The cap is on the compiled form, not on the \
+                 WebAssembly encoding, which admits a 32-bit value for both."
+            }
+            Self::BranchUnwindTooDeep { .. } => {
+                "SpaceWasm encodes the operands a branch discards in a single byte of its jump \
+                 target word. The count is in words, so an i64 or f64 held live across the \
+                 branch costs two of the 255. A branch to the function's own outermost frame \
+                 is compiled as an early return and carries no unwind at all, so this is a \
+                 branch to a block or a loop."
+            }
             Self::ImportNameTooLong { .. } => {
                 "This is a registration limit, not a decode limit: the decoder reads a name \
                  of up to 32 bytes, but an embedder registers host modules and host functions \
@@ -231,10 +296,13 @@ impl Violation {
 
     /// The one thing to change, in the source where there is one.
     ///
-    /// Four of these shapes are not producible by this compiler at all. Their
-    /// remedy splits on provenance instead of naming a source edit that does
-    /// not exist: either the module was linked in, or a compiler bug produced
-    /// it, and only the person holding the build knows which.
+    /// Five of these shapes are not producible by this compiler at all. Their
+    /// remedy splits on provenance instead of pointing at a source edit the
+    /// author cannot make: either the module was linked in, or a compiler bug
+    /// produced it, and only the person holding the build knows which. Four of
+    /// the five share one sentence because there is nothing else to say. The
+    /// fifth, `IndexTooLarge`, splits the same way and still names the edit,
+    /// because for that one there is one and it differs by instruction.
     #[must_use]
     pub fn remedy(&self) -> &'static str {
         match self {
@@ -250,6 +318,23 @@ impl Violation {
             Self::LocalWordsExceeded { .. } | Self::FrameWordsExceeded { .. } => {
                 "Split the function into smaller functions, or move a large array out of the \
                  frame."
+            }
+            Self::IndexTooLarge { kind, .. } => match kind {
+                IndexKind::CallIndirectType => {
+                    "This compiler emits no `call_indirect`, so these bytes came from a linked \
+                     module or a post-build step: rebuild that module with fewer function \
+                     types, or split it. If `infc` produced it, please report a compiler bug."
+                }
+                IndexKind::BranchTableTargets => {
+                    "This compiler emits no `br_table`, so these bytes came from a linked \
+                     module or a post-build step: rebuild that module with a narrower jump \
+                     table, or split the dispatch. If `infc` produced it, please report a \
+                     compiler bug."
+                }
+            },
+            Self::BranchUnwindTooDeep { .. } => {
+                "Hold fewer operands across the branch: bind them to locals before it, or \
+                 split the block so the jump crosses less of the stack."
             }
             Self::ImportNameTooLong { which, .. } => match which {
                 NamePart::Module => "Shorten the module name this extern is bound under.",
