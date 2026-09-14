@@ -365,7 +365,8 @@ impl Violation {
                  (`Module::get_func_ref` and `Module::get_global_ref`). The module loads, and \
                  every reference past the cap runs against the definition 65536 below it. A \
                  build that refuses is better for a flight target than one that loads and \
-                 calls the wrong function, so this crate is deliberately stricter here."
+                 calls the wrong function, so this crate is deliberately stricter here. The \
+                 narrowing is reported upstream as nasa/spacewasm#201."
             }
             Self::BranchUnwindTooDeep { .. } => {
                 "SpaceWasm encodes the operands a branch discards in a single byte of its jump \

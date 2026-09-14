@@ -58,7 +58,9 @@
 //! decoder verdict to agree with there, only a wrong execution to inherit, and
 //! for a flight target a build that refuses is better than an artifact that
 //! flies and calls the wrong function. [`MAX_IR_INDEX`] carries the mechanism
-//! and the five places that reach it.
+//! and the five places that reach it; the narrowing is reported upstream as
+//! nasa/spacewasm#201, and the day it is refused there this refusal becomes a
+//! transcription like the rest.
 
 use wasmparser::{
     BinaryReaderError, CompositeInnerType, ElementItems, ElementSectionReader, ExternalKind,
