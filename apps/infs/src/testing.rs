@@ -1,5 +1,16 @@
 //! Test-only helpers shared by the `infs` unit tests.
 //!
+//! # Small WebAssembly modules
+//!
+//! Several unit tests need a module that exercises one instruction, and `wat`
+//! cannot assemble the custom `0xfc`-prefixed Inference opcodes, so those
+//! modules are assembled byte-by-byte here. The builders are shared rather than
+//! per-module because the same few shapes are what every artifact-level test is
+//! written against — a body wrapped in a minimal module, that module with a
+//! memory so a memory operator can be validated rather than merely parsed, and
+//! that module with one custom section — and a second copy of a shape is a
+//! second thing to keep true.
+//!
 //! # The write-then-exec (`ETXTBSY`) race
 //!
 //! Several unit tests write a small shell script, mark it executable, and then
@@ -35,6 +46,96 @@ use std::time::Duration;
 #[cfg(unix)]
 use anyhow::Context;
 use anyhow::Result;
+
+/// Wraps a raw code-section body (an operator stream) into a one-function
+/// module and returns the finished bytes. `wat` cannot assemble the custom
+/// `0xfc`-prefixed Inference opcodes, so bodies exercising them are built
+/// byte-by-byte (recipe mirrored from `core/wasm-linker/src/safety.rs`).
+/// `Function::new([])` emits the empty-locals byte, so `body` is the
+/// instruction stream that follows it.
+pub(crate) fn module_with_raw_body(body: &[u8]) -> Vec<u8> {
+    use wasm_encoder::{CodeSection, Function, FunctionSection, Module, TypeSection};
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([], []);
+    module.section(&types);
+    let mut funcs = FunctionSection::new();
+    funcs.function(0);
+    module.section(&funcs);
+    let mut code = CodeSection::new();
+    let mut f = Function::new([]);
+    f.raw(body.iter().copied());
+    code.function(&f);
+    module.section(&code);
+    module.finish()
+}
+
+/// Like [`module_with_raw_body`] but the module also declares a one-page
+/// memory, so a body exercising memory operators can be *validated* rather
+/// than merely parsed.
+pub(crate) fn module_with_memory_and_raw_body(body: &[u8]) -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, Function, FunctionSection, MemorySection, MemoryType, Module, TypeSection,
+    };
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([], []);
+    module.section(&types);
+    let mut funcs = FunctionSection::new();
+    funcs.function(0);
+    module.section(&funcs);
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: 1,
+        maximum: Some(1),
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    module.section(&memories);
+    let mut code = CodeSection::new();
+    let mut f = Function::new([]);
+    f.raw(body.iter().copied());
+    code.function(&f);
+    module.section(&code);
+    module.finish()
+}
+
+/// `i32.const 0` three times, `memory.fill 0`, `end` — a well-typed
+/// bulk-memory body over the single shared memory.
+pub(crate) const MEMORY_FILL_BODY: &[u8] =
+    &[0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0b, 0x00, 0x0b];
+
+/// `i32.const 0` three times, `memory.copy 0 0`, `end`.
+pub(crate) const MEMORY_COPY_BODY: &[u8] = &[
+    0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0a, 0x00, 0x00, 0x0b,
+];
+
+/// [`module_with_raw_body`] plus one custom section, for the guard-record
+/// tests. `name` is taken as written so a test can build a module whose
+/// section is *not* the guard record.
+pub(crate) fn module_with_custom_section(body: &[u8], name: &str, payload: &[u8]) -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, CustomSection, Function, FunctionSection, Module, TypeSection,
+    };
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([], []);
+    module.section(&types);
+    let mut funcs = FunctionSection::new();
+    funcs.function(0);
+    module.section(&funcs);
+    let mut code = CodeSection::new();
+    let mut f = Function::new([]);
+    f.raw(body.iter().copied());
+    code.function(&f);
+    module.section(&code);
+    module.section(&CustomSection {
+        name: name.into(),
+        data: payload.into(),
+    });
+    module.finish()
+}
 
 /// How many times [`retry_while_exec_busy`] runs its operation before giving up.
 const EXEC_BUSY_ATTEMPTS: u32 = 50;

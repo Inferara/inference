@@ -50,9 +50,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use inf_wasmparser::{Operator, Parser, Payload, WasmFeatures};
+use inf_wasmparser::{Parser, Payload, WasmFeatures};
 use inference_compiler_interface::TargetName;
 
+use crate::artifact::{ArtifactScan, CHECKED_SECTION_NAME, scan_artifact};
 use crate::commands::build::BuildMode;
 use crate::project::ProjectContext;
 use crate::toolchain::binaryen;
@@ -63,17 +64,8 @@ use crate::toolchain::{Platform, ToolchainPaths};
 /// over a PATH lookup.
 const WASM_OPT_PATH_ENV: &str = "WASM_OPT_PATH";
 
-/// The custom section recording which functions of a module trap on arithmetic
-/// overflow.
-///
-/// A hand-synchronised copy of the name code generation emits and the linker
-/// reads, kept here rather than pulled in so the CLI does not depend on a
-/// compiler crate for one string. It is held to the wire format by the unit test
-/// below, which spells the string out, and each of the other copies is held to
-/// the same spelling by a test of its own.
-const CHECKED_SECTION_NAME: &str = "inference.checked";
-
-/// The opaque form of that section's payload: a version byte and nothing else.
+/// The opaque form of the [`CHECKED_SECTION_NAME`] payload: a version byte
+/// and nothing else.
 ///
 /// Version 1 is the exact form — a version, a count and an ascending index list.
 /// Version 2 carries no list, and that absence is the statement: some function
@@ -183,21 +175,28 @@ pub(crate) fn post_build_optimize(
     let wasm_bytes = std::fs::read(&wasm_path)
         .with_context(|| format!("Failed to read {} for optimization", wasm_path.display()))?;
 
-    let (uses_bulk_memory, records_overflow_guards) = match scan_artifact(&wasm_bytes)? {
-        ArtifactScan::VerificationConstruct(construct) => bail!(
-            "`[build.wasm-opt]` is enabled but `out/main.wasm` contains the \
-             verification-only construct `{construct}`, which wasm-opt cannot \
-             process. Verification constructs (forall/exists/assume/unique and \
-             `@`/uzumaki) belong in `spec` blocks, which compile-mode builds \
-             strip. Move the construct into a `spec` block, or disable \
-             optimization (`enabled = false` under `[build.wasm-opt]`, or pass \
-             `--no-wasm-opt`)."
-        ),
-        ArtifactScan::Executable {
-            uses_bulk_memory,
-            records_overflow_guards,
-        } => (uses_bulk_memory, records_overflow_guards),
-    };
+    // The guard record is read from the *input*, before the optimizer runs,
+    // because that is the artifact whose section is still true. Reading it
+    // afterwards would answer the same question about bytes whose functions
+    // have already moved. `wasm_path` is absolute; the scan is given the
+    // conventional relative spelling the refusal below uses, so the two
+    // failures name one file.
+    let (uses_bulk_memory, records_overflow_guards) =
+        match scan_artifact(&wasm_bytes, Path::new("out/main.wasm"))? {
+            ArtifactScan::VerificationConstruct(construct) => bail!(
+                "`[build.wasm-opt]` is enabled but `out/main.wasm` contains the \
+                 verification-only construct `{construct}`, which wasm-opt cannot \
+                 process. Verification constructs (forall/exists/assume/unique and \
+                 `@`/uzumaki) belong in `spec` blocks, which compile-mode builds \
+                 strip. Move the construct into a `spec` block, or disable \
+                 optimization (`enabled = false` under `[build.wasm-opt]`, or pass \
+                 `--no-wasm-opt`)."
+            ),
+            ArtifactScan::Executable {
+                uses_bulk_memory,
+                records_overflow_guards,
+            } => (uses_bulk_memory, records_overflow_guards),
+        };
 
     let wasm_opt = match resolve_wasm_opt_with_source()? {
         Some((path, _)) => path,
@@ -520,117 +519,6 @@ fn wasm_opt_doctor_absent(name: &str, paths: Option<&ToolchainPaths>) -> DoctorC
         "Not installed (optional — needed only for [build.wasm-opt]; install \
          with 'infs component add wasm-opt')",
     )
-}
-
-/// What the pre-optimization scan found in `out/main.wasm`.
-///
-/// The two states are mutually exclusive by construction, so a caller can never
-/// read a bulk-memory verdict off an artifact the scan rejected outright.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArtifactScan {
-    /// A verification-only construct leaked into an ordinary function; the
-    /// payload is its source spelling (e.g. `"forall"`, `"i32.uzumaki"`).
-    VerificationConstruct(&'static str),
-    /// An ordinary executable artifact: whether it carries any bulk-memory
-    /// operator, and whether it records which of its functions trap on
-    /// arithmetic overflow.
-    Executable {
-        uses_bulk_memory: bool,
-        records_overflow_guards: bool,
-    },
-}
-
-/// Scans `wasm_bytes` once for the three facts the optimizer needs up front:
-/// whether a verification-only construct leaked into the artifact, whether the
-/// artifact carries bulk memory, and whether it records which of its functions
-/// trap on arithmetic overflow.
-///
-/// Compile-mode builds strip `spec` blocks, so a well-formed executable artifact
-/// carries no verification construct. Finding one means it leaked into an
-/// ordinary function — `wasm-opt` would reject the unknown `0xfc` opcode with an
-/// opaque error, so the scan stops there and lets the caller surface it with
-/// remediation instead.
-///
-/// The guard record is read from the *input*, before the optimizer runs, because
-/// that is the artifact whose section is still true. Reading it afterwards would
-/// answer the same question about bytes whose functions have already moved.
-///
-/// # Errors
-///
-/// Errors if the artifact cannot be parsed as WebAssembly.
-fn scan_artifact(wasm_bytes: &[u8]) -> Result<ArtifactScan> {
-    let mut uses_bulk_memory = false;
-    let mut records_overflow_guards = false;
-    for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let payload =
-            payload.map_err(|err| anyhow::anyhow!("failed to scan out/main.wasm: {err}"))?;
-        if let Payload::CustomSection(reader) = &payload
-            && reader.name() == CHECKED_SECTION_NAME
-        {
-            records_overflow_guards = true;
-            continue;
-        }
-        let Payload::CodeSectionEntry(body) = payload else {
-            continue;
-        };
-        let operators = body.get_operators_reader().map_err(|err| {
-            anyhow::anyhow!("failed to read a function body while scanning out/main.wasm: {err}")
-        })?;
-        for op in operators {
-            let op = op.map_err(|err| {
-                anyhow::anyhow!("failed to decode an operator while scanning out/main.wasm: {err}")
-            })?;
-            if let Some(name) = verification_construct_name(&op) {
-                return Ok(ArtifactScan::VerificationConstruct(name));
-            }
-            uses_bulk_memory |= is_bulk_memory(&op);
-        }
-    }
-    Ok(ArtifactScan::Executable {
-        uses_bulk_memory,
-        records_overflow_guards,
-    })
-}
-
-/// Whether `op` belongs to the bulk-memory proposal.
-///
-/// Two sanctioned sources put one of these in a built artifact: a project that
-/// opts in with `[build] wasm-features = ["bulk-memory"]`, in which case codegen
-/// emits `memory.copy`/`memory.fill` directly; and a statically merged external
-/// module, which the linker's supported-feature envelope admits regardless of
-/// what the project requested. Neither is distinguishable here, and neither needs
-/// to be — the predicate answers what the bytes contain. The segment-indexed
-/// forms are included even though the merge rejects them today and codegen never
-/// emits them, so that a widened linker or codegen cannot silently produce an
-/// artifact Binaryen is not told to parse.
-fn is_bulk_memory(op: &Operator) -> bool {
-    use Operator::{DataDrop, MemoryCopy, MemoryFill, MemoryInit};
-    matches!(
-        op,
-        MemoryFill { .. } | MemoryCopy { .. } | MemoryInit { .. } | DataDrop { .. }
-    )
-}
-
-/// The source spelling of a verification-only operator, or `None` for an
-/// ordinary executable one.
-///
-/// This is the local mirror of `is_verification_only` in
-/// `core/wasm-linker/src/safety.rs` — the linker's fail-closed predicate over
-/// the same six opcodes. Both consume the same `inf-wasmparser` fork, so a new
-/// verification opcode requires touching that fork (where the mirrored-predicate
-/// note lives); a wasm-linker dependency for six match arms is not worth the
-/// coupling.
-fn verification_construct_name(op: &Operator) -> Option<&'static str> {
-    use Operator::{Assume, Exists, Forall, I32Uzumaki, I64Uzumaki, Unique};
-    match op {
-        Forall { .. } => Some("forall"),
-        Exists { .. } => Some("exists"),
-        Assume { .. } => Some("assume"),
-        Unique { .. } => Some("unique"),
-        I32Uzumaki { .. } => Some("i32.uzumaki"),
-        I64Uzumaki { .. } => Some("i64.uzumaki"),
-        _ => None,
-    }
 }
 
 /// Builds the `wasm-opt` argument vector.
@@ -974,70 +862,11 @@ fn validate_optimized(bytes: &[u8], allow_bulk_memory: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{
+        MEMORY_FILL_BODY, module_with_custom_section, module_with_memory_and_raw_body,
+        module_with_raw_body,
+    };
     use assert_fs::prelude::*;
-
-    /// Wraps a raw code-section body (an operator stream) into a one-function
-    /// module and returns the finished bytes. `wat` cannot assemble the custom
-    /// `0xfc`-prefixed Inference opcodes, so bodies exercising them are built
-    /// byte-by-byte (recipe mirrored from `core/wasm-linker/src/safety.rs`).
-    /// `Function::new([])` emits the empty-locals byte, so `body` is the
-    /// instruction stream that follows it.
-    fn module_with_raw_body(body: &[u8]) -> Vec<u8> {
-        use wasm_encoder::{CodeSection, Function, FunctionSection, Module, TypeSection};
-        let mut module = Module::new();
-        let mut types = TypeSection::new();
-        types.ty().function([], []);
-        module.section(&types);
-        let mut funcs = FunctionSection::new();
-        funcs.function(0);
-        module.section(&funcs);
-        let mut code = CodeSection::new();
-        let mut f = Function::new([]);
-        f.raw(body.iter().copied());
-        code.function(&f);
-        module.section(&code);
-        module.finish()
-    }
-
-    /// Like [`module_with_raw_body`] but the module also declares a one-page
-    /// memory, so a body exercising memory operators can be *validated* rather
-    /// than merely parsed.
-    fn module_with_memory_and_raw_body(body: &[u8]) -> Vec<u8> {
-        use wasm_encoder::{
-            CodeSection, Function, FunctionSection, MemorySection, MemoryType, Module, TypeSection,
-        };
-        let mut module = Module::new();
-        let mut types = TypeSection::new();
-        types.ty().function([], []);
-        module.section(&types);
-        let mut funcs = FunctionSection::new();
-        funcs.function(0);
-        module.section(&funcs);
-        let mut memories = MemorySection::new();
-        memories.memory(MemoryType {
-            minimum: 1,
-            maximum: Some(1),
-            memory64: false,
-            shared: false,
-            page_size_log2: None,
-        });
-        module.section(&memories);
-        let mut code = CodeSection::new();
-        let mut f = Function::new([]);
-        f.raw(body.iter().copied());
-        code.function(&f);
-        module.section(&code);
-        module.finish()
-    }
-
-    /// `i32.const 0` three times, `memory.fill 0`, `end` — a well-typed
-    /// bulk-memory body over the single shared memory.
-    const MEMORY_FILL_BODY: &[u8] = &[0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0b, 0x00, 0x0b];
-
-    /// `i32.const 0` three times, `memory.copy 0 0`, `end`.
-    const MEMORY_COPY_BODY: &[u8] = &[
-        0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0a, 0x00, 0x00, 0x0b,
-    ];
 
     #[test]
     fn parse_wasm_opt_version_reads_release_output() {
@@ -1353,101 +1182,13 @@ mod tests {
     }
 
     #[test]
-    fn scan_artifact_detects_each_nondet_block() {
-        for (sub_opcode, name) in [
-            (0x3a_u8, "forall"),
-            (0x3b, "exists"),
-            (0x3c, "assume"),
-            (0x3d, "unique"),
-        ] {
-            // `<nondet> (empty blocktype) end; end`.
-            let body = [0x00, 0xfc, sub_opcode, 0x40, 0x0b, 0x0b];
-            let module = module_with_raw_body(&body);
-            assert_eq!(
-                scan_artifact(&module).unwrap(),
-                ArtifactScan::VerificationConstruct(name),
-                "sub-opcode {sub_opcode:#x} must be reported as `{name}`"
-            );
-        }
-    }
-
-    #[test]
-    fn scan_artifact_detects_uzumaki() {
-        // `<uzumaki> drop; end`, for both the i32 and i64 forms.
-        let i32_body = [0x00, 0xfc, 0x31, 0x1a, 0x0b];
-        assert_eq!(
-            scan_artifact(&module_with_raw_body(&i32_body)).unwrap(),
-            ArtifactScan::VerificationConstruct("i32.uzumaki")
-        );
-        let i64_body = [0x00, 0xfc, 0x32, 0x1a, 0x0b];
-        assert_eq!(
-            scan_artifact(&module_with_raw_body(&i64_body)).unwrap(),
-            ArtifactScan::VerificationConstruct("i64.uzumaki")
-        );
-    }
-
-    /// [`module_with_raw_body`] plus one custom section, for the guard-record
-    /// tests. `name` is taken as written so a test can build a module whose
-    /// section is *not* the guard record.
-    fn module_with_custom_section(body: &[u8], name: &str, payload: &[u8]) -> Vec<u8> {
-        use wasm_encoder::{
-            CodeSection, CustomSection, Function, FunctionSection, Module, TypeSection,
-        };
-        let mut module = Module::new();
-        let mut types = TypeSection::new();
-        types.ty().function([], []);
-        module.section(&types);
-        let mut funcs = FunctionSection::new();
-        funcs.function(0);
-        module.section(&funcs);
-        let mut code = CodeSection::new();
-        let mut f = Function::new([]);
-        f.raw(body.iter().copied());
-        code.function(&f);
-        module.section(&code);
-        module.section(&CustomSection {
-            name: name.into(),
-            data: payload.into(),
-        });
-        module.finish()
-    }
-
-    #[test]
-    fn the_guard_record_is_spelled_as_the_wire_format_has_it() {
-        // This crate's copy of the section name and of the opaque payload, held
-        // to the wire format by spelling both out. Code generation and the
+    fn the_opaque_guard_payload_is_spelled_as_the_wire_format_has_it() {
+        // The opaque payload this module writes, held to the wire format by
+        // spelling it out. The section name it goes under is pinned beside the
+        // constant in `crate::artifact`, and code generation and the
         // static-merge linker keep copies of their own, each pinned the same
-        // way, so a drift in any one of the three fails somewhere.
-        assert_eq!(CHECKED_SECTION_NAME, "inference.checked");
+        // way, so a drift in any one of them fails somewhere.
         assert_eq!(CHECKED_OPAQUE_PAYLOAD, [2]);
-    }
-
-    #[test]
-    fn scan_artifact_reports_an_artifact_that_records_overflow_guards() {
-        let module = module_with_custom_section(&[0x0b], CHECKED_SECTION_NAME, &[1, 1, 0]);
-        assert_eq!(
-            scan_artifact(&module).unwrap(),
-            ArtifactScan::Executable {
-                uses_bulk_memory: false,
-                records_overflow_guards: true
-            }
-        );
-    }
-
-    #[test]
-    fn scan_artifact_reads_no_guard_record_from_another_custom_section() {
-        // The verdict keys on the section's name, not on there being a custom
-        // section at all -- a `name` or `producers` section says nothing about
-        // overflow, and marking an artifact that records no guards would put a
-        // claim in it its producer never made.
-        let module = module_with_custom_section(&[0x0b], "producers", &[0]);
-        assert_eq!(
-            scan_artifact(&module).unwrap(),
-            ArtifactScan::Executable {
-                uses_bulk_memory: false,
-                records_overflow_guards: false
-            }
-        );
     }
 
     #[test]
@@ -1513,59 +1254,6 @@ mod tests {
         assert!(
             err.to_string().contains("copied verbatim"),
             "got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn scan_artifact_reports_a_plain_body_as_bulk_free() {
-        // An ordinary executable body (just `end`) carries neither a
-        // verification-only opcode nor bulk memory.
-        let module = module_with_raw_body(&[0x0b]);
-        assert_eq!(
-            scan_artifact(&module).unwrap(),
-            ArtifactScan::Executable {
-                uses_bulk_memory: false,
-                records_overflow_guards: false
-            }
-        );
-    }
-
-    #[test]
-    fn scan_artifact_detects_each_bulk_memory_operator() {
-        // The four bulk-memory operators, each in an otherwise ordinary body.
-        // `memory.init 0 0` and `data.drop 0` decode without their segments;
-        // the scan reads operators, it does not validate.
-        let memory_init: &[u8] = &[
-            0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x08, 0x00, 0x00, 0x0b,
-        ];
-        let data_drop: &[u8] = &[0xfc, 0x09, 0x00, 0x0b];
-        for (body, name) in [
-            (MEMORY_FILL_BODY, "memory.fill"),
-            (MEMORY_COPY_BODY, "memory.copy"),
-            (memory_init, "memory.init"),
-            (data_drop, "data.drop"),
-        ] {
-            let module = module_with_raw_body(body);
-            assert_eq!(
-                scan_artifact(&module).unwrap(),
-                ArtifactScan::Executable {
-                    uses_bulk_memory: true,
-                    records_overflow_guards: false
-                },
-                "{name} must be reported as bulk memory"
-            );
-        }
-    }
-
-    #[test]
-    fn scan_artifact_reports_verification_construct_ahead_of_bulk_memory() {
-        // A leaked construct is a hard error, so it wins over the bulk verdict
-        // even when both are present — the caller never has to choose.
-        let mut body = vec![0xfc, 0x31, 0x1a];
-        body.extend_from_slice(MEMORY_FILL_BODY);
-        assert_eq!(
-            scan_artifact(&module_with_raw_body(&body)).unwrap(),
-            ArtifactScan::VerificationConstruct("i32.uzumaki")
         );
     }
 
