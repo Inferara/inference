@@ -1,10 +1,12 @@
-//! The source-level admissibility gate for the Stellar target.
+//! The source-level admissibility gates for the Stellar target.
 //!
 //! A Stellar build's artifact is a contract, and a contract's method signature
 //! is narrower than an Inference function's: every parameter and every return
 //! has to fit in the host's tagged word without a host object behind it. The
 //! gate in `codegen()` is where a program that does not fit is refused, against
-//! the source the author wrote rather than against bytes.
+//! the source the author wrote rather than against bytes. A second gate, over
+//! the same source, refuses a program that binds a host import; it has its own
+//! heading below.
 //!
 //! The rules themselves are unit-tested where they live, against hand-built
 //! descriptors that can express shapes no source can — an empty export name, a
@@ -21,6 +23,16 @@
 //! really produce. That is what lets a project prove the default build and
 //! deploy the Stellar one: the contract wrappers are added afterwards, by the
 //! Val-ABI rewriter, to a module the proof already describes.
+//!
+//! # The host-import gate
+//!
+//! The target's other source-level gate lives here too, though it reads no
+//! export descriptor. `Target::supports_host_imports()` answers `false` at this
+//! target and at no other, so a program binding `use { f } from host::<module>;`
+//! is refused — and refused *before* `emit()`, where the export gate above runs
+//! after it. That ordering is the whole of what the doubly-inadmissible row
+//! pins: the corpus's own host program is inadmissible twice over, and nothing
+//! but the position of the two checks decides which message its author reads.
 
 #[cfg(test)]
 mod stellar_gate_tests {
@@ -89,7 +101,7 @@ mod stellar_gate_tests {
         assert!(message.contains("exported function 'transfer'"), "{message}");
         assert!(message.contains("parameter 2 'amount'"), "{message}");
         assert!(message.contains("declared 'u64'"), "{message}");
-        assert!(message.contains("issue #464"), "{message}");
+        assert!(message.contains("issue #324"), "{message}");
     }
 
     /// The parameter name comes from the source, not from the descriptor, so a
@@ -156,7 +168,7 @@ mod stellar_gate_tests {
         );
         assert!(message.contains("parameter 1 'p' is declared 'Point'"), "{message}");
         assert!(message.contains("A compound value"), "{message}");
-        assert!(message.contains("issue #464"), "{message}");
+        assert!(message.contains("issue #324"), "{message}");
     }
 
     #[test]
@@ -371,5 +383,188 @@ mod stellar_gate_tests {
         let one = accepted("pub fn answer() -> i32 { return 42; }");
         let other = accepted("pub fn answer() -> i32 { return 43; }");
         assert_ne!(one, other, "the byte comparison must be able to fail");
+    }
+
+    // Host imports ---
+
+    /// A program whose only inadmissible element is a host binding.
+    ///
+    /// Its exported signature is scalar on purpose. A host-bound program whose
+    /// export this target would also refuse — the corpus fixtures return `i64` —
+    /// is refused twice over, and then only the order of the two checks decides
+    /// which message a user reads: a test written on one of those would still
+    /// pass with the host-import refusal deleted, having fallen through to the
+    /// export gate's own words. [`HOST_IMPORT_WIDE_EXPORT`] is that program, and
+    /// it is here to pin the order rather than the refusal.
+    const HOST_IMPORT: &str = "external fn put(k: i32, v: i32) -> i32; \
+                               use { put } from host::l; \
+                               pub fn store(k: i32, v: i32) -> i32 { return put(k, v); }";
+
+    /// The same exported signature with the binding taken away, and nothing
+    /// else changed.
+    ///
+    /// The negative control: every other row in this section asserts a refusal,
+    /// so a gate that refused every Stellar build would satisfy the lot.
+    const NO_HOST_IMPORT: &str = "pub fn store(k: i32, v: i32) -> i32 { \
+                                  if k > 0 { return v; } return 0; }";
+
+    /// A host binding whose declaration carries no value in either position.
+    ///
+    /// The refusal is written about what this toolchain does not map onto a
+    /// host function rather than about what a declaration sends across the
+    /// boundary, and this is the declaration that tells the two apart: there is
+    /// nothing here to send. Every earlier wording described the reader's own
+    /// parameters and return, and every one of them passed the rest of this
+    /// section.
+    const HOST_IMPORT_NO_VALUES: &str = "external fn commit(); \
+                                         use { commit } from host::l; \
+                                         pub fn save() { commit(); }";
+
+    /// A program this target refuses twice over: it binds a host import *and*
+    /// exports a `u64`-family return the contract boundary cannot carry.
+    ///
+    /// The same program as the corpus's own `extern_import/host_import` fixture,
+    /// respelled on one line as the sources in this file are. That is the shape
+    /// a user meets first, and it is the one that tells the two refusals apart —
+    /// the host gate runs before `emit()` and the export gate after it, so
+    /// moving either would silently swap the message a real program gets while
+    /// every other row here stayed green.
+    const HOST_IMPORT_WIDE_EXPORT: &str = "external fn clock_ms() -> i64; \
+                                           use { clock_ms } from host::env; \
+                                           pub fn now() -> i64 { return clock_ms(); }";
+
+    /// Two host bindings, with the one the refusal names written second.
+    ///
+    /// The enumeration behind the choice is ordered by module and field name,
+    /// so `host::a` is reached before `host::z` however the file is written;
+    /// declaring `zulu` first is what makes source order visible as a wrong
+    /// answer rather than as the same answer.
+    const TWO_HOST_IMPORTS: &str = "external fn zulu() -> i32; \
+                                    external fn alpha() -> i32; \
+                                    use { zulu } from host::z; \
+                                    use { alpha } from host::a; \
+                                    pub fn both() -> i32 { return zulu() + alpha(); }";
+
+    /// A host binding is refused at this target, pinned whole: the first
+    /// sentence is the family the configuration refusals share, and everything
+    /// after it is the reason and the two ways out, which are the half a reader
+    /// acts on.
+    ///
+    /// The `external fn` is named rather than a `use` clause quoted back,
+    /// because one directive may import several fields and a synthesized
+    /// single-field clause would be a line the author never wrote.
+    ///
+    /// The order of the two ways out is pinned with the words. A reader typed
+    /// `--target stellar` because they want an uploadable contract, and
+    /// building for `wasm32` is the one that gives that up, so it cannot lead.
+    #[test]
+    fn a_host_import_is_refused_at_stellar() {
+        cov_mark::check!(wasm_codegen_target_rejects_host_import);
+        assert_eq!(
+            refused(HOST_IMPORT),
+            "The `stellar` target does not support host imports. `external fn put` is bound \
+             to `host::l`, and the Soroban host-call convention is not bound by this \
+             toolchain yet: a contract reaches storage, ledger access and every host object \
+             through host functions the host defines, each taking and returning the host's \
+             64-bit tagged word, and nothing here maps an `external fn` onto one of them. \
+             Remove the host binding to build a contract, or build this program for the \
+             `wasm32` target, where a host import is supported; the Stellar host binding is \
+             tracked under issue #324."
+        );
+    }
+
+    /// A declaration carrying no value at all earns the same message, word for
+    /// word.
+    ///
+    /// This is the row the wording is held to. Every clause has to be true of
+    /// `external fn commit();`, which declares neither a parameter nor a
+    /// return, and a refusal that reached for the values the declaration sends
+    /// across the boundary would be describing an empty set while reading like
+    /// a fact about this program.
+    #[test]
+    fn a_host_binding_declaring_no_value_earns_the_same_refusal() {
+        assert_eq!(
+            refused(HOST_IMPORT_NO_VALUES),
+            "The `stellar` target does not support host imports. `external fn commit` is \
+             bound to `host::l`, and the Soroban host-call convention is not bound by this \
+             toolchain yet: a contract reaches storage, ledger access and every host object \
+             through host functions the host defines, each taking and returning the host's \
+             64-bit tagged word, and nothing here maps an `external fn` onto one of them. \
+             Remove the host binding to build a contract, or build this program for the \
+             `wasm32` target, where a host import is supported; the Stellar host binding is \
+             tracked under issue #324."
+        );
+    }
+
+    /// A program both gates refuse is refused for the host import, and the whole
+    /// message is pinned because that is the half a reader acts on.
+    ///
+    /// The order is what rides on this row: the host gate runs before `emit()`
+    /// and the export gate after it, so a refusal moved below emission would
+    /// leave every other row in this file green and quietly hand the corpus's
+    /// own host fixture a message about its `i64` return instead of about the
+    /// binding that has to change first.
+    #[test]
+    fn a_doubly_inadmissible_program_is_refused_for_its_host_import() {
+        assert_eq!(
+            refused(HOST_IMPORT_WIDE_EXPORT),
+            "The `stellar` target does not support host imports. `external fn clock_ms` is \
+             bound to `host::env`, and the Soroban host-call convention is not bound by this \
+             toolchain yet: a contract reaches storage, ledger access and every host object \
+             through host functions the host defines, each taking and returning the host's \
+             64-bit tagged word, and nothing here maps an `external fn` onto one of them. \
+             Remove the host binding to build a contract, or build this program for the \
+             `wasm32` target, where a host import is supported; the Stellar host binding is \
+             tracked under issue #324."
+        );
+    }
+
+    /// Two bindings earn one refusal, and the one it names is decided by the
+    /// program rather than by the run.
+    ///
+    /// Both halves of that are a choice nothing else would notice. One binding
+    /// is named rather than the inventory, because the way out is the same for
+    /// all of them and a list would state one decision once per clause; and the
+    /// same one is named every time, because the enumeration is ordered by
+    /// module and field name — `host::a` here, though `host::z` is bound first
+    /// in the source. A message reading off a hash map would name either
+    /// binding on either run of one unchanged program.
+    #[test]
+    fn two_host_bindings_earn_one_refusal_and_it_names_the_same_one_every_time() {
+        let message = refused(TWO_HOST_IMPORTS);
+        assert!(
+            message.contains("`external fn alpha` is bound to `host::a`"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("zulu"),
+            "the refusal names one binding, not the inventory: {message}"
+        );
+    }
+
+    /// The gate refuses a binding rather than a target: the same exported
+    /// signature with no `external fn` behind it still compiles here.
+    #[test]
+    fn a_stellar_program_with_no_host_binding_still_compiles() {
+        assert!(!accepted(NO_HOST_IMPORT).is_empty());
+    }
+
+    /// The refusal belongs to this target and not to the language: the same
+    /// program builds wherever an embedder registers a host against the
+    /// WebAssembly signature the import declares.
+    ///
+    /// Both other targets are named because they answer for different reasons —
+    /// one narrows nothing, the other narrows the instruction set and still
+    /// admits the binding — and a predicate that had been written as "the
+    /// default target only" would pass every other test in this file.
+    #[test]
+    fn the_targets_that_bind_a_host_accept_what_stellar_refuses() {
+        for target in [Target::Wasm32, Target::SpaceWasm] {
+            assert!(
+                codegen_with_target_mode(HOST_IMPORT, target, CompilationMode::Compile).is_ok(),
+                "`{}` must accept a host import",
+                target.as_str()
+            );
+        }
     }
 }

@@ -15,6 +15,12 @@
 //! it fails at load time on hardware, which is the failure this module exists
 //! to move to build time.
 //!
+//! [`check_host_imports`] asks the import half of that verdict earlier, of the
+//! imports a program *declares* rather than of the ones a finished module
+//! carries. It is here rather than in its caller because a rule stated twice is
+//! a rule that can be answered two ways: both entry points run one body, so a
+//! source-level refusal and a byte-level one cannot disagree about one import.
+//!
 //! # Where the numbers come from
 //!
 //! Every constant below cites the upstream file and line it was read from, and
@@ -33,8 +39,9 @@
 //! Some of these are **decode** limits: the decoder refuses the module. Others
 //! are **registration** limits: the module decodes, and then no embedder can
 //! supply what it imports, so it can never be instantiated. The 31-byte import
-//! name and the nine-parameter host function are the second kind, and the
-//! refusals say so — a user told "the decoder rejects 32 bytes" would shorten a
+//! name, the nine-parameter host function and the single result a host function
+//! returns are the second kind — the three an import is held to — and the
+//! refusals say so: a user told "the decoder rejects 32 bytes" would shorten a
 //! name to 32 and meet the same wall.
 //!
 //! # What is not checked
@@ -482,9 +489,125 @@ pub fn check(wasm: &[u8]) -> Result<Report, Violations> {
     let scan = Scan::run(wasm);
     let violations = scan.violations();
     if !violations.is_empty() {
-        return Err(Violations::new(violations));
+        return Err(Violations::about_artifact(violations));
     }
     Ok(scan.report(wasm.len()))
+}
+
+/// One import a program *declares*, as the compiler knows it before any byte
+/// exists.
+///
+/// Named for the vantage rather than for the provider: what separates it from
+/// the facts this crate reads out of an artifact is that one is a declaration
+/// and the other is bytes. It is not itself a claim that the import is a host
+/// import. A program also declares imports a link step resolves away, and
+/// nothing here can tell those from the ones an embedder will be asked to
+/// register — so which declarations are handed over is the caller's decision,
+/// and what it hands over is what is checked. An import that will not survive
+/// into the artifact is held to caps no embedder is ever asked about.
+///
+/// Borrowed rather than owned because a caller building one already holds the
+/// strings: they came off the declaration it is about to compile. The type
+/// exists to be filled in at a call site, not stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredImportFacts<'a> {
+    /// The WebAssembly import module string an embedder registers under.
+    pub module: &'a str,
+    /// The import field name within that module.
+    pub field: &'a str,
+    /// Parameters the declaration lowers to.
+    pub params: usize,
+    /// Results the declaration lowers to.
+    pub results: usize,
+}
+
+/// Whether every host import a program *declares* is one a `SpaceWasm` embedder
+/// could register.
+///
+/// The same three registration caps [`check`] applies to the imports it reads
+/// out of finished bytes, applied to the facts the compiler already holds. It
+/// exists so a developer hears about an `external fn` they wrote rather than
+/// about an import section they did not: asked here, a refusal can name the
+/// declaration; asked of the artifact, the only thing left to name is a
+/// two-level string in a module no file holds.
+///
+/// # What this does not answer
+///
+/// It is a claim about *declarations*, so it sees the ones it is handed and
+/// nothing else, and it takes on trust that they are the imports the artifact
+/// will carry. An import a linked `.wasm` dragged in is outside it, as is any
+/// import a post-build step adds. [`check`] over the finished bytes remains the
+/// backstop, and the two agree on every import they both see because they run
+/// one body.
+///
+/// Of the three caps, the one-result cap is unreachable from Inference source:
+/// an `external fn` returns one value or unit, and a compound return lowers to
+/// a single `i32`. That arm is here because the rule is one rule — it earns its
+/// findings on the byte-level path, where a linked module can declare anything.
+///
+/// # Errors
+///
+/// Returns every finding, in the order `declared` lists the imports and, within
+/// one import, module name then field name then parameters then results. `Ok`
+/// when there is nothing to report, so a [`Violations`] in hand always names at
+/// least one.
+pub fn check_host_imports(declared: &[DeclaredImportFacts<'_>]) -> Result<(), Violations> {
+    let mut found = Vec::new();
+    for import in declared {
+        import_cap_violations(*import, &mut found);
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(Violations::about_declarations(found))
+}
+
+/// What one import asks of an embedder that no embedder could supply, appended
+/// to `found`.
+///
+/// The single statement of the three registration caps. Both paths into this
+/// crate run it — [`check`] over an artifact's import section and
+/// [`check_host_imports`] over a program's declarations — because the whole
+/// reason the declared-facts entry point lives here rather than in its caller
+/// is that a source-level refusal and a byte-level one must not be able to
+/// disagree about the same import.
+///
+/// Takes one [`DeclaredImportFacts`] rather than four positional arguments: two
+/// `&str` names and two `usize` counts are two same-typed adjacent pairs, and a
+/// swap within either would compile and then report the wrong half of an import
+/// at each call site. [`ImportFacts`] borrows itself into one in a line.
+fn import_cap_violations(import: DeclaredImportFacts<'_>, found: &mut Vec<Violation>) {
+    let DeclaredImportFacts {
+        module,
+        field,
+        params,
+        results,
+    } = import;
+    for (which, name) in [(NamePart::Module, module), (NamePart::Field, field)] {
+        if name.len() > MAX_IMPORT_NAME_BYTES {
+            found.push(Violation::ImportNameTooLong {
+                module: module.to_string(),
+                field: field.to_string(),
+                which,
+                name: name.to_string(),
+                len: name.len(),
+            });
+        }
+    }
+    if params > MAX_HOST_FUNCTION_PARAMS {
+        found.push(Violation::ImportArityExceeded {
+            module: module.to_string(),
+            field: field.to_string(),
+            params,
+        });
+    }
+    if results > MAX_HOST_FUNCTION_RESULTS {
+        found.push(Violation::ImportMultipleResults {
+            module: module.to_string(),
+            field: field.to_string(),
+            results,
+        });
+    }
 }
 
 /// One imported function, as both decoders see it before any host is offered.
@@ -949,36 +1072,21 @@ impl Scan {
 
     /// What each import asks of an embedder that no embedder could supply, in
     /// import order.
+    ///
+    /// The rule itself is [`import_cap_violations`], which the declared-facts
+    /// entry point runs too, so the two cannot answer differently about one
+    /// import.
     fn import_violations(&self, found: &mut Vec<Violation>) {
         for import in &self.imports {
-            for (which, name) in [
-                (NamePart::Module, &import.module),
-                (NamePart::Field, &import.field),
-            ] {
-                if name.len() > MAX_IMPORT_NAME_BYTES {
-                    found.push(Violation::ImportNameTooLong {
-                        module: import.module.clone(),
-                        field: import.field.clone(),
-                        which,
-                        name: name.clone(),
-                        len: name.len(),
-                    });
-                }
-            }
-            if import.params > MAX_HOST_FUNCTION_PARAMS {
-                found.push(Violation::ImportArityExceeded {
-                    module: import.module.clone(),
-                    field: import.field.clone(),
+            import_cap_violations(
+                DeclaredImportFacts {
+                    module: &import.module,
+                    field: &import.field,
                     params: import.params,
-                });
-            }
-            if import.results > MAX_HOST_FUNCTION_RESULTS {
-                found.push(Violation::ImportMultipleResults {
-                    module: import.module.clone(),
-                    field: import.field.clone(),
                     results: import.results,
-                });
-            }
+                },
+                found,
+            );
         }
     }
 
@@ -1295,7 +1403,9 @@ fn height_after_selector_pop(validator: &FuncValidator<ValidatorResources>, heig
 #[cfg(test)]
 mod spacewasm_tests {
     use super::{
-        FunctionMetrics, REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH, Report,
+        DeclaredImportFacts, FunctionMetrics, MAX_HOST_FUNCTION_PARAMS, MAX_IMPORT_NAME_BYTES,
+        NamePart, REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH, Report, Violation,
+        check, check_host_imports,
     };
 
     /// A function reaching `control_depth` frames and `values` operands, named
@@ -1499,5 +1609,265 @@ mod spacewasm_tests {
                 && !line.contains("MAX_CONTROL_FRAMES >="),
             "the empty arm says there is no budget rather than reporting one: {line}"
         );
+    }
+
+    // Declared host imports ---
+
+    /// One declared import, as a caller about to emit it describes it.
+    fn declared<'a>(module: &'a str, field: &'a str, params: usize) -> DeclaredImportFacts<'a> {
+        DeclaredImportFacts {
+            module,
+            field,
+            params,
+            results: 1,
+        }
+    }
+
+    /// A module importing `module`.`field` with no parameters and no results,
+    /// assembled by hand.
+    ///
+    /// Eight bytes of header, a type section holding `() -> ()`, and an import
+    /// section naming it. Both lengths are written as one byte, which every
+    /// name this test passes stays under.
+    fn module_importing(module: &str, field: &str) -> Vec<u8> {
+        let mut wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        wasm.extend_from_slice(&[0x01, 0x04, 0x01, 0x60, 0x00, 0x00]);
+        let mut section = vec![0x01];
+        for name in [module, field] {
+            section.push(u8::try_from(name.len()).expect("a name under 128 bytes"));
+            section.extend_from_slice(name.as_bytes());
+        }
+        section.extend_from_slice(&[0x00, 0x00]);
+        wasm.push(0x02);
+        wasm.push(u8::try_from(section.len()).expect("a section under 128 bytes"));
+        wasm.extend_from_slice(&section);
+        wasm
+    }
+
+    /// A program declaring nothing is owed no refusal, and the answer is `Ok`
+    /// rather than an empty `Violations`.
+    ///
+    /// That is the invariant `Violations` is built on: every value of it names
+    /// at least one finding, so a caller may render one without checking first.
+    /// A second builder is exactly where that invariant is lost, so it is
+    /// asserted of the second builder.
+    #[test]
+    fn a_program_declaring_no_host_import_is_owed_no_refusal() {
+        assert!(check_host_imports(&[]).is_ok());
+    }
+
+    /// The module name's cap is exact: the longest name an embedder can
+    /// register passes, and one byte more does not.
+    ///
+    /// The accepting half is what makes this a boundary rather than a
+    /// direction. Built from the constant, so narrowing the cap shortens the
+    /// accepted row with it and the refusing row is what turns red.
+    #[test]
+    fn the_module_name_cap_is_exact_at_thirty_one_bytes() {
+        let longest = "m".repeat(MAX_IMPORT_NAME_BYTES);
+        assert!(check_host_imports(&[declared(&longest, "f", 1)]).is_ok());
+
+        let over = "m".repeat(MAX_IMPORT_NAME_BYTES + 1);
+        let violations = check_host_imports(&[declared(&over, "f", 1)])
+            .expect_err("a 32-byte module name cannot be registered");
+        assert!(
+            matches!(
+                violations.as_slice(),
+                [Violation::ImportNameTooLong {
+                    which: NamePart::Module,
+                    len: 32,
+                    ..
+                }]
+            ),
+            "{violations:?}"
+        );
+    }
+
+    /// The field name carries its own cap and its own half of the finding: the
+    /// two names are read through separate registrations, and a refusal that
+    /// could not say which of them is over would leave the reader guessing at
+    /// which edit to make.
+    #[test]
+    fn the_field_name_cap_is_exact_at_thirty_one_bytes() {
+        let longest = "f".repeat(MAX_IMPORT_NAME_BYTES);
+        assert!(check_host_imports(&[declared("m", &longest, 1)]).is_ok());
+
+        let over = "f".repeat(MAX_IMPORT_NAME_BYTES + 1);
+        let violations = check_host_imports(&[declared("m", &over, 1)])
+            .expect_err("a 32-byte field name cannot be registered");
+        assert!(
+            matches!(
+                violations.as_slice(),
+                [Violation::ImportNameTooLong {
+                    which: NamePart::Field,
+                    len: 32,
+                    ..
+                }]
+            ),
+            "{violations:?}"
+        );
+    }
+
+    /// A host argument list holds nine, so nine is a host function and ten is
+    /// one no embedder could build.
+    #[test]
+    fn the_parameter_cap_is_exact_at_nine() {
+        assert!(check_host_imports(&[declared("m", "f", MAX_HOST_FUNCTION_PARAMS)]).is_ok());
+
+        let violations = check_host_imports(&[declared("m", "f", MAX_HOST_FUNCTION_PARAMS + 1)])
+            .expect_err("a ten-parameter host function cannot be registered");
+        assert!(
+            matches!(
+                violations.as_slice(),
+                [Violation::ImportArityExceeded { params: 10, .. }]
+            ),
+            "{violations:?}"
+        );
+    }
+
+    /// Every finding is reported, and in the order the imports were declared.
+    ///
+    /// A caller lists its imports in the order it will emit them, and a reader
+    /// walking a refusal alongside their source has to find the two in the same
+    /// order. A check that stopped at the first offender, or that sorted its
+    /// findings, would leave the second import to a second build.
+    #[test]
+    fn every_offending_import_is_reported_in_declaration_order() {
+        let over_name = "z".repeat(MAX_IMPORT_NAME_BYTES + 1);
+        let violations = check_host_imports(&[
+            declared("m", "wide", MAX_HOST_FUNCTION_PARAMS + 1),
+            declared(&over_name, "f", 1),
+        ])
+        .expect_err("both imports are inadmissible");
+        assert!(
+            matches!(
+                violations.as_slice(),
+                [
+                    Violation::ImportArityExceeded { field, .. },
+                    Violation::ImportNameTooLong { .. },
+                ] if field == "wide"
+            ),
+            "{violations:?}"
+        );
+    }
+
+    /// The rendered refusal carries the registration authority, not a decode
+    /// one, and each name carries its whole remedy.
+    ///
+    /// The authority is what a reader acts on differently: told the decoder
+    /// refuses 32 bytes, an author shortens the name to 32 and meets the same
+    /// wall. The remedies are pinned whole, and both of them, because each is
+    /// two pieces of advice written for two readers and only one of those two
+    /// is reachable from this entry point. The source edit is exact — the
+    /// language has no rename-on-import, so the field an import carries is the
+    /// declaration's own name, and that same name is written again in the `use`
+    /// clause that binds it, where a mismatch is refused as an undeclared
+    /// import; advice to bind a shorter field would be advice to write
+    /// something unspellable, and advice to rename only the declaration would
+    /// buy the reader a second build failure. The linked-module sentence after
+    /// it is for the reader a declaration-level check never sees, and nothing
+    /// here could tell that reader from this one: [`Violation::remedy`] is
+    /// blind to which check produced the finding, and the byte-level check
+    /// reads import sections in which the offending name has no `external fn`
+    /// behind it at all.
+    #[test]
+    fn a_rendered_refusal_names_the_registration_limit_and_each_whole_remedy() {
+        let over = "n".repeat(MAX_IMPORT_NAME_BYTES + 1);
+
+        let field = check_host_imports(&[declared("m", &over, 1)])
+            .expect_err("a 32-byte field name cannot be registered")
+            .to_string();
+        assert!(
+            field.contains("This is a registration limit, not a decode limit"),
+            "{field}"
+        );
+        assert!(
+            field.contains(
+                "Rename the `external fn` and the name in the `use { … }` clause that binds \
+                 it: the field name an import carries is the declaration's own name. If the \
+                 import came from a linked module rather than from a declaration in this \
+                 program, rebuild that module so it imports the function under a shorter \
+                 name."
+            ),
+            "{field}"
+        );
+
+        let module = check_host_imports(&[declared(&over, "f", 1)])
+            .expect_err("a 32-byte module name cannot be registered")
+            .to_string();
+        assert!(
+            module.contains("This is a registration limit, not a decode limit"),
+            "{module}"
+        );
+        assert!(
+            module.contains(
+                "Shorten the module name this extern is bound under. If the import came from \
+                 a linked module rather than from a declaration in this program, rebuild \
+                 that module so it imports from a shorter module name."
+            ),
+            "{module}"
+        );
+    }
+
+    /// A declaration-level refusal does not open by calling the subject a
+    /// module.
+    ///
+    /// Nothing has been emitted when this check runs, so the artifact header —
+    /// `is not a module a SpaceWasm embedder can load and run as written` — is
+    /// a category error about a `.inf` file, and `Display` is the rendering a
+    /// `?` on the error reaches. Both headers are asserted in one test because
+    /// what is being pinned is that they differ: a single header restored for
+    /// both would leave either half passing on its own.
+    #[test]
+    fn a_declared_refusal_and_an_artifact_refusal_open_differently() {
+        let over = "f".repeat(MAX_IMPORT_NAME_BYTES + 1);
+        let from_declaration = check_host_imports(&[declared("m", &over, 1)])
+            .expect_err("a 32-byte field name cannot be registered")
+            .to_string();
+        assert!(
+            from_declaration.starts_with(
+                "SpaceWasm conformance failed: the host imports this program declares cannot \
+                 all be registered by a SpaceWasm embedder.\n"
+            ),
+            "{from_declaration}"
+        );
+
+        let from_bytes = check(&module_importing("m", &over))
+            .expect_err("the same name in an import section is refused")
+            .to_string();
+        assert!(
+            from_bytes.starts_with(
+                "SpaceWasm conformance failed: this module is not a module a SpaceWasm \
+                 embedder can load and run as written.\n"
+            ),
+            "{from_bytes}"
+        );
+    }
+
+    /// The two entry points answer identically about one import.
+    ///
+    /// This is what the shared body buys, and it is the only thing that would
+    /// notice the sharing being undone: two copies of the three comparisons
+    /// would pass every row above and every row the artifact checker has, and
+    /// the first symptom of their drifting apart is a build refusing a
+    /// declaration it then accepts as bytes, or accepting one a flight computer
+    /// will not load.
+    #[test]
+    fn the_declared_and_the_byte_level_checks_agree_about_one_import() {
+        let module = "m".repeat(MAX_IMPORT_NAME_BYTES + 1);
+        let field = "f".repeat(MAX_IMPORT_NAME_BYTES + 1);
+        let wasm = module_importing(&module, &field);
+
+        let from_bytes = check(&wasm).expect_err("two 32-byte import names are refused");
+        let from_declaration = check_host_imports(&[DeclaredImportFacts {
+            module: &module,
+            field: &field,
+            params: 0,
+            results: 0,
+        }])
+        .expect_err("the same import, declared, is refused");
+
+        assert_eq!(from_bytes.as_slice().len(), 2, "{from_bytes:?}");
+        assert_eq!(from_bytes.as_slice(), from_declaration.as_slice());
     }
 }

@@ -16,12 +16,13 @@ use wasm_encoder::CustomSection;
 /// in it — uploads to all of them. Measured accepted by a protocol-28 host;
 /// protocol 99 is refused with `contract protocol number is newer than host`.
 ///
-/// **The rule this constant must follow once host imports land (#464): it
-/// becomes the maximum introduction protocol over every host function the
-/// contract imports.** A contract that imports a function introduced in
-/// protocol 22 and declares 20 is claiming to run on a host where that import
-/// does not resolve. With no imports at all there is nothing to bound, which is
-/// the only reason the floor is usable today.
+/// **The rule this constant must follow once host imports are admitted at this
+/// target (#324): it becomes the maximum introduction protocol over every host
+/// function the contract imports.** A contract that imports a function
+/// introduced in protocol 22 and declares 20 is claiming to run on a host where
+/// that import does not resolve. A host binding is refused at this target
+/// today, so a contract imports nothing and there is nothing to bound, which is
+/// the only reason the floor is usable.
 pub const STELLAR_ENV_PROTOCOL: u32 = 20;
 
 /// The pre-release number this toolchain declares.

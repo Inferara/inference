@@ -43,9 +43,11 @@ mod target_identity_tests {
     ///
     /// Measured over the 148 fixtures the corpus holds today: `SpaceWasm`
     /// compares 132 and refuses 16, all 16 on non-determinism; Stellar compares
-    /// 68 and refuses 80, those same 16 among them and the rest on its export
-    /// gate. Every fixture compiles at the default target, so nothing is skipped
-    /// for failing to compile at all. The floors are those counts with roughly a
+    /// 68 and refuses 80 — those same 16, two on its host-import gate (the
+    /// `extern_import/host_import*` fixtures, refused before `emit()` where the
+    /// export gate runs after it), and the rest on its export gate. Every
+    /// fixture compiles at the default target, so nothing is skipped for
+    /// failing to compile at all. The floors are those counts with roughly a
     /// tenth of headroom, which is what keeps a fixture added or retired from
     /// turning this red for a reason that has nothing to do with the theorem.
     /// They were deliberately left where they were when the measurement moved —

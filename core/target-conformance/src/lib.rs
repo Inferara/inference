@@ -7,6 +7,14 @@
 //! than compiles, and its only dependencies are a WebAssembly decoder and an
 //! error derive.
 //!
+//! One question here is also askable earlier. The `SpaceWasm` registration caps
+//! bound what an *embedder* can be handed, not what a decoder reads, so they are
+//! answerable of the imports a program declares before any bytes exist — and
+//! answered there a refusal can name the `external fn` an author wrote. That
+//! entry point sits beside the byte-level one and shares its body, so the two
+//! vantages cannot give one import two answers; the byte-level check stays the
+//! backstop, because it is the only one that sees an import linking dragged in.
+//!
 //! # Why the stock decoder
 //!
 //! The in-tree `inf-wasmparser` fork decodes and validates this compiler's
@@ -38,7 +46,10 @@
 //!   needs to size its two const generics — and the one refusal in the crate
 //!   that is deliberately stricter than the decoder: a reference to a
 //!   definition past the 16-bit IR word the interpreter narrows it into
-//!   without checking, which loads and runs against a different definition.
+//!   without checking, which loads and runs against a different definition. Its
+//!   registration caps are also askable of the imports a program *declares*,
+//!   before any bytes exist, so a build can name the `external fn` a developer
+//!   wrote instead of an import section they did not.
 //!
 //! The refusal vocabulary is one enum, private to the crate and re-exported
 //! from [`spacewasm`], which is the path a caller reaches it through. It

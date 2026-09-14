@@ -139,8 +139,8 @@ function and the offending element. The refusals differ because the reasons do:
 
 - **A 64-bit integer** (`u64`, `i64`): *"…the host's word is 64 bits wide and
   spends part of it on a tag, so no 64-bit value fits in one, and it travels as a
-  host object built through host functions this toolchain does not bind yet —
-  issue #464."*
+  host object built through host functions this target refuses to import, their
+  call convention not being bound here yet — issue #324."*
 - **A narrow integer** (`u8`, `i8`, `u16`, `i16`): *"…the host has no narrower
   word, so what an exported `u8` does with a caller-supplied 300 is a language
   question rather than a layout one, and it is not settled. Widen the declaration
@@ -148,7 +148,8 @@ function and the offending element. The refusals differ because the reasons do:
   be.
 - **A struct, array or enum**: *"A compound value crosses the contract boundary
   as a host object, which a contract has to build and read through host functions
-  it imports; this toolchain binds none of those yet."*
+  it imports; this target refuses a host binding, because the Soroban host-call
+  convention is not bound here yet."*
 - **A compound return** additionally explains the mechanism it cannot use: the
   caller would receive it through a hidden pointer into linear memory, and a
   contract method hands back one host word and has no pointer to give.
@@ -182,15 +183,19 @@ un-uploadable to any network still behind it.
 
 That constant is not permanent. It is the *minimum* the contract needs, and it
 must become the maximum of the minimum protocols of the host functions the
-contract imports once importing host functions is possible at all (issue #464).
+contract imports once host imports are admitted at this target (issue #324).
 Until then a contract imports nothing, and the floor is the whole answer.
 
 #### What is not supported, and why
 
 - **Host imports — anything stateful.** Storage, ledger access, events,
   authorization, cross-contract calls and the host-object constructors all arrive
-  as imported host functions, and this toolchain binds none of them. Issue #464
-  is where that work is tracked. Everything below follows from it.
+  as imported host functions. The language spells such a binding
+  `use { f } from host::<module>;`, and this target refuses it at code
+  generation: each of those host functions takes and returns the host's 64-bit
+  tagged word, and nothing in this toolchain maps an `external fn` onto one of
+  them. Issue #324 is where binding that convention is tracked. Everything below
+  follows from it.
 - **Compound types and 64-bit integers at the contract boundary.** Both travel as
   host objects, which are built and read through those same imports.
 - **No `contractspecv0` section.** A contract normally ships a machine-readable
@@ -526,9 +531,11 @@ budget — so a script can tell them apart without reading the message. A trap
 prints the interpreter's own reason. Execution runs under an instruction budget
 that `--fuel N` sets, so a program that does not terminate fails the run instead
 of hanging it. A module importing functions no embedder supplied is a load
-failure, and the harness names each `module.field` it found; binding an
-`external fn` to a host the embedder provides at run time is not supported yet
-and is tracked as issue #464.
+failure, and the harness names each `module.field` it found. That is what a
+program binding `use { f } from host::<module>;` meets here: this target admits
+the binding and the artifact carries the import, but the harness registers no
+host module, so it reports the imports it could not satisfy instead of running
+the program.
 
 `--stats` reports what the module cost the interpreter — the IR pages it
 compiled to, the sixteen-bit words written into them against the words those

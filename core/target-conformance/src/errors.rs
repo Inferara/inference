@@ -411,6 +411,13 @@ impl Violation {
     /// other two, `IndexTooLarge` and `IndexTruncated`, split the same way and
     /// still name the edit, because for those there is one: a narrower
     /// instruction for the first, a smaller module for the second.
+    ///
+    /// The two `ImportNameTooLong` arms are producible from source and lead
+    /// with the source edit, and they carry the linked-module alternative all
+    /// the same: this method cannot see which check produced the finding, and
+    /// the same sentence renders for a name read off a declaration and for one
+    /// read off an artifact's import section — where the import may be one a
+    /// linked module dragged in, with no `external fn` anywhere to rename.
     #[must_use]
     pub fn remedy(&self) -> &'static str {
         match self {
@@ -451,9 +458,17 @@ impl Violation {
                  split the block so the jump crosses less of the stack."
             }
             Self::ImportNameTooLong { which, .. } => match which {
-                NamePart::Module => "Shorten the module name this extern is bound under.",
+                NamePart::Module => {
+                    "Shorten the module name this extern is bound under. If the import came \
+                     from a linked module rather than from a declaration in this program, \
+                     rebuild that module so it imports from a shorter module name."
+                }
                 NamePart::Field => {
-                    "Rename the `external fn`, or bind it to a shorter export field."
+                    "Rename the `external fn` and the name in the `use { … }` clause that \
+                     binds it: the field name an import carries is the declaration's own \
+                     name. If the import came from a linked module rather than from a \
+                     declaration in this program, rebuild that module so it imports the \
+                     function under a shorter name."
                 }
             },
             Self::ImportArityExceeded { .. } => {
@@ -472,52 +487,101 @@ impl Violation {
     }
 }
 
-/// Every reason a module was refused, in a fixed order.
+/// What a set of findings was read from, which is the one thing about them a
+/// rendering cannot recover from the findings themselves.
 ///
-/// Non-empty by construction: [`crate::spacewasm::check`] returns `Ok` when
-/// there is nothing to report, so a `Violations` in hand always names at least
-/// one finding.
+/// A refusal opens by saying what was checked, and the two checks in this crate
+/// are asked of different things: one is handed a finished module, the other a
+/// program's declarations with no module anywhere yet. Told "this is not a
+/// module a `SpaceWasm` embedder can load", an author holding a `.inf` file and
+/// no artifact has been handed a category error rather than a finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Checked {
+    /// A finished module's bytes, read by [`crate::spacewasm::check`].
+    Artifact,
+    /// The imports a program declares, read by
+    /// [`crate::spacewasm::check_host_imports`] before any bytes exist.
+    Declarations,
+}
+
+/// Every reason a check refused what it was asked about, in a fixed order.
+///
+/// Non-empty by construction: [`crate::spacewasm::check`] over an artifact's
+/// bytes and [`crate::spacewasm::check_host_imports`] over the imports a
+/// program declares each return `Ok` where they found nothing rather than an
+/// empty `Violations`, so the invariant belongs to both of them and a
+/// `Violations` in hand always names at least one finding however it was
+/// built.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Violations(Vec<Violation>);
+pub struct Violations {
+    checked: Checked,
+    found: Vec<Violation>,
+}
 
 impl Violations {
-    /// The refusals [`crate::spacewasm::check`] found, which is the only place
-    /// a `Violations` is built: the invariant that it is non-empty is that
-    /// function's, and a constructor open to callers would lose it.
-    pub(crate) fn new(violations: Vec<Violation>) -> Self {
-        Self(violations)
+    /// The refusals read out of a finished module's bytes.
+    ///
+    /// `pub(crate)` along with its sibling because the non-empty invariant
+    /// above is the two builders' to keep: a constructor open to callers would
+    /// lose it, and that invariant is what lets a rendered refusal promise at
+    /// least one finding under its header.
+    pub(crate) fn about_artifact(found: Vec<Violation>) -> Self {
+        Self {
+            checked: Checked::Artifact,
+            found,
+        }
+    }
+
+    /// The refusals read off the imports a program declares, before any bytes
+    /// exist to read.
+    pub(crate) fn about_declarations(found: Vec<Violation>) -> Self {
+        Self {
+            checked: Checked::Declarations,
+            found,
+        }
     }
 
     /// The findings, in the order they are rendered.
     #[must_use]
     pub fn as_slice(&self) -> &[Violation] {
-        &self.0
+        &self.found
     }
 
     /// The full refusal: a header naming what was checked and what it cost,
     /// then one block per finding giving the two numbers, the authority and one
     /// thing to change.
     ///
-    /// `subject` is what the reader knows the bytes as — a path, or a phrase
-    /// like "the linked module" for a build that writes no file. `consequence`
-    /// is the one sentence only the caller can write: what it did about the
-    /// refusal. Both are the caller's because this crate is handed bytes and
-    /// nothing else.
+    /// `subject` is what the reader knows the checked thing as — a path, or a
+    /// phrase like "the linked module" for a build that writes no file, or the
+    /// source file a declaration was read from. `consequence` is the one
+    /// sentence only the caller can write: what it did about the refusal. Both
+    /// are the caller's because this crate is handed the findings and nothing
+    /// else.
+    ///
+    /// The opening sentence is not the caller's, and is chosen by which check
+    /// built the value: a declaration-level refusal cannot open by calling the
+    /// subject a module, because at that point there is none.
     ///
     /// An empty `consequence` omits that line, which is what the `Display` impl
     /// passes: a reader quoting the violations out of a build has no build to
     /// report the consequence of.
     #[must_use]
     pub fn render(&self, subject: &str, consequence: &str) -> String {
-        let mut out = format!(
-            "SpaceWasm conformance failed: {subject} is not a module a SpaceWasm embedder can \
-             load and run as written.\n"
-        );
+        let mut out = match self.checked {
+            Checked::Artifact => format!(
+                "SpaceWasm conformance failed: {subject} is not a module a SpaceWasm embedder \
+                 can load and run as written.\n"
+            ),
+            Checked::Declarations => format!(
+                "SpaceWasm conformance failed: the host imports {subject} declares cannot all \
+                 be registered by a SpaceWasm embedder.\n"
+            ),
+        };
         if !consequence.is_empty() {
             out.push_str(consequence);
             out.push('\n');
         }
-        for violation in &self.0 {
+        for violation in &self.found {
             let _ = write!(
                 out,
                 "\n  {violation}.\n    {}\n    {}\n",
@@ -530,8 +594,17 @@ impl Violations {
 }
 
 impl fmt::Display for Violations {
+    /// The rendering a caller with nothing to add falls back to, which is what
+    /// `?` on a `Violations` produces. The subject is as specific as a value
+    /// that was handed no path can be, and it follows what was checked: naming
+    /// a program's declarations "this module" would be the category error the
+    /// header above already avoids.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.render("this module", ""))
+        let subject = match self.checked {
+            Checked::Artifact => "this module",
+            Checked::Declarations => "this program",
+        };
+        f.write_str(&self.render(subject, ""))
     }
 }
 

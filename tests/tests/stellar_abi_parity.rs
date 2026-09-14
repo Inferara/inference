@@ -24,7 +24,7 @@
 //! build would pass code generation and then die in the rewriter with a
 //! byte-level message about exports, in place of the source-located one that
 //! names the function, the parameter, the declared type, and points at issue
-//! #464 for the work that would lift the restriction. The cost is the quality
+//! #324 for the work that would lift the restriction. The cost is the quality
 //! of the message a user gets.
 //!
 //! # How a refused program is put in front of the rewriter
@@ -38,6 +38,17 @@
 //! let the program through. That the two builds hold the same computation is
 //! established next door, by
 //! `the_default_build_and_the_stellar_build_agree_on_every_fixture`.
+//!
+//! That module then reaches the rewriter the way a shipped artifact does, which
+//! is two paths rather than one. A program binding no host import goes through
+//! `inference::link`, whose merge over no externals is the documented
+//! byte-identical pass-through. A program binding one is returned by
+//! `inference::link_resolved` unchanged — its imports are meant to survive for
+//! an embedder, so there is nothing to merge — and a merge entry point handed
+//! its bytes fails closed on the unsatisfied import instead. Both paths end at
+//! code generation's own bytes, so the rewriter judges the same module either
+//! way; the split is here because taking the wrong one turns a host row into a
+//! link failure that never reaches the gate under test.
 //!
 //! # Two rules this file cannot reach
 //!
@@ -97,6 +108,9 @@ struct Row {
     /// is admitted, every row agrees, and the matrix reads as full coverage
     /// while measuring nothing at all.
     admissible: bool,
+    /// Which of the two shipping routes puts this row's module in front of the
+    /// rewriter. See the module documentation for the two.
+    binds_a_host: bool,
 }
 
 fn row(label: &'static str, source: &str, admissible: bool) -> Row {
@@ -104,6 +118,21 @@ fn row(label: &'static str, source: &str, admissible: bool) -> Row {
         label,
         source: source.to_string(),
         admissible,
+        binds_a_host: false,
+    }
+}
+
+/// A row whose program binds a host import.
+///
+/// Its own constructor rather than a fourth argument on every call: one row of
+/// the matrix takes the other route to the rewriter, and a bare `false` on
+/// every other row would say nothing to a reader about which route that is.
+fn host_row(label: &'static str, source: &str, admissible: bool) -> Row {
+    Row {
+        label,
+        source: source.to_string(),
+        admissible,
+        binds_a_host: true,
     }
 }
 
@@ -201,6 +230,18 @@ fn rows() -> Vec<Row> {
             "fn helper(v: u32) -> u32 { return v; }\nfn other(v: u32) -> u32 { return helper(v); }",
             false,
         ),
+        // The one rule stated about what a program *imports* rather than about
+        // what it exports. The source gate refuses the binding; the rewriter
+        // refuses the import that binding emits, having no way to know which
+        // declaration it came from. Its module reaches the rewriter unlinked,
+        // because that is what the shipping path does with a host program.
+        host_row(
+            "a host import",
+            "external fn put(k: i32, v: i32) -> i32; \
+             use { put } from host::l; \
+             pub fn store(k: i32, v: i32) -> i32 { return put(k, v); }",
+            false,
+        ),
     ]
 }
 
@@ -231,11 +272,17 @@ fn is_admissibility_refusal(refusal: &StellarAbiError) -> bool {
             | StellarAbiError::UnsupportedParameter { .. }
             | StellarAbiError::UnsupportedReturn { .. }
             | StellarAbiError::CompoundReturn { .. }
+            | StellarAbiError::ImportsUnsupported { .. }
     )
 }
 
 /// The verdict of the Val-ABI rewriter on the same source, reached without the
 /// source gate having seen it.
+///
+/// Which of the two routes the module takes is the row's own: a host program's
+/// shipped artifact is code generation's bytes, and handing those to the merge
+/// would fail closed on the import no external satisfies, well before the gate
+/// under test was reached.
 ///
 /// # Panics
 ///
@@ -247,15 +294,25 @@ fn is_admissibility_refusal(refusal: &StellarAbiError) -> bool {
 /// over something the policy never mentions. A row that agrees for the wrong
 /// reason measures nothing while reading as coverage, which is worse than a row
 /// that fails.
-fn val_abi_rewriter(label: &str, source: &str) -> Verdict {
+fn val_abi_rewriter(row: &Row) -> Verdict {
+    let Row {
+        label,
+        source,
+        binds_a_host,
+        ..
+    } = row;
     let built = codegen_for_target(source, Target::Wasm32).unwrap_or_else(|e| {
         panic!(
             "row '{label}': the default build must succeed to put this row in front of the \
              rewriter, but it failed: {e}"
         )
     });
-    let linked = inference::link(built.wasm(), &[], None)
-        .unwrap_or_else(|e| panic!("row '{label}': the link must succeed, but it failed: {e}"));
+    let linked = if *binds_a_host {
+        built.wasm().to_vec()
+    } else {
+        inference::link(built.wasm(), &[], None)
+            .unwrap_or_else(|e| panic!("row '{label}': the link must succeed, but it failed: {e}"))
+    };
 
     match rewrite(&linked, built.export_signatures(), STELLAR_ENV_PROTOCOL) {
         Ok(_) => Verdict::Admitted,
@@ -273,9 +330,10 @@ fn val_abi_rewriter(label: &str, source: &str) -> Verdict {
 /// The parity claim: one program, one answer, whichever gate is asked.
 #[test]
 fn the_source_gate_and_the_rewriter_agree_on_every_row() {
-    for Row { label, source, .. } in rows() {
-        let gate = source_gate(&source);
-        let rewriter = val_abi_rewriter(label, &source);
+    for row in rows() {
+        let Row { label, source, .. } = &row;
+        let gate = source_gate(source);
+        let rewriter = val_abi_rewriter(&row);
         assert_eq!(
             gate.admits(),
             rewriter.admits(),
@@ -296,6 +354,7 @@ fn every_row_lands_where_the_stated_policy_puts_it() {
         label,
         source,
         admissible,
+        ..
     } in rows()
     {
         let gate = source_gate(&source);
