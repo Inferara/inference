@@ -36,13 +36,13 @@
 //! missing; [`gate::every_panic_free_fixture_is_listed`] closes it in both
 //! directions so a file cannot escape the table by being added beside it.
 //!
-//! The three sources, 218 fixtures and 436 compilations between them:
+//! The three sources, 220 fixtures and 440 compilations between them:
 //!
 //! - `tests/test_data/inf/` — the language corpus, every `.inf` in the
 //!   directory: 50.
 //! - `tests/test_data/codegen/wasm/` — the canonical paired golden fixtures,
 //!   selected by the rule that a fixture's file stem equals its parent directory
-//!   name: 146. That rule admits both paired layouts, the one with a module
+//!   name: 148. That rule admits both paired layouts, the one with a module
 //!   directory above the fixture directory and the flat one without, and the 22
 //!   files it excludes are exactly the multi-file project trees under `src/`,
 //!   whose `use` clauses need a project driver this in-process pipeline does not

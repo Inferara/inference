@@ -23,11 +23,13 @@ use std::path::PathBuf;
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{DefId, NodeId};
 use inference_ast::nodes::Def;
-use inference_type_checker::ExternOrigin;
 use inference_type_checker::typed_context::TypedContext;
+use inference_type_checker::{ExternKind, ExternOrigin, HOST_SEGMENT};
 use inference_wasm_linker::ImportWriteSet;
 
-use super::resolve::{resolve_wasm_module, ManifestDeps, ModulePath, SearchPath};
+use super::resolve::{
+    resolve_wasm_module, ManifestDeps, ModulePath, SearchPath, EMBEDDER_SUPPLIED_NEXT_STEP,
+};
 use super::validate::{lower_extern_signature, validate_extern, LoweredExtern};
 
 /// Maximum size, in bytes, of a resolved external `.wasm` module.
@@ -143,10 +145,36 @@ pub enum ExternalResolutionError {
     ConflictingWriteSet {
         logical_module: String,
         export_field: String,
-        /// The two files, already rendered for the message.
+        /// The file holding the declaration seen first, already rendered for
+        /// the message: a backticked file label, or `the entry file` for the
+        /// document with no module path.
         first_file: String,
+        /// The file holding the declaration that disagreed with it, rendered
+        /// the way `first_file` is. One file may hold both declarations, in
+        /// which case the two read alike, which is the truth about where to
+        /// look.
         second_file: String,
     },
+    /// A bound extern names a module the embedder supplies at run time
+    /// (`use { f } from host::<module>;`), which this resolver cannot honour.
+    ///
+    /// Resolution's only currency is a file. Left to run, this loop would look
+    /// the module up on disk and, if a `.wasm` of that name happened to be on
+    /// the search path — `env` is the canonical host-module name, so the
+    /// collision is likely rather than exotic — link it in and strip the import
+    /// the author asked an embedder to satisfy. That is a silent substitution of
+    /// one provider for another, with no diagnostic anywhere, so a host binding
+    /// is refused outright until the pipeline can carry it.
+    ///
+    /// The message carries the reservation's rename remedy as well, the one the
+    /// two type-checker refusals of a malformed `host` clause end with. This is
+    /// the only diagnostic a two-segment `from host::io;` ever reaches — that
+    /// shape is byte-for-byte a well-formed host binding, so the front end says
+    /// nothing about it — and the author who arrives here is as likely to be
+    /// someone whose linked `host/io.wasm` was reclassified by the reservation
+    /// as someone who wants an embedder. Told only that the feature is pending,
+    /// the first of the two would wait on an issue when a rename is the answer.
+    HostImportUnsupported { module: String },
 }
 
 impl std::fmt::Display for ExternalResolutionError {
@@ -206,6 +234,22 @@ impl std::fmt::Display for ExternalResolutionError {
                  parameters that body may write through; mark the same parameters `mut` in both \
                  declarations"
             ),
+            ExternalResolutionError::HostImportUnsupported { module } => {
+                // Through the classifier's own inverse, so the clause quoted
+                // back is the clause the front end would have accepted.
+                let clause = ExternKind::Host.source_spelling(module);
+                write!(
+                    f,
+                    "`use {{ … }} from {clause};` binds an import the embedder \
+                     supplies. {EMBEDDER_SUPPLIED_NEXT_STEP} Until then, \
+                     refusing the build is the only safe answer — a file named `{module}.wasm` \
+                     on the search path would otherwise be merged in and the import stripped, \
+                     silently replacing the provider you asked for. If you meant the linked \
+                     `.wasm` module `{clause}`, rename it: a module path whose first segment is \
+                     `{HOST_SEGMENT}` is reserved in this position and no longer resolves to a \
+                     file"
+                )
+            }
         }
     }
 }
@@ -240,9 +284,14 @@ impl std::error::Error for ExternalResolutionError {}
 ///
 /// # Errors
 ///
-/// Returns an [`ExternalResolutionError`] if any extern fails to resolve,
-/// validate, lower its signature, or read its bytes, or if two declarations of
-/// one `(module, field)` declare different write sets.
+/// Returns [`ExternalResolutionError::HostImportUnsupported`] for a bound
+/// extern whose body the embedder supplies, before any filesystem access — no
+/// candidate path is probed and no `.wasm` is read, because resolving one is
+/// exactly the substitution that refusal exists to prevent.
+///
+/// Otherwise returns an [`ExternalResolutionError`] if any extern fails to
+/// resolve, validate, lower its signature, or read its bytes, or if two
+/// declarations of one `(module, field)` declare different write sets.
 pub fn resolve_external_modules(
     typed_context: &TypedContext,
     search_path: &SearchPath,
@@ -269,6 +318,14 @@ pub fn resolve_external_modules(
     let mut contracts: BTreeMap<(String, String), DeclaredWriteSet> = BTreeMap::new();
 
     for origin in &origins {
+        // Fail closed ahead of resolution rather than after it; what running
+        // the loop would silently substitute is on
+        // `ExternalResolutionError::HostImportUnsupported`.
+        if origin.kind == ExternKind::Host {
+            return Err(ExternalResolutionError::HostImportUnsupported {
+                module: origin.logical_module.clone(),
+            });
+        }
         let module_path = parse_module_path(&origin.logical_module)?;
         let resolved = resolve_wasm_module(&module_path, search_path, manifest_deps)
             .map_err(ExternalResolutionError::Resolve)?;
@@ -385,19 +442,14 @@ struct DeclaredWriteSet {
 
 /// How a diagnostic names the file a declaration lives in.
 ///
-/// The entry file has no module path, so it is named in words rather than
-/// rendered as an empty label — a message quoting nothing at all would leave the
-/// reader with one of the two files unidentified, which is the whole point of
-/// the diagnostic. A declaration whose file cannot be recovered falls back to
-/// the same wording, which is honest: nothing better is known about it.
+/// Renders through [`inference_ast::nodes::file_label_in_prose`], which owns the
+/// wording for a file named inside a sentence. A declaration whose file cannot
+/// be recovered falls back to the entry file's spelling, which is honest:
+/// nothing better is known about it.
 fn declaring_file(arena: &AstArena, decl: DefId) -> String {
-    match arena
-        .node_module_path(NodeId::Def(decl))
-        .and_then(inference_ast::nodes::file_label)
-    {
-        Some(label) => format!("`{label}`"),
-        None => "the entry file".to_string(),
-    }
+    inference_ast::nodes::file_label_in_prose(
+        arena.node_module_path(NodeId::Def(decl)).unwrap_or_default(),
+    )
 }
 
 /// Reads a resolved external `.wasm` module's bytes, enforcing

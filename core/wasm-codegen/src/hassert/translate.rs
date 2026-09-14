@@ -265,7 +265,7 @@ use inference_ast::nodes::{
 };
 use inference_fn_key::{FnKey, merged_name};
 use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HTerm};
-use inference_type_checker::ExternIndex;
+use inference_type_checker::{ExternIndex, ExternKind};
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
@@ -2412,20 +2412,31 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// Resolves an `external fn` declaration to the symbol its linked body
-    /// carries, or rejects it when nothing binds the declaration to a module.
+    /// carries, or rejects it when this build supplies no such body.
     ///
-    /// A bound extern is a legitimate specification subject: the static merge
+    /// A *linked* extern is a legitimate specification subject: the static merge
     /// splices its body into the emitted module, where the downstream
-    /// realization obligation reduces it like any other. An *unbound* one is
-    /// not — no module supplies a body, so an application of it would name a
-    /// function the proof can never reach.
+    /// realization obligation reduces it like any other. The two other states
+    /// are not, for the same underlying reason stated two different ways — the
+    /// artifact an obligation is about holds no body to reduce. An unbound
+    /// declaration names no module at all; a host one names a module whose body
+    /// arrives from outside the build and is never spliced in, so minting a
+    /// merged symbol for it would name a function the merged module does not
+    /// define.
     fn resolve_external(&self, decl: DefId) -> Result<Callee, CalleeError> {
         let Some(origin) = self.ctx.extern_origin_by_decl(decl) else {
             return Err(CalleeError::NotApplicable(
-                "it is an external function with no `use … from` binding, so no module supplies \
-                 the body an obligation about it would reduce",
+                "it is an external function with no `use … from` binding, so this build names \
+                 no module at all to take the body an obligation about it would reduce from",
             ));
         };
+        if origin.kind == ExternKind::Host {
+            return Err(CalleeError::NotApplicable(
+                "it is a host import, whose body the embedder supplies at run time, so nothing in \
+                 the artifact an obligation is about implements it; a host contract would have to \
+                 be stated as an assumption, which this translation cannot do yet",
+            ));
+        }
         Ok(Callee::External {
             symbol: merged_name::root(&origin.logical_module, &origin.export_field),
             decl,

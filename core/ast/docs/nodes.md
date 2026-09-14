@@ -174,6 +174,7 @@ use core::option::Option;
 pub use lib::arith;
 use { sort } from sorting;
 use { hash } from crypto::sha256;
+use { telemetry } from host::fprime_core;
 ```
 
 **Fields:**
@@ -182,8 +183,15 @@ use { hash } from crypto::sha256;
 - `imported_types`: Specific types to import (e.g., `{io, fs}`)
 - `segments`: Path-form module segments (e.g., `std`, `core`)
 - `from`: Optional logical module reference of a `from` clause. A `ModuleRef`
-  carries identifier-path segments (e.g. `crypto::sha256`), not a filesystem
-  path — the driver resolves it to a `.wasm` file, keeping source portable.
+  carries identifier-path segments (e.g. `crypto::sha256`), never a filesystem
+  path, which keeps source portable. The clause names a logical module, and its
+  *first segment* decides who supplies the bodies it binds. An ordinary path is
+  a linked module the driver resolves to a `.wasm` file. A leading reserved
+  `host` segment instead marks an import the embedder supplies at run time: its
+  module is the single segment after `host` (`host::fprime_core` imports from
+  the WebAssembly module `fprime_core`), and it is never resolved against the
+  filesystem. The node itself records only the segments; the classification is
+  the type checker's, so a consumer reading `from` must not assume a file.
 
 ## Definitions
 

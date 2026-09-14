@@ -67,6 +67,8 @@ const OPERATOR_EMITTING: &[&str] = &[];
 /// The fixtures whose emitted module declares an import, which resolves against
 /// a host-module set this tier leaves empty. See [`ENVELOPE_REFUSED`].
 const IMPORT_EMITTING: &[&str] = &[
+    "codegen/wasm/extern_import/host_import/host_import.inf",
+    "codegen/wasm/extern_import/host_import_fprime/host_import_fprime.inf",
     "codegen/wasm/extern_import/import_dedup/import_dedup.inf",
     "codegen/wasm/extern_import/import_with_locals/import_with_locals.inf",
     "codegen/wasm/extern_import/multi_import/multi_import.inf",

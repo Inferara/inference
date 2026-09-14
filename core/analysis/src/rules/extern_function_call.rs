@@ -1,12 +1,25 @@
 //! A024: a call to an `external fn` that no `use … from` directive binds.
 //!
-//! An `external fn` bound to a source module via `use { f } from <module>;`
-//! lowers to a WASM import that the static-merge linker later satisfies (issue
-//! #9), so calling it is fully supported — in executable code and inside a
-//! `spec` alike. An *unbound* bare extern — declared `external fn` with no
-//! binding `use` — names no module at all, so nothing supplies a body for the
-//! call to reach: there is no import to emit and nothing for the merge to
-//! splice in. This rule rejects calls to those unbound externs only.
+//! An `external fn` bound to a *linked* source module via
+//! `use { f } from <module>;` lowers to a WASM import that the static-merge
+//! linker later satisfies (issue #9), so calling it is fully supported — in
+//! executable code, and inside a `spec` as an obligation's subject, since the
+//! merge splices that body into the module an obligation is about.
+//!
+//! A clause opening with the reserved `host` segment — `use { f } from
+//! host::env;` — binds the same declaration to a body the embedder supplies at
+//! run time. Calling it is supported too, and for the same reason this rule
+//! exists: something does supply a body, so the call reaches one. It is not a
+//! specification subject, though. Nothing splices that body into the artifact,
+//! so the translation refuses a host extern as an obligation's subject — in
+//! term position and as a bare call statement alike — with `P005`, rather than
+//! minting a symbol for a function the emitted module does not define. That
+//! refusal belongs to the translator, not here.
+//!
+//! An *unbound* bare extern — declared `external fn` with no binding `use` —
+//! names no module at all, so nothing supplies a body for the call to reach:
+//! there is no import to emit and nothing for the merge to splice in. This rule
+//! rejects calls to those unbound externs only.
 //!
 //! Resolution is *scope-aware*, not name-keyed. Two distinct `external fn f`
 //! declarations — a bound top-level `f` and an unbound spec-inner `f` — share

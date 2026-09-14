@@ -967,7 +967,7 @@ whose own function answers for a linked body or the reverse:
   marked (`mathlib::#helper`), so a foreign module's inner name — which
   is unconstrained and may be exactly one of that module's export fields
   — cannot shadow a root. Code generation writes that same string for a
-  call to a bound `external fn`, resolving
+  call to a *linked* bound `external fn`, resolving
   the declaration by `DefId` rather than by name: two `external fn`s may
   share a name across scopes and only one of them be bound (a `use … from`
   clause binds top-level declarations only), so a name-keyed lookup would
@@ -975,9 +975,13 @@ whose own function answers for a linked body or the reverse:
   merged body the call does not reach. `A024` resolves unbound-extern
   calls through the same scope walk and rejects such a call first, so the
   agreement is defense in depth — except on a pipeline that skips
-  analysis, where it is the only guard. An *unbound* extern stays `P005`
-  — no module supplies a body for the downstream realization obligation
-  to reduce.
+  analysis, where it is the only guard. An *unbound* or *host*-bound
+  extern stays `P005` — the artifact an obligation is about holds no body
+  for the downstream realization obligation to reduce. The unbound one
+  names no module at all; the host one names a module whose body the
+  embedder supplies at run time, so it is never spliced in and a merged
+  symbol minted for it would name a function the merged module does not
+  define.
 
 An obligation about a linked external therefore resolves only against
 the **merged** module. Translating the compiler's direct output instead
@@ -1935,7 +1939,7 @@ entries are matched by name, not position.
   | P002 | A construct with no assertion encoding: `loop`, `break`, a nested `unique` *block*, `**`, a string literal, an array/struct literal read in scalar term position or written at a shape outside the representable surface, or an access chain the element encoding cannot pin — one carrying more than one non-constant index, or one whose non-constant index lands on an aggregate rather than a scalar leaf. Four of these carry their own message rather than the shared no-encoding template, because the template's "this has no encoding; move the logic into a helper" is false or useless for them: `loop` (a loop's purpose in a specification is exactly what quantifying an index and constraining it says directly), an out-of-surface literal (literals encode now — the restriction is the shape, and the helper remedy dead-ends because a compound call result is P005 and a compound call argument P004: a `T_app` symbol resolves to the compiled function, whose real signature takes and returns pointers, so leaf-expanding an application would change its arity and detach the symbol from the function it names), and each of the two access-chain cases |
   | P003 | Reassignment (`Stmt::Assign`) in a specification body. A permanent rule, not a pending feature: a specification names values, not storage, so every name stands for one value throughout the claim — which is what lets the translation read a name as the same term wherever it appears. Mutation would need per-branch value versioning across quantifier scopes for no expressive gain over a fresh `let` |
   | P004 | A type with no place in a specification term — `unit`, a string, a function type — or an aggregate outside the representable surface: arrays of scalars at any rank and structs whose fields are scalars or one-dimensional scalar arrays (the executable aggregate `@` surface, bounded by analysis rules A027/A028). Two further wordings live under this code: an aggregate read *whole* where a term is required (an aggregate call argument, most often — its type is nameable, it is just not a term) and any *aggregate* parameter of an `exists`/`unique` body, whose obligation denotes against a real frame in which the parameter is one pointer local. A non-scalar, non-aggregate parameter there is unrepresentable for the first reason instead, and takes the first wording |
-  | P005 | A call that cannot be represented as a `T_app`/`HA_app_ok` term: an *unbound* external function (a bound one resolves — see [T_app resolution discipline](#t_app-resolution-discipline)), an instance method, an unresolved target, a non-deterministic-bodied callee, or (in term position specifically) a non-scalar result |
+  | P005 | A call that cannot be represented as a `T_app`/`HA_app_ok` term: an *unbound* external function or a *host*-bound one (`use … from host::…`; only a *linked* bound extern resolves, since only its body is merged into the artifact the obligation is about — see [T_app resolution discipline](#t_app-resolution-discipline)), an instance method, an unresolved target, a non-deterministic-bodied callee, or (in term position specifically) a non-scalar result |
   | P006 | A bare `@` outside a `let` right-hand side or a call-argument position |
   | P007 | A `forall` block nested inside an `exists`/`unique`-quantified body. Inside a `forall`/plain body the same nesting translates: the inner block binds a `Hall` logical variable per `@` and the alternation is emitted as written. A reachability body cannot: there every `@` is a hidden trailing choice parameter the judgment quantifies operationally, and a universal binder over one would need a choice-plan and lowering redesign |
   | P008 | `@` at a compound (array/struct) type outside the representable surface, or at any compound type in an `exists`/`unique` body. In a `forall`/plain body a supported-shape compound `@` quantifies one universal slot per scalar leaf instead of raising this; in a reachability body the message names the quantifier, since the identical declaration translates in a `forall` body — the obligation there is about one actual run, each of whose choices arrives as one scalar parameter, and a compound value lives in linear memory |

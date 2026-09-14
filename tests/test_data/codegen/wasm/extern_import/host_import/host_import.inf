@@ -1,0 +1,6 @@
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+
+pub fn now() -> i64 {
+    return clock_ms();
+}

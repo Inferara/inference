@@ -430,6 +430,8 @@ both import-section marks together.
 - `tests/test_data/codegen/wasm/extern_import/multi_import/multi_import.inf` — Two imports, index shift
 - `tests/test_data/codegen/wasm/extern_import/import_with_locals/import_with_locals.inf` — Import plus two local functions
 - `tests/test_data/codegen/wasm/extern_import/import_dedup/import_dedup.inf` — Two same-signature imports sharing one type
+- `tests/test_data/codegen/wasm/extern_import/host_import/host_import.inf` — A host binding (`use … from host::env;`) emitting the import module `env`, without the reserved `host` segment
+- `tests/test_data/codegen/wasm/extern_import/host_import_fprime/host_import_fprime.inf` — Two host modules in one program, each directive classified on its own
 - `tests/src/codegen/wasm/extern_import.rs` — Structural and golden tests for import emission
 - `tests/test_data/codegen/wasm/base/fn_params/fn_params.inf` — Parameter test fixture
 - `tests/test_data/codegen/wasm/base/fn_calls/fn_calls.inf` — Function call test fixture

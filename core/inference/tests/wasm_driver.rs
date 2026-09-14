@@ -94,6 +94,104 @@ fn resolves_validates_and_reads_a_bound_extern() {
     assert_eq!(modules[0].bytes, lib);
 }
 
+/// A `use … from host::<module>;` binding is refused before resolution, and the
+/// refusal does not depend on what is on the search path.
+///
+/// This is the whole point of the guard. Left to resolve, `env` finds the
+/// planted `env.wasm`, validates against the declared signature, merges, and the
+/// import is stripped — an artifact that silently replaces the embedder the
+/// author asked for with a body this build chose, and not one diagnostic
+/// anywhere says so. `env` is the canonical host-module name, so the fixture is
+/// the shape a user hits, not a contrived collision.
+///
+/// Three facts make that claim, rather than one assertion that an error came
+/// back:
+///
+/// 1. The planted module is one this build really would link. The *same* tree
+///    and the *same* declared signature, bound by a linked clause, resolve and
+///    validate and yield the module's bytes. Without that control the refusal
+///    below would be indistinguishable from a resolution that was going to fail
+///    anyway — a fixture whose planted file did not validate would pin nothing
+///    about the guard.
+/// 2. Only the clause differs between the two halves, and the host one is
+///    refused by the exact variant that names the module.
+/// 3. With the file absent from an otherwise identical search path, the error
+///    comes back rendered identically. An outcome that does not move when the
+///    filesystem does cannot have been produced by looking at the filesystem,
+///    which is what "refused *before* resolution" means — and it is what keeps
+///    the refusal honest for the reader whose `env.wasm` is simply missing.
+#[test]
+fn a_host_binding_is_refused_even_when_a_module_of_that_name_resolves() {
+    const DECL: &str = "external fn clock_ms(a: i32) -> i32;";
+    const CALL: &str = "pub fn use_it(x: i32) -> i32 { return clock_ms(x); }";
+
+    let lib = compile("pub fn clock_ms(a: i32) -> i32 { return a; }", "env");
+    let tree = TempTree::new("host-collision");
+    tree.write("env.wasm", &lib);
+    let mut search = SearchPath::new();
+    search.push_lib_dir(tree.root().to_path_buf());
+
+    let linked = typed_of(&format!("{DECL}\nuse {{ clock_ms }} from env;\n{CALL}"));
+    let resolved = resolve_external_modules(&linked, &search, None)
+        .expect("the planted module resolves and validates for a linked clause")
+        .modules;
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].logical_module, "env");
+    assert_eq!(
+        resolved[0].bytes, lib,
+        "the guard below has to be refusing a module this build would otherwise have linked"
+    );
+
+    let host = typed_of(&format!("{DECL}\nuse {{ clock_ms }} from host::env;\n{CALL}"));
+    let err = resolve_external_modules(&host, &search, None)
+        .expect_err("a host binding must not be satisfied off the search path");
+    assert!(
+        matches!(
+            &err,
+            ExternalResolutionError::HostImportUnsupported { module } if module == "env"
+        ),
+        "got: {err:?}"
+    );
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("`use { … } from host::env;`")
+            && rendered.contains("issue #464 is where that work is tracked"),
+        "the refusal must quote the clause and name where the work lives, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("silently replacing the provider you asked for"),
+        "the reader has to be told why a resolvable module is still refused, got: {rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "If you meant the linked `.wasm` module `host::env`, rename it: a module path whose \
+             first segment is `host` is reserved in this position"
+        ),
+        "a two-segment `from host::…;` clause type-checks silently, so this refusal is the only \
+         place an author whose linked module was reclassified by the reservation is told to \
+         rename it, got: {rendered}"
+    );
+
+    let bare = TempTree::new("host-absent");
+    let mut empty_search = SearchPath::new();
+    empty_search.push_lib_dir(bare.root().to_path_buf());
+    let absent = resolve_external_modules(&host, &empty_search, None)
+        .expect_err("a host binding is refused with nothing to resolve either");
+    assert!(
+        matches!(
+            &absent,
+            ExternalResolutionError::HostImportUnsupported { module } if module == "env"
+        ),
+        "got: {absent:?}"
+    );
+    assert_eq!(
+        absent.to_string(),
+        rendered,
+        "the refusal must not move when the search path does, or it was decided after \
+         resolution rather than before it"
+    );
+}
+
 #[test]
 fn resolves_a_bound_extern_through_a_manifest_entry() {
     // The manifest binds the logical module to a `.wasm` whose name on disk does

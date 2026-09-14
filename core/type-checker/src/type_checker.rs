@@ -44,17 +44,20 @@ use inference_ast::extern_prelude::ExternPrelude;
 use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{
     ArgData, ArgKind, Def, Directive, Expr, Location, OperatorKind, Stmt, TypeNode,
-    UnaryOperatorKind, Visibility,
+    UnaryOperatorKind, UseDirective, Visibility,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     definition_graph::{self, DefNode, GraphOutcome},
-    errors::{DedupKind, RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
+    errors::{
+        DedupKind, MIXED_PROVIDER_NOTE, RegistrationKind, TypeCheckError, TypeMismatchContext,
+        VisibilityContext,
+    },
     symbol_table::{
-        BindingMutability, ExternOrigin, FuncInfo, FuncKind, Import, ImportItem, ImportKind,
-        ResolvedImport, ResolvedImportTarget, ResolvedNominalType, SymbolTable,
-        UnimportedNamespace,
+        BindingMutability, ExternKind, ExternOrigin, FuncInfo, FuncKind, HOST_SEGMENT, Import,
+        ImportItem, ImportKind, ResolvedImport, ResolvedImportTarget, ResolvedNominalType,
+        SymbolTable, UnimportedNamespace,
     },
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::{CallTarget, TypedContext},
@@ -72,6 +75,24 @@ struct DuplicateNameImport {
     first: Import,
     /// A later import claiming the same name (excluded from binding).
     later: Import,
+}
+
+/// The first binding seen for one import module: who supplies it, which
+/// `external fn`'s clause said so, and the file that clause is in.
+///
+/// Those three are exactly what
+/// [`TypeCheckError::ConflictingExternProvider`] needs about the earlier half of
+/// a disagreement, which is not recoverable once the walk has moved on. See
+/// [`TypeChecker::check_extern_provider_agreement`].
+#[derive(Clone)]
+struct FirstProvider {
+    kind: ExternKind,
+    /// The extern whose `use … from` clause bound the module. Not necessarily
+    /// the name the conflicting clause uses: the rule is about the module.
+    name: String,
+    /// Rendered for a message already, by
+    /// [`inference_ast::nodes::file_label_in_prose`].
+    file: String,
 }
 
 /// The canonical target an import binds a name to, used to distinguish a benign
@@ -182,6 +203,15 @@ pub(crate) struct TypeChecker {
     /// modules is reported as [`TypeCheckError::AmbiguousExternModule`] and
     /// omitted here so it falls back to an unbound registration.
     extern_module_bindings: FxHashMap<DefId, ExternOrigin>,
+    /// Declaring extern [`DefId`] → the `use … from` clause that bound it,
+    /// parallel to [`Self::extern_module_bindings`] and populated with it.
+    ///
+    /// An [`ExternOrigin`] is what the source *said*, not where it said it, and
+    /// it travels far past this crate; a location every consumer would ignore
+    /// does not belong on it. The one diagnostic that needs the clause —
+    /// [`Self::check_extern_provider_agreement`], whose whole remedy is to edit
+    /// a `from` clause — reads it back here.
+    extern_binding_clauses: FxHashMap<DefId, Location>,
     /// `(scope_id, local_name)` of every import binding flagged as a collision
     /// during [`Self::report_import_collisions`]. The fixpoint import resolution
     /// skips these so a colliding import never produces a binding, no matter
@@ -297,6 +327,8 @@ impl TypeChecker {
     ) -> (SymbolTable, Vec<(Option<String>, TypeCheckError)>) {
         self.process_directives(ctx);
         self.collect_extern_bindings(ctx);
+        // Reads the bindings the pass above recorded, so it has to follow it.
+        self.check_extern_provider_agreement(ctx);
         // Runs before any registration so a same-file collision is reported by
         // the purpose-built diagnostic rather than by the symbol table refusing
         // the second insert.
@@ -4388,13 +4420,36 @@ impl TypeChecker {
     /// directive in one file can neither bind nor conflict with a declaration in
     /// another, and the diagnostics below all describe one file's own text.
     ///
-    /// For every `use { fields } from module;` directive, each field is paired
-    /// with `module`. The resulting bindings are validated:
+    /// Each directive is first classified by its `from` clause, which decides
+    /// who supplies the bodies it binds:
+    ///
+    /// - `use { f } from host::env;` is an [`ExternKind::Host`] binding. The
+    ///   module is the one segment after `host` — `"env"`, never `"host::env"`,
+    ///   because `host` names the provider rather than a component of the
+    ///   WebAssembly import module string the embedder registers.
+    /// - Anything else is an [`ExternKind::Linked`] binding, whose module is the
+    ///   `::`-joined path exactly as written.
+    ///
+    /// A `from` clause opening with `host` and carrying anything but exactly one
+    /// further segment names no import module this compiler can emit, and is
+    /// reported as [`TypeCheckError::HostImportWithoutModule`] or
+    /// [`TypeCheckError::HostImportModuleNested`]. That diagnostic is raised
+    /// once for the *directive*, and none of its fields are accumulated: the
+    /// mistake is in the `from` clause, which every field in the clause shares,
+    /// so reporting per field would repeat one message at one location and would
+    /// additionally report each skipped field as a dangling import. A file's
+    /// other, well-formed directives are unaffected and still bind.
+    ///
+    /// For every surviving directive, each field is paired with the classified
+    /// module. The resulting bindings are validated:
     ///
     /// - A field imported from two or more distinct modules *by the same file*
     ///   is reported as [`TypeCheckError::AmbiguousExternModule`] and left
     ///   unbound. Two files may bind the same name to different modules; the
-    ///   declarations are distinct and each keeps its own origin.
+    ///   declarations are distinct and each keeps its own origin. Distinctness
+    ///   is on the kind as well as the name, so `from a;` and `from host::a;`
+    ///   are two modules and not one: they emit the same import module string
+    ///   but only one of them is linked away.
     /// - A field imported from a module but not declared as an `external fn` at
     ///   the importing file's top level is reported as
     ///   [`TypeCheckError::ExternImportNotDeclared`].
@@ -4404,6 +4459,13 @@ impl TypeChecker {
     /// An `external fn` with no binding `use` is left unbound (no error): a bare
     /// extern declaration is valid; analysis rule A024 governs whether *calling*
     /// an unlinked extern is allowed.
+    ///
+    /// One rule about these bindings is not decidable here.
+    /// [`Self::check_extern_provider_agreement`] reads the whole map afterwards,
+    /// because the check above is keyed on one imported name within one file,
+    /// and clauses that reach one import module through different names can
+    /// disagree about who supplies it while leaving every file involved
+    /// internally consistent.
     ///
     /// Diagnostics are emitted in source order. The per-file map is drained in
     /// hash order, so each file's errors are sorted by source position before
@@ -4416,75 +4478,267 @@ impl TypeChecker {
         for sf in arena.source_files() {
             let owner_label = inference_ast::nodes::file_label(&sf.module_path);
 
-            // field name → (distinct modules in first-seen order, first import
+            // field name → (distinct bindings in first-seen order, first import
             // location), over this file's directives alone.
-            let mut imports: FxHashMap<String, (Vec<String>, Location)> = FxHashMap::default();
+            let mut imports: FxHashMap<String, (Vec<(ExternKind, String)>, Location)> =
+                FxHashMap::default();
+            let mut errors: Vec<(Location, TypeCheckError)> = Vec::new();
             for directive in &sf.directives {
                 let Directive::Use(use_dir) = directive;
                 let Some(module_ref) = &use_dir.from else {
                     continue;
                 };
-                let module = module_ref
-                    .segments
-                    .iter()
-                    .map(|s| arena[*s].name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("::");
+                let Some(binding) =
+                    Self::classify_from_clause(arena, use_dir, &module_ref.segments, &mut errors)
+                else {
+                    continue;
+                };
                 for &field_id in &use_dir.imported_types {
                     let field = arena[field_id].name.clone();
                     let entry = imports
                         .entry(field)
                         .or_insert_with(|| (Vec::new(), use_dir.location));
-                    if !entry.0.contains(&module) {
-                        entry.0.push(module.clone());
+                    if !entry.0.contains(&binding) {
+                        entry.0.push(binding.clone());
                     }
                 }
             }
 
-            let mut errors: Vec<(Location, TypeCheckError)> = Vec::new();
             for (field, (modules, location)) in imports {
                 let Some(decl) = index.lookup_top_level(&sf.module_path, &field) else {
                     errors.push((
                         location,
                         TypeCheckError::ExternImportNotDeclared {
                             name: field,
-                            module: modules.join(", "),
+                            module: Self::render_modules(&modules),
                             location,
                         },
                     ));
                     continue;
                 };
                 if modules.len() > 1 {
-                    let module_list = modules
-                        .iter()
-                        .map(|m| format!("`{m}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
                     errors.push((
                         location,
                         TypeCheckError::AmbiguousExternModule {
                             name: field,
-                            modules: module_list,
+                            modules: Self::render_quoted_modules(&modules),
+                            provider_note: Self::provider_note(&modules),
                             location,
                         },
                     ));
                     continue;
                 }
-                let logical_module = modules.into_iter().next().expect("one module");
+                let (kind, logical_module) = modules.into_iter().next().expect("one module");
                 self.extern_module_bindings.insert(
                     decl,
                     ExternOrigin {
+                        kind,
                         logical_module,
                         export_field: field,
                         decl,
                     },
                 );
+                self.extern_binding_clauses.insert(decl, location);
             }
 
             errors.sort_by_key(|(location, _)| (location.offset_start, location.offset_end));
             for (_, error) in errors {
                 self.push_error_with_label(owner_label.clone(), error);
             }
+        }
+    }
+
+    /// Classifies `segments`, the `from` clause of `use_dir`, into the binding
+    /// its imported fields take — or records the malformed-shape diagnostic it
+    /// earns into `errors` and answers `None`, which drops the whole directive.
+    ///
+    /// The diagnostic is recorded here rather than returned so that one
+    /// directive contributes at most one of them: a caller handed an error back
+    /// per imported field would have to suppress the repeats itself.
+    ///
+    /// A recorded diagnostic's location is the text to act on rather than the
+    /// clause as a whole: the first surplus segment for a path, the reserved
+    /// word itself for a clause that names nothing after it.
+    fn classify_from_clause(
+        arena: &AstArena,
+        use_dir: &UseDirective,
+        segments: &[IdentId],
+        errors: &mut Vec<(Location, TypeCheckError)>,
+    ) -> Option<(ExternKind, String)> {
+        let joined = |ids: &[IdentId]| {
+            ids.iter()
+                .map(|s| arena[*s].name.as_str())
+                .collect::<Vec<_>>()
+                .join("::")
+        };
+        let is_host = segments
+            .first()
+            .is_some_and(|&s| arena[s].name == HOST_SEGMENT);
+        if !is_host {
+            return Some((ExternKind::Linked, joined(segments)));
+        }
+        match segments.len() {
+            2 => Some((ExternKind::Host, arena[segments[1]].name.clone())),
+            1 => {
+                let location = arena[segments[0]].location;
+                errors.push((
+                    location,
+                    TypeCheckError::HostImportWithoutModule {
+                        items: Self::render_import_items(arena, use_dir),
+                        location,
+                    },
+                ));
+                None
+            }
+            _ => {
+                let location = arena[segments[2]].location;
+                errors.push((
+                    location,
+                    TypeCheckError::HostImportModuleNested {
+                        items: Self::render_import_items(arena, use_dir),
+                        module: arena[segments[1]].name.clone(),
+                        linked_path: joined(&segments[1..]),
+                        location,
+                    },
+                ));
+                None
+            }
+        }
+    }
+
+    /// The imported field names of a directive, as the diagnostics spell them
+    /// between the braces: `telemetry` or `telemetry, command`.
+    fn render_import_items(arena: &AstArena, use_dir: &UseDirective) -> String {
+        use_dir
+            .imported_types
+            .iter()
+            .map(|f| arena[*f].name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// [`ExternKind::source_spelling`] over a binding list, comma separated, for
+    /// the dangling-import diagnostic — which backticks the whole list itself.
+    fn render_modules(modules: &[(ExternKind, String)]) -> String {
+        modules
+            .iter()
+            .map(|(kind, module)| kind.source_spelling(module))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// [`Self::render_modules`] with each module in backticks, for the
+    /// ambiguity diagnostic's parenthesised list.
+    fn render_quoted_modules(modules: &[(ExternKind, String)]) -> String {
+        modules
+            .iter()
+            .map(|(kind, module)| format!("`{}`", kind.source_spelling(module)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// [`MIXED_PROVIDER_NOTE`] when one module string in `modules` appears both
+    /// as a linked module and as a host import, and nothing otherwise.
+    ///
+    /// The condition is a genuine collision, not merely a list that mixes the
+    /// two kinds; [`TypeCheckError::AmbiguousExternModule`] says what the note
+    /// is for and which lists do not earn it.
+    fn provider_note(modules: &[(ExternKind, String)]) -> String {
+        let collides = modules.iter().any(|(kind, module)| {
+            *kind == ExternKind::Host
+                && modules
+                    .iter()
+                    .any(|(other, name)| *other == ExternKind::Linked && name == module)
+        });
+        if collides {
+            MIXED_PROVIDER_NOTE.to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    /// Rejects one import module bound as a linked module by one clause and as
+    /// a host import by another, raising
+    /// [`TypeCheckError::ConflictingExternProvider`] — see that variant for why
+    /// the disagreement is unrepresentable rather than merely unusual, and why
+    /// the import module rather than the `(module, field)` pair is the unit.
+    ///
+    /// Whole-program rather than per file, because the rule is whole-program:
+    /// [`Self::collect_extern_bindings`]'s ambiguity rule is keyed on one
+    /// imported name within one file, and two clauses that reach one module
+    /// through different names leave every file involved internally consistent.
+    /// It also has to be decided here rather than in the linker driver, which by
+    /// design looks at linked origins alone and would see only half the
+    /// disagreement.
+    ///
+    /// Files are walked in arena order and each file's declarations in source
+    /// order, so the *first* binding of a module holds the slot and the
+    /// diagnostic lands on the later one — the order the user reads. Which of
+    /// the two the message calls linked and which host follows the clauses
+    /// themselves, never the walk order.
+    ///
+    /// One diagnostic per conflicting module, not per declaration that
+    /// disagrees. The unit of the rule is the module, and the second side of a
+    /// disagreement may bind it through any number of declarations — each of
+    /// which would otherwise repeat one message about one pair of clauses.
+    ///
+    /// Located on the later binding's `use … from` clause rather than on its
+    /// `external fn` declaration, because the clause is what the message asks
+    /// the reader to rewrite. Both files' clauses are implicated and a
+    /// diagnostic carries one position, so it goes to the file the diagnostic is
+    /// labelled with — the later one, which is where the conflict became one;
+    /// the other file is named in the message text.
+    fn check_extern_provider_agreement(&mut self, ctx: &TypedContext) {
+        let arena = ctx.arena();
+        let mut first: FxHashMap<String, FirstProvider> = FxHashMap::default();
+        let mut reported: FxHashSet<String> = FxHashSet::default();
+        let mut conflicts: Vec<(Option<String>, TypeCheckError)> = Vec::new();
+        for sf in arena.source_files() {
+            let label = inference_ast::nodes::file_label(&sf.module_path);
+            let named = inference_ast::nodes::file_label_in_prose(&sf.module_path);
+            for &def_id in &sf.defs {
+                let Some(origin) = self.extern_module_bindings.get(&def_id) else {
+                    continue;
+                };
+                let Some(seen) = first.get(&origin.logical_module).cloned() else {
+                    first.insert(
+                        origin.logical_module.clone(),
+                        FirstProvider {
+                            kind: origin.kind,
+                            name: origin.export_field.clone(),
+                            file: named.clone(),
+                        },
+                    );
+                    continue;
+                };
+                if seen.kind == origin.kind || !reported.insert(origin.logical_module.clone()) {
+                    continue;
+                }
+                let later = (origin.export_field.clone(), named.clone());
+                let earlier = (seen.name, seen.file);
+                let ((linked_name, linked_file), (host_name, host_file)) = match origin.kind {
+                    ExternKind::Host => (earlier, later),
+                    ExternKind::Linked => (later, earlier),
+                };
+                let clause = *self
+                    .extern_binding_clauses
+                    .get(&def_id)
+                    .expect("a recorded binding records the clause that made it");
+                conflicts.push((
+                    label.clone(),
+                    TypeCheckError::ConflictingExternProvider {
+                        module: origin.logical_module.clone(),
+                        linked_name,
+                        host_name,
+                        linked_file,
+                        host_file,
+                        location: clause,
+                    },
+                ));
+            }
+        }
+        for (label, error) in conflicts {
+            self.push_error_with_label(label, error);
         }
     }
 
