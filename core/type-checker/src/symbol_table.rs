@@ -34,7 +34,6 @@
 //! represented as `TypeInfo { kind: TypeInfoKind::Unit, type_params: vec![] }`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
 use anyhow::bail;
 
@@ -77,13 +76,14 @@ impl ScopeId {
 }
 
 /// Provenance of an `external fn` declaration: the logical module that exports
-/// it, the export field name to bind against, and (once the driver resolves it)
-/// the concrete `.wasm` path.
+/// it and the export field name to bind against.
 ///
 /// `logical_module` and `export_field` are platform-independent: they come from
 /// the `use { field } from logical::module;` clause that names the extern, not
-/// from any filesystem path. `resolved_path` stays `None` until the driver maps
-/// the logical module to a file; later phases populate it for the linker.
+/// from any filesystem path. Resolving that logical module to a concrete
+/// `.wasm` file is the linker driver's job, and the file it picks travels with
+/// the module the driver returns rather than being written back here — an
+/// `ExternOrigin` stays exactly what the source said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternOrigin {
     /// Logical, `::`-joined module reference from the binding `use` clause
@@ -102,9 +102,6 @@ pub struct ExternOrigin {
     /// sibling — and lets analysis resolve each call to the specific extern it
     /// names.
     pub decl: DefId,
-    /// Concrete `.wasm` path once the driver resolves `logical_module`.
-    /// `None` during type checking; populated downstream.
-    pub resolved_path: Option<PathBuf>,
 }
 
 /// Whether a registered function is local or an `external fn`, and — for an
@@ -3617,7 +3614,6 @@ impl SymbolTable {
                     logical_module: module_name.to_string(),
                     export_field: extern_name.clone(),
                     decl: def_id,
-                    resolved_path: None,
                 };
                 self.register_extern_function(
                     &extern_name,
@@ -4205,7 +4201,6 @@ mod tests {
                 logical_module: module.to_string(),
                 export_field: field.to_string(),
                 decl: inference_ast::ids::idx_from_u32(0),
-                resolved_path: None,
             }
         }
 
