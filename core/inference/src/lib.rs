@@ -292,6 +292,16 @@ pub use inference_type_checker::{TypeCheckDiagnostic, TypeCheckOutcome};
 /// [`TypeCheckError::location`]: inference_type_checker::errors::TypeCheckError::location
 pub use inference_type_checker::errors::TypeCheckError;
 
+/// Re-export of the reserved first segment that marks a host import
+/// (`use { f } from host::env;`).
+///
+/// The reservation is one rule, and it is enforced at more than one front end:
+/// the type checker refuses a malformed `host` clause, and the CLI refuses a
+/// `--wasm-dep` (and so an `Inference.toml [wasm-dependencies]` key) naming a
+/// linked module under it. Those two would drift apart the moment either spelled
+/// the segment itself.
+pub use inference_type_checker::HOST_SEGMENT;
+
 pub mod extern_prelude;
 pub mod wasm_link;
 
@@ -325,6 +335,12 @@ pub use inference_wasm_linker::LinkError;
 /// Re-export of the static-merge linker's success types, so a consumer of
 /// [`link_with_warnings`] can name and match on what it returns without taking a
 /// direct dependency on `inference-wasm-linker`.
+///
+/// [`LinkOutput::wasm`] is self-contained for every value a merge produces, and
+/// says so. The one value in this crate that is not is [`link_resolved`]'s
+/// host-import pass-through: nothing was merged, and the module still declares
+/// the imports an embedder is asked to satisfy, which is that path's whole
+/// purpose. A caller must not read self-containment off the type.
 pub use inference_wasm_linker::{LinkOutput, LinkWarning};
 
 /// Re-export of the static-merge linker's policy inputs, so a caller of
@@ -864,6 +880,15 @@ pub fn link_with_warnings(
 /// modes, and the entry-point divergence from
 /// [`inference_wasm_linker::link_with_warnings`] — applies here unchanged.
 ///
+/// This is the merge over **linked** externals alone. A caller holding a
+/// [`wasm_link::ResolvedExternals`] must go through [`link_resolved`], which
+/// decides between this merge and the host-import pass-through: handing a host
+/// program's [`wasm_link::ResolvedExternals::module_bytes`] to this entry point
+/// drops the declared host set entirely, and the module's surviving imports are
+/// then reported as [`inference_wasm_linker::LinkError::UnsatisfiedImport`] —
+/// which names the import and never the wrong entry point, so the author debugs
+/// the program rather than the call.
+///
 /// # Errors
 ///
 /// The same conditions as [`link`], plus — under
@@ -911,22 +936,124 @@ pub fn link_with_options(
 /// failure or on the first surviving import, so [`link`] routes such a module
 /// through the linker — which validates it and reports the precise error —
 /// rather than taking the byte-identical no-op path.
+///
+/// Both misses have to collapse to `false` and not to an error, which is why
+/// this reads as a question rather than forwarding
+/// [`wasm_link::imports::module_imports`]'s own: a module that does not decode
+/// and a module that imports something are both modules the linker must see,
+/// and it is the linker that produces the precise diagnostic for either.
+///
+/// The reader it delegates to decodes the type section as well as the import
+/// section, so a module whose type section is malformed answers `false` where an
+/// import-section-only scan would have answered `true`. That is a deliberate
+/// narrowing and not a side effect: such a module is exactly the one the
+/// sentence above sends to the linker, it is strictly stricter — nothing that
+/// used to be refused is now accepted — and it is reachable only for bytes this
+/// compiler did not write, since a module it emitted decodes. The one shape
+/// that moves is a caller's hand-built module that frames an import section
+/// correctly and a type section wrongly, which used to be handed back
+/// unexamined.
 fn module_is_import_free(wasm: &[u8]) -> bool {
-    use inf_wasmparser::{Parser, Payload};
-    for payload in Parser::new(0).parse_all(wasm) {
-        match payload {
-            Ok(Payload::ImportSection(reader)) => {
-                // Any entry (well-formed or not) means the module is not yet
-                // self-contained, so it must not take the no-op path.
-                if reader.into_iter().next().is_some() {
-                    return false;
-                }
-            }
-            Ok(_) => {}
-            Err(_) => return false,
-        }
+    wasm_link::imports::module_imports(wasm).is_ok_and(|imports| imports.is_empty())
+}
+
+/// Links the output of [`wasm_link::resolve_external_modules`] into the shipped
+/// artifact, taking whichever of the two paths that resolution's answer calls
+/// for.
+///
+/// This is the single place the choice is made, and the rule for a caller that
+/// **ships** an artifact: reach the linker through here. A rule rather than an
+/// invariant of the crate — the merge entry points stay public and this
+/// workspace's test suites call [`link`], [`link_with_warnings`] and
+/// [`link_with_options`] directly, which is right for them, since a test
+/// exercising the merge over linked externals alone is asking for exactly that
+/// merge and that is verbatim the call this makes for it. `infc` is the only
+/// in-tree caller that ships. A host program handed to a merge entry point fails
+/// closed rather than shipping unchecked: its imports have no external to
+/// satisfy them, so the linker reports
+/// [`inference_wasm_linker::LinkError::UnsatisfiedImport`] instead of producing
+/// a module.
+///
+/// With no host imports, exactly [`link_with_options`] over the resolved bytes
+/// and contracts — byte for byte the path a build has always taken.
+///
+/// With host imports, the codegen output **is** the artifact: nothing was
+/// resolved, so there is nothing to merge, and the imports are meant to survive
+/// into the shipped module for an embedder to satisfy. The bytes are returned
+/// unchanged, after the check below.
+///
+/// # What the check is for
+///
+/// The pass-through is only sound because `main_wasm`'s import section is held
+/// to equal the declared host set, on `(module, field, params, results)`.
+///
+/// That equality is what makes a later `[host-imports]` allowlist a control
+/// rather than documentation. An allowlist is checked against the *driver's*
+/// set — the declarations the type checker collected — while the artifact's
+/// imports come from codegen's own `register_imports` walk. Two walks over two
+/// data structures agree only when something says so, and this is the only thing
+/// that says so before bytes ship: without it, an allowlist could pass while the
+/// artifact imported something else entirely. It is also what pins declared
+/// parameter count to emitted parameter count, which a later registration-cap
+/// check counts on — a cap measured against the declaration means nothing unless
+/// the artifact declares the same arity.
+///
+/// # The divergence it stands in for
+///
+/// [`link_with_warnings`] records that this crate's no-op path accepts main-side
+/// shapes the linker rejects, and argues the divergence is benign because a
+/// program with no import to satisfy has no declaration to contract. The host
+/// path breaks that premise outright: it has imports and it has declarations,
+/// and it still does not run the linker. So the same list of accepted shapes
+/// applies here with nothing to excuse it — a data or element segment, a start
+/// function, a table, a second memory, a float or `v128` in one of main's own
+/// signatures, and a duplicated or malformed `inference.spec_funcs` or
+/// `inference.hspecs` custom section all pass through unexamined.
+///
+/// What makes that safe is the scope of what the linker's main-side gate is for.
+/// It exists so the *merge* can assume a shape it can rewrite: index spaces it
+/// can renumber, sections it can concatenate, signatures it can re-emit. No
+/// merge happens here, and the bytes that ship are the bytes codegen wrote — so
+/// a shape the merge could not have handled is not a shape this path mishandled.
+/// The one property that genuinely must hold of a module nobody rewrote is that
+/// its unsatisfied imports are the ones the author asked for, and that is
+/// precisely what the equality check establishes.
+///
+/// # Errors
+///
+/// With no host imports, the same conditions as [`link`].
+///
+/// With host imports, a [`wasm_link::HostImportError`] if `main_wasm` does not
+/// decode, imports anything that is not a function, imports a function the
+/// program declared no host binding for, omits one it did declare, carries one
+/// at a different signature, or imports a two-level name twice — and if
+/// `externals` somehow carries resolved modules as well, which resolution
+/// refuses to produce.
+pub fn link_resolved(
+    main_wasm: &[u8],
+    externals: &wasm_link::ResolvedExternals,
+    options: &LinkOptions,
+) -> anyhow::Result<LinkOutput> {
+    if externals.host_imports.is_empty() {
+        return link_with_options(
+            main_wasm,
+            &externals.module_bytes(),
+            Some(&externals.contracts),
+            options,
+        );
     }
-    true
+    if !externals.modules.is_empty() {
+        return Err(wasm_link::HostImportError::MixedResolution {
+            modules: externals.modules.len(),
+            host_imports: externals.host_imports.len(),
+        }
+        .into());
+    }
+    wasm_link::imports::check_declared_host_imports(main_wasm, &externals.host_imports)?;
+    Ok(LinkOutput {
+        wasm: main_wasm.to_vec(),
+        warnings: Vec::new(),
+    })
 }
 
 /// Translates WebAssembly binary to Rocq (Coq) verification code.

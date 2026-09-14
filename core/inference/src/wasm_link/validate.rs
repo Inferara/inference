@@ -16,18 +16,22 @@
 //!
 //! Inference primitive types lower to WASM value types as `wasm-codegen` does:
 //! `bool`, `i8`/`u8`, `i16`/`u16`, `i32`/`u32`, arrays, and struct/enum pointers
-//! become `i32`; `i64`/`u64` become `i64`; `unit` produces no value. Keeping this
-//! in lock-step with codegen is what makes validation meaningful — a mismatch
-//! here is a real mismatch at link time.
+//! become `i32`; `i64`/`u64` become `i64`; `unit` produces no value, written
+//! either `()` or as the bare name. Keeping this in lock-step with codegen is
+//! what makes validation meaningful — a mismatch here is a real mismatch at
+//! link time, and since a host import's declared signature is compared against
+//! the one codegen emitted for it, a divergence is a refusal of a program in
+//! which nothing is wrong.
 //!
 //! The two lowerings are not yet identical, and what keeps the difference
 //! harmless is a rejection elsewhere rather than agreement here. Codegen lowers a
 //! `::`-qualified type that resolves to a struct or enum to an `i32` pointer,
 //! where this module has no arm for one and reports it unsupported; and codegen
-//! errors on a `Custom` name it cannot resolve, where this module lowers any
-//! `Custom` to `i32` on sight. Neither divergence is reachable today, because a
-//! `::`-qualified type on an `external fn` is rejected by the type checker before
-//! validation runs, and an unknown type name is rejected outright. That standoff
+//! errors on a `Custom` name it cannot resolve, where this module lowers every
+//! `Custom` but the reserved `unit` to `i32` on sight. Neither divergence is
+//! reachable today, because a `::`-qualified type on an `external fn` is
+//! rejected by the type checker before validation runs, and an unknown type name
+//! is rejected outright. That standoff
 //! is what [#425](https://github.com/Inferara/inference/issues/425) tracks: the
 //! rejection and these two arms have to move together, since lifting the
 //! rejection on its own would admit a declaration this module refuses and codegen
@@ -54,7 +58,10 @@ pub enum WasmValType {
 }
 
 impl WasmValType {
-    fn from_parser(val: ValType) -> Option<Self> {
+    /// The Inference-modelled counterpart of a decoded WASM value type, or
+    /// `None` for one no `external fn` declaration can name (a float, `v128`,
+    /// or a reference type).
+    pub(super) fn from_parser(val: ValType) -> Option<Self> {
         match val {
             ValType::I32 => Some(WasmValType::I32),
             ValType::I64 => Some(WasmValType::I64),
@@ -77,6 +84,18 @@ impl std::fmt::Display for WasmValType {
 pub struct DeclaredSignature {
     pub params: Vec<WasmValType>,
     pub results: Vec<WasmValType>,
+}
+
+/// Renders as `(i32, i32) -> (i64)`, the spelling every signature-mismatch
+/// diagnostic in this crate already uses.
+///
+/// Deliberately the *lowered* form rather than the source one: `u32` and `i32`
+/// are one WASM value type, and a diagnostic that echoed the source text would
+/// invite a reader to hunt for a difference the compiler cannot see.
+impl std::fmt::Display for DeclaredSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", render_signature(&self.params, &self.results))
+    }
 }
 
 /// Reason an `external fn` type could not be lowered to a WASM value type.
@@ -105,13 +124,21 @@ impl std::fmt::Display for LowerSignatureError {
 impl std::error::Error for LowerSignatureError {}
 
 /// Lowers an Inference type to its WASM value type, mirroring
-/// `wasm-codegen`'s `val_type_from_type_id`. `unit` lowers to `None`
-/// (no value); a struct or enum name lowers to an `i32` pointer. The mirror is
-/// not yet exact; see the module documentation for where it parts company and
-/// why that is currently unobservable.
+/// `wasm-codegen`'s `val_type_from_type_id`. `unit` lowers to `None` (no
+/// value) in both its spellings, `()` and the bare name; a struct or enum name
+/// lowers to an `i32` pointer. The mirror is not yet exact; see the module
+/// documentation for where it parts company and why that is currently
+/// unobservable.
 fn lower_value_type(arena: &AstArena, ty: TypeId) -> Result<Option<WasmValType>, LowerSignatureError> {
     match &arena[ty].kind {
         TypeNode::Simple(SimpleTypeKind::Unit) => Ok(None),
+        // `unit` is a builtin type *name*, so `-> unit` arrives here as a
+        // `Custom` while `-> ()` arrives as the simple kind above; both declare
+        // the empty result list. Codegen resolves the reserved name ahead of its
+        // struct/enum lookup, and this arm has to stand ahead of the pointer arm
+        // for the same reason — nothing a user declares can carry the name, so
+        // falling through would lower a builtin as a struct pointer.
+        TypeNode::Custom(ident) if arena[*ident].name == "unit" => Ok(None),
         TypeNode::Simple(
             SimpleTypeKind::Bool
             | SimpleTypeKind::I8
@@ -552,6 +579,46 @@ mod tests {
         let err = lower_first_extern("external fn f(a: ()) -> i32;")
             .expect_err("unit parameter must be rejected");
         assert_eq!(err, LowerSignatureError::UnitParameter);
+    }
+
+    /// `unit` written as a *name* lowers exactly as `()` does, in both
+    /// positions.
+    ///
+    /// The two spellings arrive here by different routes: the parser's unit
+    /// production fires only on the parentheses, so the bare name reaches this
+    /// lowering as the named type a struct or enum reaches it as. Read as a
+    /// struct it would answer `i32`, which is wrong twice over — a `-> unit`
+    /// declaration would claim a result the emitted import does not have, and a
+    /// `unit` parameter would be admitted for code generation to drop.
+    #[test]
+    fn unit_written_as_a_name_lowers_as_the_parenthesised_spelling_does() {
+        let sig = lower_first_extern("external fn f(a: i32) -> unit;").expect("lowers");
+        assert_eq!(sig.params, vec![WasmValType::I32]);
+        assert!(
+            sig.results.is_empty(),
+            "`-> unit` declares no result value, as `-> ()` does"
+        );
+
+        let err = lower_first_extern("external fn f(a: unit) -> i32;")
+            .expect_err("a `unit` parameter has no WASM representation, however it is spelled");
+        assert_eq!(err, LowerSignatureError::UnitParameter);
+    }
+
+    /// Every other named type is still an `i32` pointer: the reserved name is
+    /// resolved ahead of the struct lookup, not instead of it.
+    #[test]
+    fn a_name_that_is_not_unit_still_lowers_to_a_pointer() {
+        let sig = lower_first_extern(
+            "struct Unitary { x: i32; }\n\
+             external fn f(a: Unitary) -> Unitary;",
+        )
+        .expect("lowers");
+        assert_eq!(sig.params, vec![WasmValType::I32]);
+        assert_eq!(
+            sig.results,
+            vec![WasmValType::I32],
+            "a struct name that merely resembles the reserved one is an ordinary pointer"
+        );
     }
 
     #[test]

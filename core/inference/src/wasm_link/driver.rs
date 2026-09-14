@@ -16,7 +16,7 @@
 //! plumbing through the front end.
 
 use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -27,10 +27,8 @@ use inference_type_checker::typed_context::TypedContext;
 use inference_type_checker::{ExternKind, ExternOrigin, HOST_SEGMENT};
 use inference_wasm_linker::ImportWriteSet;
 
-use super::resolve::{
-    resolve_wasm_module, ManifestDeps, ModulePath, SearchPath, EMBEDDER_SUPPLIED_NEXT_STEP,
-};
-use super::validate::{lower_extern_signature, validate_extern, LoweredExtern};
+use super::resolve::{resolve_wasm_module, ManifestDeps, ModulePath, SearchPath};
+use super::validate::{lower_extern_signature, validate_extern, DeclaredSignature, LoweredExtern};
 
 /// Maximum size, in bytes, of a resolved external `.wasm` module.
 ///
@@ -52,21 +50,183 @@ pub struct ResolvedExternalModule {
     pub bytes: Vec<u8>,
 }
 
-/// Everything a program's `external fn` declarations resolve to: the modules to
-/// merge, and the write-set contracts the merge is checked against.
+/// An import this build satisfies nothing for: the two-level name it is emitted
+/// under, and the signature the program's calls were compiled against.
 ///
-/// The two travel together because they are two halves of one answer. The bytes
-/// alone let a caller link without a check; the contracts alone describe imports
-/// nothing satisfies. Handing them over as one value keeps a caller from
+/// The signature travels with the name because it is the only description of the
+/// function that survives the build. A linked external is checked against the
+/// `.wasm` that provides it and then merged away; a host import ships, and the
+/// declaration is all anyone — the artifact check below, a build log, an
+/// embedder's author — ever gets to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostImport {
+    /// The import module string an embedder registers the provider under, as the
+    /// emitted `(import "<module>" "<field>" …)` entry spells it.
+    pub module: String,
+    /// The export field the embedder offers under that module.
+    pub field: String,
+    /// The lowered signature every declaration of this pair agrees on.
+    pub signature: DeclaredSignature,
+}
+
+/// Renders as ``` `env`.`clock_ms` ```: the two names quoted separately, joined
+/// by a dot.
+///
+/// Separately quoted because they are two strings and not one dotted name —
+/// `module` is what an embedder registers a provider under, `field` is the
+/// function offered there, and a reader copying either into a registration call
+/// has to see where one ends. This forwards to [`host_import_label`], which is
+/// what every site that renders the pair as a *single label* calls — the
+/// mixed-program refusal and every [`super::imports::HostImportError`] arm — so
+/// those cannot come to spell one pair differently. The two host `Conflicting*`
+/// arms below are deliberately not among them: they name the field and the
+/// module separately, mirroring
+/// [`ExternalResolutionError::ConflictingWriteSet`], so a reader who already
+/// knows the linked diagnostic reads the host one without relearning it. The
+/// build-log line that renders a whole [`HostImport`] arrives with a later
+/// change.
+impl std::fmt::Display for HostImport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", host_import_label(&self.module, &self.field))
+    }
+}
+
+/// The two ways out of a mixed program, each stated with the consequence of
+/// taking it, in the order that fits the modules the program binds.
+///
+/// Neither half can be offered as a bare instruction. Moving the linked modules
+/// to host imports does not merely change how a function is provided: the
+/// `.wasm` files stop being read, nothing warns about it, and the embedder
+/// becomes responsible for every one of those functions — which is the
+/// substitution the reservation exists to prevent, so the compiler must not
+/// recommend it without saying what it costs. Moving the other way is a plain
+/// edit, but "bind none of them to `host::`" has to say what to provide instead
+/// or it reads as an instruction to delete the bindings.
+///
+/// Each half is stated in the unit the work is actually done in, which is not
+/// the unit its own list is printed in. The refusal names host imports one
+/// *function* at a time, because a declaration is what an author wrote; a
+/// `.wasm` file, though, is supplied one *module* at a time, so two host
+/// functions of one module become one file and not two, and a remedy counted in
+/// functions would ask for a file that has no clause to come from. The other
+/// direction has the mirror problem: the list beside it is of linked modules,
+/// so "every one of these functions" would have no antecedent at all, and the
+/// functions it means are named nowhere — hence the modules are named again
+/// inside the sentence.
+///
+/// A linked module whose name is a `::` path has no host spelling at all — a
+/// host module is the single flat string an embedder registers — so for those
+/// the first half is not a rewrite of what is written but a renaming exercise,
+/// and offering it first would send the author straight into a second refusal.
+/// The other direction leads whenever any linked name is a path. Where no
+/// linked name is a path, every one of them *is* a legal host module string, so
+/// the clauses that would have worked are spelled out rather than templated: a
+/// `<module>` placeholder printed at an author whose module names are all in
+/// hand buries the one fix under a form to fill in.
+fn mixed_remedy(host_modules: &[String], linked: &[String]) -> String {
+    let to_linked = format!(
+        "drop `{HOST_SEGMENT}::` from the clauses above and provide a `.wasm` file for each of \
+         the modules they then name ({}) — one file per module, never one per function",
+        quoted_modules(host_modules)
+    );
+    let to_host = format!(
+        "the embedder then has to supply every function this program binds to {} instead of the \
+         `.wasm` files this build would have linked",
+        quoted_modules(linked)
+    );
+    if linked.iter().any(|module| module.contains("::")) {
+        format!(
+            "Take the program one way or the other: {to_linked}; or move every extern to a host \
+             import, which for the linked modules is not a rewrite of the clauses that bind them \
+             — a host module is one flat segment, never a `::` path — so each linked module \
+             listed here needs a new flat name the embedder registers, and {to_host}"
+        )
+    } else {
+        format!(
+            "Take the program one way or the other: bind every extern to its host spelling ({}), \
+             and {to_host}; or {to_linked}",
+            host_spellings(linked)
+        )
+    }
+}
+
+/// Renders each linked module name as the host clause it would be bound by:
+/// ``` `host::mathlib`, `host::crypto` ```.
+///
+/// Only correct where every name is a single segment, which is the one branch of
+/// [`mixed_remedy`] that calls it: a `::` path prefixed with `host::` names no
+/// host module at all, and printing it would be advice that earns a second
+/// refusal.
+fn host_spellings(linked: &[String]) -> String {
+    linked
+        .iter()
+        .map(|module| format!("`{HOST_SEGMENT}::{module}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Renders a list of logical module names as a backticked, comma-separated list.
+fn quoted_modules(modules: &[String]) -> String {
+    modules
+        .iter()
+        .map(|module| format!("`{module}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// How a diagnostic names one host import, for the message sites that hold the
+/// pair without a [`HostImport`] around it.
+///
+/// Shared with [`HostImport`]'s own [`std::fmt::Display`], which is the whole
+/// point: the refusal that fires *before* any signature is lowered has only the
+/// two names, and it must still spell them the way every later message that
+/// renders the pair as one label does. The two host `Conflicting*` arms are
+/// deliberately not among those — they name the field and the module
+/// separately, as [`ExternalResolutionError::ConflictingWriteSet`] does for the
+/// linked form — so a reader meeting one of them is reading a phrasing they
+/// already know rather than a second convention.
+pub(super) fn host_import_label(module: &str, field: &str) -> String {
+    format!("`{module}`.`{field}`")
+}
+
+/// Everything a program's `external fn` declarations resolve to: the modules to
+/// merge, the write-set contracts the merge is checked against, and the imports
+/// this build satisfies nothing for.
+///
+/// The first two travel together because they are two halves of one answer. The
+/// bytes alone let a caller link without a check; the contracts alone describe
+/// imports nothing satisfies. Handing them over as one value keeps a caller from
 /// reaching the linker with the first and not the second.
+///
+/// `host_imports` is not a third half of that answer, and not a fourth kind of
+/// the same thing. A host import is a declaration this build satisfies
+/// *nothing* for: it contributes no bytes to merge, because there is no file,
+/// and no write-set contract to check, because a contract is checked against a
+/// merged body and none is merged. It is carried here because it is what the
+/// same walk over the same declarations found, and because the one caller that
+/// decides how to link needs both answers from one value — a caller that saw
+/// only an empty `modules` would conclude the program has no externals at all
+/// and ship the artifact unchecked.
+///
+/// The two are mutually exclusive today: a program binding some externs to host
+/// modules and others to linked ones is refused by
+/// [`ExternalResolutionError::MixedHostAndLinked`] before either is resolved.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedExternals {
-    /// One entry per distinct logical module the program binds, sorted by name.
+    /// One entry per distinct **linked** logical module the program binds,
+    /// sorted by name. Empty for a host-only program, whose bindings are in
+    /// `host_imports`.
     pub modules: Vec<ResolvedExternalModule>,
-    /// One entry per distinct `(module, field)` the program binds, sorted by
-    /// that pair. Every satisfied import of the codegen output has an entry, so
-    /// the checked link mode holds all of them to a declaration.
+    /// One entry per distinct `(module, field)` the program binds to a
+    /// **linked** module, sorted by that pair. Every satisfied import of the
+    /// codegen output has an entry, so the checked link mode holds all of them
+    /// to a declaration. A host import contributes none: nothing is merged, so
+    /// there is no body to check a write set against — its declarations are
+    /// reconciled against the artifact by [`super::imports`] instead.
     pub contracts: Vec<ImportWriteSet>,
+    /// One entry per distinct `(module, field)` the program binds to a host
+    /// module, sorted by that pair. Empty whenever `modules` is not.
+    pub host_imports: Vec<HostImport>,
 }
 
 impl ResolvedExternals {
@@ -155,26 +315,89 @@ pub enum ExternalResolutionError {
         /// look.
         second_file: String,
     },
-    /// A bound extern names a module the embedder supplies at run time
-    /// (`use { f } from host::<module>;`), which this resolver cannot honour.
+    /// The program binds some externs to host modules and others to linked
+    /// `.wasm` modules.
     ///
-    /// Resolution's only currency is a file. Left to run, this loop would look
-    /// the module up on disk and, if a `.wasm` of that name happened to be on
-    /// the search path — `env` is the canonical host-module name, so the
-    /// collision is likely rather than exotic — link it in and strip the import
-    /// the author asked an embedder to satisfy. That is a silent substitution of
-    /// one provider for another, with no diagnostic anywhere, so a host binding
-    /// is refused outright until the pipeline can carry it.
+    /// Each half is supported on its own; together they are not. The linker's
+    /// output is a module with **no import section** — satisfying every import
+    /// is what merging means — so a host import that reached the merge would be
+    /// reported unsatisfied, and one that survived it would have to survive a
+    /// pass whose whole purpose is to leave nothing behind. Neither exists yet.
     ///
-    /// The message carries the reservation's rename remedy as well, the one the
-    /// two type-checker refusals of a malformed `host` clause end with. This is
-    /// the only diagnostic a two-segment `from host::io;` ever reaches — that
-    /// shape is byte-for-byte a well-formed host binding, so the front end says
-    /// nothing about it — and the author who arrives here is as likely to be
-    /// someone whose linked `host/io.wasm` was reclassified by the reservation
-    /// as someone who wants an embedder. Told only that the feature is pending,
-    /// the first of the two would wait on an issue when a rename is the answer.
-    HostImportUnsupported { module: String },
+    /// Decided before any filesystem access, which is the point of raising it
+    /// here rather than letting resolution run first. A mixed program is very
+    /// likely to have a missing `.wasm` as well — the author is midway through
+    /// changing how a module is provided — and a `NotFound` naming that file
+    /// would send them to fix a path when the clause is what has to change.
+    MixedHostAndLinked {
+        /// Every distinct host import the program declares, each already
+        /// rendered for the message the way [`HostImport`] renders itself.
+        /// Rendered rather than typed because this refusal fires before any
+        /// signature is lowered: an unlowerable declaration must not decide
+        /// which of the two errors the user sees.
+        host: Vec<String>,
+        /// Every distinct import module string the host bindings name, sorted.
+        ///
+        /// Carried beside `host` rather than derived from it because `host`
+        /// holds rendered labels and a module string must survive as a name: the
+        /// remedy counts `.wasm` files in modules, and one module answering two
+        /// host functions is one file.
+        host_modules: Vec<String>,
+        /// Every distinct linked logical module the program binds, sorted.
+        linked: Vec<String>,
+    },
+    /// Two declarations of one host `(module, field)` lower to different
+    /// signatures.
+    ///
+    /// A linked external has a `.wasm` file both declarations are checked
+    /// against, so two that disagree are caught as a mismatch against the
+    /// library and neither is trusted on its own. A host import has no such
+    /// oracle: the declarations are the only description of the function, and
+    /// nothing in the build can say which is right.
+    ///
+    /// Left to run, the disagreement is not resolved but duplicated. Codegen
+    /// interns an import on `(module, field, type_idx)`, so two signatures are
+    /// two type indices and therefore two separate import entries of the same
+    /// two-level name — which no embedder can satisfy twice.
+    ConflictingHostSignature {
+        module: String,
+        field: String,
+        /// The file holding the declaration seen first, already rendered for
+        /// the message: a backticked file label, or `the entry file` for the
+        /// document with no module path.
+        first_file: String,
+        /// The file holding the declaration that disagreed with it, rendered
+        /// the way `first_file` is. One file may hold both declarations, in
+        /// which case the two read alike, which is the truth about where to
+        /// look.
+        second_file: String,
+        /// The first declaration's lowered signature. Lowered, so `u32` and
+        /// `i32` render alike and a difference shown here is a real one.
+        ///
+        /// Boxed, as [`ExternalResolutionError::Validate`]'s payload is and for
+        /// the same reason: a pair of signatures held inline would dominate the
+        /// size of every `Err` this module returns, including the common ones.
+        first: Box<DeclaredSignature>,
+        /// The second declaration's lowered signature, boxed as `first` is.
+        second: Box<DeclaredSignature>,
+    },
+    /// Two declarations of one host `(module, field)` declare different write
+    /// sets: one marks a parameter `mut` and the other does not.
+    ///
+    /// The linked form of this ([`ExternalResolutionError::ConflictingWriteSet`])
+    /// is about a merged body being checked once against two contradictory
+    /// contracts. Nothing is merged here, so the harm is the other way round: the
+    /// two declarations are a reader's only account of what the imported function
+    /// may write through, and calls in both files are compiled against their own.
+    ConflictingHostWriteSet {
+        module: String,
+        field: String,
+        /// The file holding the declaration seen first, rendered as
+        /// [`ExternalResolutionError::ConflictingHostSignature`] renders it.
+        first_file: String,
+        /// The file holding the declaration that disagreed with it.
+        second_file: String,
+    },
 }
 
 impl std::fmt::Display for ExternalResolutionError {
@@ -234,32 +457,62 @@ impl std::fmt::Display for ExternalResolutionError {
                  parameters that body may write through; mark the same parameters `mut` in both \
                  declarations"
             ),
-            ExternalResolutionError::HostImportUnsupported { module } => {
-                // Through the classifier's own inverse, so the clause quoted
-                // back is the clause the front end would have accepted.
-                let clause = ExternKind::Host.source_spelling(module);
-                write!(
-                    f,
-                    "`use {{ … }} from {clause};` binds an import the embedder \
-                     supplies. {EMBEDDER_SUPPLIED_NEXT_STEP} Until then, \
-                     refusing the build is the only safe answer — a file named `{module}.wasm` \
-                     on the search path would otherwise be merged in and the import stripped, \
-                     silently replacing the provider you asked for. If you meant the linked \
-                     `.wasm` module `{clause}`, rename it: a module path whose first segment is \
-                     `{HOST_SEGMENT}` is reserved in this position and no longer resolves to a \
-                     file"
-                )
-            }
+            ExternalResolutionError::MixedHostAndLinked {
+                host,
+                host_modules,
+                linked,
+            } => write!(
+                f,
+                "host imports and statically linked modules cannot be combined yet. This program \
+                 declares host imports ({}) and also binds externs to linked modules ({}). The \
+                 linker produces a module with no import section, so a host import cannot \
+                 survive a link step today; supporting both needs the linker's import-survivor \
+                 path, which is tracked separately. {}",
+                host.join(", "),
+                quoted_modules(linked),
+                mixed_remedy(host_modules, linked),
+            ),
+            ExternalResolutionError::ConflictingHostSignature {
+                module,
+                field,
+                first_file,
+                second_file,
+                first,
+                second,
+            } => write!(
+                f,
+                "conflicting signatures for host import `{field}` of module `{module}`: \
+                 {first_file} declares `{first}` and {second_file} declares `{second}`. A host \
+                 import has no `.wasm` file to check both against, and two declarations of one \
+                 (module, field) at different signatures are emitted as two separate imports of \
+                 the same name — which no embedder can satisfy twice. Make the declarations agree"
+            ),
+            ExternalResolutionError::ConflictingHostWriteSet {
+                module,
+                field,
+                first_file,
+                second_file,
+            } => write!(
+                f,
+                "conflicting write sets for host import `{field}` of module `{module}`: \
+                 {first_file} and {second_file} declare it with different `mut` parameters. Both \
+                 declarations describe the same imported function to a reader of this program, \
+                 and there is no merged body to check a write set against, so the two must not \
+                 disagree about what it may write through; mark the same parameters `mut` in \
+                 both declarations"
+            ),
         }
     }
 }
 
 impl std::error::Error for ExternalResolutionError {}
 
-/// Resolves, validates, and reads every external `.wasm` module a program binds.
+/// Resolves, validates, and reads every external `.wasm` module a program binds,
+/// and collects the imports it leaves for an embedder to satisfy.
 ///
 /// Returns the resolved modules together with the write-set contracts their
-/// declarations state, as one [`ResolvedExternals`].
+/// declarations state, and the host imports no file backs, as one
+/// [`ResolvedExternals`].
 ///
 /// One resolved module per distinct **logical module** the program
 /// binds. Two externs from the same logical module yield a single entry, and a
@@ -282,16 +535,29 @@ impl std::error::Error for ExternalResolutionError {}
 /// import on. Two declarations of one pair that disagree on that set are
 /// rejected rather than reconciled; see [`record_write_set`].
 ///
+/// # Host imports
+///
+/// A declaration bound with `use { f } from host::<module>;` names a provider the
+/// embedder registers, so there is nothing on disk to resolve it against and no
+/// path is probed for it. Its declared signature is still lowered — see
+/// `resolve_host_imports` for why that is the one step that must not be skipped
+/// — and the pair it binds is returned in
+/// [`ResolvedExternals::host_imports`] instead of as bytes.
+///
+/// The two kinds are not mixed: a program binding some externs to host modules
+/// and others to linked ones is refused, before any filesystem access, by
+/// [`ExternalResolutionError::MixedHostAndLinked`].
+///
 /// # Errors
 ///
-/// Returns [`ExternalResolutionError::HostImportUnsupported`] for a bound
-/// extern whose body the embedder supplies, before any filesystem access — no
-/// candidate path is probed and no `.wasm` is read, because resolving one is
-/// exactly the substitution that refusal exists to prevent.
+/// Returns [`ExternalResolutionError::MixedHostAndLinked`] for a program that
+/// binds both kinds, decided ahead of every other check so that a `.wasm` this
+/// build cannot find does not mask the clause that has to change.
 ///
 /// Otherwise returns an [`ExternalResolutionError`] if any extern fails to
 /// resolve, validate, lower its signature, or read its bytes, or if two
-/// declarations of one `(module, field)` declare different write sets.
+/// declarations of one `(module, field)` disagree about its write set or — for a
+/// host import — about its signature.
 pub fn resolve_external_modules(
     typed_context: &TypedContext,
     search_path: &SearchPath,
@@ -303,6 +569,19 @@ pub fn resolve_external_modules(
     }
 
     let arena = typed_context.arena();
+
+    let (host_origins, linked_origins): (Vec<&ExternOrigin>, Vec<&ExternOrigin>) = origins
+        .iter()
+        .partition(|origin| origin.kind == ExternKind::Host);
+    if !host_origins.is_empty() && !linked_origins.is_empty() {
+        return Err(mixed_provider_refusal(&host_origins, &linked_origins));
+    }
+    if !host_origins.is_empty() {
+        return Ok(ResolvedExternals {
+            host_imports: resolve_host_imports(arena, &host_origins)?,
+            ..ResolvedExternals::default()
+        });
+    }
 
     // Cache reads/validations by resolved path so a physical file is read once,
     // even when two logical modules resolve to it.
@@ -317,15 +596,7 @@ pub fn resolve_external_modules(
     // because one library may back several imports with different write sets.
     let mut contracts: BTreeMap<(String, String), DeclaredWriteSet> = BTreeMap::new();
 
-    for origin in &origins {
-        // Fail closed ahead of resolution rather than after it; what running
-        // the loop would silently substitute is on
-        // `ExternalResolutionError::HostImportUnsupported`.
-        if origin.kind == ExternKind::Host {
-            return Err(ExternalResolutionError::HostImportUnsupported {
-                module: origin.logical_module.clone(),
-            });
-        }
+    for origin in linked_origins {
         let module_path = parse_module_path(&origin.logical_module)?;
         let resolved = resolve_wasm_module(&module_path, search_path, manifest_deps)
             .map_err(ExternalResolutionError::Resolve)?;
@@ -342,23 +613,7 @@ pub fn resolve_external_modules(
             bytes
         };
 
-        // Recover the declared signature from the *exact* declaration this
-        // binding attaches to, by `DefId`. Two same-named externs (e.g. a
-        // top-level and a spec-inner `sort`) must not collide into one slot:
-        // validating the resolved library against a same-named sibling's
-        // signature would either reject a matching library or accept a
-        // mismatching one. Only the bound declaration is the source of truth.
-        let (args, returns) = extern_declaration(arena, origin.decl).ok_or_else(|| {
-            ExternalResolutionError::MissingDeclaration {
-                export_field: origin.export_field.clone(),
-            }
-        })?;
-        let lowered = lower_extern_signature(arena, &args, returns).map_err(|error| {
-            ExternalResolutionError::Signature {
-                export_field: origin.export_field.clone(),
-                error,
-            }
-        })?;
+        let lowered = lower_declaration(arena, origin)?;
 
         validate_extern(&bytes, &origin.export_field, &lowered.signature).map_err(|error| {
             ExternalResolutionError::Validate {
@@ -381,6 +636,147 @@ pub fn resolve_external_modules(
     Ok(ResolvedExternals {
         modules: by_module.into_values().collect(),
         contracts: contracts.into_values().map(|d| d.write_set).collect(),
+        host_imports: Vec::new(),
+    })
+}
+
+/// Builds the refusal of a program that binds both kinds of provider, naming
+/// every import and every module involved.
+///
+/// Both lists in full rather than one example of each. The author has to decide
+/// which way to take the program, and the size of each list is the decision: one
+/// host import among nine linked modules reads very differently from the
+/// reverse, and an example of each hides that.
+fn mixed_provider_refusal(
+    host_origins: &[&ExternOrigin],
+    linked_origins: &[&ExternOrigin],
+) -> ExternalResolutionError {
+    let host: BTreeSet<String> = host_origins
+        .iter()
+        .map(|origin| host_import_label(&origin.logical_module, &origin.export_field))
+        .collect();
+    let host_modules: BTreeSet<String> = host_origins
+        .iter()
+        .map(|origin| origin.logical_module.clone())
+        .collect();
+    let linked: BTreeSet<String> = linked_origins
+        .iter()
+        .map(|origin| origin.logical_module.clone())
+        .collect();
+    ExternalResolutionError::MixedHostAndLinked {
+        host: host.into_iter().collect(),
+        host_modules: host_modules.into_iter().collect(),
+        linked: linked.into_iter().collect(),
+    }
+}
+
+/// Collects the host imports a program declares, holding every declaration of
+/// one `(module, field)` to one description of it.
+///
+/// Nothing here touches the filesystem: a host module names a provider an
+/// embedder registers, and probing the search path for a file of that name is
+/// exactly the substitution this pipeline must never make.
+///
+/// Signature lowering is kept, and is the one step that must not be skipped with
+/// the rest. It is the only refusal of a `unit` parameter or a type form that
+/// has no WASM value representation on the extern path, and codegen's
+/// `import_param_types` emits the import assuming that shape has already been
+/// rejected — a `unit` parameter would silently occupy no slot there and the
+/// emitted import would have fewer parameters than the declaration a reader
+/// sees.
+///
+/// Two declarations of one pair must agree, because there is no `.wasm` to check
+/// either against and because codegen interns an import on
+/// `(module, field, type_idx)`: two signatures become two import entries of one
+/// name, which no embedder can satisfy twice. The comparison is on the *lowered*
+/// signature, so a `u32` declaration and an `i32` one agree — they are one WASM
+/// type and one import.
+///
+/// The write set is compared the way [`record_write_set`] compares a linked
+/// external's: on the `mut` parameter indices alone. Declared parameter *names*
+/// are deliberately not part of the agreement — they are how a write-set
+/// diagnostic quotes a parameter, they take no part in codegen's interning, and
+/// two files that call one imported argument `buf` and `out` have not disagreed
+/// about anything the artifact can express.
+fn resolve_host_imports(
+    arena: &AstArena,
+    origins: &[&ExternOrigin],
+) -> Result<Vec<HostImport>, ExternalResolutionError> {
+    let mut declared: BTreeMap<(String, String), DeclaredHostImport> = BTreeMap::new();
+    for origin in origins {
+        let lowered = lower_declaration(arena, origin)?;
+        let key = (origin.logical_module.clone(), origin.export_field.clone());
+        match declared.entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert(DeclaredHostImport {
+                    decl: origin.decl,
+                    lowered,
+                });
+            }
+            Entry::Occupied(slot) => {
+                let first = slot.get();
+                if first.lowered.signature != lowered.signature {
+                    return Err(ExternalResolutionError::ConflictingHostSignature {
+                        module: origin.logical_module.clone(),
+                        field: origin.export_field.clone(),
+                        first_file: declaring_file(arena, first.decl),
+                        second_file: declaring_file(arena, origin.decl),
+                        first: Box::new(first.lowered.signature.clone()),
+                        second: Box::new(lowered.signature),
+                    });
+                }
+                if first.lowered.mut_params != lowered.mut_params {
+                    return Err(ExternalResolutionError::ConflictingHostWriteSet {
+                        module: origin.logical_module.clone(),
+                        field: origin.export_field.clone(),
+                        first_file: declaring_file(arena, first.decl),
+                        second_file: declaring_file(arena, origin.decl),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(declared
+        .into_iter()
+        .map(|((module, field), entry)| HostImport {
+            module,
+            field,
+            signature: entry.lowered.signature,
+        })
+        .collect())
+}
+
+/// One host `(module, field)`'s first declaration, tagged with the declaration
+/// it came from so a later disagreement can name both files.
+struct DeclaredHostImport {
+    decl: DefId,
+    lowered: LoweredExtern,
+}
+
+/// Lowers the signature of the *exact* declaration a binding attaches to.
+///
+/// Resolved by [`DefId`] rather than by bare name. Two same-named externs — a
+/// top-level and a spec-inner `sort` with divergent signatures — must not
+/// collide into one slot: validating a resolved library against a same-named
+/// sibling's signature would either reject a matching library or accept a
+/// mismatching one, and comparing two host declarations that are not the two the
+/// program bound would invent a disagreement or hide one. Only the bound
+/// declaration is the source of truth.
+fn lower_declaration(
+    arena: &AstArena,
+    origin: &ExternOrigin,
+) -> Result<LoweredExtern, ExternalResolutionError> {
+    let (args, returns) = extern_declaration(arena, origin.decl).ok_or_else(|| {
+        ExternalResolutionError::MissingDeclaration {
+            export_field: origin.export_field.clone(),
+        }
+    })?;
+    lower_extern_signature(arena, &args, returns).map_err(|error| {
+        ExternalResolutionError::Signature {
+            export_field: origin.export_field.clone(),
+            error,
+        }
     })
 }
 
@@ -631,6 +1027,28 @@ mod tests {
         .to_string();
         assert!(rendered.contains("arith.wasm"), "names the path: {rendered}");
         assert!(rendered.contains("missing"), "carries the io error: {rendered}");
+    }
+
+    /// The one spelling of a host import, asserted directly because nothing in
+    /// this build calls it: the messages below reach it through
+    /// [`host_import_label`], and the inventory line that renders a whole
+    /// [`HostImport`] belongs to a later phase. Left unpinned, the two halves
+    /// could come to be quoted differently — and a reader copying a module name
+    /// out of a build log into an embedder's registration call has to get back
+    /// exactly the string the artifact carries.
+    #[test]
+    fn host_import_renders_both_names_quoted_separately() {
+        let rendered = HostImport {
+            module: "fprime_core".into(),
+            field: "telemetry".into(),
+            signature: DeclaredSignature {
+                params: vec![WasmValType::I32],
+                results: Vec::new(),
+            },
+        }
+        .to_string();
+        assert_eq!(rendered, "`fprime_core`.`telemetry`");
+        assert_eq!(rendered, host_import_label("fprime_core", "telemetry"));
     }
 
     #[test]

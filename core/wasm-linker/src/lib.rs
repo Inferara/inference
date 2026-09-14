@@ -1049,7 +1049,14 @@ pub struct LinkOptions {
 /// ignore, which positional access would hide.
 #[derive(Debug, Clone)]
 pub struct LinkOutput {
-    /// The unified, self-contained module.
+    /// The module bytes to ship.
+    ///
+    /// Self-contained — nothing left for anyone to satisfy — for every value a
+    /// merge here produces, because satisfying each import is what merging
+    /// means. That is a property of the merge and not of the type: the fields
+    /// are public, so a caller may assemble one for a module it never handed to
+    /// a merge, and a module that still declares imports is then exactly what
+    /// this holds.
     pub wasm: Vec<u8>,
     /// Warnings raised during the merge. Empty is the common case.
     pub warnings: Vec<LinkWarning>,
