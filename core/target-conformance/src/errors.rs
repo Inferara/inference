@@ -66,7 +66,78 @@ impl fmt::Display for IndexKind {
     }
 }
 
-/// One reason a module cannot be loaded by a `SpaceWasm` embedder.
+/// Which of the two index spaces the interpreter narrows without checking.
+///
+/// Both are narrowed by one accessor each — `Module::get_func_ref`
+/// (`src/module.rs:383-389`) and `Module::get_global_ref`
+/// (`src/module.rs:423-429`) — and the two are told apart because the count to
+/// shrink and the section to look in are different for each, and a finding that
+/// named neither would leave the reader to guess which of the two a module of
+/// 65,536 definitions had too many of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexSpace {
+    /// The module's own functions, numbered after the imported ones.
+    Function,
+    /// The module's own globals, numbered after the imported ones.
+    Global,
+}
+
+impl fmt::Display for IndexSpace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Function => f.write_str("function"),
+            Self::Global => f.write_str("global"),
+        }
+    }
+}
+
+/// Where a module names a defined function or a defined global.
+///
+/// Five places do, and every one of them resolves through the two narrowing
+/// accessors: a `call` operand (`src/compiler.rs:202-206`), a `global.get` or
+/// `global.set` operand (`src/text.rs:631-634`), an export descriptor
+/// (`src/module.rs:753-778`), an element-segment entry (`src/module.rs:870-874`)
+/// and the `start` section (`src/module.rs:299-303`). The cross-module link
+/// path (`src/imports.rs:71,169`) reaches them too, but with an index it reads
+/// back out of the *exporting* module's export descriptor, so a refusal at that
+/// module's export section already covers it. The first two are edited in a
+/// function body and the rest in three different sections, which is why the
+/// refusal names the place: a reader told the wrong one goes looking in a part
+/// of the module that names nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferenceSite {
+    /// An instruction in the named function's body.
+    Body {
+        /// The function, named from the `name` section where it has one.
+        function: String,
+    },
+    /// The descriptor of the named export.
+    Export {
+        /// The export's name.
+        name: String,
+    },
+    /// An entry of the element segment at this index.
+    ElementSegment {
+        /// The segment's index in the element section.
+        index: u32,
+    },
+    /// The `start` section.
+    Start,
+}
+
+impl fmt::Display for ReferenceSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Body { function } => write!(f, "the body of function `{function}`"),
+            Self::Export { name } => write!(f, "the export `{name}`"),
+            Self::ElementSegment { index } => write!(f, "element segment {index}"),
+            Self::Start => f.write_str("the start section"),
+        }
+    }
+}
+
+/// One reason a module is not one a `SpaceWasm` embedder can load and run as
+/// written.
 ///
 /// The `Display` here is the finding alone — what, and both numbers. The
 /// sentence naming the authority and the sentence naming the remedy are
@@ -144,6 +215,32 @@ pub enum Violation {
         /// for a `br_table`, because the decoder writes both into the same
         /// field. The largest one the function names is the one reported.
         index: u32,
+    },
+    /// A reference to a defined function or global at a position wider than the
+    /// 16-bit IR word the interpreter narrows it to without checking.
+    ///
+    /// The one refusal in this crate that is stricter than the decoder: 0.7.1
+    /// loads such a module and runs it against a different definition.
+    #[error(
+        "defined index truncated: {site} names {space} {index}, which is definition \
+         {position} among the module's own; SpaceWasm holds a defined index in one 16-bit \
+         IR word and does not check the narrowing, so the reference resolves to definition \
+         {} instead",
+        .position % (MAX_IR_INDEX + 1)
+    )]
+    IndexTruncated {
+        /// Which index space the reference is in, since the finding has to say
+        /// which of the two the module has too many of.
+        space: IndexSpace,
+        /// Where the module names it.
+        site: ReferenceSite,
+        /// The index as the module writes it, imported entries included. The
+        /// largest one a site names is the one reported, as with
+        /// [`Violation::IndexTooLarge`].
+        index: u32,
+        /// The same reference counted from the module's first defined entry,
+        /// which is the number the interpreter narrows.
+        position: u32,
     },
     /// A branch discards more operand words than the jump target's field holds.
     #[error(
@@ -261,6 +358,15 @@ impl Violation {
                  count in one 16-bit immediate. The cap is on the compiled form, not on the \
                  WebAssembly encoding, which admits a 32-bit value for both."
             }
+            Self::IndexTruncated { .. } => {
+                "This is the one refusal this crate makes that the decoder does not: SpaceWasm \
+                 0.7.1 narrows a defined function or global index into the same 16-bit IR word \
+                 its other immediates use, and unlike those it does not check the narrowing \
+                 (`Module::get_func_ref` and `Module::get_global_ref`). The module loads, and \
+                 every reference past the cap runs against the definition 65536 below it. A \
+                 build that refuses is better for a flight target than one that loads and \
+                 calls the wrong function, so this crate is deliberately stricter here."
+            }
             Self::BranchUnwindTooDeep { .. } => {
                 "SpaceWasm encodes the operands a branch discards in a single byte of its jump \
                  target word. The count is in words, so an i64 or f64 held live across the \
@@ -296,13 +402,14 @@ impl Violation {
 
     /// The one thing to change, in the source where there is one.
     ///
-    /// Five of these shapes are not producible by this compiler at all. Their
+    /// Six of these shapes are not producible by this compiler at all. Their
     /// remedy splits on provenance instead of pointing at a source edit the
     /// author cannot make: either the module was linked in, or a compiler bug
     /// produced it, and only the person holding the build knows which. Four of
-    /// the five share one sentence because there is nothing else to say. The
-    /// fifth, `IndexTooLarge`, splits the same way and still names the edit,
-    /// because for that one there is one and it differs by instruction.
+    /// the six share one sentence because there is nothing else to say. The
+    /// other two, `IndexTooLarge` and `IndexTruncated`, split the same way and
+    /// still name the edit, because for those there is one: a narrower
+    /// instruction for the first, a smaller module for the second.
     #[must_use]
     pub fn remedy(&self) -> &'static str {
         match self {
@@ -332,6 +439,12 @@ impl Violation {
                      compiler bug."
                 }
             },
+            Self::IndexTruncated { .. } => {
+                "This compiler emits one global and nowhere near 65,536 functions, so these \
+                 bytes came from a linked module or a post-build step: split that module, or \
+                 link fewer of them, so no definition sits at 65,536 or beyond. If `infc` \
+                 produced it, please report a compiler bug."
+            }
             Self::BranchUnwindTooDeep { .. } => {
                 "Hold fewer operands across the branch: bind them to locals before it, or \
                  split the block so the jump crosses less of the stack."
@@ -396,7 +509,8 @@ impl Violations {
     #[must_use]
     pub fn render(&self, subject: &str, consequence: &str) -> String {
         let mut out = format!(
-            "SpaceWasm conformance failed: {subject} cannot be loaded by a SpaceWasm embedder.\n"
+            "SpaceWasm conformance failed: {subject} is not a module a SpaceWasm embedder can \
+             load and run as written.\n"
         );
         if !consequence.is_empty() {
             out.push_str(consequence);
