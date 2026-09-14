@@ -41,16 +41,16 @@ mod target_identity_tests {
     /// analogue here. One constant tuned to Stellar's rate would leave
     /// `SpaceWasm` almost unguarded.
     ///
-    /// Measured over the 146 fixtures the corpus holds today: `SpaceWasm`
-    /// compares 130 and refuses 16, all 16 on non-determinism; Stellar compares
-    /// 68 and refuses 78, those same 16 among them and the rest on its export
+    /// Measured over the 148 fixtures the corpus holds today: `SpaceWasm`
+    /// compares 132 and refuses 16, all 16 on non-determinism; Stellar compares
+    /// 68 and refuses 80, those same 16 among them and the rest on its export
     /// gate. Every fixture compiles at the default target, so nothing is skipped
     /// for failing to compile at all. The floors are those counts with roughly a
     /// tenth of headroom, which is what keeps a fixture added or retired from
     /// turning this red for a reason that has nothing to do with the theorem.
-    /// They were deliberately left where they were when the measurement moved by
-    /// one — 118 against a compared 130 and 60 against a compared 68 are both
-    /// inside that rule — because what pins the skip set exactly is
+    /// They were deliberately left where they were when the measurement moved —
+    /// 118 against a compared 132 and 60 against a compared 68 are both inside
+    /// that rule — because what pins the skip set exactly is
     /// `ENVELOPE_REFUSED`'s list equality in `tests/tests/spacewasm/differential.rs`,
     /// while a floor here guards only against a sweep that compares almost
     /// nothing.
@@ -61,7 +61,7 @@ mod target_identity_tests {
     /// with `SpaceWasm`'s is a measurement and not an inference — the sentence
     /// above says Stellar refuses everything `SpaceWasm` does, but that fixture
     /// declares no signature Stellar's export gate objects to, so it was one of
-    /// the 69 Stellar compared and is now one of the 78 it refuses.
+    /// the 69 Stellar compared and is now one of the 80 it refuses.
     ///
     /// The corpus is compiled with analysis skipped precisely so the constructs
     /// A012/A027/A042 reject still reach code generation, which is why it holds

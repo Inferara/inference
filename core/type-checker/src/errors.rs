@@ -346,6 +346,25 @@ pub(crate) enum DedupKind {
     ImportedItemNotFound,
 }
 
+/// The sentence [`TypeCheckError::AmbiguousExternModule`] carries when the
+/// clauses it names mix a linked module with a host import.
+///
+/// Those two can name one import module string and still be two bindings, which
+/// is the one case where the module list alone explains nothing: it reads as a
+/// name repeated. What separates them is who supplies the body, so that is what
+/// the sentence says.
+///
+/// Leads with a space: it is concatenated onto the sentence before it, and is
+/// empty for a list that names genuinely different modules.
+///
+/// Crate-internal: the only thing outside the crate can do with half a sentence
+/// is match on it, and a caller matching on a fragment of a message would pin
+/// wording this module is free to reword.
+pub(crate) const MIXED_PROVIDER_NOTE: &str =
+    " A `host::` clause and a linked one are two different bindings even when they reduce to the \
+     same import module string: a linked body is merged into the artifact at build time, while a \
+     host body is supplied by the embedder at run time.";
+
 /// Represents a type checking error with source location.
 /// All type errors are tied to AST nodes and must have a location.
 #[derive(Debug, Clone, Error)]
@@ -992,18 +1011,40 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    /// An `external fn` is named by more than one `use … from <module>` clause,
-    /// each referring to a different module.
+    /// An `external fn` is named by more than one `use … from <module>` clause
+    /// in one file, and the clauses are not the same binding.
     ///
-    /// Extern provenance must be unambiguous: the linker needs exactly one
-    /// source module per extern. List the offending modules and rename or
-    /// remove the conflicting `use` clauses to disambiguate.
+    /// Extern provenance must be unambiguous: one `external fn`, one binding.
+    /// A linked extern needs exactly one source module for the linker to take a
+    /// body from, and a host import is a different binding from a linked one
+    /// even when the two reduce to the same module string — nothing supplies
+    /// the second body either way. List the offending clauses and rename or
+    /// remove the conflicting ones to disambiguate.
+    ///
+    /// "Exactly one module" is not the rule, and saying so would be false for
+    /// the case two clauses can name one module and still disagree: `from a;`
+    /// and `from host::a;` both emit the import module string `a`, so a reader
+    /// shown that rule against a list that repeats one name concludes the
+    /// compiler is confused. The rule is one *binding*, and `provider_note` is
+    /// appended when a linked clause and a host one
+    /// in the list reduce to *one* module string, to say what the two spellings
+    /// differ in. A list that mixes the kinds across two genuinely different
+    /// names — `` (`a`, `host::b`) `` — needs no such sentence and gets none;
+    /// there the names already explain themselves.
     #[error(
-        "{location}: external function `{name}` is bound to multiple modules ({modules}); each extern must come from exactly one module"
+        "{location}: external function `{name}` is bound to multiple modules ({modules}); each extern must have exactly one binding.{provider_note} Keep exactly one `use … from` clause for `{name}`."
     )]
     AmbiguousExternModule {
         name: String,
         modules: String,
+        /// The crate's `MIXED_PROVIDER_NOTE` sentence when one module string in
+        /// the list is named by both a linked clause and a host one, empty
+        /// otherwise.
+        ///
+        /// Pre-rendered because the message is a format string with no room for
+        /// a branch, and the sentence is only worth its length when the reader
+        /// would otherwise read the module list as a repetition.
+        provider_note: String,
         location: Location,
     },
 
@@ -1019,6 +1060,118 @@ pub enum TypeCheckError {
     ExternImportNotDeclared {
         name: String,
         module: String,
+        location: Location,
+    },
+
+    /// A `use … from host;` clause names the reserved `host` segment and nothing
+    /// else, so it names no import module at all.
+    ///
+    /// `host` is not a module: it is the marker that the module named after it
+    /// is one the embedder supplies at run time rather than one this build
+    /// links. A clause that stops at the marker has said who provides the import
+    /// and never said what to import from.
+    ///
+    /// Reserving the segment is what makes this reachable, and the message says
+    /// so: a linked `.wasm` module whose path *opens* with `host` is no longer
+    /// nameable in this position and has to be renamed. The reservation is of
+    /// the position, not of the name — `host` stays an ordinary identifier
+    /// everywhere else, and `host::host` legally imports from a module named
+    /// `host`. Only the bare and the nested shapes earn a diagnostic; a
+    /// two-segment `from host::io;` is byte-for-byte a well-formed host binding
+    /// and is silently taken as one, which is the half of the reservation no
+    /// message can state.
+    #[error(
+        "{location}: `use {{ {items} }} from host;` names no import module: `host` is the reserved first segment of a `from` clause and marks an import the embedder supplies at run time, so exactly one module name must follow it — `from host::env;` imports from the WebAssembly module `env`. If you meant a linked `.wasm` module named `host`, rename the module: `host` is reserved in this position and no longer resolves to a file."
+    )]
+    HostImportWithoutModule { items: String, location: Location },
+
+    /// A `use … from host::…;` clause names more than one segment after `host`.
+    ///
+    /// The segment after `host` is not a path this compiler resolves — it is the
+    /// module string of a WebAssembly import, which an embedder registers under
+    /// one flat name. There is nothing for a second segment to mean, so a path
+    /// is rejected rather than joined into a name no embedder would register.
+    ///
+    /// Reported per directive rather than per imported field: the mistake is in
+    /// the `from` clause, which every field in the clause shares.
+    #[error(
+        "{location}: `use {{ {items} }} from host::{linked_path};` names more than one host import module: after `host`, exactly one segment follows, and it is the WebAssembly import module string the embedder registers — a flat name, never a path. Bind it as `from host::{module};`. If you meant the linked `.wasm` module `host::{linked_path}`, rename it: a module path whose first segment is `host` is reserved in this position and no longer resolves to a file."
+    )]
+    HostImportModuleNested {
+        items: String,
+        /// The single segment a correct binding would name — the first one after
+        /// `host`.
+        module: String,
+        /// What the user wrote after `host`.
+        ///
+        /// Not a module anything ever bound: before the reservation this clause
+        /// named the linked module `host::{linked_path}`, and the file under a
+        /// search directory is `host/…`. Dropping the segment would name a
+        /// different module, so the message quotes this path only to rebuild the
+        /// one the author had.
+        linked_path: String,
+        location: Location,
+    },
+
+    /// One import module is bound to two providers: some clause links a `.wasm`
+    /// module of that name while another names it as a host import.
+    ///
+    /// A provider is chosen for an import *module*, not for the
+    /// `(module, field)` pair one declaration emits. That is the granularity
+    /// both ends of the boundary actually have. The linker's candidate set for
+    /// any import is every external bound under that module string — it filters
+    /// on the module and then takes whichever of that module's exports carries
+    /// the field — so a linked library merged in for one field is offered to
+    /// satisfy every other import under the same module name, including the one
+    /// its author left for an embedder. And an embedder registers a namespace
+    /// under one module name rather than a function at a time, so it cannot be
+    /// asked for a module half of which this build already linked away.
+    ///
+    /// The two clauses naming one *field* is the sharpest case of that, and it
+    /// fails a second way. Two files binding one field is ordinary and
+    /// supported — each keeps its own declaration and origin, and code
+    /// generation folds them onto a single `(import "module" "field" …)` entry,
+    /// because one foreign function must not occupy two function indices. That
+    /// one entry is either satisfied by a merged body and stripped at link time
+    /// or left in the artifact for an embedder, and the two files each compiled
+    /// their calls expecting the other outcome.
+    ///
+    /// Neither reading can be picked. Honouring the linked clause ships an
+    /// artifact whose host-bound file calls a body the embedder never gets to
+    /// supply; honouring the host clause leaves an import the linked file's
+    /// author supplied a `.wasm` file for. So the program is rejected until the
+    /// clauses agree, which is the same verdict a cross-file disagreement about
+    /// one import's write set already earns.
+    ///
+    /// Checked across the whole program rather than per file, because that is
+    /// the scope both the fold and the linker's candidate set have: the per-file
+    /// ambiguity rule is keyed on one imported name, and two clauses that reach
+    /// one module through different names leave every file involved internally
+    /// consistent.
+    #[error(
+        "{location}: the import module `{module}` is bound to two providers: `{linked_name}` binds it as a linked module in {linked_file}, and `{host_name}` binds it as a host import in {host_file}. An import module names one provider — the linker offers every export of a `.wasm` module bound under that name to satisfy any import under it, and an embedder registers the module as a whole — so the two clauses cannot both hold. Write the same clause in both places: `from {module};` to link the module, `from host::{module};` to have the embedder supply it."
+    )]
+    ConflictingExternProvider {
+        /// The emitted import module string both clauses bind.
+        module: String,
+        /// The `external fn` whose clause links the module.
+        ///
+        /// Often the same name as `host_name` — two files binding one foreign
+        /// function is the ordinary shape — but not necessarily: the conflict is
+        /// about the module, which either clause may reach through any of the
+        /// fields it imports.
+        linked_name: String,
+        /// The `external fn` whose clause names the module as a host import.
+        /// See `linked_name`; the two may be one name or two.
+        host_name: String,
+        /// The file whose clause links the module, already rendered for the
+        /// message: a backticked file label, or `the entry file` for the
+        /// document with no module path.
+        linked_file: String,
+        /// The file whose clause names the module as a host import, rendered
+        /// the way `linked_file` is. One file may hold both clauses, in which
+        /// case the two read alike, which is the truth about where to look.
+        host_file: String,
         location: Location,
     },
 
@@ -1120,6 +1273,9 @@ impl TypeCheckError {
             | TypeCheckError::DuplicateEnumVariant { location, .. }
             | TypeCheckError::AmbiguousExternModule { location, .. }
             | TypeCheckError::ExternImportNotDeclared { location, .. }
+            | TypeCheckError::HostImportWithoutModule { location, .. }
+            | TypeCheckError::HostImportModuleNested { location, .. }
+            | TypeCheckError::ConflictingExternProvider { location, .. }
             | TypeCheckError::ExternFunctionNameCollision { location, .. }
             | TypeCheckError::SpecFunctionShadowsTopLevel { location, .. } => location,
         }
@@ -2139,11 +2295,31 @@ mod tests {
         let err = TypeCheckError::AmbiguousExternModule {
             name: "sort".to_string(),
             modules: "`sorting`, `collections`".to_string(),
+            provider_note: String::new(),
             location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: external function `sort` is bound to multiple modules (`sorting`, `collections`); each extern must come from exactly one module"
+            "1:5: external function `sort` is bound to multiple modules (`sorting`, `collections`); each extern must have exactly one binding. Keep exactly one `use … from` clause for `sort`."
+        );
+    }
+
+    /// Two clauses that reduce to one import module string are the case the
+    /// general sentence cannot carry: the list repeats a name, so without the
+    /// note the message shows a rule the program does not break. The whole
+    /// string is pinned because the note only earns its length if it lands in
+    /// the right place — appended to the rule, ahead of the remedy.
+    #[test]
+    fn display_ambiguous_extern_module_mixing_providers() {
+        let err = TypeCheckError::AmbiguousExternModule {
+            name: "f".to_string(),
+            modules: "`a`, `host::a`".to_string(),
+            provider_note: MIXED_PROVIDER_NOTE.to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: external function `f` is bound to multiple modules (`a`, `host::a`); each extern must have exactly one binding. A `host::` clause and a linked one are two different bindings even when they reduce to the same import module string: a linked body is merged into the artifact at build time, while a host body is supplied by the embedder at run time. Keep exactly one `use … from` clause for `f`."
         );
     }
 
@@ -2157,6 +2333,66 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: `use` imports `hash` from module `crypto`, but no `external fn hash` is declared"
+        );
+    }
+
+    /// The whole string is pinned because the remedy is the message. A clause
+    /// that stops at `host` is most often a linked module that used to be named
+    /// `host`, and the last sentence is the only place the user is told the name
+    /// is now reserved.
+    #[test]
+    fn display_host_import_without_module() {
+        let err = TypeCheckError::HostImportWithoutModule {
+            items: "telemetry, command".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: `use { telemetry, command } from host;` names no import module: `host` is the reserved first segment of a `from` clause and marks an import the embedder supplies at run time, so exactly one module name must follow it — `from host::env;` imports from the WebAssembly module `env`. If you meant a linked `.wasm` module named `host`, rename the module: `host` is reserved in this position and no longer resolves to a file."
+        );
+    }
+
+    /// Both remedies are pinned: binding the first segment alone, and renaming
+    /// the linked module the clause used to name. A message that kept only one
+    /// would send half the users who hit this the wrong way.
+    ///
+    /// The second remedy names `host::fprime_core::v2` and not `fprime_core::v2`
+    /// on purpose. The linked module this clause bound before the reservation is
+    /// the whole path including `host`, so advising the shorter one would send a
+    /// reader with a real linked module to a file that does not exist.
+    #[test]
+    fn display_host_import_module_nested() {
+        let err = TypeCheckError::HostImportModuleNested {
+            items: "telemetry".to_string(),
+            module: "fprime_core".to_string(),
+            linked_path: "fprime_core::v2".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: `use { telemetry } from host::fprime_core::v2;` names more than one host import module: after `host`, exactly one segment follows, and it is the WebAssembly import module string the embedder registers — a flat name, never a path. Bind it as `from host::fprime_core;`. If you meant the linked `.wasm` module `host::fprime_core::v2`, rename it: a module path whose first segment is `host` is reserved in this position and no longer resolves to a file."
+        );
+    }
+
+    /// Both files are named, and named by the role that tells them apart: a
+    /// reader who is shown two file labels and one module still has to open both
+    /// to learn which clause to change. Each clause is named by the
+    /// `external fn` that carries it for the same reason — the rule is about the
+    /// module, so the two halves need not share a name and a message that
+    /// printed only one would leave half the conflict unlocatable.
+    #[test]
+    fn display_conflicting_extern_provider() {
+        let err = TypeCheckError::ConflictingExternProvider {
+            module: "env".to_string(),
+            linked_name: "clock_ms".to_string(),
+            host_name: "sleep_ms".to_string(),
+            linked_file: "`lib::timing`".to_string(),
+            host_file: "the entry file".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: the import module `env` is bound to two providers: `clock_ms` binds it as a linked module in `lib::timing`, and `sleep_ms` binds it as a host import in the entry file. An import module names one provider — the linker offers every export of a `.wasm` module bound under that name to satisfy any import under it, and an embedder registers the module as a whole — so the two clauses cannot both hold. Write the same clause in both places: `from env;` to link the module, `from host::env;` to have the embedder supply it."
         );
     }
 

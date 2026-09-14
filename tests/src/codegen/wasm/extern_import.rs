@@ -248,6 +248,72 @@ mod extern_import_tests {
         );
     }
 
+    /// A `use … from host::env;` clause imports from the WebAssembly module
+    /// `env`, not `host::env`: the reserved `host` segment names who supplies
+    /// the body — the embedder, at run time — and is not part of the module
+    /// string an embedder registers. Emission is otherwise the linked path
+    /// unchanged, which is the point of stripping the segment in the front end.
+    #[test]
+    fn host_import_test() {
+        let test_name = "host_import";
+        let actual = compile(test_name);
+        assert_matches_golden(test_name, &actual);
+
+        let shape = read_shape(&actual);
+        assert_eq!(
+            shape.imports,
+            vec![("env".to_string(), "clock_ms".to_string(), 0)],
+            "the import module is the segment after `host`, never `host::env`"
+        );
+        assert_eq!(
+            shape.func_exports,
+            vec![("now".to_string(), 1)],
+            "local now is shifted to index 1 (after the import)"
+        );
+        assert_eq!(
+            shape.calls_per_defined_func,
+            vec![vec![0]],
+            "the call to clock_ms lowers to import index 0"
+        );
+    }
+
+    /// Two host modules in one program, in the F-prime vocabulary an embedder
+    /// registers: `command` and `telemetry` from `fprime_core`, `clock_ms` from
+    /// `env`. Each directive is classified on its own, so the two modules stay
+    /// distinct and the fields land under the module their own clause named.
+    #[test]
+    fn host_import_fprime_test() {
+        let test_name = "host_import_fprime";
+        let actual = compile(test_name);
+        assert_matches_golden(test_name, &actual);
+
+        let shape = read_shape(&actual);
+        assert_eq!(
+            shape.imports,
+            vec![
+                ("fprime_core".to_string(), "telemetry".to_string(), 0),
+                ("fprime_core".to_string(), "command".to_string(), 1),
+                ("env".to_string(), "clock_ms".to_string(), 2),
+            ],
+            "both fprime_core fields and the env one keep their own host module"
+        );
+        assert_eq!(
+            shape.defined_func_types.len(),
+            1,
+            "one local function beside the three imports"
+        );
+        assert_eq!(
+            shape.func_exports,
+            vec![("report".to_string(), 3)],
+            "local report is shifted past all three imports"
+        );
+        assert_eq!(
+            shape.calls_per_defined_func,
+            vec![vec![1, 0, 2]],
+            "report calls command (1), telemetry (0) and clock_ms (2)"
+        );
+    }
+
     /// A bound `external fn` that is never called still emits its import and
     /// still shifts local functions: import emission is driven by the
     /// declaration + binding, not by call sites.
@@ -361,6 +427,8 @@ pub fn main() -> i32 {
             "multi_import",
             "import_with_locals",
             "import_dedup",
+            "host_import",
+            "host_import_fprime",
         ] {
             let dir = get_test_data_path()
                 .join("codegen")

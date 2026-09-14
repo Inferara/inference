@@ -90,7 +90,7 @@ mod spacewasm_conformance_tests {
     /// floor would let the class shrink toward empty without a diff. The sibling
     /// tier commits the names; the count is what a sweep in a different binary
     /// can hold them to.
-    const IMPORT_BEARING_COUNT: usize = 15;
+    const IMPORT_BEARING_COUNT: usize = 17;
 
     /// Every golden `.wasm` of the default partition, with what `check` says
     /// about it.
@@ -204,6 +204,8 @@ mod spacewasm_conformance_tests {
     ("codegen/wasm/checked_arith/checked_arith.wasm", Maxima(6, 4, 7)),
     ("codegen/wasm/export_narrow_params/export_narrow_params.wasm", Maxima(2, 2, 2)),
     ("codegen/wasm/expr_deep_nesting/expr_deep_nesting.wasm", Maxima(4, 5, 5)),
+    ("codegen/wasm/extern_import/host_import/host_import.wasm", Maxima(1, 1, 2)),
+    ("codegen/wasm/extern_import/host_import_fprime/host_import_fprime.wasm", Maxima(2, 2, 2)),
     ("codegen/wasm/extern_import/import_dedup/import_dedup.wasm", Maxima(1, 1, 1)),
     ("codegen/wasm/extern_import/import_with_locals/import_with_locals.wasm", Maxima(2, 3, 3)),
     ("codegen/wasm/extern_import/multi_import/multi_import.wasm", Maxima(1, 2, 2)),

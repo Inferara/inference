@@ -1,0 +1,15 @@
+external fn telemetry(channel: i32, value: i32) -> i32;
+external fn command(opcode: i32) -> i32;
+use { telemetry, command } from host::fprime_core;
+
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+
+pub fn report(channel: i32) -> i64 {
+    let ack: i32 = command(channel);
+    let sent: i32 = telemetry(channel, ack);
+    if sent == 0 {
+        return 0;
+    }
+    return clock_ms();
+}

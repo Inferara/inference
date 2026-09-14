@@ -3329,8 +3329,9 @@ mod external_function_tests {
 mod extern_provenance_tests {
     use super::*;
     use inference_ast::ids::DefId;
-    use inference_type_checker::ExternOrigin;
+    use inference_type_checker::errors::TypeCheckError;
     use inference_type_checker::typed_context::TypedContext;
+    use inference_type_checker::{ExternKind, ExternOrigin, check_with_diagnostics};
 
     fn err_string(source: &str) -> String {
         match try_type_check(source) {
@@ -3381,6 +3382,380 @@ mod extern_provenance_tests {
             origin.logical_module, "crypto::sha256",
             "nested path joins with `::`, never an OS separator"
         );
+        assert_eq!(
+            origin.kind,
+            ExternKind::Linked,
+            "an ordinary path is a linked module and keeps every segment: only a leading \
+             `host` is stripped, and stripping any other first segment would name a module \
+             the linker cannot find"
+        );
+    }
+
+    // Host imports ---
+
+    /// A `from` clause opening with the reserved `host` segment binds a host
+    /// import, whose module is the segment *after* `host`. That string is what
+    /// an embedder registers and what the emitted import declares, so carrying
+    /// `host` into it would name a module nothing supplies.
+    #[test]
+    fn binds_host_import_to_the_single_segment_after_host() {
+        let source = r#"
+            use { telemetry } from host::fprime_core;
+            external fn telemetry(channel: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let ctx = try_type_check(source).expect("a host binding should type-check");
+        let origin = origin_of(&ctx, "telemetry").expect("telemetry should be bound");
+        assert_eq!(origin.kind, ExternKind::Host);
+        assert_eq!(
+            origin.logical_module, "fprime_core",
+            "`host` names the provider, never a component of the module name"
+        );
+    }
+
+    /// `host` is a perfectly good WebAssembly import module name, so
+    /// `host::host` binds the module `host`. Refusing it would be a rule about
+    /// how this compiler spells the reservation rather than about the program.
+    #[test]
+    fn binds_a_host_module_that_is_itself_named_host() {
+        let source = r#"
+            use { ping } from host::host;
+            external fn ping(x: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let ctx = try_type_check(source).expect("`host::host` should type-check");
+        let origin = origin_of(&ctx, "ping").expect("ping should be bound");
+        assert_eq!(origin.kind, ExternKind::Host);
+        assert_eq!(origin.logical_module, "host");
+    }
+
+    /// The reservation is matched exactly. `Host` is not `host`, so `Host::env`
+    /// is an ordinary linked module whose name happens to start with a capital
+    /// letter — a test says so, because nothing in the implementation would
+    /// look wrong if the comparison were made case-insensitively.
+    #[test]
+    fn a_capitalised_host_segment_is_an_ordinary_linked_module() {
+        let source = r#"
+            use { clock_ms } from Host::env;
+            external fn clock_ms() -> i64;
+            fn main() -> i32 { return 0; }
+        "#;
+        let ctx = try_type_check(source).expect("`Host::env` should type-check");
+        let origin = origin_of(&ctx, "clock_ms").expect("clock_ms should be bound");
+        assert_eq!(origin.kind, ExternKind::Linked);
+        assert_eq!(origin.logical_module, "Host::env");
+    }
+
+    /// One name imported from `a` and from `host::a` is ambiguous, even though
+    /// both emit the import module string `a`: one is linked away at build time
+    /// and the other survives into the artifact, so they are two bindings and
+    /// keying the ambiguity check on the module string alone would silently
+    /// collapse them into whichever was seen first.
+    #[test]
+    fn a_linked_and_a_host_module_of_the_same_name_are_ambiguous() {
+        let source = r#"
+            use { f } from a;
+            use { f } from host::a;
+            external fn f(x: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains("external function `f` is bound to multiple modules"),
+            "expected ambiguity diagnostic, got: {err}"
+        );
+        assert!(
+            err.contains("(`a`, `host::a`)"),
+            "the host module must be named the way the source spells it, got: {err}"
+        );
+        assert!(
+            err.contains("a linked body is merged into the artifact at build time"),
+            "the list reads as one name written twice, so the message has to say what the two \
+             spellings differ in, got: {err}"
+        );
+        assert!(
+            !err.contains("come from exactly one module"),
+            "both clauses do come from one module — `a` — so the rule the message states must \
+             be one binding, not one module: {err}"
+        );
+    }
+
+    /// Two clauses naming genuinely different modules keep the shorter message.
+    /// The provider sentence explains a list that repeats one name; against
+    /// `sorting` and `collections` it is a paragraph about a distinction the
+    /// program does not draw.
+    #[test]
+    fn two_linked_modules_are_ambiguous_without_the_provider_note() {
+        let source = r#"
+            use { f } from a;
+            use { f } from b;
+            external fn f(x: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains("external function `f` is bound to multiple modules (`a`, `b`)"),
+            "expected ambiguity diagnostic, got: {err}"
+        );
+        assert!(
+            !err.contains("supplied by the embedder at run time"),
+            "no host clause is involved, got: {err}"
+        );
+    }
+
+    /// Two *host* clauses naming different modules keep the shorter message
+    /// too. The note explains a list that reads as one name written twice;
+    /// `host::a` and `host::b` are two names, and the sentence would describe a
+    /// linked clause the program does not contain.
+    #[test]
+    fn two_host_modules_are_ambiguous_without_the_provider_note() {
+        let source = r#"
+            use { f } from host::a;
+            use { f } from host::b;
+            external fn f(x: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains(
+                "external function `f` is bound to multiple modules (`host::a`, `host::b`)"
+            ),
+            "expected ambiguity diagnostic naming both host clauses, got: {err}"
+        );
+        assert!(
+            !err.contains("A `host::` clause and a linked one"),
+            "no linked clause is involved, so the note states a rule the program does not \
+             break: {err}"
+        );
+    }
+
+    /// Mixing the two kinds is not itself what earns the note; a collision on
+    /// one module string is. `a` and `host::b` are two names that explain
+    /// themselves, and appending "even when they reduce to the same import
+    /// module string" to a list where they demonstrably do not is a
+    /// non-sequitur about a rule this program never came near.
+    #[test]
+    fn a_linked_and_a_host_module_of_different_names_carry_no_provider_note() {
+        let source = r#"
+            use { f } from a;
+            use { f } from host::b;
+            external fn f(x: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains("external function `f` is bound to multiple modules (`a`, `host::b`)"),
+            "expected ambiguity diagnostic naming both clauses, got: {err}"
+        );
+        assert!(
+            !err.contains("A `host::` clause and a linked one"),
+            "the two clauses reduce to two different import module strings, which is what the \
+             note claims they do not: {err}"
+        );
+    }
+
+    /// A dangling import under a host clause names the clause the user wrote,
+    /// not the stripped module string. `from env;` is a linked binding of a
+    /// different provider, so a message quoting it sends the reader to write
+    /// the wrong fix.
+    #[test]
+    fn a_dangling_host_import_names_the_clause_the_source_spells() {
+        let source = r#"
+            use { missing } from host::env;
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains("`use` imports `missing` from module `host::env`"),
+            "the reserved segment goes back on for the message, got: {err}"
+        );
+        assert!(
+            !err.contains("from module `env`"),
+            "`from env;` is a linked clause the program never wrote: {err}"
+        );
+    }
+
+    /// One file may disagree with itself about an import module's provider, and
+    /// the whole-program rule catches that too.
+    ///
+    /// The per-file ambiguity rule does not: it is keyed on the imported name,
+    /// and `f` and `g` are two names each bound exactly once. What collides is
+    /// the module `vendor`, which the linker would offer a merged
+    /// `vendor.wasm`'s exports for whichever import asked under that name.
+    #[test]
+    fn two_clauses_in_one_file_may_not_disagree_about_a_module_provider() {
+        let source = r#"
+            use { f } from vendor;
+            use { g } from host::vendor;
+            external fn f(x: i32) -> i32;
+            external fn g(x: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains(
+                "the import module `vendor` is bound to two providers: `f` binds it as a linked \
+                 module in the entry file, and `g` binds it as a host import in the entry file"
+            ),
+            "one file holding both clauses is still one module with two providers, got: {err}"
+        );
+    }
+
+    // Malformed host clauses ---
+
+    /// The structured diagnostics of `source`, which need not type-check.
+    fn diagnostics(source: &str) -> Vec<TypeCheckError> {
+        check_with_diagnostics(build_ast(source.to_string()))
+            .errors
+            .into_iter()
+            .map(|d| d.error)
+            .collect()
+    }
+
+    /// The 1-based `(line, column)` a diagnostic points at.
+    fn caret(error: &TypeCheckError) -> (u32, u32) {
+        let location = error.location();
+        (location.start_line, location.start_column)
+    }
+
+    /// The shape refusal belongs to the directive, not to each field it
+    /// imports: one mistake written once earns one message. Reported per field,
+    /// this fixture would print three copies of one sentence at one location.
+    ///
+    /// The caret belongs on the reserved word rather than on the clause, which
+    /// is the text the author has to change; every other binding diagnostic in
+    /// this pass points at the whole directive, so nothing but this assertion
+    /// keeps the narrower location from being widened back.
+    #[test]
+    fn a_bare_host_clause_reports_one_diagnostic_however_many_fields_it_imports() {
+        let source = r#"use { a, b, c } from host;
+external fn a(x: i32) -> i32;
+external fn b(x: i32) -> i32;
+external fn c(x: i32) -> i32;
+fn main() -> i32 { return 0; }
+"#;
+        let reported = diagnostics(source);
+        assert_eq!(
+            reported.len(),
+            1,
+            "one directive, one diagnostic; got: {reported:?}"
+        );
+        assert!(
+            matches!(reported[0], TypeCheckError::HostImportWithoutModule { .. }),
+            "got: {reported:?}"
+        );
+        assert!(
+            reported[0]
+                .to_string()
+                .contains("`use { a, b, c } from host;` names no import module"),
+            "the message quotes the whole directive, got: {}",
+            reported[0]
+        );
+        assert_eq!(
+            caret(&reported[0]),
+            (1, 22),
+            "the caret belongs on the reserved word, which starts at column 22"
+        );
+    }
+
+    /// A refused directive's fields are dropped before they are accumulated.
+    /// Left in, they would resolve against a module the clause never validly
+    /// named and add a dangling-import error contradicting the shape error
+    /// beside it — two diagnostics disagreeing about one line.
+    ///
+    /// The caret is the *first* surplus segment: the clause is correct up to
+    /// and including the module, and everything from there on is what has to
+    /// go.
+    #[test]
+    fn a_nested_host_clause_reports_one_diagnostic_and_no_dangling_import() {
+        let source = r#"use { f } from host::a::b;
+fn main() -> i32 { return 0; }
+"#;
+        let reported = diagnostics(source);
+        assert_eq!(
+            reported.len(),
+            1,
+            "the skipped field must not also be reported as dangling; got: {reported:?}"
+        );
+        assert!(
+            matches!(reported[0], TypeCheckError::HostImportModuleNested { .. }),
+            "got: {reported:?}"
+        );
+        let rendered = reported[0].to_string();
+        assert!(
+            rendered.contains("`use { f } from host::a::b;` names more than one host import \
+                               module")
+                && rendered.contains("Bind it as `from host::a;`")
+                && rendered.contains("If you meant the linked `.wasm` module `host::a::b`"),
+            "both remedies must name the path the user wrote, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("drop the `host` segment"),
+            "`from a::b;` names a different module than the clause used to bind, and advising \
+             it sends a reader with a real linked module to a file that does not exist: \
+             {rendered}"
+        );
+        assert_eq!(
+            caret(&reported[0]),
+            (1, 25),
+            "the caret is the first surplus segment `b`, at column 25"
+        );
+    }
+
+    /// A longer path does not move the caret onto its last segment. `b` is
+    /// where the clause stopped being a host binding, and `c` is merely more of
+    /// the same mistake — a location that slid to the end would point past the
+    /// first thing the author has to delete.
+    #[test]
+    fn a_deeper_nested_host_clause_still_points_at_the_first_surplus_segment() {
+        let source = r#"use { f } from host::a::b::c;
+fn main() -> i32 { return 0; }
+"#;
+        let reported = diagnostics(source);
+        assert_eq!(reported.len(), 1, "got: {reported:?}");
+        assert!(
+            matches!(reported[0], TypeCheckError::HostImportModuleNested { .. }),
+            "got: {reported:?}"
+        );
+        assert_eq!(
+            caret(&reported[0]),
+            (1, 25),
+            "still `b`'s column, not `c`'s"
+        );
+        assert!(
+            reported[0]
+                .to_string()
+                .contains("If you meant the linked `.wasm` module `host::a::b::c`"),
+            "the rename remedy names the whole path the clause bound, got: {}",
+            reported[0]
+        );
+    }
+
+    /// A malformed directive does not disarm the file's others. The bare `host`
+    /// clause is refused and its field dropped; the sibling clause is a
+    /// different directive and still binds `f` to `arith`.
+    #[test]
+    fn a_malformed_host_directive_leaves_a_well_formed_sibling_binding() {
+        let source = r#"use { f } from arith;
+use { f } from host;
+external fn f(x: i32) -> i32;
+fn main() -> i32 { return 0; }
+"#;
+        let outcome = check_with_diagnostics(build_ast(source.to_string()));
+        let reported: Vec<&TypeCheckError> = outcome.errors.iter().map(|d| &d.error).collect();
+        assert_eq!(
+            reported.len(),
+            1,
+            "only the malformed directive is at fault; got: {reported:?}"
+        );
+        assert!(
+            matches!(reported[0], TypeCheckError::HostImportWithoutModule { .. }),
+            "got: {reported:?}"
+        );
+        let origin = origin_of(&outcome.typed_context, "f")
+            .expect("the well-formed directive still binds f");
+        assert_eq!(origin.kind, ExternKind::Linked);
+        assert_eq!(origin.logical_module, "arith");
     }
 
     #[test]

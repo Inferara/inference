@@ -2083,6 +2083,44 @@ spec S { fn f() forall { let a: i32 = @; assert(double(a) == a + a); } }
     );
 }
 
+/// A *host* extern is bound, and still not a specification subject. Its body
+/// arrives from the embedder at run time and is never spliced into the emitted
+/// module, so the merged symbol a linked extern applies under would name a
+/// function the artifact an obligation is about does not define.
+///
+/// The rejection must not reuse the unbound extern's wording: this declaration
+/// is bound, and telling its author to add a `use … from` clause would send
+/// them to write the clause they already wrote.
+///
+/// Driven directly at this layer because the pipeline refuses a proof-mode
+/// build carrying host imports before code generation is reached, so nothing
+/// through the CLI arrives here — and an arm with no test of its own rots.
+#[test]
+fn a_host_extern_is_refused_as_a_specification_subject() {
+    let e = err("\
+external fn clock_ms() -> i32;
+use { clock_ms } from host::env;
+spec S { fn f() forall { let a: i32 = @; assert(clock_ms() == a); } }
+");
+    assert!(e.contains("error[P005]"), "{e}");
+    assert!(
+        e.contains(
+            "it is a host import, whose body the embedder supplies at run time, so nothing in \
+             the artifact an obligation is about implements it"
+        ),
+        "{e}"
+    );
+    assert!(
+        e.contains("which this translation cannot do yet"),
+        "a later phase may admit a host contract as an assumption, and the message must not \
+         read as the settled rule: {e}"
+    );
+    assert!(
+        !e.contains("no `use … from` binding"),
+        "the declaration is bound; the rejection is about who supplies the body: {e}"
+    );
+}
+
 /// An extern bound under a `::`-joined logical module keeps that module in its
 /// symbol: the merged name is per source module, not per export field, because
 /// two modules may export the same field.

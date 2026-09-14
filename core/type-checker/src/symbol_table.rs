@@ -75,8 +75,78 @@ impl ScopeId {
     }
 }
 
-/// Provenance of an `external fn` declaration: the logical module that exports
-/// it and the export field name to bind against.
+/// The reserved first segment of a `use … from` clause that marks a host
+/// import: `use { telemetry } from host::fprime_core;`.
+///
+/// It lives beside [`ExternKind`] because the reservation and the classification
+/// are one rule read from two directions — the classifier strips this segment
+/// and every message that names a host module has to put it back. Two spellings
+/// of it would be the string an embedder registers disagreeing with the string a
+/// diagnostic tells the author to write.
+///
+/// Matched exactly. `Host::env` is an ordinary linked module whose name happens
+/// to start with a capital `H`, and reserving a spelling the language does not
+/// otherwise distinguish would make the rule about the compiler rather than
+/// about the program.
+pub const HOST_SEGMENT: &str = "host";
+
+/// Who supplies the body behind a bound `external fn`, and so whether its
+/// import survives into the shipped artifact.
+///
+/// The distinction is made once, where the binding `use … from` clause is read,
+/// and travels on the [`ExternOrigin`]. No later stage re-derives it from the
+/// module string: two spellings that produce the same module name must still be
+/// able to mean different things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternKind {
+    /// The module names a `.wasm` file this build resolves and merges. The
+    /// import it stands for is satisfied and removed at link time, so the
+    /// artifact that ships carries no import for this declaration and the body
+    /// it calls is one this build produced.
+    Linked,
+    /// The module names a provider the embedder registers at run time, written
+    /// `use { f } from host::<module>;`. Nothing in this build supplies the
+    /// body: the linker leaves the import alone and the shipped artifact still
+    /// declares it, so the module will not instantiate until an embedder offers
+    /// a matching function.
+    Host,
+}
+
+impl ExternKind {
+    /// How a `from` clause naming `module` under this kind is spelled in source.
+    ///
+    /// The inverse of the classification: a [`Host`](Self::Host) binding carries
+    /// [`HOST_SEGMENT`] back, because the module string the binding kept is the
+    /// one an embedder registers rather than the one the author wrote.
+    ///
+    /// The binding diagnostics that *list* an extern's modules —
+    /// [`TypeCheckError::ExternImportNotDeclared`] and
+    /// [`TypeCheckError::AmbiguousExternModule`] — render every entry through
+    /// here, so a reader who pastes back what one of them printed gets the
+    /// clause they had. A message that has to show both spellings side by side,
+    /// or that lives outside this crate, spells its own clause; there is no
+    /// invariant that every rendered `from` clause in the toolchain comes from
+    /// this function.
+    ///
+    /// Takes the module loose because its callers have one: a binding being
+    /// collected before an [`ExternOrigin`] exists, or a message about a kind it
+    /// names itself. A caller holding an origin goes through
+    /// [`ExternOrigin::source_spelling`], which is this function with the pair
+    /// already made.
+    ///
+    /// [`TypeCheckError::ExternImportNotDeclared`]: crate::errors::TypeCheckError::ExternImportNotDeclared
+    /// [`TypeCheckError::AmbiguousExternModule`]: crate::errors::TypeCheckError::AmbiguousExternModule
+    #[must_use = "the rendered clause is the return value"]
+    pub fn source_spelling(self, module: &str) -> String {
+        match self {
+            ExternKind::Host => format!("{HOST_SEGMENT}::{module}"),
+            ExternKind::Linked => module.to_string(),
+        }
+    }
+}
+
+/// Provenance of an `external fn` declaration: who supplies its body, the
+/// logical module that exports it and the export field name to bind against.
 ///
 /// `logical_module` and `export_field` are platform-independent: they come from
 /// the `use { field } from logical::module;` clause that names the extern, not
@@ -86,8 +156,27 @@ impl ScopeId {
 /// `ExternOrigin` stays exactly what the source said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternOrigin {
-    /// Logical, `::`-joined module reference from the binding `use` clause
-    /// (e.g. `"crypto::sha256"`). Never a filesystem path.
+    /// Whether a linked `.wasm` module or the embedder supplies the body. See
+    /// [`ExternKind`]; it is what decides whether the import survives linking.
+    pub kind: ExternKind,
+    /// The module name this extern is imported from, as the emitted
+    /// `(import "<module>" "<field>" …)` entry spells it.
+    ///
+    /// For [`ExternKind::Linked`] it is the `::`-joined path of the `from`
+    /// clause (`use { hash } from crypto::sha256;` ⇒ `"crypto::sha256"`), which
+    /// the linker matches a resolved `.wasm` file against. For
+    /// [`ExternKind::Host`] it is the single segment *after* `host`
+    /// (`use { telemetry } from host::fprime_core;` ⇒ `"fprime_core"`), never
+    /// `"host::fprime_core"`: `host` names the provider of the module, not a
+    /// component of its name, and dropping it here is what lets import emission
+    /// stay one path for both kinds.
+    ///
+    /// One field carries both because the emitted import module string must
+    /// have exactly one definition. The name a platform cap is measured against
+    /// and the name an embedder registers are the same string or the artifact
+    /// does not instantiate, and two fields could drift apart.
+    ///
+    /// Never a filesystem path.
     pub logical_module: String,
     /// Export field name to bind against in the resolved module. Equals the
     /// extern's declared name; carried explicitly so renaming-on-import can
@@ -102,6 +191,22 @@ pub struct ExternOrigin {
     /// sibling — and lets analysis resolve each call to the specific extern it
     /// names.
     pub decl: DefId,
+}
+
+impl ExternOrigin {
+    /// The `from` clause as the user wrote it: `crypto::sha256` for a linked
+    /// binding, `host::fprime_core` for a host one.
+    ///
+    /// The two-part join lives in [`ExternKind::source_spelling`], which this
+    /// delegates to. A message site holding a whole origin calls this instead of
+    /// pairing the two fields itself, so no caller has to know that the `host`
+    /// segment the classifier stripped belongs back in front of
+    /// [`logical_module`](Self::logical_module) — the one way the two could come
+    /// to disagree.
+    #[must_use = "the rendered clause is the return value"]
+    pub fn source_spelling(&self) -> String {
+        self.kind.source_spelling(&self.logical_module)
+    }
 }
 
 /// Whether a registered function is local or an `external fn`, and — for an
@@ -3493,7 +3598,9 @@ impl SymbolTable {
     ///
     /// `module_name` is the logical name of the module being loaded; an
     /// `external fn` registered here is bound to it by construction, so its
-    /// [`ExternOrigin`] names this module.
+    /// [`ExternOrigin`] names this module. The module is a `.wasm` file the
+    /// build loaded, so the binding is [`ExternKind::Linked`] — a host import
+    /// is written by a `use … from host::…` clause and never arrives here.
     #[allow(dead_code)]
     fn register_definition_from_external(
         &mut self,
@@ -3611,6 +3718,7 @@ impl SymbolTable {
                     .map(|r| TypeInfo::from_type_id(arena, r))
                     .unwrap_or_default();
                 let origin = ExternOrigin {
+                    kind: ExternKind::Linked,
                     logical_module: module_name.to_string(),
                     export_field: extern_name.clone(),
                     decl: def_id,
@@ -4198,10 +4306,32 @@ mod tests {
 
         fn origin(module: &str, field: &str) -> ExternOrigin {
             ExternOrigin {
+                kind: ExternKind::Linked,
                 logical_module: module.to_string(),
                 export_field: field.to_string(),
                 decl: inference_ast::ids::idx_from_u32(0),
             }
+        }
+
+        /// An origin renders the clause its own kind was written with, both
+        /// ways round.
+        ///
+        /// The host case is the one that can go wrong: the classifier strips
+        /// `host` before the module reaches the origin, so a rendering that
+        /// forgot to put it back would print a clause naming a linked module —
+        /// advice that compiles and binds the wrong provider. Pinning the linked
+        /// case beside it keeps the delegation honest in the other direction,
+        /// where adding the segment unconditionally would be just as wrong.
+        #[test]
+        fn an_origin_renders_the_from_clause_of_its_own_kind() {
+            let linked = origin("crypto::sha256", "hash");
+            assert_eq!(linked.source_spelling(), "crypto::sha256");
+
+            let host = ExternOrigin {
+                kind: ExternKind::Host,
+                ..origin("fprime_core", "telemetry")
+            };
+            assert_eq!(host.source_spelling(), "host::fprime_core");
         }
 
         #[test]

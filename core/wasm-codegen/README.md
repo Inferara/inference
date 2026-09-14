@@ -640,6 +640,12 @@ Test data includes:
     import index
   - `import_dedup.inf` - Two externs with an identical `(i32) -> i32` signature share one
     type entry; verifies import-against-import type deduplication
+  - `host_import.inf` - One `external fn` bound via `use … from host::env;`; verifies the
+    emitted import module is `env`, not `host::env` — the reserved `host` segment names who
+    supplies the body and is not part of the module string an embedder registers
+  - `host_import_fprime.inf` - Two host modules in one program (`fprime_core` and `env`);
+    verifies each directive is classified on its own, so the fields land under the module
+    their own clause named
 - By-reference parameter fixtures in `tests/test_data/codegen/wasm/param_by_ref/`
   (tests in `tests/src/codegen/wasm/param_by_ref.rs`). Each fixture pins the *decision*
   with `check_count!` on `wasm_codegen_param_by_reference` /

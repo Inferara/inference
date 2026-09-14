@@ -20,8 +20,6 @@
 
 use std::path::{Path, PathBuf};
 
-use inference_ast::arena::AstArena;
-use inference_ast::nodes::ModuleRef;
 use rustc_hash::FxHashMap;
 
 /// File extension of a compiled WebAssembly module.
@@ -88,19 +86,6 @@ impl ModulePath {
             }
         }
         Ok(ModulePath { segments })
-    }
-
-    /// Builds a [`ModulePath`] from a parsed [`ModuleRef`], resolving each
-    /// identifier index against `arena`.
-    ///
-    /// # Errors
-    ///
-    /// Propagates the validation errors of [`ModulePath::from_segments`].
-    pub fn from_module_ref(
-        module_ref: &ModuleRef,
-        arena: &AstArena,
-    ) -> Result<Self, ModulePathError> {
-        Self::from_segments(module_ref.segments.iter().map(|&id| arena.ident_name(id)))
     }
 
     /// The logical name in `a::b` form, for diagnostics.
@@ -225,9 +210,14 @@ pub enum ResolveError {
 /// written something the toolchain cannot express yet, and a list of probed
 /// paths on its own sends them hunting for a file that was never going to
 /// exist.
-const EMBEDDER_SUPPLIED_NEXT_STEP: &str = "An `external fn` satisfied by the embedder at run \
-     time, rather than by a `.wasm` file this build links in, is not supported yet; issue #464 \
-     is where that work is tracked.";
+///
+/// Shared with the driver's refusal of a `from host::…` binding, which is the
+/// same limitation reached from the other direction — a clause that *says* the
+/// embedder supplies the body, rather than one the search path failed to find.
+/// One sentence so the two never come to name different work.
+pub(super) const EMBEDDER_SUPPLIED_NEXT_STEP: &str =
+    "An `external fn` satisfied by the embedder at run time, rather than by a `.wasm` file this \
+     build links in, is not supported yet; issue #464 is where that work is tracked.";
 
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -316,8 +306,9 @@ mod tests {
     use super::*;
     use inference_ast::nodes::Directive;
 
-    /// Parses `source` and returns the `ModuleRef` of its first `use … from …;`.
-    fn first_module_ref(source: &str) -> (inference_ast::arena::AstArena, ModuleRef) {
+    /// The `::` segments of the first `use … from …;` clause in `source`, the
+    /// spelling a caller hands to [`ModulePath::from_segments`].
+    fn first_module_segments(source: &str) -> Vec<String> {
         let arena = crate::parse(source).expect("source parses");
         let module_ref = arena
             .source_files()
@@ -327,16 +318,20 @@ mod tests {
                 use_dir.from.clone()
             })
             .expect("a `use … from …;` directive");
-        (arena, module_ref)
+        module_ref
+            .segments
+            .iter()
+            .map(|&id| arena.ident_name(id).to_string())
+            .collect()
     }
 
     #[test]
     fn module_path_from_a_parsed_use_directive() {
-        let (arena, module_ref) = first_module_ref(
+        let segments = first_module_segments(
             "external fn hash(a: i32) -> i32;\n\
              use { hash } from crypto::sha256;",
         );
-        let path = ModulePath::from_module_ref(&module_ref, &arena).expect("valid module ref");
+        let path = ModulePath::from_segments(segments).expect("a parsed clause is a valid path");
         assert_eq!(path.display_name(), "crypto::sha256");
 
         let components: Vec<_> = path
@@ -353,11 +348,11 @@ mod tests {
 
     #[test]
     fn single_segment_use_directive_maps_to_a_flat_file() {
-        let (arena, module_ref) = first_module_ref(
+        let segments = first_module_segments(
             "external fn sum(a: i32) -> i32;\n\
              use { sum } from arith;",
         );
-        let path = ModulePath::from_module_ref(&module_ref, &arena).expect("valid module ref");
+        let path = ModulePath::from_segments(segments).expect("a parsed clause is a valid path");
         assert_eq!(path.display_name(), "arith");
         assert_eq!(path.to_relative_path(), PathBuf::from("arith.wasm"));
     }

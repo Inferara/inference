@@ -72,6 +72,8 @@ fn not_decodable(wasm: &[u8]) -> Option<NotDecodable> {
 /// the corpus. A classifier compared against itself agrees whatever the corpus
 /// does; this list disagrees.
 const IMPORT_BEARING: &[&str] = &[
+    "codegen/wasm/extern_import/host_import/host_import.wasm",
+    "codegen/wasm/extern_import/host_import_fprime/host_import_fprime.wasm",
     "codegen/wasm/extern_import/import_dedup/import_dedup.wasm",
     "codegen/wasm/extern_import/import_with_locals/import_with_locals.wasm",
     "codegen/wasm/extern_import/multi_import/multi_import.wasm",

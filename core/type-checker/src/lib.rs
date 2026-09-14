@@ -112,7 +112,10 @@ pub mod type_info;
 pub mod typed_context;
 
 pub use extern_index::ExternIndex;
-pub use symbol_table::{BindingMutability, EnumInfo, ExternOrigin, StructFieldInfo, StructInfo};
+pub use symbol_table::{
+    BindingMutability, EnumInfo, ExternKind, ExternOrigin, HOST_SEGMENT, StructFieldInfo,
+    StructInfo,
+};
 pub use typed_context::MethodMetadata;
 
 /// Marker state indicating builder has not yet been initialized with an arena.

@@ -87,6 +87,24 @@ pub fn file_label(module_path: &[String]) -> Option<String> {
     }
 }
 
+/// [`file_label`] rendered for a message that names a file *inside a sentence*:
+/// a backticked label, or `the entry file` for the document with no module path.
+///
+/// A diagnostic about two files disagreeing has to name both of them or it
+/// leaves one unidentified, which is the whole point of such a message — and the
+/// entry file has no label to quote. The diagnostics that refuse a cross-file
+/// disagreement about one `external fn` render both of their file names through
+/// here, so a reader who hits two of those rules is told about the same file the
+/// same way. Other messages name a file in their own words where that reads
+/// better in context.
+#[must_use]
+pub fn file_label_in_prose(module_path: &[String]) -> String {
+    match file_label(module_path) {
+        Some(label) => format!("`{label}`"),
+        None => "the entry file".to_string(),
+    }
+}
+
 // Shared enums (unchanged)
 
 /// Visibility modifier for definitions.
