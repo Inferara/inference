@@ -4241,3 +4241,129 @@ fn a_generic_program_is_refused_with_a_diagnostic() {
         "a rejected build must leave no artifact"
     );
 }
+
+/// `--wasm-dep` refuses a module name whose first segment is `host`, in both the
+/// bare and the `::`-qualified spelling.
+///
+/// The reservation is one rule, and this is the door that would otherwise skip
+/// it. `--wasm-dep` binds a logical module name straight to a file and takes
+/// precedence over every search directory, so a `host` entry would supply a
+/// linked body under exactly the name a `use … from host::…;` clause reserves
+/// for the embedder — the substitution the reservation exists to make
+/// impossible, reached without the search path being consulted at all.
+///
+/// Refused at the flag rather than only where a manifest is read, because
+/// `infs build` forwards one `--wasm-dep` per `[wasm-dependencies]` key: a rule
+/// enforced only in the manifest reader holds for a project and not for a direct
+/// `infc` invocation, which is a rule about the tool rather than the language.
+#[test]
+fn a_wasm_dep_under_the_reserved_host_segment_is_refused() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = temp.child("prog.inf");
+    std::fs::write(entry.path(), "pub fn main() -> i32 { return 1; }").unwrap();
+    let lib = temp.child("x.wasm");
+    std::fs::write(lib.path(), b"").unwrap();
+
+    for name in ["host", "host::a"] {
+        let dep = format!("{name}={}", lib.path().display());
+        let assert = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+            .current_dir(temp.path())
+            .arg(entry.path())
+            .arg("--wasm-dep")
+            .arg(&dep)
+            .assert()
+            .failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains(&format!("invalid --wasm-dep `{dep}`")),
+            "the refusal opens on the flag and the whole entry, as its two siblings do — an \
+             `infs build` user whose `[wasm-dependencies]` key was forwarded here has to be able \
+             to see where the name came from, got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("reserved as the first segment")
+                && stderr.contains("imports the embedder supplies"),
+            "the refusal says what the segment is reserved for, got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("If this entry was written for a host import, delete it"),
+            "this is the only one of the three `host` reservations that can fire on a program \
+             whose source is already correct — a working `use … from host::env;` beside a \
+             `host::env` dependency entry — and for that author the entry is the redundant \
+             half, got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("Rename the module")
+                && stderr.contains("only if you meant a linked `.wasm` module"),
+            "the refusal carries the same remedy the two source-level reservation refusals end \
+             with, and carries it conditionally: followed unconditionally it converts a working \
+             host binding into a linked module, which is the provider substitution the \
+             reservation exists to prevent, got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("reserved in this position and no longer resolves to a file"),
+            "the clause that marks this a migration rather than a rule the author broke, worded \
+             as its two source-level siblings word it — the entry may be a `[wasm-dependencies]` \
+             key forwarded here from a project that built yesterday, under a flag its author \
+             never typed, got:\n{stderr}"
+        );
+    }
+
+    // The rule is exact identity of the *first segment*: not a substring, so
+    // `a::host` binds; not a prefix, so `hostlib` binds; not a case-insensitive
+    // match, so `Host` binds. The CLI states the reservation as a raw string
+    // comparison rather than through the type checker's segment identity, so
+    // each of the three loosenings is one edit away and none of them would be
+    // caught by refusing a single accepted control.
+    for name in ["a::host", "hostlib", "Host"] {
+        let assert = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+            .current_dir(temp.path())
+            .arg(entry.path())
+            .arg("--wasm-dep")
+            .arg(format!("{name}={}", lib.path().display()))
+            .assert()
+            .success();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            !stderr.contains("invalid --wasm-dep"),
+            "`{name}` is an ordinary linked module and refusing it would instruct an author to \
+             rename a module that was never reserved, got:\n{stderr}"
+        );
+    }
+}
+
+/// A program whose externs are host imports builds, and the artifact still
+/// declares the import an embedder is asked to satisfy.
+///
+/// The end-to-end statement of the feature: no `-L`, no `--wasm-dep`, nothing on
+/// disk for `env`, and a `.wasm` that carries `(import "env" "clock_ms" …)`
+/// rather than a merged body. A build that quietly stripped the import would
+/// pass every check the compiler makes and fail at the embedder, so the import's
+/// survival is asserted on the bytes that were written.
+#[test]
+fn a_host_import_program_builds_and_keeps_its_import() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = temp.child("clock.inf");
+    std::fs::write(
+        entry.path(),
+        "external fn clock_ms() -> i64;\n\
+         use { clock_ms } from host::env;\n\
+         pub fn now() -> i64 { return clock_ms(); }\n",
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .current_dir(temp.path())
+        .arg(entry.path())
+        .assert()
+        .success();
+
+    let artifact = temp.child("out").child("clock.wasm");
+    assert!(artifact.path().exists(), "the build must write an artifact");
+    let printed = wasmprinter::print_bytes(std::fs::read(artifact.path()).unwrap())
+        .expect("the artifact is a decodable module");
+    assert!(
+        printed.contains("(import \"env\" \"clock_ms\""),
+        "the import the author asked an embedder for must survive the link step:\n{printed}"
+    );
+}

@@ -321,6 +321,22 @@ mod extern_link_tests {
             link(&[0x00, 0x61, 0x73, 0x6d, 0xff], &[], None).is_err(),
             "malformed main bytes must be a link error, not a silent pass-through"
         );
+
+        // A module can carry no import section and still fail to decode, and
+        // "import-free" must not be answered for one that does. These bytes are
+        // a valid header followed by a well-framed type section whose single
+        // entry is not a type — a scan that stopped at the import section would
+        // never look at it and would wave the module through unexamined, while
+        // the linker reads it and says what is wrong.
+        let malformed_type_section = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
+            0x01, 0x02, 0x01, 0x7f, // type section: one entry, whose form byte is not a type
+        ];
+        assert!(
+            link(&malformed_type_section, &[], None).is_err(),
+            "a module that does not decode must reach the linker whatever its import section \
+             does or does not say"
+        );
     }
 
     /// A writing external, hand-written in WAT: `sort_pair(ptr)` sorts the two

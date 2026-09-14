@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+use inference_type_checker::HOST_SEGMENT;
 use rustc_hash::FxHashMap;
 
 /// File extension of a compiled WebAssembly module.
@@ -201,23 +202,83 @@ pub enum ResolveError {
     },
 }
 
-/// Why a miss can survive a correct search path, and where the work that would
-/// satisfy it is tracked.
+/// What to check when a name that *is* meant to be a linked module does not
+/// resolve, stated before the host clause below.
 ///
-/// The resolver's only currency is a file: every external this toolchain binds
-/// is a `.wasm` module read off disk and merged into the artifact. An author
-/// who meant the function to be supplied by whatever runs the program has
-/// written something the toolchain cannot express yet, and a list of probed
-/// paths on its own sends them hunting for a file that was never going to
-/// exist.
+/// The ordinary cause of this miss is a misspelling or a search path that was
+/// never configured, and a bare list of probed paths names neither: the list
+/// says where the resolver looked, and the branch that shows no list at all is
+/// precisely the one whose author forgot `-L`. Leaving those unsaid would make
+/// the host clause the only actionable sentence in the message — and the host
+/// clause is the wrong fix for the common case, now doubly so: taking it no
+/// longer fails, it *resolves*, so an author who mistypes a linked module and
+/// follows the only advice on offer ships an artifact importing the typo and
+/// hears about it from the embedder.
 ///
-/// Shared with the driver's refusal of a `from host::…` binding, which is the
-/// same limitation reached from the other direction — a clause that *says* the
-/// embedder supplies the body, rather than one the search path failed to find.
-/// One sentence so the two never come to name different work.
-pub(super) const EMBEDDER_SUPPLIED_NEXT_STEP: &str =
-    "An `external fn` satisfied by the embedder at run time, rather than by a `.wasm` file this \
-     build links in, is not supported yet; issue #464 is where that work is tracked.";
+/// What it does *not* do is re-spell the file the resolver was looking for.
+/// Every probed path in the list above is already a whole candidate —
+/// `resolve_wasm_module` pushes `dir.join(relative)`, not `dir` — so the
+/// mapping is on the page, and printing it again beside a list of paths that
+/// end in it would describe the list as a list of directories, which it is not:
+/// a reader following `lib/crypto/sha256.wasm` plus "`crypto::sha256` is looked
+/// up as `crypto/sha256.wasm` under each location above" concludes that
+/// `lib/crypto/sha256.wasm/crypto/sha256.wasm` was probed. What is left is the
+/// actionable half, and it is the half that holds for every name: the three
+/// places the spelling has to agree, which the reader can compare against the
+/// list themselves.
+fn linked_module_next_step(logical_name: &str, any_location_searched: bool) -> String {
+    if !any_location_searched {
+        return format!(
+            "Pass `-L <dir>` to name a directory to look in, or bind this module straight to a \
+             file with `--wasm-dep {logical_name}=<path>` or a `[wasm-dependencies]` entry."
+        );
+    }
+    format!(
+        "Check the spelling of `{logical_name}` against the file on disk, and against any \
+         `[wasm-dependencies]` key or `--wasm-dep` name meant to bind it."
+    )
+}
+
+/// Why a miss can survive a correct search path, and the clause that satisfies
+/// it without one.
+///
+/// The resolver's only currency is a file: a linked external is a `.wasm`
+/// module read off disk and merged into the artifact. An author who meant the
+/// function to be supplied by whatever runs the program wrote the wrong clause,
+/// and a list of probed paths on its own sends them hunting for a file that was
+/// never going to exist.
+///
+/// Specialised on the shape of the name, because only one shape has a fix that
+/// can be written out. A host module is a single segment — it is the string an
+/// embedder registers, not a path — so a one-segment miss can be quoted back as
+/// the clause that would have worked. A `::`-joined name has no single host
+/// module to name, and inventing one would be a guess at which segment the
+/// author meant, so that branch teaches the form and leaves the module to them.
+///
+/// Both branches carry the all-or-nothing rule, because this miss can only be
+/// reached from a program that already binds at least one linked module — the
+/// driver refuses a mixed program ahead of every lookup — so an author with a
+/// second extern who follows the advice as written lands in that refusal. A
+/// sentence naming the restriction costs one clause; discovering it costs a
+/// build.
+fn embedder_supplied_next_step(logical_name: &str) -> String {
+    const ALL_OR_NOTHING: &str =
+        "Today a program's externs must all be host imports or all be linked modules, so this \
+         works only if every other `use … from` clause is bound the same way.";
+    let mut segments = logical_name.split("::");
+    match (segments.next(), segments.next()) {
+        (Some(single), None) => format!(
+            "If `{single}` is meant to be supplied by the embedder at run time rather than by a \
+             `.wasm` file, bind it with `use {{ … }} from {HOST_SEGMENT}::{single};` instead. \
+             {ALL_OR_NOTHING}"
+        ),
+        _ => format!(
+            "If these functions are meant to be supplied by the embedder at run time rather than \
+             by a `.wasm` file, bind them with `use {{ … }} from {HOST_SEGMENT}::<module>;` \
+             instead. {ALL_OR_NOTHING}"
+        ),
+    }
+}
 
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -238,7 +299,12 @@ impl std::fmt::Display for ResolveError {
                         writeln!(f, "    - {}", path.display())?;
                     }
                 }
-                write!(f, "  {EMBEDDER_SUPPLIED_NEXT_STEP}")
+                writeln!(
+                    f,
+                    "  {}",
+                    linked_module_next_step(logical_name, !searched.is_empty())
+                )?;
+                write!(f, "  {}", embedder_supplied_next_step(logical_name))
             }
             ResolveError::ManifestPathMissing { logical_name, path } => {
                 write!(
@@ -367,6 +433,43 @@ mod tests {
             .contains("a/b"));
     }
 
+    /// The advice never re-spells the file the resolver looked for, whatever the
+    /// logical name is.
+    ///
+    /// Each entry of the probed list is already a whole candidate path, ending
+    /// in that spelling, so a sentence quoting it again describes the list as a
+    /// list of directories: a reader shown `lib/crypto/sha256.wasm` and told the
+    /// name "is looked up as `crypto/sha256.wasm` under each location above"
+    /// concludes the resolver probed `lib/crypto/sha256.wasm/crypto/sha256.wasm`
+    /// and goes looking for a mistake in the resolver.
+    ///
+    /// Both a well-formed name and one that is not a module path at all are
+    /// rendered, because `ResolveError`'s fields are public and nothing stops
+    /// either arriving, and the second is the one that would have crashed a
+    /// rendering that derived a file name to print.
+    #[test]
+    fn not_found_display_never_re_spells_the_file_it_looked_for() {
+        for (logical_name, expected) in [
+            ("crypto::sha256", "Check the spelling of `crypto::sha256`"),
+            ("", "Check the spelling of ``"),
+        ] {
+            let rendered = ResolveError::NotFound {
+                logical_name: logical_name.to_string(),
+                searched: vec![PathBuf::from("lib").join("crypto").join("sha256.wasm")],
+            }
+            .to_string();
+            assert!(
+                rendered.contains(expected),
+                "the advice names what to check, in the spelling the author wrote: {rendered}"
+            );
+            assert!(
+                !rendered.contains("is looked up as"),
+                "a candidate file printed beside a list of candidate paths reads as a path \
+                 joined onto each of them: {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn not_found_display_lists_every_searched_location() {
         let rendered = ResolveError::NotFound {
@@ -386,22 +489,54 @@ mod tests {
         assert!(rendered.contains(&env_line), "lists last path: {rendered}");
     }
 
-    /// Both shapes of a not-found miss end by naming the feature that would
-    /// have satisfied an extern nothing on disk provides.
+    /// Both shapes of a not-found miss end by naming the clause that would have
+    /// satisfied an extern nothing on disk provides, and a single-segment miss
+    /// names the module in it.
     ///
     /// The two branches print entirely separate bodies — a list of probed paths,
     /// or a note that nothing was probed — so a pointer appended inside one of
     /// them reaches only half the users who need it, and the half that
     /// configured no search path at all is the half most likely to have meant
-    /// the embedder. Asserting on the sentence rather than on `464` is what
-    /// makes this fail if the number survives while the explanation is dropped,
-    /// reworded past recognition, or moved into a branch of its own; asserting
-    /// that it comes last is what makes it fail if the sentence is hoisted above
-    /// the body it is the next step after, where a reader who stops at the list
-    /// of paths never reaches it.
+    /// the embedder. Asserting on the sentence rather than on a keyword is what
+    /// makes this fail if the advice survives in form while the explanation is
+    /// dropped or reworded past recognition; asserting that it comes last is
+    /// what makes it fail if the sentence is hoisted above the body it is the
+    /// next step after, where a reader who stops at the list of paths never
+    /// reaches it.
+    ///
+    /// The one-segment assertion is the half that can go wrong silently. A
+    /// generic sentence is right for every miss and so never looks broken, and
+    /// it is exactly what a reader whose module *is* a host module does not
+    /// need: the clause they should have written can be spelled out in full,
+    /// and printing `<module>` at them instead buries the one fix under a
+    /// template.
+    ///
+    /// Every rendering also states the all-or-nothing rule, and that assertion
+    /// is what keeps the advice from being a round trip. This miss implies at
+    /// least one *linked* binding — it is raised from nowhere else — so an
+    /// author with a second extern who takes the advice as written is met by the
+    /// driver's mixed-program refusal, and a sentence that is true only of
+    /// single-extern programs looks correct in every fixture.
+    ///
+    /// The ordinary remedy is asserted to come *first* in both branches, and
+    /// that ordering is the substance rather than the presentation. The common
+    /// cause of this miss is a typo or a missing `-L`, and the host clause is
+    /// the wrong fix for both — a fix that no longer merely fails, since a host
+    /// binding now resolves with nothing probed, so an author who reads only as
+    /// far as the first instruction and takes it ships the typo as an import.
+    ///
+    /// That remedy is asserted on the three places a spelling has to agree and
+    /// never on a candidate file name. The probed list is already a list of
+    /// whole candidate paths, so the spelling a typo is compared against is on
+    /// the page; a sentence re-spelling it beside them would read as a path
+    /// joined onto each, which
+    /// [`not_found_display_never_re_spells_the_file_it_looked_for`] is the
+    /// standing guard against.
     #[test]
-    fn not_found_display_points_at_embedder_supplied_externs_in_both_branches() {
-        const PHRASE: &str = "satisfied by the embedder at run time";
+    fn not_found_display_points_at_the_host_clause_in_both_branches() {
+        const PHRASE: &str = "by the embedder at run time";
+        const ALL_OR_NOTHING: &str = "must all be host imports or all be linked modules";
+        const NO_LOCATION: &str = "Pass `-L <dir>` to name a directory to look in";
 
         let with_paths = ResolveError::NotFound {
             logical_name: "crypto::sha256".into(),
@@ -409,7 +544,27 @@ mod tests {
         }
         .to_string();
         assert!(with_paths.contains(PHRASE), "{with_paths}");
-        assert!(with_paths.contains("issue #464"), "{with_paths}");
+        const CHECK_SPELLING: &str = "Check the spelling of `crypto::sha256`";
+        assert!(
+            with_paths.contains(CHECK_SPELLING),
+            "the ordinary cause is named, or a list of paths is the only thing on the page and \
+             the host clause is the only instruction: {with_paths}"
+        );
+        assert!(
+            with_paths.contains("`[wasm-dependencies]` key or `--wasm-dep` name"),
+            "a spelling has three places to agree, and a manifest key is the one an `infs` \
+             project author never typed as a flag: {with_paths}"
+        );
+        assert!(
+            with_paths.find(CHECK_SPELLING) < with_paths.find(PHRASE),
+            "the ordinary cause is offered before the host clause, which is the wrong fix for it \
+             and no longer fails when taken: {with_paths}"
+        );
+        assert!(
+            with_paths.contains("from host::<module>;"),
+            "a multi-segment name has no single host module to name, so the form is taught \
+             instead: {with_paths}"
+        );
         assert!(
             with_paths.contains("searched the following locations"),
             "the probed-path list still renders beside the pointer: {with_paths}"
@@ -418,6 +573,11 @@ mod tests {
             with_paths.find(PHRASE) > with_paths.find("searched the following locations"),
             "the pointer follows the list it is the next step after: {with_paths}"
         );
+        assert!(
+            with_paths.contains(ALL_OR_NOTHING),
+            "the advice states the restriction that makes it conditional, or it sends a \
+             multi-extern program into the mixed-program refusal: {with_paths}"
+        );
 
         let without_paths = ResolveError::NotFound {
             logical_name: "crypto::sha256".into(),
@@ -425,7 +585,20 @@ mod tests {
         }
         .to_string();
         assert!(without_paths.contains(PHRASE), "{without_paths}");
-        assert!(without_paths.contains("issue #464"), "{without_paths}");
+        assert!(
+            without_paths.contains(NO_LOCATION)
+                && without_paths.contains("`-L <dir>`")
+                && without_paths.contains("`--wasm-dep crypto::sha256=<path>`")
+                && without_paths.contains("`[wasm-dependencies]` entry"),
+            "the branch an author with a forgotten `-L` sees must name every way to configure \
+             one, the manifest key included — its sibling names all three, and an author whose \
+             build is driven by `infs` reaches `infc` without typing a flag at all: \
+             {without_paths}"
+        );
+        assert!(
+            without_paths.find(NO_LOCATION) < without_paths.find(PHRASE),
+            "the ordinary cause leads here too, and here it is the likelier one: {without_paths}"
+        );
         assert!(
             without_paths.contains("(no search directories were configured)"),
             "the no-directories line still renders beside the pointer: {without_paths}"
@@ -434,6 +607,30 @@ mod tests {
             without_paths.find(PHRASE)
                 > without_paths.find("(no search directories were configured)"),
             "the pointer follows the line it is the next step after: {without_paths}"
+        );
+        assert!(
+            without_paths.contains(ALL_OR_NOTHING),
+            "the restriction reaches the branch that renders no paths as well: {without_paths}"
+        );
+
+        let single = ResolveError::NotFound {
+            logical_name: "env".into(),
+            searched: vec![PathBuf::from("lib").join("env.wasm")],
+        }
+        .to_string();
+        assert!(
+            single.contains("`use { … } from host::env;`"),
+            "a one-segment miss is quoted back as the clause that would have worked, not as a \
+             template: {single}"
+        );
+        assert!(
+            !single.contains("<module>"),
+            "the placeholder must not survive where the real module is known: {single}"
+        );
+        assert!(
+            single.contains(ALL_OR_NOTHING),
+            "the branch that spells the clause out in full is the one most likely to be \
+             followed verbatim, so it carries the restriction too: {single}"
         );
     }
 

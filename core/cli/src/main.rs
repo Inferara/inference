@@ -170,8 +170,8 @@ use inference::wasm_link::{
     resolve_external_modules, ManifestDeps, ResolvedExternalModule, ResolvedExternals, SearchPath,
 };
 use inference::{
-    AnalysisOptions, ExternalSpecPolicy, LinkOptions, analyze_with_options, link_with_options,
-    parse_project, type_check, wasm_to_v,
+    AnalysisOptions, ExternalSpecPolicy, HOST_SEGMENT, LinkOptions, analyze_with_options,
+    link_resolved, parse_project, type_check, wasm_to_v,
 };
 use inference_wasm_codegen::{EmitFeatures, MemoryLayout, MemoryLayoutSource};
 use parser::{Cli, CliMode};
@@ -194,6 +194,42 @@ const WASM_LIB_PATH_ENV: &str = "INFERENCE_WASM_LIB_PATH";
 /// take precedence over every search directory. A malformed entry (no `=`, or an
 /// empty name) is a hard error so a typo never silently falls through to the
 /// search path.
+///
+/// A name whose first segment is [`HOST_SEGMENT`] is refused here, and here is
+/// the only place the dependency-key half of the reservation is enforced:
+/// `infs build` forwards one `--wasm-dep` per `Inference.toml
+/// [wasm-dependencies]` key, so a manifest key reaches this function and no
+/// other check stands between it and the search path. A direct
+/// `--wasm-dep host=x.wasm` would otherwise bind a file under the name a `use …
+/// from host::…;` clause reserves for the embedder — the search-path
+/// substitution the reservation exists to make impossible, reached through the
+/// one door that skips the search path entirely.
+///
+/// The refusal carries the two source-level reservations' "reserved in this
+/// position and no longer resolves to a file" clause verbatim, and that clause
+/// is the whole of what makes the three one rule rather than three rules. This
+/// one reaches an author who typed no flag at all, whose project built
+/// yesterday; without it they read a rule they broke instead of a migration they
+/// owe.
+///
+/// The remedy is two branches because this is the only one of the three that can
+/// fire on a program whose *source* is already correct. An author with a working
+/// `use { clock_ms } from host::env;` who also writes a `host::env` dependency
+/// entry beside it — plausible, since every other `from` clause needs one — is
+/// not mistaken about the clause: the entry is the redundant half, and deleting
+/// it is the fix. Issuing the rename unconditionally would tell them to turn a
+/// working host binding into a linked module, which is the provider substitution
+/// this refusal exists to prevent. The delete branch is phrased on what the
+/// entry was written *for* rather than on the key's own spelling, because a bare
+/// `host` key has no host clause to correspond to — `use … from host;` is
+/// refused by the front end — and a sentence keyed on the name would read as an
+/// invitation to write one. The rename branch is kept for the reader who did
+/// mean a linked module, and is stated second because it is the one that changes
+/// a program that works.
+///
+/// The match is on the first segment and is exact: not a prefix, so `hostlib`
+/// binds; not case-insensitive, so `Host` binds; not a substring, so `a::host`
+/// binds.
 fn parse_manifest_deps(entries: &[String]) -> anyhow::Result<ManifestDeps> {
     let mut deps = ManifestDeps::new();
     for entry in entries {
@@ -202,6 +238,20 @@ fn parse_manifest_deps(entries: &[String]) -> anyhow::Result<ManifestDeps> {
         })?;
         if name.is_empty() {
             anyhow::bail!("invalid --wasm-dep `{entry}`: module name is empty");
+        }
+        if name.split("::").next() == Some(HOST_SEGMENT) {
+            anyhow::bail!(
+                "invalid --wasm-dep `{entry}`: a dependency key names the module a `use … from` \
+                 clause refers to, and `{HOST_SEGMENT}` is reserved as the first segment there \
+                 for imports the embedder supplies, so no linked module can be named under it. If \
+                 this entry was written for a host import, delete it: a `use … from \
+                 {HOST_SEGMENT}::<module>;` clause needs no dependency entry at all, because the \
+                 embedder supplies the function and no file is named. Rename the module — and the \
+                 `use … from` clause that binds it — to a name outside `{HOST_SEGMENT}` only if \
+                 you meant a linked `.wasm` module named `{name}`: a module path whose first \
+                 segment is `{HOST_SEGMENT}` is reserved in this position and no longer resolves \
+                 to a file"
+            );
         }
         deps.insert(name, PathBuf::from(path));
     }
@@ -1002,12 +1052,20 @@ fn run() {
             process::exit(1);
         }
 
-        // Fold the resolved external modules into the codegen output: a single
-        // self-contained module with no cross-module imports. Each external is
-        // paired with the logical module it was bound under, so the merge
-        // matches each import's recorded `(module, field)` against the right
-        // external. With no externs this is a byte-identical pass-through.
-        let external_bytes = externals.module_bytes();
+        // Fold the resolved external modules into the codegen output, or — for a
+        // program whose externs are host imports — ship the codegen bytes with
+        // the imports intact. The merge branch produces a single self-contained
+        // module with no cross-module imports: each external is paired with the
+        // logical module it was bound under, so the merge matches each import's
+        // recorded `(module, field)` against the right external. With no externs
+        // this is a byte-identical pass-through.
+        //
+        // Through `link_resolved` rather than the linker entry point directly,
+        // because resolution's answer decides which of two paths the artifact
+        // takes: a program whose externs are host imports has nothing to merge
+        // and must keep the imports it emitted, checked against the declarations
+        // that asked for them.
+        //
         // The warning-carrying entry point, not the discarding `link`: the merge
         // reports where its own guarantee stops short of what a reader would
         // assume, and a diagnostic nobody prints is one nobody acts on.
@@ -1021,15 +1079,14 @@ fn run() {
             args.generate_v_output,
             args.adopt_external_specs,
         );
-        let linked = match link_with_options(
+        let linked = match link_resolved(
             codegen_output.wasm(),
-            &external_bytes,
-            Some(&externals.contracts),
+            &externals,
             &LinkOptions { external_specs },
         ) {
             Ok(linked) => linked,
             Err(e) => {
-                eprintln!("Linking external modules failed: {e}");
+                eprintln!("Link step failed: {e}");
                 process::exit(1);
             }
         };
