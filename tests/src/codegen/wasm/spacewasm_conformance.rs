@@ -45,8 +45,9 @@ mod spacewasm_conformance_tests {
     use inference_target_conformance::spacewasm::{LIMITS_FROM, Violation, check};
     use inference_wasm_codegen::Target;
     use wasm_encoder::{
-        BlockType, CodeSection, Function, FunctionSection, Instruction, Module, RefType,
-        TableSection, TableType, TypeSection, ValType,
+        BlockType, CodeSection, ConstExpr, CustomSection, EntityType, ExportKind, ExportSection,
+        Function, FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction, Module,
+        RefType, TableSection, TableType, TypeSection, ValType,
     };
 
     /// What `check` must say about one committed artifact.
@@ -720,6 +721,31 @@ mod spacewasm_conformance_tests {
         module.finish()
     }
 
+    /// A module declaring `count` `i32` globals and exporting global `index`.
+    ///
+    /// No function and no body: the export descriptor is enough to reach the
+    /// narrowing accessor, and a module carrying an instruction as well would
+    /// not say which of the two earned the refusal.
+    fn module_exporting_global(count: u32, index: u32) -> Vec<u8> {
+        let mut module = Module::new();
+        let mut globals = GlobalSection::new();
+        for _ in 0..count {
+            globals.global(
+                GlobalType {
+                    val_type: ValType::I32,
+                    mutable: false,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(0),
+            );
+        }
+        module.section(&globals);
+        let mut exports = ExportSection::new();
+        exports.export("g", ExportKind::Global, index);
+        module.section(&exports);
+        module.finish()
+    }
+
     /// Every refusal carries a finding, an authority and a remedy of its own.
     ///
     /// The two tests above prove the three-part shape on two variants. This
@@ -744,7 +770,7 @@ mod spacewasm_conformance_tests {
         let over_long_field_name = wat(&format!("(module (import \"h\" \"{long_name}\" (func)))"));
         let mut over_deep_branch = vec![Instruction::I32Const(1); 256];
         over_deep_branch.push(Instruction::Br(0));
-        let rows: [(&str, Vec<u8>, &str, &str, &str); 15] = [
+        let rows: [(&str, Vec<u8>, &str, &str, &str); 16] = [
             (
                 "a post-1.0 instruction",
                 wat("(module (func i32.const 0 i32.extend8_s drop))"),
@@ -796,6 +822,17 @@ mod spacewasm_conformance_tests {
                 "the target count of a `br_table` is 65536",
                 "one 16-bit immediate",
                 "narrower jump table",
+            ),
+            // The one refusal this crate makes that the decoder does not, so
+            // its authority sentence has to say so where the other fifteen say
+            // what upstream refuses. A reader told only "SpaceWasm rejects it"
+            // would go looking for a decode failure that never happens.
+            (
+                "an export of global 65536",
+                module_exporting_global(65_537, 65_536),
+                "defined index truncated: the export `g` names global 65536",
+                "one refusal this crate makes that the decoder does not",
+                "split that module",
             ),
             (
                 "a branch unwinding 256 words",
@@ -907,22 +944,18 @@ mod spacewasm_conformance_tests {
     /// A refusal with several findings is read top to bottom, and the order is
     /// the only thing that makes it readable: the WebAssembly 1.0 verdict first
     /// because it can explain the rest, then the functions in index order, then
-    /// the imports, then the module's own shape. Nothing else in this tier
-    /// looks at the order — every other assertion searches the slice — so a
-    /// reordering of the scan would otherwise be invisible.
+    /// the imports, then what the sections outside a body name — the exports,
+    /// the `start` section and the element segments — then the module's own
+    /// shape. Nothing else in this tier looks at the order — every other
+    /// assertion searches the slice — so a reordering of the scan would
+    /// otherwise be invisible.
     ///
     /// Fails if a category moves, or if the order becomes the order the scan
     /// happens to discover findings in.
     #[test]
     fn the_findings_arrive_in_the_documented_order() {
-        let module = wat(&format!(
-            "(module (@custom \"{}\" \"x\") (import \"h\" \"f\" (func (param {}))) \
-             (func (param {}) i32.const 0 i32.extend8_s drop))",
-            "c".repeat(33),
-            "i32 ".repeat(10),
-            "i32 ".repeat(256)
-        ));
-        let violations = check(&module).expect_err("four findings are four refusals");
+        let module = module_with_one_finding_per_group();
+        let violations = check(&module).expect_err("five findings are five refusals");
         let order: Vec<&str> = violations
             .as_slice()
             .iter()
@@ -930,16 +963,68 @@ mod spacewasm_conformance_tests {
                 Violation::OutsideWasm1 { .. } => "wasm1",
                 Violation::ParamWordsExceeded { .. } => "function",
                 Violation::ImportArityExceeded { .. } => "import",
+                Violation::IndexTruncated { .. } => "reference",
                 Violation::CustomSectionNameTooLong { .. } => "module",
                 other => panic!("this module earns no other finding, got {other:?}"),
             })
             .collect();
         assert_eq!(
             order,
-            ["wasm1", "function", "import", "module"],
+            ["wasm1", "function", "import", "reference", "module"],
             "the rendered refusal reads top to bottom, and the documented order is what \
              makes it read"
         );
+    }
+
+    /// A module earning exactly one finding from each of the five groups
+    /// `check` documents an order for.
+    ///
+    /// Built with the encoder rather than from WAT because one of the five
+    /// needs 65,537 globals, which WAT would spell one declaration at a time.
+    /// The five faults are deliberately unrelated to each other: a
+    /// sign-extension instruction, a 256-word parameter list, a ten-parameter
+    /// import, an export naming a global past the interpreter's 16-bit word,
+    /// and a 33-byte custom section name.
+    fn module_with_one_finding_per_group() -> Vec<u8> {
+        let mut module = Module::new();
+        module.section(&CustomSection {
+            name: "c".repeat(33).into(),
+            data: b"x"[..].into(),
+        });
+        let mut types = TypeSection::new();
+        types.ty().function([ValType::I32; 10], []);
+        types.ty().function([ValType::I32; 256], []);
+        module.section(&types);
+        let mut imports = ImportSection::new();
+        imports.import("h", "f", EntityType::Function(0));
+        module.section(&imports);
+        let mut functions = FunctionSection::new();
+        functions.function(1);
+        module.section(&functions);
+        let mut globals = GlobalSection::new();
+        for _ in 0..65_537 {
+            globals.global(
+                GlobalType {
+                    val_type: ValType::I32,
+                    mutable: false,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(0),
+            );
+        }
+        module.section(&globals);
+        let mut exports = ExportSection::new();
+        exports.export("g", ExportKind::Global, 65_536);
+        module.section(&exports);
+        let mut code = CodeSection::new();
+        let mut function = Function::new([]);
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Extend8S);
+        function.instruction(&Instruction::Drop);
+        function.instruction(&Instruction::End);
+        code.function(&function);
+        module.section(&code);
+        module.finish()
     }
 
     /// A shape this compiler cannot emit is blamed on provenance, not on the
@@ -947,17 +1032,17 @@ mod spacewasm_conformance_tests {
     ///
     /// "Shorten the custom section name" is advice about a file the user did not
     /// write: nothing in the language names a custom section. The remedy for the
-    /// five such shapes therefore splits — report a compiler bug, or rebuild the
+    /// six such shapes therefore splits — report a compiler bug, or rebuild the
     /// external — because only the person holding the build knows which half
     /// applies.
     ///
-    /// Both halves of the split are asserted, and on both of its shapes: the
-    /// four that share one sentence are represented by the custom-section name,
-    /// and `IndexTooLarge` is the fifth, whose two kinds each say the same thing
-    /// in their own words while still naming the edit — there is one for those,
-    /// and it differs by instruction. A row for each kind, because the two
-    /// sentences are written out separately and a single row would let the other
-    /// lose the provenance half unnoticed.
+    /// Both halves of the split are asserted, and on every shape that spells
+    /// them itself: the four that share one sentence are represented by the
+    /// custom-section name, `IndexTooLarge`'s two kinds each say the same thing
+    /// in their own words while still naming the edit, and `IndexTruncated`
+    /// names a third edit again — split the module that carries the definitions.
+    /// A row for each, because the sentences are written out separately and a
+    /// single row would let the others lose the provenance half unnoticed.
     ///
     /// Fails if one of those arms is given a source-level remedy that does not
     /// exist, or drops the provenance question and names only the edit.
@@ -969,7 +1054,8 @@ mod spacewasm_conformance_tests {
             Instruction::I32Const(0),
             Instruction::BrTable(vec![0u32; 65_536].as_slice().into(), 0),
         ]);
-        for (label, wasm, fragments) in [
+        let truncated = module_exporting_global(65_537, 65_536);
+        let rows: [(&str, Vec<u8>, Vec<&str>); 4] = [
             (
                 "a 33-byte custom section name",
                 named,
@@ -1001,7 +1087,18 @@ mod spacewasm_conformance_tests {
                     "report a compiler bug",
                 ],
             ),
-        ] {
+            (
+                "an export of global 65536",
+                truncated,
+                vec![
+                    "emits one global and nowhere near 65,536 functions",
+                    "came from a linked module or a post-build step",
+                    "split that module",
+                    "report a compiler bug",
+                ],
+            ),
+        ];
+        for (label, wasm, fragments) in rows {
             let rendered = check(&wasm)
                 .err()
                 .unwrap_or_else(|| panic!("{label} must be refused"))

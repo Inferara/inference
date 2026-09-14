@@ -344,13 +344,18 @@ interpreter can raise, either as one of the rows here or with the reason it is
 out of reach, and nothing is left unclassified. The two embedder-configured rows
 cannot be refusals, because their values belong to a deployment rather than to
 the interpreter; the build measures them instead and prints what they have to be.
-One shape is neither refused nor executed faithfully and is therefore outside
-what this table promises: a module declaring more than 65,536 functions or
-globals is *loaded*, because the interpreter narrows those two index spaces to
-sixteen bits, so an access past the cap reads the wrong entry rather than failing
-— `core/target-conformance`'s README records that residue and the measurement
-behind it. This compiler emits one global and no build approaches either count,
-which is why it is a sentence here rather than a row above.
+One shape is refused here although the interpreter would load it, and it is the
+only one: a module that *references* a function or a global it defines at
+position 65,536 or beyond. The interpreter narrows those two index spaces to
+sixteen bits without checking the narrowing, so it loads such a module and then
+runs it against the definition 65,536 below — a `call` reaching the wrong
+function, a `global.get` reading the wrong word. There is no load failure to
+move to build time there, only a wrong execution to inherit, and for a flight
+computer a build that fails is better than an artifact that flies and calls the
+wrong function. `core/target-conformance`'s README carries the mechanism, the
+five places a module can name a definition, and the measurements behind them.
+This compiler emits one global and no build approaches either count, which is
+why it is a sentence here rather than a row above.
 
 | Limit | Value | Where it comes from |
 |-------|-------|---------------------|
@@ -425,12 +430,16 @@ local words, call-frame words, a locals group, a `call_indirect` type index or
 `br_table` width over the interpreter's 16-bit IR immediate, a branch discarding
 more than 255 operand words, an import module or field name over 31 bytes, a host
 function over nine parameters or one result, a custom section name over 32 bytes,
-and a memory over the address space. Every refusal names the two numbers, says
-which cap it met, and gives one thing to change. Five of them describe module
-shapes this compiler cannot produce; those say so, and ask you to rebuild the
-external module or report a compiler bug, because you did not write the file the
-shape is in — the two IR-immediate ones still name the edit that would shorten
-it, since for those there is one.
+and a memory over the address space. One further refusal is the build being
+deliberately stricter than the interpreter rather than agreeing with it: a
+reference to a defined function or global at position 65,536 or beyond, which
+the interpreter loads and then resolves to the wrong definition, as
+[Decode-time limits](#decode-time-limits) above describes. Every refusal names
+the two numbers, says which cap it met, and gives one thing to change. Six of
+them describe module shapes this compiler cannot produce; those say so, and ask
+you to rebuild the external module or report a compiler bug, because you did not
+write the file the shape is in — the two IR-immediate ones and the truncation
+one still name the edit that would shorten it, since for those there is one.
 
 **What is reported.** Three numbers, and each carries its unit because two of
 them sound alike and are not the same quantity:
@@ -476,7 +485,7 @@ exactly where it was:
 ```
 $ infs build
 ...
-SpaceWasm conformance failed: out/main.wasm cannot be loaded by a SpaceWasm embedder.
+SpaceWasm conformance failed: out/main.wasm is not a module a SpaceWasm embedder can load and run as written.
 The original artifact is unchanged; try `--no-wasm-opt`, or a different Binaryen version.
 ```
 

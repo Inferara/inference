@@ -2,11 +2,18 @@
 //! in process by the real `spacewasm` flight interpreter — the runtime the
 //! `spacewasm` target is named for.
 //!
-//! Two things live here. `decode_sweep` puts the committed golden corpus in
-//! front of the decoder and requires the two partitions to land on opposite
-//! sides of it: every WebAssembly 1.0 golden that binds no import and carries no
-//! verification operator loads, each of those two classes is refused for the
-//! reason it is excluded for rather than skipped, and every golden built with
+//! Three things live here. `conformance_oracle` puts a hand-written module on
+//! both sides of every boundary the `spacewasm` target's checker models, in
+//! front of that checker and in front of the real decoder, and requires the two
+//! verdicts to be equal everywhere but one class — the references the
+//! interpreter narrows without checking — where the rows state the two verdicts
+//! separately because they differ on purpose, and run the loaded module to
+//! record which definition it actually reaches. `decode_sweep` puts the
+//! committed golden corpus in front of the decoder and requires the two
+//! partitions to land on opposite sides of it: every WebAssembly 1.0 golden
+//! that binds no import and carries no verification operator loads, each of
+//! those two classes is refused for the reason it is excluded for rather than
+//! skipped, and every golden built with
 //! the bulk-memory feature opted in is refused with an unsupported-opcode
 //! verdict rather than merely refused — which is what makes the target's
 //! post-MVP refusal a measured property of the runtime instead of a claim about

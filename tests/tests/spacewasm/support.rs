@@ -415,14 +415,46 @@ pub fn decode<'s>(
 /// an oversized code-page budget — since that is a harness fault rather than a
 /// verdict about `wasm`.
 pub fn decode_with<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
+    session: &'s mut SpaceWasmSession,
+    wasm: &[u8],
+    hosts: spacewasm::Vec<HostModule>,
+) -> Result<LoadedModule<'s>, ParseError> {
+    decode_with_pages::<CONTROL_FRAMES, STACK_DEPTH>(session, wasm, hosts, MAX_CODE_PAGES)
+}
+
+/// [`decode_with`] with the code builder's IR page budget chosen by the caller
+/// as well.
+///
+/// `MAX_CODE_PAGES` is `spacewasm_std`'s, and it is the right budget for
+/// every question about an artifact this compiler could write. It is the wrong
+/// one for a module built to sit past an index the interpreter narrows: that
+/// needs more than 65,536 function bodies, which is more compiled IR than a
+/// flight configuration holds, and a row decoding it under the reference budget
+/// would record a page-budget refusal while saying nothing about the index.
+///
+/// The budget is the embedder's own choice — `CompilerOptions::max_code_pages`
+/// is what a mission integrator sets — so widening it is a parameter here
+/// rather than a second allocator or a second session token: the allocator
+/// contract and the single-threaded lock are untouched, and a caller passing a
+/// larger number is describing a larger flight computer, not evading anything.
+///
+/// # Errors
+///
+/// Returns the decoder's own [`ParseError`].
+///
+/// # Panics
+///
+/// Panics if the interpreter cannot be built at all, as [`decode_with`] does.
+pub fn decode_with_pages<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
     _session: &'s mut SpaceWasmSession,
     wasm: &[u8],
     hosts: spacewasm::Vec<HostModule>,
+    max_code_pages: usize,
 ) -> Result<LoadedModule<'s>, ParseError> {
     let mut code_builder = CodeBuilder::new(CompilerOptions {
         allow_memory_grow: false,
         max_backpatch_iterations: None,
-        max_code_pages: MAX_CODE_PAGES,
+        max_code_pages,
     })
     .expect("the code builder's page budget is allocatable");
     let mut engine = Engine::new(STACK_WORDS, MAX_MODULES, hosts).expect("the engine allocates");

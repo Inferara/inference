@@ -48,8 +48,9 @@ on-board use. It allocates nothing it did not ask an embedder for, so its
 acceptance set is narrower than the standard's in ways the standard does not
 describe. `check` answers both questions a build has about that envelope:
 
-- a **verdict** — is this a module the decoder would accept, and could an
-  embedder supply what it imports?
+- a **verdict** — is this a module the decoder would accept, could an embedder
+  supply what it imports, and — in the one place the two part company — is it
+  one the decoder would execute as written?
 - a **measurement** — what must the embedder's two const generics be for it to
   fit? Neither number can be read off the standard, and a module that exceeds
   one fails at load time on hardware.
@@ -76,7 +77,7 @@ width, while a function's recorded stack usage is in **words**, where `i64` and
 | `MAX_LOCAL_WORDS` | 65 535 | words | `src/code.rs:142-145`; `Func::local_size: u16`, `src/code.rs:69` | decode |
 | `MAX_FRAME_WORDS` | 65 535 | words | `src/code.rs:157-160` | decode |
 | `MAX_LOCALS_GROUP_COUNT` | 65 535 | locals per group | `src/code.rs:126-127` | decode |
-| `MAX_IR_INDEX` | 65 535 | a value in one 16-bit IR immediate | `src/text.rs:1099-1102` (`instr_imm_8_or_16`); `src/compiler.rs:281-283` | decode |
+| `MAX_IR_INDEX` | 65 535 | a value in one 16-bit IR immediate | `src/text.rs:1099-1102` (`instr_imm_8_or_16`); `src/compiler.rs:281-283`; `src/module.rs:383-389,423-429` | decode, narrowing |
 | `MAX_BRANCH_UNWIND_WORDS` | 255 | words | `src/text.rs:741-748` | decode |
 | `MAX_IMPORT_NAME_BYTES` | 31 | bytes | `src/host.rs:327,352` (`HOST_FUNCTION_NAME_CAP`, `HOST_MODULE_NAME_CAP`) | registration |
 | `MAX_HOST_FUNCTION_PARAMS` | 9 | parameters | `src/host.rs:168` | registration |
@@ -86,7 +87,7 @@ width, while a function's recorded stack usage is in **words**, where `i64` and
 | `REFERENCE_MAX_CONTROL_FRAMES` | 64 | frames | `spacewasm_std`'s embedding; the generic is `src/text.rs:444` | embedder |
 | `REFERENCE_MAX_STACK_DEPTH` | 256 | values | `spacewasm_std`'s embedding; the generic is `src/text.rs:445` | embedder |
 
-Three kinds of limit, and a refusal always says which it met:
+Four kinds of limit, and a refusal always says which it met:
 
 - **decode** — the decoder refuses the module outright.
 - **registration** — the module decodes, and then no embedder can supply what it
@@ -94,6 +95,11 @@ Three kinds of limit, and a refusal always says which it met:
   bytes" would shorten a name to 32 and meet the same wall.
 - **embedder** — not a limit at all, but the configuration `spacewasm_std`
   ships. A module above it is conformant and needs a bigger const generic.
+- **narrowing** — the decoder does *not* refuse: it truncates the value into the
+  field and loads the module, which then runs against the wrong definition. The
+  one entry is a defined function's or a defined global's position, and it is
+  the only place this crate is deliberately stricter than the runtime it
+  describes — see "Stricter than the decoder" below.
 
 Two of the decode limits interact, and which one a function reaches first is
 worth knowing: `MAX_FRAME_WORDS` bounds two words of header plus the locals plus
@@ -105,16 +111,19 @@ section *declares*, and the decoder meets it while reading that section. These
 two bound the bytecode the interpreter compiles the module into, and it meets
 them while walking a function body:
 
-- `MAX_IR_INDEX` is one 16-bit immediate. Two operators can present a value over
-  it — a `call_indirect`'s type index and a `br_table`'s target count — so one
+- `MAX_IR_INDEX` is one 16-bit immediate, and it bounds two different things.
+  Two operators can present a value over it and are *refused* upstream — a
+  `call_indirect`'s type index and a `br_table`'s target count — so one
   violation covers both and says which. They meet the cap in two different
   places, which is worth knowing when reading upstream: the target count goes
   through the shared emitter `instr_imm_8_or_16`, and the type index is checked
-  by hand before its `write_16`. Nothing else reaches the refusal — a global and
-  a function index arrive already narrowed to `u16`, which is a defect rather
-  than a safeguard and is what the residue section below is about; a local index
-  is a frame offset bounded by `MAX_FRAME_WORDS`; and a label index is refused
-  as `InvalidLabelIndex` before it can be one.
+  by hand before its `write_16`. The same word also holds a defined function's
+  and a defined global's position, and those are *narrowed* rather than
+  refused — the `IndexTruncated` refusal below is this crate's own, and the only
+  one it makes that upstream does not. The two index kinds left over reach
+  neither refusal: a local index is a frame offset bounded by
+  `MAX_FRAME_WORDS`, and a label index is refused as `InvalidLabelIndex` before
+  it can be one.
 - `MAX_BRANCH_UNWIND_WORDS` is the operands one branch discards, counted in
   words from the bottom of the live stack up to the target frame's own height —
   the same word convention and the same stop-at-the-first-untracked-slot rule
@@ -179,7 +188,7 @@ gives the finding with both numbers, the sentence naming the authority that
 imposes the cap, and one thing to change:
 
 ```
-SpaceWasm conformance failed: out/main.wasm cannot be loaded by a SpaceWasm embedder.
+SpaceWasm conformance failed: out/main.wasm is not a module a SpaceWasm embedder can load and run as written.
 No file was written.
 
   parameter words exceeded: function `mix_channels` declares 260 parameter words; SpaceWasm accepts at most 255.
@@ -199,7 +208,7 @@ variant, the maxima each quotes, the two sentences under it and the header above
 them all name one runtime — and the module is split out for length rather than
 because anything in it is target-neutral.
 
-Five of the violations describe module shapes this compiler cannot produce. Four
+Six of the violations describe module shapes this compiler cannot produce. Four
 of them share one sentence — `MemoryTooLarge`, `LocalsGroupTooLarge`,
 `CustomSectionNameTooLong` and `ImportMultipleResults`. "Shorten the custom
 section name" would be advice about a file the user did not write, so their
@@ -210,9 +219,12 @@ applies.
 `IndexTooLarge` is the fifth — code generation emits no `call_indirect` and no
 `br_table` at any target — and its remedy splits the same way while still naming
 the edit, because there is one and it differs by instruction: fewer function
-types, or a narrower jump table. `BranchUnwindTooDeep` is not in that family: a
-branch over a deep stack is a shape a body can be written into, so its remedy is
-the source edit that shortens it.
+types, or a narrower jump table. `IndexTruncated` is the sixth — this compiler
+emits one global and nowhere near 65,536 functions — and it names an edit again:
+split the module that carries the definitions, so none of them sits at 65,536 or
+beyond. `BranchUnwindTooDeep` is not in that family: a branch over a deep stack
+is a shape a body can be written into, so its remedy is the source edit that
+shortens it.
 
 ### What `check` does not refuse, and why
 
@@ -315,33 +327,56 @@ refusal to add.
 **Not modelled.** None. Every variant of `ValidationError` is in one of the
 classes above.
 
-**The residue that is left, and it is not a refusal.** Two index spaces
-`spacewasm` 0.7.1 **truncates** rather than refusing. `Module::get_func_ref`
-(`src/module.rs:383-389`) and `Module::get_global_ref` (`src/module.rs:423-429`)
-narrow a function index and a global index to `u16` with an `as` cast, and the
-IR emitter is then handed a value that cannot be over the cap — which is why
-`IdxTooLarge` is unreachable through `call`, `global.get` and `global.set`, and
-why the modelled arms are the two operators that reach the emitter with an
-un-narrowed value.
+### Stricter than the decoder
+
+Everything above transcribes the decoder: `check` refuses what `spacewasm` 0.7.1
+refuses, and a disagreement is a defect. There is exactly one entry that is not a
+transcription, and this is the whole of it.
+
+`Module::get_func_ref` (`src/module.rs:383-389`) and `Module::get_global_ref`
+(`src/module.rs:423-429`) subtract the imported count from the raw index,
+bounds-check the result against the defined table, and then narrow it with
+`Ref::Module(i as u16)` — with no check on the narrowing. A module naming a
+defined function or global at position 65,536 or beyond therefore **loads**, and
+every reference to it resolves to the definition 65,536 below. That is not a
+refusal this crate could inherit, because there is no refusal upstream; it is a
+wrong execution, and for a flight target an artifact that flies and calls the
+wrong function is worse than a build that fails. `Violation::IndexTruncated` is
+the refusal, its authority sentence says plainly that the decoder does not make
+it, and its remedy splits on provenance like the other shapes this compiler
+cannot produce.
+
+Five places reach those two accessors, and all five are checked: a `call`
+operand (`src/compiler.rs:202-206`), a `global.get` or `global.set` operand
+(`src/text.rs:631-634`), an export descriptor (`src/module.rs:753-778`), an
+element-segment entry (`src/module.rs:870-874`) and the `start` section
+(`src/module.rs:299-303`). A constant expression's `global.get` is not a sixth:
+a module-local global is refused there as `InvalidConstantInstruction`
+(`src/constant.rs:291-298`) before the cast is reached. The cross-module link
+path is not a sixth either (`src/imports.rs:71,169`): it reaches the same two
+accessors, but with an index it reads back out of the *exporting* module's
+export descriptor, so a refusal at that module's export section already covers
+it. An import is not one either — it resolves to a `Ref::Host` or a `Ref::Extern`
+that carries no narrowed position — but imports **shift** every definition after
+them, which is why the refusal reports the written index and the position
+separately and why one imported global moves the boundary from index 65,536 to
+index 65,537.
 
 What the cast costs is measured rather than argued, and the measurement is
-committed: a module declaring 65,537 globals whose exported function returns
-`global.get 65536` decodes, loads and returns global **0**'s value — pinned by
-`a_global_index_over_the_ir_immediate_is_truncated_rather_than_refused` in the
-oracle suite, which runs the module and reads the answer, against the 65,535
-neighbour as its control. `check` does not refuse it. The question this crate
-answers is what the decoder's verdict would be, and the decoder's verdict is
-"accepted" — a refusal here would be this crate disagreeing with the runtime it
-describes, which is a policy change and not a transcription, and every row of the
-oracle suite is built on the two agreeing. Whether a build ought nonetheless to be
-stricter than the decoder here — refusing a module the interpreter would load, on
-the grounds that it would load it and call the wrong function — is a policy
-question this crate deliberately leaves undecided. It is written down because a
-residue nobody wrote down is one nothing turns red about, and because the shape is
-reachable in principle: a linked program declaring more than 65,536 globals. The
-function-index half needs an embedder whose code-page budget survives 65,536
-function bodies as well; the reference configuration does not, and refuses such a
-module with `AllocError(OutOfMemory)` before the truncation can matter.
+committed. A module declaring 65,537 globals whose exported function returns
+`global.get 65536` loads under the real decoder and answers with global **0**'s
+value; a `global.set 65536` lands on global 0; a `call 65536` runs definition 0;
+an export of function 65,536 resolves to definition 0 for the life of the module;
+an element entry of 65,536 fills the table slot with definition 0; and a `start`
+section naming 65,536 runs definition 0 before an embedder calls anything. Each
+of those is one row of `tests/tests/spacewasm/conformance_oracle.rs`, stating
+both verdicts — `check` refuses, the decoder loads — with the 65,535 neighbour as
+its control, so this section turns red the day upstream starts checking the
+narrowing and the refusal becomes a transcription like every other. The
+function-index rows need an embedder whose code-page budget holds 65,537 function
+bodies; the `spacewasm_std` reference budget does not, and refuses such a module
+with `AllocError(OutOfMemory)`, which the `call` row measures in place before the
+four of them decode under the widened budget it establishes.
 
 ## How it is held to being right
 
@@ -350,8 +385,10 @@ is worse than none: it turns a build-time refusal into a load failure on flight
 hardware. So the numbers are not trusted — `tests/tests/spacewasm/conformance_oracle.rs`
 puts a hand-written module on *both* sides of every boundary, in front of this
 crate and in front of the real interpreter, and requires the two verdicts to be
-the same. `MAX_FRAME_WORDS` is in the table above because that oracle found it:
-the crate accepted a 65 535-word local declaration the decoder refused.
+the same everywhere except the one class above, where the rows state the two
+verdicts separately and run the loaded module to record which definition it
+actually reaches. `MAX_FRAME_WORDS` is in the table above because that oracle
+found it: the crate accepted a 65 535-word local declaration the decoder refused.
 
 The two IR limits are pinned the same way, and their rows assert the decoder's
 *reason* rather than only its verdict, since every module that reaches them is
@@ -363,3 +400,24 @@ row separates a model that forgets the selector from one that does not; a
 `br_table`'s default target is the one a model measuring "the targets" would
 skip; and a branch to the function's own frame is compiled as an early return, so
 a model measuring every branch alike would refuse a module the decoder runs.
+
+The one class where the two verdicts differ is held to being deliberate rather
+than accidental. The five upstream places are six arms of this model — the two
+export kinds are read by an arm each, and the two global operators share one arm
+and one peak because upstream reads both through `TextBuilder::get_global` — and
+the seven references they name have a site row each. Deleting the pattern that
+reads a reference was measured, an arm or one alternative of the shared arm's
+or-pattern: it turns that reference's site row red and no other reference's. Five
+of the seven turn one of the rows about the model red as well, each for a reason
+worth knowing before reading a failure list. The `call`, `global.get` and element
+patterns are the three a single site can name twice, so each also carries the row
+that requires the largest index a site names to be the one reported. The
+`global.get` alternative carries the global import shift and the function-export
+arm the function one, since each observes its subtraction through that reference.
+The element arm carries the row that requires the finding to name the *second* of
+two segments. The export, `start` and element patterns each carry the row that
+reads the order the three sections outside a body are reported in. And the
+global-export arm is the fixture the in-process tier uses for this variant's
+remedy, authority and place in the finding order. Every row carries the 65,535
+neighbour that both sides accept and run correctly — without it a checker that
+refused every large module would satisfy them all.

@@ -35,7 +35,10 @@
 //!   that says so.
 //! - [`spacewasm`] is the `SpaceWasm` flight interpreter's decode-time and
 //!   registration-time envelope, plus the per-function measurements an embedder
-//!   needs to size its two const generics.
+//!   needs to size its two const generics — and the one refusal in the crate
+//!   that is deliberately stricter than the decoder: a reference to a
+//!   definition past the 16-bit IR word the interpreter narrows it into
+//!   without checking, which loads and runs against a different definition.
 //!
 //! The refusal vocabulary is one enum, private to the crate and re-exported
 //! from [`spacewasm`], which is the path a caller reaches it through. It

@@ -8,11 +8,12 @@
 //! verifier's two stacks are const generics an embedder chooses at compile time.
 //!
 //! [`check`] answers both questions a build has about that envelope. The first
-//! is a verdict: is this module one the decoder would accept? The second is a
-//! measurement: what must the two const generics be for it to fit? An embedder
-//! cannot read the second off the standard, and a module that exceeds it fails
-//! at load time on hardware, which is the failure this module exists to move to
-//! build time.
+//! is a verdict: is this module one the decoder would accept, and — in the one
+//! place the two part company — one it would execute as written? The second is
+//! a measurement: what must the two const generics be for it to fit? An
+//! embedder cannot read the second off the standard, and a module that exceeds
+//! it fails at load time on hardware, which is the failure this module exists
+//! to move to build time.
 //!
 //! # Where the numbers come from
 //!
@@ -43,20 +44,30 @@
 //! and this crate's README classifies every variant of it: modelled here,
 //! reached first by the WebAssembly 1.0 validation, decided by a host set these
 //! bytes do not carry, chosen by an embedder and therefore measured instead, or
-//! out of reach on this compiler's path. No variant is left unclassified, and
-//! the one residue the README does name is not a variant at all — two index
-//! spaces `spacewasm` 0.7.1 truncates rather than refusing, so no verdict this
-//! crate could return would agree with the decoder's. An enumeration is the only
-//! form that stays honest, because the residue nobody wrote down is the residue
-//! nothing turns red about.
+//! out of reach on this compiler's path. No variant is left unclassified. An
+//! enumeration is the only form that stays honest, because the residue nobody
+//! wrote down is the residue nothing turns red about.
+//!
+//! # Where this is stricter than the decoder
+//!
+//! One refusal is not a transcription of a `ValidationError`, and it is the
+//! only one: [`Violation::IndexTruncated`]. `spacewasm` 0.7.1 narrows a defined
+//! function's and a defined global's position into a 16-bit IR word without
+//! checking the narrowing, so a module naming definition 65,536 or beyond
+//! **loads** and then runs against the definition 65,536 below it. There is no
+//! decoder verdict to agree with there, only a wrong execution to inherit, and
+//! for a flight target a build that refuses is better than an artifact that
+//! flies and calls the wrong function. [`MAX_IR_INDEX`] carries the mechanism
+//! and the five places that reach it.
 
 use wasmparser::{
-    BinaryReaderError, CompositeInnerType, FuncToValidate, FuncValidator, FuncValidatorAllocations,
-    FunctionBody, MemoryType, Name, NameSectionReader, Operator, OperatorsReader, Parser, Payload,
-    TypeRef, ValType, ValidPayload, Validator, ValidatorResources,
+    BinaryReaderError, CompositeInnerType, ElementItems, ElementSectionReader, ExternalKind,
+    FuncToValidate, FuncValidator, FuncValidatorAllocations, FunctionBody, MemoryType, Name,
+    NameSectionReader, Operator, OperatorsReader, Parser, Payload, TypeRef, ValType, ValidPayload,
+    Validator, ValidatorResources,
 };
 
-pub use crate::errors::{IndexKind, NamePart, Violation, Violations};
+pub use crate::errors::{IndexKind, IndexSpace, NamePart, ReferenceSite, Violation, Violations};
 
 /// The upstream release every constant in this module was read from.
 ///
@@ -180,18 +191,34 @@ pub const MAX_FRAME_WORDS: u64 = 65_535;
 /// count goes through the shared emitter (called at `src/compiler.rs:166`), and
 /// a `call_indirect`'s type index is checked by hand before its `write_16`.
 ///
-/// Every other index the interpreter writes as a 16-bit immediate is out of
-/// reach of this refusal, and each for its own reason:
+/// The same word also holds a **defined function** and a **defined global**
+/// position, and those two are the crate's one refusal that is stricter than
+/// the decoder rather than a transcription of it: `Module::get_func_ref`
+/// (`src/module.rs:383-389`) and `Module::get_global_ref`
+/// (`src/module.rs:423-429`) subtract the imported count, bounds-check the
+/// result against the defined table and then narrow it with `as u16` and no
+/// check at all. A module naming a definition at 65,536 or beyond therefore
+/// loads and runs against the definition 65,536 below it, which is why
+/// [`Violation::IndexTruncated`] refuses it here. Five places reach those two
+/// accessors: a `call` operand (`src/compiler.rs:202-206`), a `global.get` or
+/// `global.set` operand (`src/text.rs:631-634`), an export descriptor
+/// (`src/module.rs:753-778`), an element-segment entry
+/// (`src/module.rs:870-874`) and the `start` section (`src/module.rs:299-303`).
+/// A constant expression's `global.get` is not one: a module-local global is
+/// refused there as `InvalidConstantInstruction` before the cast is reached
+/// (`src/constant.rs:291-298`). The cross-module link path is not one either
+/// (`src/imports.rs:71,169`): it reaches the same two accessors, but with an
+/// index it reads back out of the *exporting* module's export descriptor, so a
+/// refusal at that module's export section already covers it and it names
+/// nothing of its own. An imported function or global is not one
+/// either — it resolves to a `Ref::Host` or a `Ref::Extern` carrying no
+/// narrowed position — but the imports **shift** every definition after them,
+/// which is why the position is the index minus the imported count and not the
+/// index.
 ///
-/// - A module **global** reaches the emitter as `Ref::Module(u16)`, already
-///   narrowed by `Module::get_global_ref` (`src/module.rs:423-429`), so
-///   `global.get` and `global.set` cannot present a value above the cap by the
-///   time the check is made. Those are the emitter's two remaining callers
-///   (`src/compiler.rs:321,345`).
-/// - A **function** index is narrowed the same way by `Module::get_func_ref`
-///   (`src/module.rs:383-389`), and `call` does not reach the emitter at all
-///   (`src/compiler.rs:222-223`, `instr_imm_8` then `write_16`). 0.7.1 truncates
-///   rather than refusing — see the README's residue section.
+/// The two remaining index kinds are out of reach of either refusal, and each
+/// for its own reason:
+///
 /// - A **local** index is not an index in the compiled form: it is a frame
 ///   offset, written as `instr_imm_8(op, ty)` plus `write_16(frame_offset)`
 ///   (`src/compiler.rs:293-312`), and how far that offset can reach is
@@ -446,7 +473,9 @@ impl Report {
 ///
 /// Returns every finding, in a fixed order: the WebAssembly 1.0 verdict first
 /// when there is one, then per-function findings in index order, then
-/// per-import findings in import order, then the module-shape findings.
+/// per-import findings in import order, then what the sections outside a body
+/// name — the exports, the `start` section and the element segments, in that
+/// order — then the module-shape findings.
 pub fn check(wasm: &[u8]) -> Result<Report, Violations> {
     let scan = Scan::run(wasm);
     let violations = scan.violations();
@@ -502,6 +531,32 @@ struct LimitPeaks {
     /// [`MAX_IR_INDEX`], which the target count shares with an index because
     /// both are one 16-bit word of the interpreter's compiled form.
     br_table_targets: u32,
+    /// Largest function index a `call` in the body names, imports included.
+    /// Zero when the body calls nothing, which is the same answer as calling
+    /// the first function and is below the cap either way.
+    called_function: u32,
+    /// Largest global index a `global.get` or a `global.set` in the body names,
+    /// imports included. Zero when the body names none, as above.
+    referenced_global: u32,
+}
+
+/// One place outside a function body where a module names a defined function or
+/// global, and the largest index it names there.
+///
+/// Recorded while the sections are read and judged afterwards, because the
+/// number of definitions a reference has to be inside is not known until the
+/// whole module has been walked, and because the function a body belongs to is
+/// named from a `name` section that may come last.
+///
+/// The largest index per site rather than every index, for the reason
+/// [`LimitPeaks`] gives: an element segment naming a thousand functions past
+/// the cap is one fault, and the largest is the one that decides how far a
+/// remedy has to go.
+#[derive(Debug)]
+struct Reference {
+    space: IndexSpace,
+    site: ReferenceSite,
+    index: u32,
 }
 
 /// What one validated function body yielded: what it costs a runtime, and what
@@ -533,6 +588,14 @@ struct Scan {
     /// How many functions the module imports, which is where the defined
     /// function index space starts.
     imported_functions: u32,
+    /// How many globals the module imports, which is where the defined global
+    /// index space starts.
+    imported_globals: u32,
+    /// How many globals the module defines.
+    defined_globals: u32,
+    /// Every reference to a defined function or global made outside a function
+    /// body, in the order the sections are read.
+    references: Vec<Reference>,
 }
 
 impl Scan {
@@ -603,8 +666,19 @@ impl Scan {
             }
             Payload::ImportSection(reader) => {
                 for import in reader.clone().into_imports().flatten() {
+                    // Spelled without a wildcard: the two counts below are
+                    // subtracted from every index the module writes, so a kind
+                    // this match guesses at is a shift applied to the wrong
+                    // number of definitions rather than a kind left unread.
                     let (params, results) = match import.ty {
-                        TypeRef::Func(index) => {
+                        // Both spellings are a function import — stock
+                        // validation resolves them into one index space — so
+                        // both are counted and both carry a signature. The
+                        // exact spelling is outside WebAssembly 1.0 and the
+                        // module is refused for that, but the count still has
+                        // to be right or every finding about it names the
+                        // wrong position.
+                        TypeRef::Func(index) | TypeRef::FuncExact(index) => {
                             self.imported_functions += 1;
                             self.type_shapes
                                 .get(index as usize)
@@ -612,10 +686,17 @@ impl Scan {
                                     (params.len(), results.len())
                                 })
                         }
-                        // A memory, table or global import carries no signature
-                        // to hold to the host caps, and is refused for its name
-                        // like any other import.
-                        _ => (0, 0),
+                        // A global import carries no signature to hold to the
+                        // host caps, and is counted all the same: it shifts
+                        // every defined global after it.
+                        TypeRef::Global(_) => {
+                            self.imported_globals += 1;
+                            (0, 0)
+                        }
+                        // A memory, a table and a tag import name neither
+                        // counted space and carry no signature; each is still
+                        // refused for its name like any other import.
+                        TypeRef::Table(_) | TypeRef::Memory(_) | TypeRef::Tag(_) => (0, 0),
                     };
                     self.imports.push(ImportFacts {
                         module: import.module.to_string(),
@@ -632,6 +713,46 @@ impl Scan {
             Payload::MemorySection(reader) => {
                 self.memories.extend(reader.clone().into_iter().flatten());
             }
+            Payload::GlobalSection(reader) => {
+                self.defined_globals += reader.count();
+            }
+            Payload::ExportSection(reader) => {
+                for export in reader.clone().into_iter().flatten() {
+                    // Spelled without a wildcard for the same reason the
+                    // import match above is: a function or global export is a
+                    // reference the narrowing applies to, and a kind guessed at
+                    // here is a reference never read.
+                    let space = match export.kind {
+                        // Both spellings name a function, as stock validation
+                        // resolves them; only the plain one arrives, since the
+                        // export reader refuses the exact spelling outright,
+                        // which is why no fixture can reach the second here.
+                        ExternalKind::Func | ExternalKind::FuncExact => IndexSpace::Function,
+                        ExternalKind::Global => IndexSpace::Global,
+                        // A memory or a table export names neither space, and
+                        // the interpreter answers both from a fixed slot rather
+                        // than through a narrowing accessor. A tag export names
+                        // neither either, and puts the module outside
+                        // WebAssembly 1.0, which is what it is refused for.
+                        ExternalKind::Table | ExternalKind::Memory | ExternalKind::Tag => continue,
+                    };
+                    self.references.push(Reference {
+                        space,
+                        site: ReferenceSite::Export {
+                            name: export.name.to_string(),
+                        },
+                        index: export.index,
+                    });
+                }
+            }
+            Payload::StartSection { func, .. } => {
+                self.references.push(Reference {
+                    space: IndexSpace::Function,
+                    site: ReferenceSite::Start,
+                    index: *func,
+                });
+            }
+            Payload::ElementSection(reader) => self.observe_elements(reader),
             Payload::CodeSectionEntry(body) => self.observe_body(body),
             Payload::CustomSection(section) => {
                 self.custom_section_names.push(section.name().to_string());
@@ -640,6 +761,38 @@ impl Scan {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Records the largest defined function index each element segment names.
+    ///
+    /// The segments are numbered from the section rather than from the entries
+    /// that survive reading it: the finding names the segment a reader is to
+    /// open, and that number should not turn on what the reader made of a
+    /// neighbour. No module separates the two spellings today — stock
+    /// `SectionLimited` ends its iteration at the first entry it cannot read,
+    /// so there is never a later segment to misnumber — which is why nothing
+    /// here turns red on the difference.
+    fn observe_elements(&mut self, reader: &ElementSectionReader<'_>) {
+        for (segment, element) in reader.clone().into_iter().enumerate() {
+            let Ok(element) = element else {
+                continue;
+            };
+            let ElementItems::Functions(functions) = element.items else {
+                // An expression-initialized segment is outside WebAssembly 1.0,
+                // and the module is refused for that.
+                continue;
+            };
+            let Some(index) = functions.clone().into_iter().flatten().max() else {
+                continue;
+            };
+            self.references.push(Reference {
+                space: IndexSpace::Function,
+                site: ReferenceSite::ElementSegment {
+                    index: u32::try_from(segment).unwrap_or(u32::MAX),
+                },
+                index,
+            });
         }
     }
 
@@ -701,11 +854,12 @@ impl Scan {
     }
 
     /// Every finding, in the order [`check`] documents: the feature verdict,
-    /// then the functions, then the imports, then the module's own shape.
+    /// then the functions, then the imports, then what the sections outside a
+    /// body name, then the module's own shape.
     ///
-    /// The three groups are separate functions because they are three different
-    /// questions asked of three different readings, and because a group that
-    /// grows an arm should not push the other two past what one screen holds.
+    /// The four groups are separate functions because they are four different
+    /// questions asked of four different readings, and because a group that
+    /// grows an arm should not push the others past what one screen holds.
     fn violations(&self) -> Vec<Violation> {
         let mut found = Vec::new();
         if let Some(detail) = &self.invalid {
@@ -715,6 +869,7 @@ impl Scan {
         }
         self.function_violations(&mut found);
         self.import_violations(&mut found);
+        self.reference_violations(&mut found);
         self.module_shape_violations(&mut found);
         found
     }
@@ -769,6 +924,17 @@ impl Scan {
                         });
                     }
                 }
+                for (space, index) in [
+                    (IndexSpace::Function, measured.peaks.called_function),
+                    (IndexSpace::Global, measured.peaks.referenced_global),
+                ] {
+                    let site = ReferenceSite::Body {
+                        function: function.clone(),
+                    };
+                    if let Some(violation) = self.truncation(space, site, index) {
+                        found.push(violation);
+                    }
+                }
                 if measured.peaks.branch_unwind_words > MAX_BRANCH_UNWIND_WORDS {
                     found.push(Violation::BranchUnwindTooDeep {
                         function,
@@ -812,6 +978,53 @@ impl Scan {
                 });
             }
         }
+    }
+
+    /// What the export section, the `start` section and the element section
+    /// name, in that order, which is the order a module writes them in and the
+    /// order the walk above recorded them in.
+    fn reference_violations(&self, found: &mut Vec<Violation>) {
+        for reference in &self.references {
+            let site = reference.site.clone();
+            if let Some(violation) = self.truncation(reference.space, site, reference.index) {
+                found.push(violation);
+            }
+        }
+    }
+
+    /// The finding one reference to `index` earns, or `None` when the
+    /// interpreter narrows nothing there.
+    ///
+    /// `None` in three cases. An index below the imported count names an
+    /// import, which resolves to a host or an external reference carrying no
+    /// narrowed position. An index past what the module defines resolves to
+    /// nothing at all, and stock validation refuses the module for that before
+    /// this crate would, so answering here would be a second finding about one
+    /// mistake. And a position inside the 16-bit word is the ordinary case: the
+    /// cast leaves it alone.
+    ///
+    /// Only the largest index a site names reaches this, so a site whose
+    /// largest index resolves to nothing is silent about a smaller index of its
+    /// own that the cast would narrow. The module is refused for the
+    /// unresolvable reference either way, and that is the edit to make first.
+    fn truncation(&self, space: IndexSpace, site: ReferenceSite, index: u32) -> Option<Violation> {
+        let (imported, defined) = match space {
+            IndexSpace::Function => (
+                self.imported_functions,
+                u32::try_from(self.function_types.len()).unwrap_or(u32::MAX),
+            ),
+            IndexSpace::Global => (self.imported_globals, self.defined_globals),
+        };
+        let position = index.checked_sub(imported)?;
+        if position >= defined || position <= MAX_IR_INDEX {
+            return None;
+        }
+        Some(Violation::IndexTruncated {
+            space,
+            site,
+            index,
+            position,
+        })
     }
 
     /// What the module declares outside any function or import.
@@ -994,15 +1207,22 @@ fn observe_branch(
 
 /// Folds an operator's 16-bit IR immediates into the running peaks.
 ///
-/// Called after validation, so a `call_indirect` naming a type the module does
-/// not declare has already been refused for that instead — which is the order
-/// the interpreter meets the two in as well.
+/// Called after validation, so an operator naming something the module does not
+/// declare has already been refused for that instead — which is the order the
+/// interpreter meets the two in as well, and what lets every index read here be
+/// treated as one that resolves.
 ///
-/// The wildcard is every other operator, and the two arms above it are the whole
-/// set rather than the ones that came to mind: they are the only operators that
-/// reach the interpreter's IR emitter carrying a value it has not already
-/// narrowed, and [`MAX_IR_INDEX`]'s doc says of each remaining index kind why it
-/// is out of this refusal's reach.
+/// The four arms are the whole set rather than the ones that came to mind: they
+/// are the only operators that write a value of the module's own into the
+/// interpreter's one 16-bit IR word, and [`MAX_IR_INDEX`]'s doc says of each
+/// remaining index kind why it is out of reach. The first two are checked
+/// against the word upstream and the last two are narrowed into it without a
+/// check, which is the difference between [`Violation::IndexTooLarge`] and
+/// [`Violation::IndexTruncated`] and not a difference in what is read.
+///
+/// The two global operators are one arm because they are one accessor: the
+/// interpreter reads both through `TextBuilder::get_global`, so a value either
+/// can present is a value the other can.
 fn observe_index(operator: &Operator<'_>, peaks: &mut LimitPeaks) {
     match operator {
         Operator::CallIndirect { type_index, .. } => {
@@ -1010,6 +1230,12 @@ fn observe_index(operator: &Operator<'_>, peaks: &mut LimitPeaks) {
         }
         Operator::BrTable { targets } => {
             peaks.br_table_targets = peaks.br_table_targets.max(targets.len());
+        }
+        Operator::Call { function_index } => {
+            peaks.called_function = peaks.called_function.max(*function_index);
+        }
+        Operator::GlobalGet { global_index } | Operator::GlobalSet { global_index } => {
+            peaks.referenced_global = peaks.referenced_global.max(*global_index);
         }
         _ => {}
     }
