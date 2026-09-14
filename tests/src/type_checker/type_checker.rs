@@ -3365,10 +3365,6 @@ mod extern_provenance_tests {
         let origin = origin_of(&ctx, "sort").expect("sort should carry a bound origin");
         assert_eq!(origin.logical_module, "collections");
         assert_eq!(origin.export_field, "sort");
-        assert!(
-            origin.resolved_path.is_none(),
-            "Phase 1 leaves resolved_path unset; the driver fills it"
-        );
         assert!(declaration(&ctx, "sort").is_some());
     }
 

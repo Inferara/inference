@@ -4477,7 +4477,6 @@ impl TypeChecker {
                         logical_module,
                         export_field: field,
                         decl,
-                        resolved_path: None,
                     },
                 );
             }
