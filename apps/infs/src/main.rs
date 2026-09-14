@@ -54,6 +54,7 @@
 //! infs version
 //! ```
 
+mod artifact;
 mod commands;
 mod errors;
 mod project;
