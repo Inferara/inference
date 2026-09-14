@@ -31,18 +31,31 @@
 //! also how the *units* are pinned: sixteen `i64` values and sixteen `i32`
 //! values differ by a factor of two in words and not at all in values, and the
 //! pair below shows the decoder counting the same way `check` reports.
+//!
+//! # The one side that is not a pair
+//!
+//! `a_branch_table_width_agrees_at_the_ir_immediate`'s *accepting* side is the
+//! single exception to the paragraph above. A table of 65,535 targets is inside
+//! the immediate and costs 131,070 IR words, which no plausible embedder's code
+//! page budget holds, so there is no verdict to match: that side asserts the
+//! absence of the refusal under test rather than an equal verdict, and says so
+//! in place. Every other side of every other row is a pair.
 
 use inference_target_conformance::spacewasm::{
-    MAX_FRAME_WORDS, MAX_HOST_FUNCTION_PARAMS, MAX_IMPORT_NAME_BYTES, MAX_LOCAL_WORDS,
-    MAX_LOCALS_GROUP_COUNT, MAX_MEMORY_PAGES, MAX_PARAM_WORDS, NamePart, Violation, check,
+    IndexKind, MAX_BRANCH_UNWIND_WORDS, MAX_FRAME_WORDS, MAX_HOST_FUNCTION_PARAMS,
+    MAX_IMPORT_NAME_BYTES, MAX_IR_INDEX, MAX_LOCAL_WORDS, MAX_LOCALS_GROUP_COUNT,
+    MAX_MEMORY_PAGES, MAX_PARAM_WORDS, NamePart, Violation, check,
 };
 use spacewasm::{HostFunction, HostModule, HostName, HostValList, ValidationError, Value};
 use wasm_encoder::{
-    CodeSection, Function, FunctionSection, Instruction, Module, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection,
+    Function, FunctionSection, GlobalSection, GlobalType, Instruction, Module, RefType,
+    TableSection, TableType, TypeSection, ValType,
 };
 
 use crate::support::{
-    EMBEDDER_MAX_CONTROL_FRAMES, EMBEDDER_MAX_STACK_DEPTH, SpaceWasmSession, decode_with,
+    EMBEDDER_MAX_CONTROL_FRAMES, EMBEDDER_MAX_STACK_DEPTH, FUEL, Outcome, SpaceWasmSession,
+    decode_with,
 };
 
 /// A module with no host module registered, which is every row that declares no
@@ -471,6 +484,690 @@ fn an_oversized_locals_group_is_refused_by_both() {
                 Violation::LocalsGroupTooLarge { count: 65_536, .. }
             )),
         "the refusal must name the group, or a reader cannot tell which declaration to split"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The interpreter's own compiled IR
+// ---------------------------------------------------------------------------
+
+/// The verifier configuration these rows decode under.
+///
+/// Wider than the reference embedder's on the operand axis, because the shapes
+/// below keep 256 values live on purpose and `spacewasm_std`'s stack holds
+/// exactly 256: a row meant to be refused for its *branch* would otherwise be
+/// refused for the stack it stands on, and a row meant to be accepted would not
+/// decode at all. The control axis is the reference one — none of these nests.
+const WIDE_STACK: usize = 300;
+
+/// Whether the real decoder loads `wasm` with room for the operands these rows
+/// keep live.
+fn decodes_wide(session: &mut SpaceWasmSession, wasm: &[u8]) -> Result<(), ValidationError> {
+    decode_with::<EMBEDDER_MAX_CONTROL_FRAMES, WIDE_STACK>(session, wasm, no_hosts())
+        .map(|_| ())
+        .map_err(|refusal| refusal.err.err)
+}
+
+/// Requires `check` and the real decoder to agree about `wasm` under
+/// [`WIDE_STACK`], and — when they refuse — requires the decoder's reason to be
+/// `expected_error`.
+///
+/// The reason is asserted rather than the verdict alone because every shape here
+/// is large or deep, and a decoder refusing it for a page budget or a stack
+/// bound would satisfy a verdict-only row while saying nothing about the limit
+/// under test.
+fn agree_wide(
+    session: &mut SpaceWasmSession,
+    label: &str,
+    wasm: &[u8],
+    expected_error: Option<ValidationError>,
+) {
+    let checked = check(wasm).is_ok();
+    let decoded = decodes_wide(session, wasm);
+    assert_eq!(
+        checked,
+        expected_error.is_none(),
+        "{label}: the checker said {checked}, the row expects {expected_error:?}"
+    );
+    match expected_error {
+        None => assert_eq!(decoded, Ok(()), "{label}: the decoder must load this module"),
+        Some(expected) => assert_eq!(
+            decoded,
+            Err(expected),
+            "{label}: the decoder must refuse this module for the limit under test"
+        ),
+    }
+}
+
+/// A module declaring `types` identical `[] -> []` types, a one-entry table, and
+/// one function performing `call_indirect` against type `type_index`.
+///
+/// The element segment is written in the legacy form (no explicit table index),
+/// which is the only one the interpreter reads: it takes the first byte of the
+/// segment as a table index, so the flag byte of any newer encoding reads as a
+/// table this module does not have.
+fn module_with_types_and_call_indirect(types_count: u32, type_index: u32) -> Vec<u8> {
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    for _ in 0..types_count {
+        types.ty().function([], []);
+    }
+    module.section(&types);
+    let mut functions = FunctionSection::new();
+    functions.function(0);
+    module.section(&functions);
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+        element_type: RefType::FUNCREF,
+        table64: false,
+        minimum: 1,
+        maximum: Some(1),
+        shared: false,
+    });
+    module.section(&tables);
+    let mut elements = ElementSection::new();
+    elements.active(
+        None,
+        &ConstExpr::i32_const(0),
+        Elements::Functions([0u32].as_slice().into()),
+    );
+    module.section(&elements);
+    let mut code = CodeSection::new();
+    let mut function = Function::new([]);
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::CallIndirect {
+        type_index,
+        table_index: 0,
+    });
+    function.instruction(&Instruction::End);
+    code.function(&function);
+    module.section(&code);
+    module.finish()
+}
+
+/// A `call_indirect` type index, on both sides of the interpreter's 16-bit IR
+/// immediate.
+///
+/// Nothing about this is visible in the WebAssembly encoding, which carries the
+/// index as a 32-bit LEB and validates it against the type section alone: both
+/// modules below are valid WebAssembly 1.0 and stock validation accepts each.
+/// What the interpreter does with them differs, because it compiles the module
+/// into a bytecode that holds the index in sixteen bits.
+///
+/// The 65,535 row is the reason this instruction is the one the boundary is
+/// pinned on rather than the `br_table` next to it: both sides of it decode, so
+/// the refusal is shown to be about the index and not about the size of the
+/// module carrying it.
+///
+/// Fails if `MAX_IR_INDEX` moves without the interpreter moving with it, if the
+/// index stops being read from the instruction, or if the finding stops naming
+/// which of the two immediates it is about.
+#[test]
+fn a_call_indirect_type_index_agrees_at_the_ir_immediate() {
+    let mut session = SpaceWasmSession::acquire();
+    assert_eq!(
+        MAX_IR_INDEX, 65_535,
+        "the rows below are built from this constant, so narrowing it would shrink them \
+         rather than fail them"
+    );
+
+    let accepted = module_with_types_and_call_indirect(MAX_IR_INDEX + 1, MAX_IR_INDEX);
+    agree_wide(&mut session, "call_indirect against type 65535", &accepted, None);
+
+    let refused = module_with_types_and_call_indirect(MAX_IR_INDEX + 2, MAX_IR_INDEX + 1);
+    agree_wide(
+        &mut session,
+        "call_indirect against type 65536",
+        &refused,
+        Some(ValidationError::IdxTooLarge),
+    );
+    assert!(
+        refusals("call_indirect against type 65536", &refused)
+            .iter()
+            .any(|violation| matches!(
+                violation,
+                Violation::IndexTooLarge {
+                    kind: IndexKind::CallIndirectType,
+                    index: 65_536,
+                    ..
+                }
+            )),
+        "the refusal must name the immediate and the value that did not fit"
+    );
+}
+
+/// A module declaring `count` immutable `i32` globals and exporting a
+/// `[] -> [i32]` function that returns `global.get index`.
+///
+/// Global 0 holds [`FIRST_GLOBAL`] and every other global holds
+/// [`OTHER_GLOBAL`], so which global a call actually read can be told from the
+/// value it returns.
+fn module_with_globals_and_getter(count: u32, index: u32) -> Vec<u8> {
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([], [ValType::I32]);
+    module.section(&types);
+    let mut functions = FunctionSection::new();
+    functions.function(0);
+    module.section(&functions);
+    let mut globals = GlobalSection::new();
+    for i in 0..count {
+        let value = if i == 0 { FIRST_GLOBAL } else { OTHER_GLOBAL };
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: false,
+                shared: false,
+            },
+            &ConstExpr::i32_const(value),
+        );
+    }
+    module.section(&globals);
+    let mut exports = ExportSection::new();
+    exports.export("get", ExportKind::Func, 0);
+    module.section(&exports);
+    let mut code = CodeSection::new();
+    let mut function = Function::new([]);
+    function.instruction(&Instruction::GlobalGet(index));
+    function.instruction(&Instruction::End);
+    code.function(&function);
+    module.section(&code);
+    module.finish()
+}
+
+/// What global 0 holds in a [`module_with_globals_and_getter`] module.
+const FIRST_GLOBAL: i32 = 7;
+
+/// What every other global in one holds.
+const OTHER_GLOBAL: i32 = 9;
+
+/// The one residue the README records, held to being what it says: a global
+/// index over the 16-bit cap is **truncated** by 0.7.1 rather than refused, and
+/// `check` agrees with the runtime by accepting the module.
+///
+/// This is the only place the crate is deliberately permissive about a module
+/// the interpreter mis-executes, and the justification is that the decoder
+/// accepts it — so the justification is a measurement, and a measurement no test
+/// performs is a sentence nothing turns red about. The row runs the module: the
+/// value it answers with says *which* global was read.
+///
+/// The 65,535 neighbour is the control. It reaches the last index the cast
+/// leaves alone, so it proves the truncation and not merely that a large module
+/// returns something.
+///
+/// Fails the day upstream refuses instead of truncating, or narrows somewhere
+/// else so the call answers global 65,536's value — either of which is the day
+/// `check` stops agreeing with the decoder and this exemption has to become a
+/// refusal.
+#[test]
+fn a_global_index_over_the_ir_immediate_is_truncated_rather_than_refused() {
+    let mut session = SpaceWasmSession::acquire();
+
+    let inside = module_with_globals_and_getter(MAX_IR_INDEX + 1, MAX_IR_INDEX);
+    assert!(
+        check(&inside).is_ok(),
+        "a global index at the cap is inside every limit this crate models"
+    );
+    let mut loaded = decode_with::<EMBEDDER_MAX_CONTROL_FRAMES, WIDE_STACK>(
+        &mut session,
+        &inside,
+        no_hosts(),
+    )
+    .expect("the decoder loads a module whose global index fits the cast");
+    assert_eq!(
+        loaded.invoke("get", &[], FUEL),
+        Outcome::Value(Some(Value::I32(OTHER_GLOBAL))),
+        "global 65535 is the one named and the one that must be read"
+    );
+    drop(loaded);
+
+    let over = module_with_globals_and_getter(MAX_IR_INDEX + 2, MAX_IR_INDEX + 1);
+    assert!(
+        check(&over).is_ok(),
+        "the decoder accepts this module, so refusing it here would be this crate \
+         disagreeing with the runtime it describes"
+    );
+    let mut loaded = decode_with::<EMBEDDER_MAX_CONTROL_FRAMES, WIDE_STACK>(
+        &mut session,
+        &over,
+        no_hosts(),
+    )
+    .expect("0.7.1 truncates the index rather than refusing the module");
+    assert_eq!(
+        loaded.invoke("get", &[], FUEL),
+        Outcome::Value(Some(Value::I32(FIRST_GLOBAL))),
+        "65536 narrowed to u16 is 0, so the call reads global 0 rather than the one it named"
+    );
+}
+
+/// A module whose single `[] -> []` function branches through a table of
+/// `targets` entries, every one of them to the block it sits in.
+fn module_with_br_table(targets: u32) -> Vec<u8> {
+    let list: Vec<u32> = vec![0; targets as usize];
+    let mut body = vec![
+        Instruction::Block(BlockType::Empty),
+        Instruction::I32Const(0),
+        Instruction::BrTable(list.as_slice().into(), 0),
+    ];
+    body.push(Instruction::End);
+    module_with_locals_and_body(&[], &body)
+}
+
+/// A `br_table`'s target count meets the same 16-bit immediate an index does.
+///
+/// The interpreter writes the width of a jump table through the same emitter it
+/// writes a type index through, and refuses it at the same cap — which is why
+/// one violation covers both and says which it is about.
+///
+/// Only the refused side of this boundary is decodable, and that is the second
+/// thing the row records. A table of 65,535 targets compiles to two IR words
+/// each, so the accepting side needs 131,070 words of code page: the decoder
+/// refuses it, but for the embedder's page budget rather than for the index, and
+/// the assertion is written as "not the index refusal" so that a bigger budget
+/// makes it pass rather than making it wrong.
+///
+/// Fails if the target count stops being read, if it is read as an index into
+/// something, or if the refusal is attributed to the `call_indirect` immediate.
+#[test]
+fn a_branch_table_width_agrees_at_the_ir_immediate() {
+    let mut session = SpaceWasmSession::acquire();
+
+    let inside = module_with_br_table(MAX_IR_INDEX);
+    assert!(
+        check(&inside).is_ok(),
+        "65535 targets are inside the immediate, whatever else the module costs"
+    );
+    assert_ne!(
+        decodes_wide(&mut session, &inside),
+        Err(ValidationError::IdxTooLarge),
+        "a table of exactly 65535 targets is inside the immediate; whether it decodes at all \
+         is the embedder's page budget, which is a different question"
+    );
+
+    let refused = module_with_br_table(MAX_IR_INDEX + 1);
+    agree_wide(
+        &mut session,
+        "a br_table of 65536 targets",
+        &refused,
+        Some(ValidationError::IdxTooLarge),
+    );
+    assert!(
+        refusals("a br_table of 65536 targets", &refused)
+            .iter()
+            .any(|violation| matches!(
+                violation,
+                Violation::IndexTooLarge {
+                    kind: IndexKind::BranchTableTargets,
+                    index: 65_536,
+                    ..
+                }
+            )),
+        "the refusal must name the table, or a reader edits the wrong instruction"
+    );
+}
+
+/// `count` operands of `ty`, to stand on the stack.
+fn live(ty: ValType, count: usize) -> Vec<Instruction<'static>> {
+    let push = match ty {
+        ValType::I64 => Instruction::I64Const(1),
+        _ => Instruction::I32Const(1),
+    };
+    vec![push; count]
+}
+
+/// A module whose single `[] -> []` function stands `groups` of operands inside
+/// a block and then executes `br 0` out of it.
+fn module_with_branch_over(groups: &[(ValType, usize)]) -> Vec<u8> {
+    let mut body = vec![Instruction::Block(BlockType::Empty)];
+    for (ty, count) in groups {
+        body.extend(live(*ty, *count));
+    }
+    body.push(Instruction::Br(0));
+    body.push(Instruction::End);
+    module_with_locals_and_body(&[], &body)
+}
+
+/// A branch's unwind, on both sides of the byte the interpreter encodes it in,
+/// and in the unit that byte counts.
+///
+/// The `i64` pair is what makes it a *word* limit rather than an operand count:
+/// 128 `i64` values are 128 operands and 256 words, and are refused, while 255
+/// `i32` values are 255 of both and are accepted. A checker counting operands
+/// would accept the first, and the decoder does not.
+///
+/// The mixed row sits exactly on the bound with two widths in one sum, which no
+/// single-width row can distinguish from a checker that weighted every operand
+/// at the width of the first.
+///
+/// Fails if `MAX_BRANCH_UNWIND_WORDS` moves without the interpreter moving with
+/// it, if the word weighting is dropped, or if the unwind is measured after the
+/// branch instead of before it — `br` truncates the stack it is measured
+/// against.
+#[test]
+fn a_branch_unwind_agrees_at_the_boundary_and_counts_words() {
+    let mut session = SpaceWasmSession::acquire();
+    let bound = MAX_BRANCH_UNWIND_WORDS as usize;
+    assert_eq!(
+        bound, 255,
+        "the rows below are built from this constant, so narrowing it would shrink them \
+         rather than fail them"
+    );
+
+    for (label, groups, expected) in [
+        ("255 i32 across a branch", vec![(ValType::I32, bound)], None),
+        (
+            "256 i32 across a branch",
+            vec![(ValType::I32, bound + 1)],
+            Some(ValidationError::LabelStackJumpTooDeep),
+        ),
+        ("127 i64 across a branch", vec![(ValType::I64, 127)], None),
+        (
+            "128 i64 across a branch",
+            vec![(ValType::I64, 128)],
+            Some(ValidationError::LabelStackJumpTooDeep),
+        ),
+        (
+            "127 i64 and one i32 across a branch",
+            vec![(ValType::I64, 127), (ValType::I32, 1)],
+            None,
+        ),
+        (
+            "127 i64 and two i32 across a branch",
+            vec![(ValType::I64, 127), (ValType::I32, 2)],
+            Some(ValidationError::LabelStackJumpTooDeep),
+        ),
+    ] {
+        let wasm = module_with_branch_over(&groups);
+        agree_wide(&mut session, label, &wasm, expected);
+    }
+
+    let refused = module_with_branch_over(&[(ValType::I64, 128)]);
+    assert!(
+        refusals("128 i64 across a branch", &refused)
+            .iter()
+            .any(|violation| matches!(
+                violation,
+                Violation::BranchUnwindTooDeep { words: 256, .. }
+            )),
+        "128 i64 values are 256 words, and that is the number the refusal owes"
+    );
+}
+
+/// A module whose single `[] -> []` function stands `count` `i32` operands and
+/// then leaves through `exit`, which is placed at the function's own top level.
+fn module_leaving_the_function_with(count: usize, exit: Instruction<'static>) -> Vec<u8> {
+    let mut body = live(ValType::I32, count);
+    body.push(exit);
+    module_with_locals_and_body(&[], &body)
+}
+
+/// Leaving the *function* carries no unwind, however much is standing on the
+/// stack.
+///
+/// A branch to the outermost frame is the function's own label, and the
+/// interpreter compiles it as an early return: a return carries the function's
+/// result and discards the rest of the frame wholesale, so there is no unwind
+/// byte to overflow. `return` takes the same route by a different name.
+///
+/// This is the row that makes the limit's shape a measurement rather than a
+/// guess: 256 operands live across an *inner* branch are refused one test up,
+/// and the same 256 live across these two are loaded. A model that measured
+/// every branch alike would refuse a module the decoder runs, which is the
+/// direction that turns a working build into a build-time failure.
+///
+/// Fails if the outermost-frame arm is dropped, or if `return` is ever folded
+/// into the branch measurement.
+#[test]
+fn leaving_the_function_carries_no_unwind() {
+    let mut session = SpaceWasmSession::acquire();
+    let over = MAX_BRANCH_UNWIND_WORDS as usize + 1;
+
+    for (label, exit) in [
+        ("br to the function's own label", Instruction::Br(0)),
+        ("return", Instruction::Return),
+    ] {
+        let wasm = module_leaving_the_function_with(over, exit);
+        agree_wide(&mut session, label, &wasm, None);
+    }
+}
+
+/// A module whose single `[] -> []` function stands `count` `i32` operands
+/// inside a block and leaves through `br_if 0`.
+fn module_with_conditional_branch_over(count: usize) -> Vec<u8> {
+    let mut body = vec![Instruction::Block(BlockType::Empty)];
+    body.extend(live(ValType::I32, count));
+    body.push(Instruction::I32Const(0));
+    body.push(Instruction::BrIf(0));
+    body.extend(core::iter::repeat_n(Instruction::Drop, count));
+    body.push(Instruction::End);
+    module_with_locals_and_body(&[], &body)
+}
+
+/// A `br_if`'s own condition is not part of what it unwinds.
+///
+/// The interpreter takes the `i32` selector off the stack *before* it measures
+/// the unwind, so a `br_if` standing on 255 operands plus its condition unwinds
+/// 255 words and not 256. A model that measured the whole stack would refuse
+/// this module, which the decoder loads — and no unconditional-branch row can
+/// tell the two models apart, because `br` has no selector to forget.
+///
+/// Fails if the selector stops being taken off, and fails in the other direction
+/// if two are.
+#[test]
+fn a_conditional_branch_does_not_unwind_its_own_condition() {
+    let mut session = SpaceWasmSession::acquire();
+    let bound = MAX_BRANCH_UNWIND_WORDS as usize;
+
+    let accepted = module_with_conditional_branch_over(bound);
+    agree_wide(&mut session, "br_if over 255 i32 and a condition", &accepted, None);
+
+    let refused = module_with_conditional_branch_over(bound + 1);
+    agree_wide(
+        &mut session,
+        "br_if over 256 i32 and a condition",
+        &refused,
+        Some(ValidationError::LabelStackJumpTooDeep),
+    );
+}
+
+/// A module whose single `[] -> []` function stands `outer` operands inside a
+/// block, `inner` more inside a block nested in it, and then executes `br 0` out
+/// of the inner one.
+fn module_with_nested_branch_over(outer: usize, inner: usize) -> Vec<u8> {
+    let mut body = vec![Instruction::Block(BlockType::Empty)];
+    body.extend(live(ValType::I32, outer));
+    body.push(Instruction::Block(BlockType::Empty));
+    body.extend(live(ValType::I32, inner));
+    body.push(Instruction::Br(0));
+    body.push(Instruction::End);
+    body.extend(core::iter::repeat_n(Instruction::Drop, outer));
+    body.push(Instruction::End);
+    module_with_locals_and_body(&[], &body)
+}
+
+/// A branch unwinds down to its target frame's own height and no further.
+///
+/// Every other branch row here leaves a frame entered at operand height zero, so
+/// what is live and what is discarded are the same number and a model reading
+/// the first would satisfy all of them. Here the two differ: 250 operands stand
+/// below the target frame and 10 above it, so 260 words are live — over the
+/// bound — while the branch discards 10, and the decoder loads the module. The
+/// refused neighbour keeps the shape and moves the ten to 256.
+///
+/// Fails if the target frame's height stops being subtracted: the accepting row
+/// then becomes a refusal of a module the decoder runs, which is the direction
+/// that turns a working build into a build-time failure.
+#[test]
+fn a_branch_unwinds_only_down_to_its_target_frame() {
+    let mut session = SpaceWasmSession::acquire();
+    let bound = MAX_BRANCH_UNWIND_WORDS as usize;
+
+    let accepted = module_with_nested_branch_over(250, 10);
+    agree_wide(
+        &mut session,
+        "br 0 discarding 10 words with 250 more standing below its frame",
+        &accepted,
+        None,
+    );
+
+    let refused = module_with_nested_branch_over(40, bound + 1);
+    let label = "br 0 discarding 256 words with 40 more standing below its frame";
+    agree_wide(
+        &mut session,
+        label,
+        &refused,
+        Some(ValidationError::LabelStackJumpTooDeep),
+    );
+    assert!(
+        refusals(label, &refused)
+            .iter()
+            .any(|violation| matches!(
+                violation,
+                Violation::BranchUnwindTooDeep { words: 256, .. }
+            )),
+        "what the branch discards is what the refusal owes, not what stands below its frame"
+    );
+}
+
+/// A module whose single `[] -> []` function runs `unreachable` inside a block
+/// and then branches conditionally out of it.
+fn module_with_unreachable_conditional_branch() -> Vec<u8> {
+    module_with_locals_and_body(
+        &[],
+        &[
+            Instruction::Block(BlockType::Empty),
+            Instruction::Unreachable,
+            Instruction::BrIf(0),
+            Instruction::End,
+        ],
+    )
+}
+
+/// A conditional branch in unreachable code, standing at its own frame's floor,
+/// discards nothing.
+///
+/// `unreachable` truncates the frame to its floor and leaves the validator
+/// synthesizing whatever an operator asks for, so the `i32` a `br_if` takes off
+/// comes out of nowhere and shrinks nothing. Every other conditional row stands
+/// on operands it really has, and none of them can tell a selector pop that asks
+/// whether there is anything to pop from one that always subtracts one.
+///
+/// Fails if the pop stops asking — an unconditional subtraction goes below the
+/// floor here, which in the unsigned unit this is counted in is not an answer.
+#[test]
+fn a_conditional_branch_in_unreachable_code_discards_nothing() {
+    let mut session = SpaceWasmSession::acquire();
+    let wasm = module_with_unreachable_conditional_branch();
+    agree_wide(
+        &mut session,
+        "br_if after unreachable at its frame's floor",
+        &wasm,
+        None,
+    );
+}
+
+/// The inner of the two blocks [`module_with_two_frame_br_table`] builds, as a
+/// branch sitting inside it names the frame.
+const INNER_FRAME: u32 = 0;
+
+/// The outer of the two, named from the same place.
+const OUTER_FRAME: u32 = 1;
+
+/// A module standing `outer` operands in one block and `inner` more in a block
+/// inside it, then branching through a one-entry table whose listed target is
+/// `listed` and whose default is `default`, each of them [`INNER_FRAME`] or
+/// [`OUTER_FRAME`].
+///
+/// Which of the two frames is the listed target and which the default is a
+/// parameter because it is the whole content of the test below: a model that
+/// read one of the two and not the other answers correctly for whichever
+/// arrangement it happens to be handed.
+fn module_with_two_frame_br_table(
+    outer: usize,
+    inner: usize,
+    listed: u32,
+    default: u32,
+) -> Vec<u8> {
+    let targets = [listed];
+    let mut body = vec![Instruction::Block(BlockType::Empty)];
+    body.extend(live(ValType::I32, outer));
+    body.push(Instruction::Block(BlockType::Empty));
+    body.extend(live(ValType::I32, inner));
+    body.push(Instruction::I32Const(0));
+    body.push(Instruction::BrTable(targets.as_slice().into(), default));
+    body.push(Instruction::End);
+    body.extend(core::iter::repeat_n(Instruction::Drop, outer));
+    body.push(Instruction::End);
+    module_with_locals_and_body(&[], &body)
+}
+
+/// Every target of a `br_table` is measured, against its own frame.
+///
+/// One `br_table` is as many branches as it lists, each leaving a different
+/// frame and therefore unwinding a different amount. The boundary is therefore
+/// pinned twice, the second time with the two arranged the other way round: once
+/// with the *default* the deep target and the listed one a few words away, and
+/// once with the listed target the deep one and the default unwinding nothing. A
+/// model reading only one of the two positions answers correctly for one
+/// arrangement and accepts a module the decoder refuses in the other, which a
+/// single arrangement cannot tell from a model that reads both.
+///
+/// Fails if the default target stops being measured, if the listed targets stop
+/// being measured, if the targets are measured against one frame instead of each
+/// against its own, or if the selector is counted here and not in `br_if`.
+#[test]
+fn every_target_of_a_branch_table_is_measured_against_its_own_frame() {
+    let mut session = SpaceWasmSession::acquire();
+    let bound = MAX_BRANCH_UNWIND_WORDS as usize;
+
+    let accepted = module_with_two_frame_br_table(bound - 10, 10, INNER_FRAME, OUTER_FRAME);
+    agree_wide(
+        &mut session,
+        "a br_table whose default unwinds 255 words",
+        &accepted,
+        None,
+    );
+
+    let refused = module_with_two_frame_br_table(bound - 10, 11, INNER_FRAME, OUTER_FRAME);
+    agree_wide(
+        &mut session,
+        "a br_table whose default unwinds 256 words",
+        &refused,
+        Some(ValidationError::LabelStackJumpTooDeep),
+    );
+    assert!(
+        refusals("a br_table whose default unwinds 256 words", &refused)
+            .iter()
+            .any(|violation| matches!(
+                violation,
+                Violation::BranchUnwindTooDeep { words: 256, .. }
+            )),
+        "the deepest of the table's targets is the one the refusal owes"
+    );
+
+    let accepted = module_with_two_frame_br_table(bound, 0, OUTER_FRAME, INNER_FRAME);
+    agree_wide(
+        &mut session,
+        "a br_table whose listed target unwinds 255 words",
+        &accepted,
+        None,
+    );
+
+    let refused = module_with_two_frame_br_table(bound + 1, 0, OUTER_FRAME, INNER_FRAME);
+    agree_wide(
+        &mut session,
+        "a br_table whose listed target unwinds 256 words",
+        &refused,
+        Some(ValidationError::LabelStackJumpTooDeep),
+    );
+    assert!(
+        refusals("a br_table whose listed target unwinds 256 words", &refused)
+            .iter()
+            .any(|violation| matches!(
+                violation,
+                Violation::BranchUnwindTooDeep { words: 256, .. }
+            )),
+        "the listed target is the deep one here, and it is the number the refusal owes"
     );
 }
 

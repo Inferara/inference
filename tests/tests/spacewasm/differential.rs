@@ -48,14 +48,21 @@ const ENVELOPE_REFUSED: &[&str] = &[
     "codegen/wasm/base/struct_nondet/struct_nondet.inf",
     "codegen/wasm/base/u32_uzumaki/u32_uzumaki.inf",
     "codegen/wasm/loops/loop_in_nondet/loop_in_nondet.inf",
+    "codegen/wasm/loops/nondet_then_break/nondet_then_break.inf",
 ];
 
 /// The fixtures whose emitted module carries a verification operator, which is
 /// not WebAssembly, so neither engine can be asked about it. See
 /// [`ENVELOPE_REFUSED`] for why the list is committed.
-const OPERATOR_EMITTING: &[&str] = &[
-    "codegen/wasm/loops/nondet_then_break/nondet_then_break.inf",
-];
+///
+/// Empty, and the emptiness is the claim. The target's non-determinism gate is
+/// total over a definition's whole body, so no source it accepts can emit one of
+/// these operators; the fixture that used to be the single entry here — a
+/// `forall` in a loop body — is refused by the envelope instead, one list up.
+/// An entry appearing here again means the gate has a hole and a module carrying
+/// instructions no WebAssembly decoder reads was produced for a target whose
+/// runtime is a WebAssembly decoder.
+const OPERATOR_EMITTING: &[&str] = &[];
 
 /// The fixtures whose emitted module declares an import, which resolves against
 /// a host-module set this tier leaves empty. See [`ENVELOPE_REFUSED`].
@@ -258,13 +265,13 @@ fn the_two_engines_agree_on_every_zero_parameter_export() {
             // one about the module rather than the one about this tier's empty
             // host set.
             //
-            // The target's gate is a backstop and says so: over a definition it
-            // recognizes a bare `@` and the statement kinds it enumerates, and
-            // leaves a `forall` nested in a loop body to analysis rule A042 —
-            // which this sweep skips on purpose, so the rest of the corpus
-            // reaches code generation at all. The module it emitted carries the
-            // compiler's custom `0xfc` operators and is not WebAssembly, so
-            // neither engine can be asked about it.
+            // No source the target accepts can reach here: the gate is total
+            // over a definition's whole body, so a module carrying the
+            // compiler's custom `0xfc` operators is refused before it is
+            // emitted. The arm is kept because that is a claim and not a
+            // guarantee — if a hole opens, this classifies the fixture into
+            // `OPERATOR_EMITTING`, whose committed emptiness then turns red,
+            // rather than handing bytes that are not WebAssembly to an engine.
             with_operators.push(name);
             continue;
         }

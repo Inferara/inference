@@ -42,18 +42,21 @@
 //! decodability. The interpreter refuses through one enum, `ValidationError`,
 //! and this crate's README classifies every variant of it: modelled here,
 //! reached first by the WebAssembly 1.0 validation, decided by a host set these
-//! bytes do not carry, chosen by an embedder and therefore measured instead,
-//! out of reach on this compiler's path, or — for two of them — not modelled.
-//! An enumeration is the only form that stays honest, because the residue
-//! nobody wrote down is the residue nothing turns red about.
+//! bytes do not carry, chosen by an embedder and therefore measured instead, or
+//! out of reach on this compiler's path. No variant is left unclassified, and
+//! the one residue the README does name is not a variant at all — two index
+//! spaces `spacewasm` 0.7.1 truncates rather than refusing, so no verdict this
+//! crate could return would agree with the decoder's. An enumeration is the only
+//! form that stays honest, because the residue nobody wrote down is the residue
+//! nothing turns red about.
 
 use wasmparser::{
     BinaryReaderError, CompositeInnerType, FuncToValidate, FuncValidator, FuncValidatorAllocations,
-    FunctionBody, MemoryType, Name, NameSectionReader, Parser, Payload, TypeRef, ValType,
-    ValidPayload, Validator, ValidatorResources,
+    FunctionBody, MemoryType, Name, NameSectionReader, Operator, OperatorsReader, Parser, Payload,
+    TypeRef, ValType, ValidPayload, Validator, ValidatorResources,
 };
 
-pub use crate::errors::{NamePart, Violation, Violations};
+pub use crate::errors::{IndexKind, NamePart, Violation, Violations};
 
 /// The upstream release every constant in this module was read from.
 ///
@@ -166,6 +169,60 @@ const FRAME_HEADER_WORDS: u32 = 2;
 /// checked, because a function with a large operand stack meets this one with
 /// far fewer locals.
 pub const MAX_FRAME_WORDS: u64 = 65_535;
+
+/// The largest value one of the interpreter's 16-bit IR immediates holds
+/// (`src/text.rs:1099-1102`, `instr_imm_8_or_16`; and the same refusal raised
+/// by hand for a `call_indirect` type index at `src/compiler.rs:281-283`).
+///
+/// A property of the *compiled* form rather than of the WebAssembly encoding,
+/// which admits a 32-bit value in both places. Two operators can present a value
+/// over it, and they meet the cap in two different places: a `br_table`'s target
+/// count goes through the shared emitter (called at `src/compiler.rs:166`), and
+/// a `call_indirect`'s type index is checked by hand before its `write_16`.
+///
+/// Every other index the interpreter writes as a 16-bit immediate is out of
+/// reach of this refusal, and each for its own reason:
+///
+/// - A module **global** reaches the emitter as `Ref::Module(u16)`, already
+///   narrowed by `Module::get_global_ref` (`src/module.rs:423-429`), so
+///   `global.get` and `global.set` cannot present a value above the cap by the
+///   time the check is made. Those are the emitter's two remaining callers
+///   (`src/compiler.rs:321,345`).
+/// - A **function** index is narrowed the same way by `Module::get_func_ref`
+///   (`src/module.rs:383-389`), and `call` does not reach the emitter at all
+///   (`src/compiler.rs:222-223`, `instr_imm_8` then `write_16`). 0.7.1 truncates
+///   rather than refusing — see the README's residue section.
+/// - A **local** index is not an index in the compiled form: it is a frame
+///   offset, written as `instr_imm_8(op, ty)` plus `write_16(frame_offset)`
+///   (`src/compiler.rs:293-312`), and how far that offset can reach is
+///   [`MAX_FRAME_WORDS`], which bites first.
+/// - A **label** index is refused as `InvalidLabelIndex` when it is past the
+///   control stack (`src/text.rs:726-728`), and stock validation refuses it
+///   before this crate would; a depth inside the stack is compiled into a jump
+///   target rather than written as an index.
+pub const MAX_IR_INDEX: u32 = 65_535;
+
+/// Operand **words** one branch may discard (`src/text.rs:741-748`).
+///
+/// A branch to a block or a loop is compiled with the operands it unwinds in a
+/// single byte of its jump-target word, counted in words from the bottom of the
+/// live stack up to the target frame's own height — the same word convention
+/// and the same stop-at-the-first-untracked-slot rule as
+/// [`FunctionMetrics::max_operand_words`]. A branch to the function's own
+/// outermost frame takes a different route: it is compiled as an early return
+/// (`src/text.rs:733-739`) and is not measured against this at all, and neither
+/// is `return`.
+///
+/// Five instructions reach the compiler's `write_label_target`, and this crate
+/// measures four of them: `br`, `br_if`, and each target of a `br_table`
+/// including the default (`src/compiler.rs:149,158,171,181`). The fifth is the
+/// implicit branch an `else` emits over its own arm
+/// (`src/compiler.rs:129-134`), and it cannot reach this cap at the feature set
+/// this target decodes: what stands above the `if` frame's floor at an `else` is
+/// the block's result type, and WebAssembly 1.0 admits at most one result, so
+/// the unwind there is at most two words. A module whose block yields more is
+/// outside the 1.0 envelope and refused for that first.
+pub const MAX_BRANCH_UNWIND_WORDS: u32 = 255;
 
 /// What one function costs the runtime that loads it.
 ///
@@ -426,6 +483,38 @@ struct Maxima {
     operand_words: u32,
 }
 
+/// The per-body quantities the interpreter's *compiler* bounds, as against the
+/// ones its decoder reads out of a section.
+///
+/// Each is the worst the body reaches rather than the first offender. The
+/// interpreter stops at the first and this crate does not, so a body with a
+/// thousand over-deep branches would otherwise produce a thousand findings that
+/// say the same thing; and where they differ, the worst is the one that decides
+/// how far a remedy has to go.
+#[derive(Debug, Default, Clone, Copy)]
+struct LimitPeaks {
+    /// Deepest operand unwind at a branch, in words. Bounded by
+    /// [`MAX_BRANCH_UNWIND_WORDS`].
+    branch_unwind_words: u32,
+    /// Largest type index a `call_indirect` names. Bounded by [`MAX_IR_INDEX`].
+    call_indirect_type: u32,
+    /// Most non-default targets one `br_table` lists. Bounded by
+    /// [`MAX_IR_INDEX`], which the target count shares with an index because
+    /// both are one 16-bit word of the interpreter's compiled form.
+    br_table_targets: u32,
+}
+
+/// What one validated function body yielded: what it costs a runtime, and what
+/// it costs the runtime's own compiler.
+///
+/// One struct rather than two parallel vectors, so a body's measurement and its
+/// peaks cannot be read at two different indices.
+#[derive(Debug, Default, Clone, Copy)]
+struct Measured {
+    maxima: Maxima,
+    peaks: LimitPeaks,
+}
+
 /// Everything one pass over a module learned.
 #[derive(Debug, Default)]
 struct Scan {
@@ -435,7 +524,7 @@ struct Scan {
     /// Type index of every defined function, in definition order.
     function_types: Vec<u32>,
     declared: Vec<DeclaredWidths>,
-    measured: Vec<Maxima>,
+    measured: Vec<Measured>,
     memories: Vec<MemoryType>,
     custom_section_names: Vec<String>,
     names: Vec<(u32, String)>,
@@ -469,7 +558,7 @@ impl Scan {
             match active.payload(&payload) {
                 Ok(ValidPayload::Func(to_validate, body)) => {
                     match measure(to_validate, &body) {
-                        Ok(maxima) => scan.measured.push(maxima),
+                        Ok(measured) => scan.measured.push(measured),
                         Err(err) => {
                             scan.record_invalid(&err);
                             validator = None;
@@ -611,7 +700,12 @@ impl Scan {
             .map_or_else(|| format!("func[{index}]"), |(_, name)| name.clone())
     }
 
-    /// Every finding, in the order [`check`] documents.
+    /// Every finding, in the order [`check`] documents: the feature verdict,
+    /// then the functions, then the imports, then the module's own shape.
+    ///
+    /// The three groups are separate functions because they are three different
+    /// questions asked of three different readings, and because a group that
+    /// grows an arm should not push the other two past what one screen holds.
     fn violations(&self) -> Vec<Violation> {
         let mut found = Vec::new();
         if let Some(detail) = &self.invalid {
@@ -619,6 +713,15 @@ impl Scan {
                 detail: detail.clone(),
             });
         }
+        self.function_violations(&mut found);
+        self.import_violations(&mut found);
+        self.module_shape_violations(&mut found);
+        found
+    }
+
+    /// What each defined function declares and what its body reached, in index
+    /// order.
+    fn function_violations(&self, found: &mut Vec<Violation>) {
         for (position, declared) in self.declared.iter().enumerate() {
             let function = self.name_of(declared.index);
             if declared.param_words > MAX_PARAM_WORDS.into() {
@@ -642,20 +745,43 @@ impl Scan {
             // Only a body the validator got through has an operand peak, and
             // without one there is no frame to add up. A module that lost its
             // measurements is being refused for that already.
-            if let Some(maxima) = self.measured.get(position) {
+            if let Some(measured) = self.measured.get(position) {
                 let words = u64::from(FRAME_HEADER_WORDS)
                     .saturating_add(declared.local_words)
-                    .saturating_add(u64::from(maxima.operand_words));
+                    .saturating_add(u64::from(measured.maxima.operand_words));
                 if words > MAX_FRAME_WORDS {
                     found.push(Violation::FrameWordsExceeded {
-                        function,
+                        function: function.clone(),
                         words,
                         local_words: declared.local_words,
-                        operand_words: maxima.operand_words,
+                        operand_words: measured.maxima.operand_words,
+                    });
+                }
+                for (kind, value) in [
+                    (IndexKind::CallIndirectType, measured.peaks.call_indirect_type),
+                    (IndexKind::BranchTableTargets, measured.peaks.br_table_targets),
+                ] {
+                    if value > MAX_IR_INDEX {
+                        found.push(Violation::IndexTooLarge {
+                            function: function.clone(),
+                            kind,
+                            index: value,
+                        });
+                    }
+                }
+                if measured.peaks.branch_unwind_words > MAX_BRANCH_UNWIND_WORDS {
+                    found.push(Violation::BranchUnwindTooDeep {
+                        function,
+                        words: measured.peaks.branch_unwind_words,
                     });
                 }
             }
         }
+    }
+
+    /// What each import asks of an embedder that no embedder could supply, in
+    /// import order.
+    fn import_violations(&self, found: &mut Vec<Violation>) {
         for import in &self.imports {
             for (which, name) in [
                 (NamePart::Module, &import.module),
@@ -686,6 +812,10 @@ impl Scan {
                 });
             }
         }
+    }
+
+    /// What the module declares outside any function or import.
+    fn module_shape_violations(&self, found: &mut Vec<Violation>) {
         for memory in &self.memories {
             let pages = memory.maximum.unwrap_or(memory.initial).max(memory.initial);
             if pages > MAX_MEMORY_PAGES {
@@ -700,7 +830,6 @@ impl Scan {
                 });
             }
         }
-        found
     }
 
     /// The measurement, once nothing has been found to refuse.
@@ -712,7 +841,7 @@ impl Scan {
             .declared
             .iter()
             .zip(&self.measured)
-            .map(|(declared, maxima)| {
+            .map(|(declared, measured)| {
                 let local_words = u32::try_from(declared.local_words).unwrap_or(u32::MAX);
                 FunctionMetrics {
                     index: declared.index,
@@ -723,9 +852,9 @@ impl Scan {
                         .map(|(_, name)| name.clone()),
                     param_words: u32::try_from(declared.param_words).unwrap_or(u32::MAX),
                     local_words,
-                    max_control_depth: maxima.control_depth,
-                    max_operand_values: maxima.operand_values,
-                    max_operand_words: maxima.operand_words,
+                    max_control_depth: measured.maxima.control_depth,
+                    max_operand_values: measured.maxima.operand_values,
+                    max_operand_words: measured.maxima.operand_words,
                 }
             })
             .collect();
@@ -752,59 +881,187 @@ fn words_of(ty: ValType) -> u32 {
 }
 
 /// Validates one function body, sampling the two stack heights after every
-/// operator.
+/// operator and the interpreter's compiler-side bounds at the operators that
+/// meet them.
 ///
 /// The heights are instantaneous readings, so the peak exists only while the
 /// body is being walked — which is why this drives the operator loop by hand
-/// rather than calling `FuncValidator::validate`.
+/// rather than calling `FuncValidator::validate`. The same is true of a
+/// branch's unwind, and more sharply: it is a difference between two heights,
+/// only one of which survives the branch.
+///
+/// Each operator is looked at twice, before validation and after, and the split
+/// is the interpreter's own ordering rather than a convenience. A branch's
+/// unwind is measured against the stack the branch *sees*, which validating the
+/// operator destroys — `br` truncates it. An index is a property of the
+/// instruction alone, and reading it after validation means an index outside the
+/// module's own range has already been refused as a validation failure, which is
+/// the order the interpreter reaches the two in as well.
 fn measure(
     to_validate: FuncToValidate<ValidatorResources>,
     body: &FunctionBody<'_>,
-) -> Result<Maxima, BinaryReaderError> {
+) -> Result<Measured, BinaryReaderError> {
     let mut validator = to_validate.into_validator(FuncValidatorAllocations::default());
     let mut locals = body.get_binary_reader();
     validator.read_locals(&mut locals)?;
 
-    let mut maxima = Maxima::default();
+    let mut measured = Measured::default();
     // The state before the first operator is a sample too: the function-body
     // frame is already on the control stack, so a body of nothing but `end`
     // still reports a depth of one.
-    sample(&validator, &mut maxima);
+    sample(&validator, &mut measured.maxima);
 
-    let mut operators = body.get_binary_reader_for_operators()?;
+    let mut operators = OperatorsReader::new(body.get_binary_reader_for_operators()?);
     while !operators.eof() {
         let offset = operators.original_position();
-        operators.visit_operator(&mut validator.visitor(offset))??;
-        sample(&validator, &mut maxima);
+        let operator = operators.read()?;
+        observe_branch(&operator, &validator, &mut measured.peaks);
+        validator.op(offset, &operator)?;
+        observe_index(&operator, &mut measured.peaks);
+        sample(&validator, &mut measured.maxima);
     }
-    operators.finish_expression(&validator.visitor(operators.original_position()))?;
-    Ok(maxima)
+    let tail = operators.get_binary_reader();
+    tail.finish_expression(&validator.visitor(tail.original_position()))?;
+    Ok(measured)
 }
 
 /// Folds the validator's current heights into the running maxima.
-///
-/// The word sum walks the stack from the bottom and stops at the first operand
-/// whose type is no longer tracked — every slot after an `unreachable`, until
-/// the enclosing block ends. That rule is not a choice: the interpreter's own
-/// verifier computes the figure the frame bound is checked against the same
-/// way, so counting an untracked slot at any width would refuse functions the
-/// decoder loads. `get_operand_type` indexes from the top, hence the reverse
-/// walk.
 fn sample(validator: &FuncValidator<ValidatorResources>, maxima: &mut Maxima) {
     let values = validator.operand_stack_height();
+    maxima.control_depth = maxima.control_depth.max(validator.control_stack_height());
+    maxima.operand_values = maxima.operand_values.max(values);
+    maxima.operand_words = maxima.operand_words.max(words_below(validator, values, values));
+}
+
+/// The words the bottom `count` operands of a stack of `height` values occupy.
+///
+/// The sum walks from the bottom and stops at the first operand whose type is no
+/// longer tracked — every slot after an `unreachable`, until the enclosing block
+/// ends. That rule is not a choice: the interpreter's own verifier computes both
+/// the frame figure and a branch's unwind this way, so counting an untracked
+/// slot at any width would refuse functions the decoder loads.
+/// `get_operand_type` indexes from the top, hence the arithmetic.
+fn words_below(validator: &FuncValidator<ValidatorResources>, height: u32, count: u32) -> u32 {
     let mut words = 0;
-    for depth in (0..values as usize).rev() {
-        // `None` is out of bounds, which `depth` never is: it is bounded by
+    for from_bottom in 0..count.min(height) {
+        // `None` is out of bounds, which the depth never is: it is bounded by
         // the height just read. Stopping on it costs nothing and needs no arm
         // of its own.
-        let Some(Some(ty)) = validator.get_operand_type(depth) else {
+        let Some(Some(ty)) = validator.get_operand_type((height - 1 - from_bottom) as usize) else {
             break;
         };
         words += words_of(ty);
     }
-    maxima.control_depth = maxima.control_depth.max(validator.control_stack_height());
-    maxima.operand_values = maxima.operand_values.max(values);
-    maxima.operand_words = maxima.operand_words.max(words);
+    words
+}
+
+/// Folds a branching operator's unwind into the running peaks.
+///
+/// Called with the stack as the branch sees it. `br_table` is one operator and
+/// as many branches as it lists, the default one included, each leaving a frame
+/// of its own — so each is measured rather than the widest guessed at.
+///
+/// The wildcard is every operator that is not a branch, which is most of the
+/// instruction set. The three arms above it are four of the interpreter's five
+/// measured unwinds; the fifth, an `else`'s implicit branch over its own arm,
+/// is out of reach of the bound at WebAssembly 1.0 and is not modelled — see
+/// [`MAX_BRANCH_UNWIND_WORDS`].
+fn observe_branch(
+    operator: &Operator<'_>,
+    validator: &FuncValidator<ValidatorResources>,
+    peaks: &mut LimitPeaks,
+) {
+    let mut note = |words: Option<u32>| {
+        if let Some(words) = words {
+            peaks.branch_unwind_words = peaks.branch_unwind_words.max(words);
+        }
+    };
+    match operator {
+        Operator::Br { relative_depth } => note(unwind_words(validator, *relative_depth, false)),
+        Operator::BrIf { relative_depth } => note(unwind_words(validator, *relative_depth, true)),
+        Operator::BrTable { targets } => {
+            for target in targets
+                .targets()
+                .flatten()
+                .chain(core::iter::once(targets.default()))
+            {
+                note(unwind_words(validator, target, true));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Folds an operator's 16-bit IR immediates into the running peaks.
+///
+/// Called after validation, so a `call_indirect` naming a type the module does
+/// not declare has already been refused for that instead — which is the order
+/// the interpreter meets the two in as well.
+///
+/// The wildcard is every other operator, and the two arms above it are the whole
+/// set rather than the ones that came to mind: they are the only operators that
+/// reach the interpreter's IR emitter carrying a value it has not already
+/// narrowed, and [`MAX_IR_INDEX`]'s doc says of each remaining index kind why it
+/// is out of this refusal's reach.
+fn observe_index(operator: &Operator<'_>, peaks: &mut LimitPeaks) {
+    match operator {
+        Operator::CallIndirect { type_index, .. } => {
+            peaks.call_indirect_type = peaks.call_indirect_type.max(*type_index);
+        }
+        Operator::BrTable { targets } => {
+            peaks.br_table_targets = peaks.br_table_targets.max(targets.len());
+        }
+        _ => {}
+    }
+}
+
+/// The operand words a branch to `relative_depth` would discard, or `None` when
+/// the interpreter encodes no unwind for it.
+///
+/// `None` in two cases. A depth past the control stack is not a branch at all —
+/// the validator refuses the module for it, and answering here would be a second
+/// finding about one mistake. A branch to the *outermost* frame is the function
+/// body's own, which the interpreter compiles as an early return carrying the
+/// function's result type and no unwind at all.
+///
+/// `pops_a_selector` is true for the two operators that take an `i32` off the
+/// stack before the unwind is read — `br_if` and `br_table`.
+fn unwind_words(
+    validator: &FuncValidator<ValidatorResources>,
+    relative_depth: u32,
+    pops_a_selector: bool,
+) -> Option<u32> {
+    let frames = validator.control_stack_height();
+    if relative_depth >= frames || relative_depth + 1 == frames {
+        return None;
+    }
+    let target = validator.get_control_frame(relative_depth as usize)?;
+    let below_target = u32::try_from(target.height).unwrap_or(u32::MAX);
+
+    let height = validator.operand_stack_height();
+    let live = if pops_a_selector {
+        height_after_selector_pop(validator, height)
+    } else {
+        height
+    };
+    Some(
+        words_below(validator, height, live)
+            .saturating_sub(words_below(validator, height, below_target.min(live))),
+    )
+}
+
+/// The operand height after a branch's `i32` selector is taken off.
+///
+/// Not `height - 1`: in unreachable code at the innermost frame's own floor the
+/// pop yields a synthesized operand and shrinks nothing. Both this validator and
+/// the interpreter's do that, and both truncate the stack to the frame floor
+/// when a frame becomes unreachable, which is what makes the two figures
+/// comparable at all.
+fn height_after_selector_pop(validator: &FuncValidator<ValidatorResources>, height: u32) -> u32 {
+    let floor = validator
+        .get_control_frame(0)
+        .map_or(0, |frame| u32::try_from(frame.height).unwrap_or(u32::MAX));
+    if height > floor { height - 1 } else { height }
 }
 
 #[cfg(test)]

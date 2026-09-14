@@ -125,10 +125,10 @@ pub enum Target {
     ///   the instruction set the interpreter decodes.
     /// - A non-deterministic construct in an executable function is refused for
     ///   the same reason (see [`Target::supports_non_det_functions`]). Analysis
-    ///   rules A042 and A006 are what make that refusal total -- A042 the
-    ///   non-deterministic blocks, A006 the bare `@` A042 leaves to it; the
-    ///   code-generation gate behind the predicate is the coarser backstop for a
-    ///   caller that never ran analysis.
+    ///   rules A042 and A006 are what report it with a source location -- A042
+    ///   the non-deterministic blocks, A006 the bare `@` A042 leaves to it; the
+    ///   code-generation gate behind the predicate reaches the same programs and
+    ///   is the backstop for a caller that never ran analysis.
     /// - A bulk-memory request is refused: the decoder has not implemented the
     ///   proposal (nasa/spacewasm#54). The sign-extension and
     ///   saturating-truncation proposals are open upstream beside it
@@ -139,15 +139,16 @@ pub enum Target {
     ///   resource on a flight computer. As everywhere, the level is recorded for
     ///   a post-build tool and applied by nothing during emission.
     ///
-    /// The interpreter also enforces decode-time maxima -- parameter and local
-    /// words per function, name and custom-section byte caps, and
-    /// embedder-configured control-frame and operand-stack depths -- which
-    /// nothing in this crate checks: emission is target-blind, and every one of
-    /// those maxima is a property of the finished module rather than of any
-    /// instruction. What this target answers is therefore the *instruction set*
-    /// question alone. `infc` asks the rest of `inference-target-conformance`,
-    /// of the linked artifact and before it writes it, so a module a `spacewasm`
-    /// build leaves on disk is one the interpreter loads.
+    /// The interpreter also enforces decode-time maxima -- among them parameter
+    /// and local words per function, the immediates of its own compiled IR, name
+    /// and custom-section byte caps, and embedder-configured control-frame and
+    /// operand-stack depths -- which nothing in this crate checks: emission is
+    /// target-blind, and every one of those maxima is a property of the finished
+    /// module rather than of any instruction. What this target answers is
+    /// therefore the *instruction set* question alone. `infc` asks the rest of
+    /// `inference-target-conformance`, of the linked artifact and before it
+    /// writes it, so a module a `spacewasm` build leaves on disk is one the
+    /// interpreter loads.
     SpaceWasm,
 }
 
@@ -475,8 +476,9 @@ impl Target {
     /// whose runtime is somebody else's answers `false`, and analysis rules A042
     /// and A006 refuse a build carrying one in a function that ships -- A042 the
     /// blocks, A006 the bare `@` A042 leaves to it. Code generation re-asks the
-    /// question for a caller that skipped analysis, but with a coarser walk than
-    /// theirs -- see [`crate::codegen`].
+    /// question for a caller that skipped analysis, and reaches the same
+    /// programs the rules do: what the rules have that it does not is the source
+    /// location -- see [`crate::codegen`].
     ///
     /// Separate from [`Self::supports_proof_mode`] because the two questions come
     /// apart: that one asks whether a build may request the mode whose entire

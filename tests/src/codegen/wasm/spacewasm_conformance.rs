@@ -42,11 +42,11 @@ mod spacewasm_conformance_tests {
         carries_verification_operator, codegen_for_target_no_analysis, golden_wasm_artifacts,
         has_import_section, relative_to_test_data, single_file_corpus_sources,
     };
-    use crate::utils::{AnalysisMode, CodegenAttempt, codegen_attempt};
     use inference_target_conformance::spacewasm::{LIMITS_FROM, Violation, check};
     use inference_wasm_codegen::Target;
     use wasm_encoder::{
-        CodeSection, Function, FunctionSection, Instruction, Module, TypeSection, ValType,
+        BlockType, CodeSection, Function, FunctionSection, Instruction, Module, RefType,
+        TableSection, TableType, TypeSection, ValType,
     };
 
     /// What `check` must say about one committed artifact.
@@ -460,59 +460,37 @@ mod spacewasm_conformance_tests {
     /// sweeps use: a good number of these fixtures exercise a construct an
     /// analysis rule legitimately rejects, and they still have to reach code
     /// generation or the sweep silently stops covering the shapes it was written
-    /// for. That makes the set a superset of what a real build produces, and the
-    /// surplus is visible rather than skipped: analysis rules A042 and A006 are
-    /// what make the non-determinism refusal total, and code generation's own
-    /// gate is deliberately the coarser backstop, so a few of these modules come
-    /// out carrying a verification operator. Those are held to being *refused*,
-    /// exactly as the proof-mode goldens are, and every other module is held to
-    /// passing. Nothing is skipped, because a skip is where coverage goes to
+    /// for. That makes the set a superset of what a real build produces, and
+    /// nothing is skipped inside it, because a skip is where coverage goes to
     /// die.
     ///
-    /// Each member of that surplus is also held to being rejected once analysis
-    /// runs, which is what carries the claim this sweep is really about: what a
-    /// *real* build accepts for this target is conformant. Without it the
-    /// surplus could be a set a shipping build produces too, and the sweep would
-    /// be tolerating exactly what it exists to catch.
+    /// Every module the target accepts is held to two things, and the first is
+    /// the stronger claim: it carries no verification operator at all. The
+    /// target's own non-determinism gate is total over a body, so a module here
+    /// carrying one would mean the gate has a hole and a `0xfc` instruction no
+    /// WebAssembly decoder reads had been written for a runtime that is a
+    /// WebAssembly decoder — which is a fault to fail on rather than a fixture
+    /// to tolerate. It used to be tolerated, when the gate read only the
+    /// statement kinds one walk enumerated and a `forall` in a loop body reached
+    /// emission; the surplus that arm existed for is empty now.
     ///
     /// Fails if code generation starts emitting, for this target, a module its
-    /// runtime could not load, or if analysis stops refusing the
-    /// non-determinism that lowers to a verification operator.
+    /// runtime could not load — whether because it carries an operator no
+    /// standard defines or because it exceeds one of the interpreter's maxima.
     #[test]
     fn every_single_file_fixture_compiled_for_spacewasm_is_conformant() {
         let sources = single_file_corpus_sources();
         let mut conformant = 0;
-        let mut refused = 0;
         for (path, source) in &sources {
             let Ok(output) = codegen_for_target_no_analysis(source, Target::SpaceWasm) else {
                 continue;
             };
-            if carries_verification_operator(output.wasm()) {
-                let violations = check(output.wasm()).err().unwrap_or_else(|| {
-                    panic!(
-                        "{path} emits a verification operator, which no WebAssembly 1.0 \
-                         decoder accepts, so it must be refused"
-                    )
-                });
-                assert!(
-                    violations
-                        .as_slice()
-                        .iter()
-                        .any(|violation| matches!(violation, Violation::OutsideWasm1 { .. })),
-                    "{path} must be refused for the operator it carries:\n{violations}"
-                );
-                assert!(
-                    matches!(
-                        codegen_attempt(source, AnalysisMode::Run),
-                        CodegenAttempt::Rejected(_)
-                    ),
-                    "{path} reaches emission carrying a verification operator only because \
-                     this sweep skips analysis; a real build must refuse it, or a shipping \
-                     artifact could carry one"
-                );
-                refused += 1;
-                continue;
-            }
+            assert!(
+                !carries_verification_operator(output.wasm()),
+                "{path} reached emission for the spacewasm target carrying a verification \
+                 operator; the target's non-determinism gate is total over a body, so this \
+                 is a hole in it and not a fixture to tolerate"
+            );
             check(output.wasm()).unwrap_or_else(|violations| {
                 panic!("{path} compiles for spacewasm but is not conformant:\n{violations}")
             });
@@ -520,8 +498,7 @@ mod spacewasm_conformance_tests {
         }
         println!(
             "spacewasm conformance: {conformant} of {} single-file fixtures compiled and \
-             passed, {refused} reached emission carrying a verification operator and were \
-             refused",
+             passed, none carrying a verification operator",
             sources.len()
         );
         assert!(
@@ -530,10 +507,90 @@ mod spacewasm_conformance_tests {
              pass, only {conformant} did; a gate that started refusing everything would \
              otherwise pass this vacuously"
         );
+    }
+
+    /// The sentence the target's non-determinism gate refuses with.
+    ///
+    /// Matched rather than "code generation returned an error", because every
+    /// other refusal code generation can make would otherwise read as agreement
+    /// with the rules below.
+    const NON_DET_REFUSAL: &str = "does not support non-deterministic operations";
+
+    /// Which of A006 and A042 analysis reports for `source`.
+    ///
+    /// Both are errors, so a source either fails analysis carrying one of them or
+    /// does not report them at all.
+    fn non_det_rules_reported(source: &str) -> Vec<&'static str> {
+        let arena = crate::utils::build_ast(source.to_string());
+        let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+            .expect("every corpus fixture type-checks")
+            .typed_context();
+        match inference_analysis::analyze(&typed_context) {
+            Ok(_) => Vec::new(),
+            Err(errors) => errors
+                .errors()
+                .iter()
+                .map(|diagnostic| diagnostic.rule_id())
+                .filter(|id| matches!(*id, "A006" | "A042"))
+                .collect(),
+        }
+    }
+
+    /// Over the whole corpus, the target's non-determinism gate refuses exactly
+    /// the fixtures analysis rejects with A006 or A042.
+    ///
+    /// The gate is a second *total* reading of a question `core/analysis` already
+    /// answers, and two total readings of one question that are never compared
+    /// drift apart. The direction that reaches a user is the gate being the
+    /// stricter of the two: a real build runs analysis first, so a program the
+    /// rules accept and the gate refuses fails at code generation with a message
+    /// that names a function and carries no source location at all.
+    ///
+    /// An equivalence rather than an inclusion, because both directions are
+    /// faults — a gate wider than the rules is the one above, and a gate narrower
+    /// than them is a program reaching emission with an instruction the runtime
+    /// cannot decode. The gate's verdict is read off its own sentence rather than
+    /// off "code generation failed", so a fixture refused for some other reason
+    /// cannot pass as agreement.
+    ///
+    /// Fails if either reading moves without the other.
+    #[test]
+    fn the_non_determinism_gate_refuses_exactly_what_a006_and_a042_reject() {
+        let sources = single_file_corpus_sources();
+        let mut refused = 0;
+        for (path, source) in &sources {
+            let gate_refused = match codegen_for_target_no_analysis(source, Target::SpaceWasm) {
+                Ok(_) => false,
+                Err(error) => error.to_string().contains(NON_DET_REFUSAL),
+            };
+            let reported = non_det_rules_reported(source);
+            assert_eq!(
+                gate_refused,
+                !reported.is_empty(),
+                "{path}: the spacewasm gate {} it while analysis reported {}",
+                if gate_refused {
+                    "refused"
+                } else {
+                    "did not refuse"
+                },
+                if reported.is_empty() {
+                    String::from("neither A006 nor A042")
+                } else {
+                    reported.join(" and ")
+                }
+            );
+            if gate_refused {
+                refused += 1;
+            }
+        }
+        println!(
+            "spacewasm conformance: the gate and A006/A042 agree on all {} fixtures, {refused} \
+             of them refused",
+            sources.len()
+        );
         assert!(
             refused > 0,
-            "no fixture reached emission carrying a verification operator, so the arm that \
-             holds a live-pipeline module to being refused ran over nothing"
+            "no fixture exercised the refusing side, so the equivalence held vacuously"
         );
     }
 
@@ -600,6 +657,69 @@ mod spacewasm_conformance_tests {
         module.finish()
     }
 
+    /// A module declaring `types_count` `[] -> []` types and one function whose
+    /// `call_indirect` names type `type_index`.
+    ///
+    /// A table is declared because `call_indirect` validates against one, and no
+    /// element segment because nothing here runs the module — this asks what
+    /// `check` says, and the sibling oracle in `tests/tests/spacewasm/` asks the
+    /// real decoder about the same shape, where the segment's encoding does
+    /// matter.
+    fn module_with_call_indirect_against_type(types_count: u32, type_index: u32) -> Vec<u8> {
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        for _ in 0..types_count {
+            types.ty().function([], []);
+        }
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        module.section(&functions);
+        let mut tables = TableSection::new();
+        tables.table(TableType {
+            element_type: RefType::FUNCREF,
+            table64: false,
+            minimum: 1,
+            maximum: Some(1),
+            shared: false,
+        });
+        module.section(&tables);
+        let mut code = CodeSection::new();
+        let mut function = Function::new([]);
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::CallIndirect {
+            type_index,
+            table_index: 0,
+        });
+        function.instruction(&Instruction::End);
+        code.function(&function);
+        module.section(&code);
+        module.finish()
+    }
+
+    /// A module whose single function runs `body` inside a block, with the
+    /// block's `end` and the function's appended.
+    fn module_with_block_body(body: &[Instruction<'_>]) -> Vec<u8> {
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        module.section(&functions);
+        let mut code = CodeSection::new();
+        let mut function = Function::new([]);
+        function.instruction(&Instruction::Block(BlockType::Empty));
+        for instruction in body {
+            function.instruction(instruction);
+        }
+        function.instruction(&Instruction::End);
+        function.instruction(&Instruction::End);
+        code.function(&function);
+        module.section(&code);
+        module.finish()
+    }
+
     /// Every refusal carries a finding, an authority and a remedy of its own.
     ///
     /// The two tests above prove the three-part shape on two variants. This
@@ -620,7 +740,11 @@ mod spacewasm_conformance_tests {
     #[test]
     fn every_refusal_carries_its_own_authority_and_remedy() {
         let long_name = "n".repeat(32);
-        let rows: [(&str, Vec<u8>, &str, &str, &str); 12] = [
+        let over_long_module_name = wat(&format!("(module (import \"{long_name}\" \"f\" (func)))"));
+        let over_long_field_name = wat(&format!("(module (import \"h\" \"{long_name}\" (func)))"));
+        let mut over_deep_branch = vec![Instruction::I32Const(1); 256];
+        over_deep_branch.push(Instruction::Br(0));
+        let rows: [(&str, Vec<u8>, &str, &str, &str); 15] = [
             (
                 "a post-1.0 instruction",
                 wat("(module (func i32.const 0 i32.extend8_s drop))"),
@@ -657,15 +781,39 @@ mod spacewasm_conformance_tests {
                 "not producible by this compiler",
             ),
             (
+                "a call_indirect against type 65536",
+                module_with_call_indirect_against_type(65_537, 65_536),
+                "the type index of a `call_indirect` is 65536",
+                "one 16-bit immediate",
+                "fewer function types",
+            ),
+            (
+                "a br_table of 65536 targets",
+                module_with_block_body(&[
+                    Instruction::I32Const(0),
+                    Instruction::BrTable(vec![0u32; 65_536].as_slice().into(), 0),
+                ]),
+                "the target count of a `br_table` is 65536",
+                "one 16-bit immediate",
+                "narrower jump table",
+            ),
+            (
+                "a branch unwinding 256 words",
+                module_with_block_body(&over_deep_branch),
+                "discards 256 operand words",
+                "single byte of its jump target word",
+                "bind them to locals",
+            ),
+            (
                 "a 32-byte import module name",
-                wat(&format!("(module (import \"{long_name}\" \"f\" (func)))")),
+                over_long_module_name.clone(),
                 "import module name",
                 "registration limit, not a decode limit",
                 "Shorten the module name",
             ),
             (
                 "a 32-byte import field name",
-                wat(&format!("(module (import \"h\" \"{long_name}\" (func)))")),
+                over_long_field_name.clone(),
                 "import field name",
                 "registration limit, not a decode limit",
                 "Rename the `external fn`",
@@ -731,10 +879,10 @@ mod spacewasm_conformance_tests {
         // The two halves of an import's name meet the same cap for the same
         // reason and are shortened by different edits, so their remedies are
         // the pair most likely to be collapsed into one sentence.
-        let module_name = check(&rows[5].1)
+        let module_name = check(&over_long_module_name)
             .expect_err("a 32-byte module name is refused")
             .to_string();
-        let field_name = check(&rows[6].1)
+        let field_name = check(&over_long_field_name)
             .expect_err("a 32-byte field name is refused")
             .to_string();
         assert!(
@@ -799,29 +947,71 @@ mod spacewasm_conformance_tests {
     ///
     /// "Shorten the custom section name" is advice about a file the user did not
     /// write: nothing in the language names a custom section. The remedy for the
-    /// four such shapes therefore splits — report a compiler bug, or rebuild the
+    /// five such shapes therefore splits — report a compiler bug, or rebuild the
     /// external — because only the person holding the build knows which half
     /// applies.
     ///
+    /// Both halves of the split are asserted, and on both of its shapes: the
+    /// four that share one sentence are represented by the custom-section name,
+    /// and `IndexTooLarge` is the fifth, whose two kinds each say the same thing
+    /// in their own words while still naming the edit — there is one for those,
+    /// and it differs by instruction. A row for each kind, because the two
+    /// sentences are written out separately and a single row would let the other
+    /// lose the provenance half unnoticed.
+    ///
     /// Fails if one of those arms is given a source-level remedy that does not
-    /// exist.
+    /// exist, or drops the provenance question and names only the edit.
     #[test]
     fn a_shape_this_compiler_cannot_produce_splits_its_remedy_on_provenance() {
         let named = wat(&format!("(module (@custom \"{}\" \"x\"))", "c".repeat(33)));
-        let rendered = check(&named)
-            .expect_err("a 33-byte custom section name is refused")
-            .to_string();
-        for fragment in [
-            "is 33 bytes",
-            "at most 32",
-            "not producible by this compiler",
-            "report a compiler bug",
-            "rebuild the external",
+        let indexed = module_with_call_indirect_against_type(65_537, 65_536);
+        let tabled = module_with_block_body(&[
+            Instruction::I32Const(0),
+            Instruction::BrTable(vec![0u32; 65_536].as_slice().into(), 0),
+        ]);
+        for (label, wasm, fragments) in [
+            (
+                "a 33-byte custom section name",
+                named,
+                vec![
+                    "is 33 bytes",
+                    "at most 32",
+                    "not producible by this compiler",
+                    "report a compiler bug",
+                    "rebuild the external",
+                ],
+            ),
+            (
+                "a call_indirect against type 65536",
+                indexed,
+                vec![
+                    "emits no `call_indirect`",
+                    "came from a linked module or a post-build step",
+                    "fewer function types",
+                    "report a compiler bug",
+                ],
+            ),
+            (
+                "a br_table of 65536 targets",
+                tabled,
+                vec![
+                    "emits no `br_table`",
+                    "came from a linked module or a post-build step",
+                    "narrower jump table",
+                    "report a compiler bug",
+                ],
+            ),
         ] {
-            assert!(
-                rendered.contains(fragment),
-                "the refusal must carry `{fragment}`, got:\n{rendered}"
-            );
+            let rendered = check(&wasm)
+                .err()
+                .unwrap_or_else(|| panic!("{label} must be refused"))
+                .to_string();
+            for fragment in fragments {
+                assert!(
+                    rendered.contains(fragment),
+                    "{label}: the refusal must carry `{fragment}`, got:\n{rendered}"
+                );
+            }
         }
     }
 
