@@ -344,7 +344,10 @@ wrong execution, and for a flight target an artifact that flies and calls the
 wrong function is worse than a build that fails. `Violation::IndexTruncated` is
 the refusal, its authority sentence says plainly that the decoder does not make
 it, and its remedy splits on provenance like the other shapes this compiler
-cannot produce.
+cannot produce. The narrowing is reported upstream as
+[nasa/spacewasm#201](https://github.com/nasa/spacewasm/issues/201); if a later
+release refuses it, this entry moves into the transcribed classes above and the
+oracle rows that run the module go red to say so.
 
 Five places reach those two accessors, and all five are checked: a `call`
 operand (`src/compiler.rs:202-206`), a `global.get` or `global.set` operand

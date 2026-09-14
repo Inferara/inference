@@ -353,7 +353,9 @@ function, a `global.get` reading the wrong word. There is no load failure to
 move to build time there, only a wrong execution to inherit, and for a flight
 computer a build that fails is better than an artifact that flies and calls the
 wrong function. `core/target-conformance`'s README carries the mechanism, the
-five places a module can name a definition, and the measurements behind them.
+five places a module can name a definition, and the measurements behind them;
+the narrowing is reported upstream as
+[nasa/spacewasm#201](https://github.com/nasa/spacewasm/issues/201).
 This compiler emits one global and no build approaches either count, which is
 why it is a sentence here rather than a row above.
 
