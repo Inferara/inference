@@ -114,10 +114,12 @@ pub enum StellarAbiError {
     },
 
     /// A surviving import. Every host function a contract may import is a
-    /// separate design question, and none is bound yet.
+    /// separate design question, and the convention behind them all is unbound
+    /// at this target.
     #[error(
         "the module imports `{module}::{name}`; a contract may import only host functions, and \
-         this toolchain binds none"
+         such an import is refused at this target until the Soroban host-call convention is \
+         bound"
     )]
     ImportsUnsupported { module: String, name: String },
 

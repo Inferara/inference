@@ -97,8 +97,9 @@ pub enum Target {
     /// is refused because its custom 0xfc intrinsics are not decodable by the
     /// Stellar VM, a bulk-memory request is refused (see
     /// [`Target::permits_bulk_memory`]), an exported function outside the scalar
-    /// set the contract calling convention can encode is refused, and
-    /// [`OptLevel::Oz`] is this target's
+    /// set the contract calling convention can encode is refused, a host import
+    /// is refused because the Soroban host-call convention is unbound here (see
+    /// [`Target::supports_host_imports`]), and [`OptLevel::Oz`] is this target's
     /// [`default_opt_level`](Target::default_opt_level), for a post-build tool
     /// to act on. The level actually recorded on the output is whatever the
     /// caller passes: the `Debug` build profile resolves this target to
@@ -144,8 +145,12 @@ pub enum Target {
     /// and custom-section byte caps, and embedder-configured control-frame and
     /// operand-stack depths -- which nothing in this crate checks: emission is
     /// target-blind, and every one of those maxima is a property of the finished
-    /// module rather than of any instruction. What this target answers is
-    /// therefore the *instruction set* question alone. `infc` asks the rest of
+    /// module rather than of any instruction. About the bytes, therefore, this
+    /// target answers the *instruction set* question alone; the one question it
+    /// answers that is not about them is whether a host import may be bound
+    /// (see [`Target::supports_host_imports`], which this target admits), and
+    /// that asks what a call out of the artifact means rather than what the
+    /// decoder reads. `infc` asks the rest of
     /// `inference-target-conformance`, of the linked artifact and before it
     /// writes it, so a module a `spacewasm` build leaves on disk is one the
     /// interpreter loads.
@@ -505,6 +510,45 @@ impl Target {
         }
     }
 
+    /// Returns whether a program built for this target may bind an `external
+    /// fn` to a host import -- `use { f } from host::<module>;`, whose body no
+    /// `.wasm` in the build supplies and an embedder registers at run time.
+    ///
+    /// The one predicate here that is not a claim about the instruction set.
+    /// The others ask what a runtime will *decode*; this one asks what a call
+    /// out of the artifact *means*, which is a property of the target's calling
+    /// convention. The two come apart: a runtime can decode an import perfectly
+    /// and still be the wrong thing to hand it to.
+    ///
+    /// `Stellar` is that runtime. A Soroban contract reaches storage, ledger
+    /// access and every host object through host functions the host defines,
+    /// each taking and returning the host's 64-bit tagged word, and nothing here
+    /// maps an `external fn` onto one of them. That is a gap in this toolchain
+    /// rather than anything about a particular declaration, so it holds of a
+    /// signature declaring no value at all as much as of one declaring several;
+    /// issue #324 is where binding the convention is tracked. The target refuses
+    /// the binding rather than emitting a contract that uploads and is wrong.
+    /// Every other target registers a host against the WebAssembly signature the
+    /// import declares, which is the convention an `external fn` already
+    /// describes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use inference_wasm_codegen::Target;
+    ///
+    /// assert!(Target::Wasm32.supports_host_imports());
+    /// assert!(Target::SpaceWasm.supports_host_imports());
+    /// assert!(!Target::Stellar.supports_host_imports());
+    /// ```
+    #[must_use]
+    pub fn supports_host_imports(self) -> bool {
+        match self {
+            Self::Wasm32 | Self::SpaceWasm => true,
+            Self::Stellar => false,
+        }
+    }
+
     /// Returns the default optimization level for this target.
     ///
     /// | Target        | `OptLevel` |
@@ -598,6 +642,18 @@ mod tests {
     /// being the default, which is the moment the envelope stops being "Wasm32
     /// or a narrowing of it" and the callers reading these predicates need
     /// re-examining.
+    ///
+    /// A fifth predicate now exists and is deliberately not here.
+    /// `supports_host_imports` splits `Target::ALL` neither way -- `SpaceWasm`
+    /// admits a host import and `Stellar` does not -- and that is a different
+    /// claim rather than a counterexample to this one. The four below are about
+    /// the *instruction set*, which every non-default target narrows to
+    /// WebAssembly 1.0 and which this compiler alone extends; a host import is
+    /// about the target's *calling convention*, which one runtime can bind and
+    /// another leave unbound with nothing following from it about what either
+    /// decodes. Added to this loop it would fail, and relaxing an assertion to
+    /// admit it would throw away what the loop proves. It is pinned next door,
+    /// against its own split.
     #[test]
     fn only_the_default_target_admits_the_compiler_s_own_extensions() {
         for target in Target::ALL {
@@ -624,6 +680,31 @@ mod tests {
                 target.requires_wasm1_externals(),
                 !is_default,
                 "`{}` disagrees with the default about foreign-module dialect",
+                target.as_str()
+            );
+        }
+    }
+
+    /// Every target states an answer about host imports, and the answer is read
+    /// off the variant rather than off `is_default`, because this split is its
+    /// own: two targets admit a host import and one refuses it.
+    ///
+    /// The exhaustive match is what forces a fourth target to decide rather than
+    /// inherit, and naming all three is what puts the asymmetry between
+    /// `SpaceWasm` and `Stellar` under test -- a predicate that answered `true`
+    /// everywhere, or one that mirrored the instruction-set split, would each
+    /// break exactly one row here.
+    #[test]
+    fn every_target_states_its_own_answer_about_host_imports() {
+        for target in Target::ALL {
+            let expected = match target {
+                Target::Wasm32 | Target::SpaceWasm => true,
+                Target::Stellar => false,
+            };
+            assert_eq!(
+                target.supports_host_imports(),
+                expected,
+                "`{}` does not answer about host imports as this test declares",
                 target.as_str()
             );
         }

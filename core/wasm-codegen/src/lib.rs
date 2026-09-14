@@ -52,6 +52,7 @@ use inference_ast::ids::DefId;
 use inference_ast::nodes::{ArgKind, Def};
 use inference_fn_key::FnKey;
 use inference_type_checker::typed_context::TypedContext;
+use inference_type_checker::{ExternKind, ExternOrigin};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::compiler::{Compiler, FunctionOrigin};
@@ -141,14 +142,19 @@ pub use crate::checked_section::SECTION_VERSION as CHECKED_SECTION_VERSION;
 ///
 /// The target-specific export check runs on what [`emit`] returns rather than
 /// on a half-built module; [`emit`] carries why that position changes no
-/// outcome.
+/// outcome. Every other refusal runs before emission, which is what decides
+/// which of two applicable refusals a user reads: a host-import program whose
+/// exported signature the Stellar target also refuses is refused for the host
+/// import, because the binding is inadmissible whatever the exported signature
+/// turns out to be, so it is the change the author has to make first.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - Validation fails: a feature the target does not accept, `proof` mode at a
 ///   target that refuses it, a non-deterministic construct in a function that
-///   ships at a target that refuses those, or an export the Stellar target
+///   ships at a target that refuses those, a host import in a `proof` build or
+///   at a target that refuses host imports, or an export the Stellar target
 ///   cannot carry (see [`check_stellar_exports`])
 /// - Code generation fails
 pub fn codegen(
@@ -168,10 +174,14 @@ pub fn codegen(
     // is emitted: a build-time refusal names the manifest entry to remove, where
     // the same module rejected at deploy time names nothing.
     //
-    // Every target name in the three configuration refusals below is rendered
-    // through `as_str()`, which is the spelling `--target` and `Inference.toml`
-    // accept. A user reading one has to be able to paste the name back into the
-    // command that produced it, which the `Debug` form does not allow.
+    // Every target name in the four configuration refusals is rendered through
+    // `as_str()`, which is the spelling `--target` and `Inference.toml` accept.
+    // A user reading one has to be able to paste the name back into the command
+    // that produced it, which the `Debug` form does not allow. Three of the four
+    // are below; the fourth is the host-import target gate in
+    // `check_host_import_support`, whose proof-mode sibling is deliberately
+    // outside the set, because it names no target at all -- what it refuses is
+    // the mode.
     if let Some(feature) = features.first_rejected_by(target) {
         cov_mark::hit!(wasm_codegen_target_rejects_feature);
         let name = target.as_str();
@@ -233,6 +243,8 @@ pub fn codegen(
         }
     }
 
+    check_host_import_support(typed_context, mode, target)?;
+
     let emitted = emit(typed_context, module_name, mode, features, layout)?;
 
     if target == Target::Stellar {
@@ -252,6 +264,111 @@ pub fn codegen(
     .with_guarded_functions(emitted.guarded_functions)
     .with_export_signatures(emitted.export_signatures)
     .with_hspecs(emitted.hspecs))
+}
+
+/// Refuses a program whose host bindings this configuration cannot carry.
+///
+/// Two refusals rather than one, because they answer different questions about
+/// the same binding and a program can meet either alone. Proof mode refuses one
+/// at every target: the body is the embedder's, so it is outside the artifact
+/// the proof is written about and the translation has no way to state an
+/// assumption about it. A target refuses one when its calling convention is
+/// unbound here, which is a claim about the runtime and not about the mode.
+///
+/// Neither can fire unless the mode or the target asks for it, and both of
+/// those are a read of the configuration, so the bound externs are walked only
+/// where the answer could change the outcome: a compile build at a target that
+/// binds a host -- what most builds are -- asks nothing at all.
+///
+/// The mode is answered first, and that is an ordering rather than a
+/// precedence: a build reaching here in `proof` mode is at the default target,
+/// the configuration refusal above this one having already refused the mode
+/// everywhere else, and the default target binds a host.
+///
+/// # Errors
+///
+/// Returns the refusal, naming the first host binding the program carries.
+fn check_host_import_support(
+    typed_context: &TypedContext,
+    mode: CompilationMode,
+    target: Target,
+) -> anyhow::Result<()> {
+    let refused_by_mode = mode == CompilationMode::Proof;
+    let refused_by_target = !target.supports_host_imports();
+    if !refused_by_mode && !refused_by_target {
+        return Ok(());
+    }
+    let Some(origin) = first_host_import(typed_context) else {
+        return Ok(());
+    };
+    let fn_name = typed_context.arena().def_name(origin.decl);
+    let clause = origin.source_spelling();
+
+    if refused_by_mode {
+        cov_mark::hit!(wasm_codegen_proof_mode_rejects_host_import);
+        return Err(anyhow::anyhow!(
+            "Host imports are not yet modeled in the proof translation. `external fn \
+             {fn_name}` is bound to `{clause}`, and its body is supplied by the embedder, so \
+             its behavior is outside the artifact a proof is written about, and the \
+             translation has no way to state an assumption about it. Build this program with \
+             `--mode compile`, or remove the host imports from the proof build."
+        ));
+    }
+
+    cov_mark::hit!(wasm_codegen_target_rejects_host_import);
+    let name = target.as_str();
+    let host_target = Target::Wasm32.as_str();
+    // The explanation belongs to the Soroban calling convention, which is the
+    // one target answering `false` today. A second refusing target would not
+    // share it: what makes a host import inadmissible is a property of the
+    // runtime's own convention, so its reason would have to be chosen here
+    // rather than inherited from this sentence.
+    //
+    // It says what this toolchain does not do rather than what the reader's
+    // declaration carries, which is what keeps it true of every signature they
+    // can write: `external fn commit();` declares no value in either position,
+    // and a sentence about the values that would cross would be about nothing
+    // at all.
+    //
+    // Dropping the binding leads because the reader named this target to get a
+    // contract out, and the other way out gives that up.
+    Err(anyhow::anyhow!(
+        "The `{name}` target does not support host imports. `external fn {fn_name}` is bound \
+         to `{clause}`, and the Soroban host-call convention is not bound by this toolchain \
+         yet: a contract reaches storage, ledger access and every host object through host \
+         functions the host defines, each taking and returning the host's 64-bit tagged \
+         word, and nothing here maps an `external fn` onto one of them. Remove the host \
+         binding to build a contract, or build this program for the `{host_target}` target, \
+         where a host import is supported; the Stellar host binding is tracked under issue \
+         #324."
+    ))
+}
+
+/// The first import an embedder would have to satisfy for this program to
+/// instantiate.
+///
+/// One rather than the inventory, because a refusal listing ten bindings would
+/// be stating the consequences of one decision ten times over. Neither message
+/// asks for anything to be done to the binding it names in particular — the
+/// restriction is all-or-nothing, so the ways out are to drop the host bindings
+/// or to move the build — and the one named is there to put the reader in the
+/// right place in their source rather than to single it out from the rest.
+/// Which one that is stays stable across runs, since
+/// [`TypedContext::extern_origins`] is already ordered; it is not, though, the
+/// first the author wrote, that ordering being by module and field name.
+///
+/// The whole origin rather than the two strings a message interpolates, so that
+/// neither is derived twice. The `from` clause a reader wrote is
+/// [`ExternOrigin::source_spelling`], the one place that knows the `host`
+/// segment the classifier stripped belongs back in front of the module string;
+/// and the declaration a reader would go and edit is named off
+/// [`decl`](ExternOrigin::decl), since `export_field` is the name the emitted
+/// import carries and the data model keeps the two free to diverge.
+fn first_host_import(typed_context: &TypedContext) -> Option<ExternOrigin> {
+    typed_context
+        .extern_origins()
+        .into_iter()
+        .find(|origin| origin.kind == ExternKind::Host)
 }
 
 /// One run of [`emit`]: the module bytes, and the metadata the traversal
@@ -402,16 +519,23 @@ const STELLAR_SCALAR_SET: &str = "This target currently carries only the scalar 
 
 /// Why a compound type cannot cross the contract boundary, and where the work
 /// that would let it is tracked.
+///
+/// It states the refusal and not only the unbound convention, because a reader
+/// told that a contract builds host objects "through host functions it imports"
+/// has been handed their next move: declare those imports. This target refuses
+/// that binding, so the sentence has to say so, or the advice is a dead end the
+/// compiler closes on the following build.
 const STELLAR_COMPOUND_NEXT_STEP: &str = "A compound value crosses the contract boundary as a \
      host object, which a contract has to build and read through host functions it imports; \
-     this toolchain binds none of those yet, and issue #464 is where that work is tracked.";
+     this target refuses a host binding, because the Soroban host-call convention is not \
+     bound here yet, and issue #324 is where that work is tracked.";
 
 /// Why a 64-bit integer cannot cross it either. Same machinery, different
-/// reason for needing it.
+/// reason for needing it, and the same reason for naming the refusal.
 const STELLAR_WIDE_NEXT_STEP: &str = "A 64-bit integer needs the same machinery: the host's \
      word is 64 bits wide and spends part of it on a tag, so no 64-bit value fits in one, \
-     and it travels as a host object built through host functions this toolchain does not \
-     bind yet — issue #464.";
+     and it travels as a host object built through host functions this target refuses to \
+     import, their call convention not being bound here yet — issue #324.";
 
 /// Why an integer narrower than 32 bits is held back, which is not the reason
 /// the others are.
@@ -514,7 +638,7 @@ fn stellar_parameter_label(name: Option<&str>, index: usize) -> String {
 /// source types off the export descriptor.
 ///
 /// Every refusal below opens with the fixed prose `Stellar target: `, rather
-/// than the interpolated `Target::as_str()` the three configuration gates in
+/// than the interpolated `Target::as_str()` the four configuration gates in
 /// [`codegen`] render. This gate is only ever reached at that one target, so
 /// there is no variant name to hand the reader back.
 ///
@@ -1543,9 +1667,9 @@ mod memory_layout_tests {
 #[cfg(test)]
 mod stellar_gate_tests {
     use super::{
-        AbiReturn, AbiType, ExportSignature, STELLAR_MAX_EXPORT_NAME_BYTES,
-        STELLAR_MAX_EXPORT_PARAMS, check_stellar_exports, render_abi_type,
-        stellar_parameter_label,
+        AbiReturn, AbiType, ExportSignature, STELLAR_COMPOUND_NEXT_STEP,
+        STELLAR_MAX_EXPORT_NAME_BYTES, STELLAR_MAX_EXPORT_PARAMS, check_stellar_exports,
+        render_abi_type, stellar_parameter_label,
     };
     use inference_type_checker::typed_context::TypedContext;
 
@@ -1698,8 +1822,9 @@ mod stellar_gate_tests {
              return is one of those or unit. A 64-bit integer needs the same machinery: the \
              host's word is 64 bits wide and spends part of it on a tag, so no 64-bit value \
              fits in one, and it travels as a host object built through host functions this \
-             toolchain does not bind yet — issue #464. If the function is not meant to be a \
-             contract method, remove 'pub': only an entry-file top-level 'pub fn' is exported."
+             target refuses to import, their call convention not being bound here yet — \
+             issue #324. If the function is not meant to be a contract method, remove 'pub': \
+             only an entry-file top-level 'pub fn' is exported."
         );
     }
 
@@ -1710,7 +1835,7 @@ mod stellar_gate_tests {
     #[test]
     fn each_type_family_earns_the_next_step_that_fits_it() {
         const WIDEN: &str = "Widen the declaration to 'u32' or 'i32'.";
-        const TRACKED: &str = "issue #464";
+        const TRACKED: &str = "issue #324";
         let cases = [
             (AbiType::U64, "64-bit integer", TRACKED),
             (AbiType::I64, "64-bit integer", TRACKED),
@@ -1761,13 +1886,13 @@ mod stellar_gate_tests {
 
     /// The narrow-integer refusal points at the language question rather than at
     /// host objects, and says so — it is the one family whose next step is not
-    /// issue #464.
+    /// issue #324.
     #[test]
     fn a_narrow_integer_is_refused_for_its_own_reason() {
         let message = refusal(&[signature("clamp", vec![AbiType::U8], AbiReturn::Unit)]);
         assert!(message.contains("Widen the declaration to 'u32' or 'i32'."), "{message}");
         assert!(
-            !message.contains("crosses that boundary as a host object"),
+            !message.contains(STELLAR_COMPOUND_NEXT_STEP),
             "a narrow integer is not a host-object problem: {message}"
         );
     }
@@ -1781,7 +1906,7 @@ mod stellar_gate_tests {
             AbiReturn::Scalar(AbiType::U64),
         )]);
         assert!(message.contains("it returns 'u64'"), "{message}");
-        assert!(message.contains("#464"), "{message}");
+        assert!(message.contains("#324"), "{message}");
     }
 
     /// A compound return arrives through a hidden pointer, which is a different

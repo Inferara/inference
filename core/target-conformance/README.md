@@ -10,6 +10,13 @@ rather than compiles, and its only dependencies are a WebAssembly decoder and an
 error derive — which is what lets `infc`, `infs` and the test suite all link it
 without dragging code generation along.
 
+One question here is also askable earlier. The SpaceWasm registration caps bound
+what an *embedder* can be handed, not what a decoder reads, so they are
+answerable of the imports a program declares before any bytes exist — and
+answered there a refusal can name the `external fn` an author wrote.
+`spacewasm::check_host_imports` is that entry point; it shares one body with
+`spacewasm::check`, so the two vantages cannot give one import two answers.
+
 ## Why stock `wasmparser`
 
 The in-tree `inf-wasmparser` fork decodes and validates this compiler's custom
@@ -196,11 +203,17 @@ No file was written.
     Pass fewer parameters, or collect them into a struct: a struct or array parameter is one i32 pointer, which is 1 word.
 ```
 
-The two strings are the caller's because this crate is handed bytes and nothing
-else: only `infc` knows it was about to write `out/main.wasm`, and only `infs`
-knows the original artifact is still there. An empty `consequence` omits that
-line, which is what `Display` passes — a reader quoting the violations out of a
-build has no build to report the consequence of.
+The two strings are the caller's because this crate is handed findings and
+nothing else: only `infc` knows it was about to write `out/main.wasm`, and only
+`infs` knows the original artifact is still there. An empty `consequence` omits
+that line, which is what `Display` passes — a reader quoting the violations out
+of a build has no build to report the consequence of.
+
+The opening sentence is *not* the caller's. It follows which check built the
+value, because the two are asked of different things: findings read off a
+program's declarations open `the host imports <subject> declares cannot all be
+registered by a SpaceWasm embedder`, since at that point there is no module to
+call one. `Display` falls back to `this module` and `this program` respectively.
 
 The violation types live in the crate's `errors` module and are re-exported from
 `spacewasm`, which is the path to use. They are that target's alone — every
@@ -275,8 +288,9 @@ interpreter's: `Eof`, `MalformedInteger`, `MalformedMagic`, `MalformedVersion`,
 
 **Not a property of the bytes: the host set decides them.** An import is bound
 against the modules an embedder registered, and this crate is handed bytes and
-no embedder — which is why it holds an import only to the two caps *no* host
-could ever satisfy. `FunctionImportNotFound`, `GlobalImportNotFound`,
+no embedder — which is why it holds an import only to the three caps *no* host
+could ever satisfy: the two names, the parameter list and the single result.
+`FunctionImportNotFound`, `GlobalImportNotFound`,
 `MemoryImportNotFound`, `TableImportNotFound`, `FunctionImportOutOfRange`,
 `FunctionImportTypeMismatch`, `GlobalImportTypeMismatch`,
 `MemoryImportTypeMismatch`, `TableImportTypeMismatch`,
@@ -380,6 +394,44 @@ function-index rows need an embedder whose code-page budget holds 65,537 functio
 bodies; the `spacewasm_std` reference budget does not, and refuses such a module
 with `AllocError(OutOfMemory)`, which the `call` row measures in place before the
 four of them decode under the widened budget it establishes.
+
+## `spacewasm::check_host_imports`
+
+```rust
+pub fn check_host_imports(declared: &[DeclaredImportFacts<'_>]) -> Result<(), Violations>
+```
+
+The same three **registration** caps `check` applies to the imports it reads out
+of finished bytes — `MAX_IMPORT_NAME_BYTES` on the module name and again on the
+field name, `MAX_HOST_FUNCTION_PARAMS` on the parameter list, and
+`MAX_HOST_FUNCTION_RESULTS` on the results — applied instead to facts a compiler
+already holds. `DeclaredImportFacts` carries them: `module` and `field`, the
+two-level name an embedder registers under, and `params` and `results`, what the
+declaration lowers to. It borrows rather than owns, because a caller building one
+is holding the strings off a declaration it is about to compile.
+
+It exists so a developer hears about an `external fn` they wrote rather than
+about an import section they did not. Asked here, a refusal names the
+declaration; asked of the artifact, the only thing left to name is a two-level
+string in a module no file holds. The header a refusal opens with follows the
+same split — a declaration-level `Violations` does not call its subject a module,
+because at that point there is none.
+
+Both entry points run one body, `import_cap_violations`, so a source-level
+refusal and a byte-level one cannot disagree about one import. That sharing is
+the whole reason this lives here rather than in its caller, and one test pins it:
+the two verdicts about a single over-long import name have to be equal.
+
+What it deliberately does not answer: it is a claim about *declarations*, so it
+sees the ones it is handed and nothing else, and takes on trust that they are
+the imports the artifact will carry — `DeclaredImportFacts` records that an
+import was declared, not that an embedder is what will satisfy it. An import a
+linked `.wasm` dragged in is outside it, as is any import a post-build step
+adds. `check` over the finished bytes remains the backstop for both. Of the
+caps it applies, the one-result cap is unreachable from Inference source — an
+`external fn` returns one value or unit, and a compound return lowers to a single
+`i32` — and it is in the shared body because the rule is one rule; it earns its
+findings on the byte-level path, where a linked module can declare anything.
 
 ## How it is held to being right
 

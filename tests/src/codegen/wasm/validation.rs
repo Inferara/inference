@@ -9,9 +9,15 @@
 //!   against one target rather than once per target; `spacewasm_gate` carries
 //!   the same two rows for the third target because that module is its whole
 //!   acceptance matrix.
-//!   The remaining target gate — the Stellar export admissibility rules — has
-//!   its own module, `stellar_gate`, because it reads the export descriptor
-//!   rather than the configuration and needs a fixture per refusal.
+//!   The target gates that read the program rather than the configuration — the
+//!   Stellar export admissibility rules, and which targets admit a host binding
+//!   — have their own module, `stellar_gate`, each needing a fixture per
+//!   refusal.
+//! - A host import in a `proof` build refused, pinned at the default target,
+//!   since that refusal reads the mode and what the program binds and every
+//!   target answers it alike. The row asserts the message whole and then builds
+//!   the same program in `compile` mode, which is what makes it a row about the
+//!   mode rather than about the binding.
 //! - Proof mode metadata matches compile mode for non-det-free code
 //! - `has_main` detection
 
@@ -190,6 +196,46 @@ pub fn read_first() -> i32 {
              Non-deterministic code is specification code: move it into a `spec` \
              block, which compile mode strips from the artifact, or build this \
              program with `--target wasm32`."
+        );
+    }
+
+    // Host import tests ---
+
+    /// Pinned whole for the reasons above. The message names the import that is
+    /// outside the proof and the mode that does carry it, and both halves are
+    /// the actionable ones.
+    ///
+    /// The import is named as the `external fn` and the clause that binds it,
+    /// which is how its sibling at the Stellar target names one too. The
+    /// two-level `env`.`clock_ms` form is a spelling no Inference source
+    /// contains — `env` exists only after `host::`, and the dot form only in an
+    /// import section — so a reader handed it has to translate before they can
+    /// go and edit anything.
+    ///
+    /// `infc` refuses this combination earlier and at greater length; this is
+    /// the library's own fail-closed backstop, and every in-process caller —
+    /// this test included — reaches it instead. Compile mode is asserted in the
+    /// same test because without it the refusal reads as a refusal of the
+    /// binding rather than of the mode.
+    #[test]
+    fn codegen_rejects_proof_mode_with_a_host_import() {
+        cov_mark::check!(wasm_codegen_proof_mode_rejects_host_import);
+        let source = "external fn clock_ms() -> i64; \
+                      use { clock_ms } from host::env; \
+                      pub fn now() -> i64 { return clock_ms(); }";
+        let err = codegen_with_target_mode(source, Target::Wasm32, CompilationMode::Proof)
+            .expect_err("a host import must be refused in proof mode");
+        assert_eq!(
+            err.to_string(),
+            "Host imports are not yet modeled in the proof translation. `external fn \
+             clock_ms` is bound to `host::env`, and its body is supplied by the embedder, so \
+             its behavior is outside the artifact a proof is written about, and the \
+             translation has no way to state an assumption about it. Build this program with \
+             `--mode compile`, or remove the host imports from the proof build."
+        );
+        assert!(
+            codegen_with_target_mode(source, Target::Wasm32, CompilationMode::Compile).is_ok(),
+            "the same program must still build in compile mode"
         );
     }
 
@@ -1560,6 +1606,53 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
         }
     }
 
+    /// The fixtures proof-mode code generation refuses, in corpus order.
+    ///
+    /// Committed rather than counted, because the floors the two sweeps below
+    /// carry cannot see this: there is headroom enough under them that a fixture
+    /// which stopped compiling for an unrelated reason would leave both sweeps
+    /// green and quieter, which is where a regression goes to hide. A fixture
+    /// entering or leaving this list is a reviewed edit.
+    ///
+    /// Both entries bind a host import. Its body is supplied by an embedder at
+    /// run time and is therefore outside the artifact a proof is written about,
+    /// with nothing in the module for an obligation about it to reduce, so
+    /// proof mode refuses the program rather than emitting one whose
+    /// translation would quietly assume the import away.
+    const PROOF_MODE_REFUSED: &[&str] = &[
+        "codegen/wasm/extern_import/host_import/host_import.inf",
+        "codegen/wasm/extern_import/host_import_fprime/host_import_fprime.inf",
+    ];
+
+    /// The opening of the refusal every [`PROOF_MODE_REFUSED`] entry earns.
+    ///
+    /// Matched rather than "code generation returned an error", because every
+    /// other refusal code generation can make would otherwise read as one of
+    /// these.
+    const PROOF_MODE_REFUSAL: &str = "Host imports are not yet modeled in the proof translation.";
+
+    /// Checks one proof-mode refusal against [`PROOF_MODE_REFUSED`] and returns
+    /// the fixture's committed spelling, for the caller to collect and compare
+    /// with the list as a whole.
+    ///
+    /// Two assertions rather than one: the list says which fixtures may be
+    /// refused, and the sentence says what for. Without the second, a fixture on
+    /// the list that started failing for some other reason would be absorbed by
+    /// its own entry.
+    fn classify_proof_mode_refusal(label: &str, error: &anyhow::Error) -> String {
+        let name = crate::corpus::relative_to_test_data(std::path::Path::new(label));
+        let message = error.to_string();
+        assert!(
+            PROOF_MODE_REFUSED.contains(&name.as_str()),
+            "{name} no longer reaches proof-mode code generation: {message}"
+        );
+        assert!(
+            message.contains(PROOF_MODE_REFUSAL),
+            "{name} is refused for `{message}`, which is not what this list is about"
+        );
+        name
+    }
+
     /// Nor does any module the compiler produces in proof mode.
     ///
     /// Proof mode lowers `spec` bodies that compile mode drops, so it reaches
@@ -1576,18 +1669,28 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
             sources.len()
         );
         let mut compiled = 0usize;
+        let mut refused: Vec<String> = Vec::new();
         for (label, source) in &sources {
-            let Ok(output) = codegen_with_full_config_no_analysis(
+            let output = match codegen_with_full_config_no_analysis(
                 source,
                 Target::Wasm32,
                 CompilationMode::Proof,
                 Target::Wasm32.default_opt_level(),
-            ) else {
-                continue;
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    refused.push(classify_proof_mode_refusal(label, &error));
+                    continue;
+                }
             };
             assert_no_bulk_memory_operator(output.wasm(), label);
             compiled += 1;
         }
+        assert_eq!(
+            refused.as_slice(),
+            PROOF_MODE_REFUSED,
+            "the fixtures proof mode refuses are not the ones this sweep declares"
+        );
         assert!(
             compiled >= 100,
             "expected at least 100 fixtures to reach proof-mode codegen, only {compiled} did"
@@ -1969,14 +2072,19 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
         );
         let mut compiled = 0usize;
         let mut carriers = 0usize;
+        let mut refused: Vec<String> = Vec::new();
         for (label, source) in &sources {
-            let Ok(output) = codegen_with_full_config_no_analysis(
+            let output = match codegen_with_full_config_no_analysis(
                 source,
                 Target::Wasm32,
                 CompilationMode::Proof,
                 Target::Wasm32.default_opt_level(),
-            ) else {
-                continue;
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    refused.push(classify_proof_mode_refusal(label, &error));
+                    continue;
+                }
             };
             compiled += 1;
             let guarded = output.guarded_functions();
@@ -2007,6 +2115,11 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
                 }
             }
         }
+        assert_eq!(
+            refused.as_slice(),
+            PROOF_MODE_REFUSED,
+            "the fixtures proof mode refuses are not the ones this sweep declares"
+        );
         assert!(
             compiled >= 100,
             "expected at least 100 fixtures to reach proof-mode codegen, only {compiled} did"
