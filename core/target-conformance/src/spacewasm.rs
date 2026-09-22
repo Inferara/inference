@@ -1760,16 +1760,22 @@ mod spacewasm_tests {
     /// two pieces of advice written for two readers and only one of those two
     /// is reachable from this entry point. The source edit is exact — the
     /// language has no rename-on-import, so the field an import carries is the
-    /// declaration's own name, and that same name is written again in the `use`
-    /// clause that binds it, where a mismatch is refused as an undeclared
-    /// import; advice to bind a shorter field would be advice to write
-    /// something unspellable, and advice to rename only the declaration would
-    /// buy the reader a second build failure. The linked-module sentence after
-    /// it is for the reader a declaration-level check never sees, and nothing
-    /// here could tell that reader from this one: [`Violation::remedy`] is
-    /// blind to which check produced the finding, and the byte-level check
-    /// reads import sections in which the offending name has no `external fn`
-    /// behind it at all.
+    /// declaration's own name, and that same name is written again in each
+    /// `use` clause that binds it, where a mismatch is refused as an undeclared
+    /// import. It also asks for the edit in every file that declares the
+    /// function: `infc` hands this check one entry per import, deduplicated
+    /// across the program, so one finding can stand for a declaration in
+    /// several files, and a reader told of "the" declaration renames one and is
+    /// refused again by the next. Advice to bind a shorter field would be
+    /// advice to write something unspellable, and advice to rename only the
+    /// declaration would buy the reader a second build failure.
+    ///
+    /// The linked-module alternative is for the other reader, and this entry
+    /// point never has one: it is handed declarations, and a name read off a
+    /// declaration always has an `external fn` behind it. So the refusal is
+    /// asserted to *end* at the source edit, and the same two findings are
+    /// rendered through [`check`] to show the alternative is not lost — a
+    /// suppression that suppressed everywhere would otherwise read as a fix.
     #[test]
     fn a_rendered_refusal_names_the_registration_limit_and_each_whole_remedy() {
         let over = "n".repeat(MAX_IMPORT_NAME_BYTES + 1);
@@ -1783,11 +1789,9 @@ mod spacewasm_tests {
         );
         assert!(
             field.contains(
-                "Rename the `external fn` and the name in the `use { … }` clause that binds \
-                 it: the field name an import carries is the declaration's own name. If the \
-                 import came from a linked module rather than from a declaration in this \
-                 program, rebuild that module so it imports the function under a shorter \
-                 name."
+                "Rename the `external fn`, and the name in each `use { … }` clause that binds \
+                 it, in every file that declares it: the field name an import carries is the \
+                 declaration's own name.\n"
             ),
             "{field}"
         );
@@ -1800,12 +1804,39 @@ mod spacewasm_tests {
             "{module}"
         );
         assert!(
-            module.contains(
+            module.contains("Shorten the module name this extern is bound under.\n"),
+            "{module}"
+        );
+
+        for rendered in [&field, &module] {
+            assert!(
+                !rendered.contains("If the import came from a linked module"),
+                "a name read off a declaration has an `external fn` behind it, so it must \
+                 not be offered a provenance it cannot have: {rendered}"
+            );
+        }
+
+        let linked_field = check(&module_importing("m", &over))
+            .expect_err("a 32-byte field name is refused in an artifact too")
+            .to_string();
+        assert!(
+            linked_field.contains(
+                "declaration's own name. If the import came from a linked module rather than \
+                 from a declaration in this program, rebuild that module so it imports the \
+                 function under a shorter name."
+            ),
+            "{linked_field}"
+        );
+        let linked_module = check(&module_importing(&over, "f"))
+            .expect_err("a 32-byte module name is refused in an artifact too")
+            .to_string();
+        assert!(
+            linked_module.contains(
                 "Shorten the module name this extern is bound under. If the import came from \
                  a linked module rather than from a declaration in this program, rebuild \
                  that module so it imports from a shorter module name."
             ),
-            "{module}"
+            "{linked_module}"
         );
     }
 

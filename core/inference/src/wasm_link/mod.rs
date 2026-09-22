@@ -26,8 +26,8 @@ pub mod resolve;
 pub mod validate;
 
 pub use driver::{
-    resolve_external_modules, ExternalResolutionError, HostImport, ResolvedExternalModule,
-    ResolvedExternals, MAX_EXTERNAL_MODULE_BYTES,
+    host_import_label, resolve_external_modules, ExternalResolutionError, HostImport,
+    ResolvedExternalModule, ResolvedExternals, MAX_EXTERNAL_MODULE_BYTES,
 };
 pub use imports::HostImportError;
 pub use resolve::{

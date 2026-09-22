@@ -87,6 +87,26 @@
 //! proof imported from the library. The flag requires proof mode; pairing it
 //! with a compile-mode build is an error rather than a silent no-op.
 //!
+//! ## Host Imports
+//!
+//! A `use { f } from host::<module>;` clause binds `f` to a function the
+//! embedder registers rather than to one this build links, so the artifact
+//! ships the import and instantiates only against a host that offers it. Every
+//! build that ships one prints a `host imports:` line naming each pair, which
+//! is the only place a clause silently reinterpreted by the `host` reservation
+//! surfaces at compile time.
+//!
+//! `--host-imports=<list>` is the policy those bindings are held to: the pairs
+//! a build may bind, written `module.field` and comma separated. The `=` is
+//! required so that `--host-imports=` — a declared, empty allowlist admitting
+//! none — is spellable; omitting the flag applies no policy at all. A build
+//! that writes a `.v` is refused outright, because a function the embedder
+//! supplies lies outside the artifact a proof is written about.
+//!
+//! See `book/src/external-functions-and-wasm-linking.md` for the surface, what
+//! each layer refuses, and what `mut` does and does not prove at a host
+//! position.
+//!
 //! ## Error Handling
 //!
 //! The compiler reports errors to stderr with descriptive messages:
@@ -167,11 +187,12 @@ mod parser;
 pub(crate) mod toolchain;
 use clap::Parser;
 use inference::wasm_link::{
-    resolve_external_modules, ManifestDeps, ResolvedExternalModule, ResolvedExternals, SearchPath,
+    host_import_label, resolve_external_modules, HostImport, ManifestDeps, ResolvedExternalModule,
+    ResolvedExternals, SearchPath,
 };
 use inference::{
-    AnalysisOptions, ExternalSpecPolicy, HOST_SEGMENT, LinkOptions, analyze_with_options,
-    link_resolved, parse_project, type_check, wasm_to_v,
+    AnalysisOptions, ExternKind, ExternalSpecPolicy, HOST_SEGMENT, LinkOptions,
+    analyze_with_options, link_resolved, parse_project, type_check, wasm_to_v,
 };
 use inference_wasm_codegen::{EmitFeatures, MemoryLayout, MemoryLayoutSource};
 use parser::{Cli, CliMode};
@@ -559,6 +580,422 @@ fn proof_artifact_refusal(
     ))
 }
 
+/// The host imports a build is allowed to bind, keyed by import module.
+///
+/// A map of modules to fields rather than a flat set of pairs, because the
+/// refusal asks two questions of it and only one of them is about a pair. "Is
+/// `env`.`clock_ms` listed?" decides whether to refuse; "does `env` have an
+/// entry at all?" decides which edit the refusal asks for, and a flat set can
+/// answer the second only by scanning. The ordering is the rendering order: a
+/// build is told what it was given as a sorted list, so two invocations that
+/// name the same imports in different orders read alike.
+type HostImportAllowlist = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
+
+/// Reads `--host-imports` into the policy a build runs under.
+///
+/// Each entry is one host import written `module.field` — the two strings an
+/// embedder registers a function under, joined by a dot. The dot is the only
+/// separator: an import module string is flat, so a name with a second dot in
+/// it could never match a declaration and is a typo rather than a nested path.
+///
+/// `::` is that same mistake made with the source's own spelling, and it gets
+/// a sentence of its own rather than the shared one. It is the likeliest entry
+/// anybody writes, because the clause being transcribed is
+/// `use { clock_ms } from host::env;` and both halves of it mislead:
+/// `env::clock_ms` keeps the path separator, and `host::env.clock_ms` keeps a
+/// segment that names the provider and is never part of an import name.
+/// Neither can match a declaration — the type checker strips `host` and keeps
+/// exactly one segment — so under the shared message the first reads as
+/// malformed for no stated reason, while the second is taken for a module
+/// named `host::env`, refused by the allowlist two phases later, and read as
+/// the allowlist mechanism being broken rather than as a typo. The sentence is
+/// [`path_separator_refusal`]'s, which also spells the entry its author meant.
+///
+/// An empty entry is the flag's third state and reaches clap as one empty
+/// value, not as none: `--host-imports=` parses to `[""]`. That spelling is a
+/// *declared and empty* allowlist, which admits nothing, and it is the whole
+/// reason the flag is an `Option` — see [`Cli::host_imports`]. Only a
+/// single-entry list means it. An empty entry inside a list that names
+/// something is a stray or trailing comma, and is told so in its own words:
+/// the refusal below quotes the entry it rejected, and quoting an empty one
+/// would name neither the comma nor the empty-allowlist spelling it is one
+/// character away from.
+///
+/// Entries are trimmed before they are read, because the inventory line a
+/// successful build prints exists to be copied back into this flag and renders
+/// its pairs `env.clock_ms, fprime_core.telemetry`. A paste inside quotes keeps
+/// the separator's space — an unquoted one never reaches this function, since
+/// the shell splits it into separate arguments first — and a refusal whose
+/// offending character is an invisible leading space inside backticks is one
+/// nobody can act on. The single-empty-entry check above reads the values as
+/// given, so trimming cannot turn a list of blanks into the empty-allowlist
+/// policy.
+///
+/// # Errors
+///
+/// Returns the shared diagnostic for the first entry that is not two non-empty
+/// names joined by exactly one dot, the `::` diagnostic for the first entry
+/// written with the source's path separator, or the stray-comma diagnostic for
+/// the first entry that is empty once trimmed.
+fn parse_host_import_allowlist(entries: &[String]) -> anyhow::Result<HostImportAllowlist> {
+    let mut allowed = HostImportAllowlist::new();
+    if entries.len() == 1 && entries[0].is_empty() {
+        return Ok(allowed);
+    }
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            anyhow::bail!(
+                "invalid `--host-imports`: the list has an empty entry, which is a stray or \
+                 trailing comma. `--host-imports=` on its own is the empty allowlist; a list \
+                 names `module.field` pairs, as in \
+                 `--host-imports=env.clock_ms,fprime_core.command`."
+            );
+        }
+        if entry.contains("::") {
+            anyhow::bail!("{}", path_separator_refusal(entry));
+        }
+        let pair = entry.split_once('.').filter(|(module, field)| {
+            !module.is_empty() && !field.is_empty() && !field.contains('.')
+        });
+        let Some((module, field)) = pair else {
+            anyhow::bail!(
+                "invalid `--host-imports` entry `{entry}`: each entry is a host import in \
+                 `module.field` form, as in `--host-imports=env.clock_ms,fprime_core.command`."
+            );
+        };
+        allowed
+            .entry(module.to_string())
+            .or_default()
+            .insert(field.to_string());
+    }
+    Ok(allowed)
+}
+
+/// The refusal for an allowlist entry written with the source's `::`, naming
+/// the entry its author meant wherever one can be read out of it.
+///
+/// A rule and an unrelated example are less than such a reader needs. The entry
+/// is almost always a transcription of one `use` clause, and a transcription
+/// has exactly one right spelling: so a leading `host::` is stripped — it names
+/// the provider and is never part of an import name — and what is left is
+/// split once, on `::` or failing that on the dot, and rendered back as
+/// `module.field`. That is a correction only where it yields two non-empty
+/// names with no separator left in either. `a::b::c` holds three names, and
+/// picking two of them would be a guess presented as a fix, so it gets the
+/// generic example instead.
+///
+/// The fault is named by what the entry carries. `host::env.clock_ms` already
+/// separates its pair with a dot, and telling its author the separator is wrong
+/// would send them to the one part of it that is right.
+fn path_separator_refusal(entry: &str) -> String {
+    let unprefixed = entry
+        .strip_prefix(HOST_SEGMENT)
+        .and_then(|rest| rest.strip_prefix("::"));
+    let rest = unprefixed.unwrap_or(entry);
+    let fault = match (unprefixed, rest.contains("::")) {
+        (None, _) => "the separator here is a dot, not `::`".to_string(),
+        (Some(_), false) => format!("the `{HOST_SEGMENT}::` prefix is not part of an import name"),
+        (Some(_), true) => format!(
+            "the separator here is a dot, not `::`, and the `{HOST_SEGMENT}::` prefix is not \
+             part of an import name"
+        ),
+    };
+    let meant = rest
+        .split_once("::")
+        .or_else(|| rest.split_once('.'))
+        .filter(|&(module, field)| {
+            [module, field]
+                .iter()
+                .all(|name| !name.is_empty() && !name.contains("::") && !name.contains('.'))
+        });
+    let correction = match meant {
+        Some((module, field)) => format!("Write it `{module}.{field}`."),
+        None => format!(
+            "For example, `use {{ clock_ms }} from {HOST_SEGMENT}::env;` is written \
+             `env.clock_ms`."
+        ),
+    };
+    format!(
+        "invalid `--host-imports` entry `{entry}`: {fault}. An entry names the WebAssembly \
+         import module and field an embedder registers a function under: an import module \
+         string is flat, and `{HOST_SEGMENT}` names the provider, so neither `::` nor a \
+         `{HOST_SEGMENT}` segment ever appears in the artifact. {correction}"
+    )
+}
+
+/// Every host import the program binds, as the label a diagnostic names one by,
+/// sorted and deduplicated.
+///
+/// Read off the typed context rather than off the linker driver's answer,
+/// because the one refusal that needs it runs before resolution. Two
+/// declarations of one `(module, field)` — the same function reached from two
+/// files — are one import to an embedder and must be one name in a message, so
+/// the list is deduplicated here exactly as resolution deduplicates its own.
+fn host_import_labels(typed_context: &inference::TypedContext) -> Vec<String> {
+    let origins = typed_context.extern_origins();
+    let mut labels: Vec<String> = origins
+        .iter()
+        .filter(|origin| origin.kind == ExternKind::Host)
+        .map(|origin| host_import_label(&origin.logical_module, &origin.export_field))
+        .collect();
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+/// The refusal owed to a build that writes a proof artifact and binds a host
+/// import, or `None` when it binds none.
+///
+/// A host import has no body in this build: the embedder supplies it at
+/// instantiation, and nothing the translation reads describes what it does. A
+/// `.v` written anyway would be a proof about a module with a hole in it, and
+/// the hole is invisible in the artifact — which is worse than no proof, so the
+/// pairing is refused rather than qualified.
+///
+/// Code generation refuses the same pairing in its own words, and this is not
+/// that refusal moved: this one runs before external resolution, and the
+/// ordering is what it is for. A program that binds both a host import and a
+/// linked module is refused by resolution as mixed, and that refusal's first
+/// remedy is to bind every extern to `host::…` — advice a proof build must not
+/// be given, since following it lands the author here having rewritten every
+/// `use` clause for nothing. Asked first, the reader hears the refusal that
+/// actually governs the build they asked for.
+///
+/// The remedy names the requests rather than a mode, because the gate does not
+/// read the mode: `-v` requests a `.v` on its own, so "build with `--mode
+/// compile`" clears `--mode proof` and sends `--mode compile -v` round the same
+/// refusal having changed nothing. It asks for every request to go, since a
+/// build can pass both and a reader who drops one of two meets this refusal
+/// again. And it names the one request a reader may not have typed: `infs
+/// build` passes `--mode proof` itself for a project whose manifest sets that
+/// mode, and a reader told only to drop flags would search a command line that
+/// holds none.
+///
+/// Takes the rendered labels rather than the typed context because that is the
+/// whole of what the message needs, and because the plural agreement is the
+/// only decision in it: one import is what the wording was written for, and a
+/// program binding three must not be told about "its" behavior.
+fn host_import_proof_refusal(host: &[String]) -> Option<String> {
+    if host.is_empty() {
+        return None;
+    }
+    let (subject, verb, possessive, object) = if host.len() == 1 {
+        (host[0].clone(), "is", "its", "the host import")
+    } else {
+        (host.join(", "), "are", "their", "the host imports")
+    };
+    Some(format!(
+        "Error: Host imports are not yet modeled in the proof translation. {subject} {verb} \
+         satisfied by the embedder, so {possessive} behavior is outside the artifact a proof is \
+         written about, and the translation has no way to state an assumption about it. Build \
+         this program without a proof artifact, or remove {object} from the program. `-v` and \
+         `--mode proof` each request a `.v` on their own, so drop every one of them this build \
+         passed; `infs build` passes `--mode proof` on a project's behalf when its \
+         Inference.toml sets `[build] mode = \"proof\"`, and there the request to drop is that \
+         setting: make it `\"compile\"`."
+    ))
+}
+
+/// The `Inference.toml [host-imports]` edit that would admit `fields` under
+/// `module` once that table exists.
+///
+/// The table will hold one array per module — the shape the Host Imports
+/// section of `book/src/external-functions-and-wasm-linking.md` documents — so
+/// the edit is not one shape but two: a module with no entry needs its key
+/// written, and a module that has one needs names added to the array already
+/// there. Deciding which is the compiler's job, because the compiler is the one
+/// holding the allowlist; a message that made the reader go and check would be
+/// asking for work already done.
+///
+/// `fields` is every unadmitted field of `module`; why they arrive together is
+/// [`host_import_allowlist_refusal`]'s.
+fn host_import_table_edit(
+    module: &str,
+    fields: &std::collections::BTreeSet<&str>,
+    has_entry: bool,
+) -> String {
+    if has_entry {
+        let quoted = fields
+            .iter()
+            .map(|field| format!("`\"{field}\"`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("add {quoted} to the `{module}` entry")
+    } else {
+        let array = fields
+            .iter()
+            .map(|field| format!("\"{field}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("add `{module} = [{array}]`")
+    }
+}
+
+/// The refusal owed to a build whose allowlist does not admit every host import
+/// it resolved, or `None` when no allowlist was given or every import is in it.
+///
+/// Asked of what resolution produced rather than of the declarations, so a pair
+/// two files declare is judged once, under the one signature they had to agree
+/// on to get this far.
+///
+/// One paragraph per import *module*, naming every unadmitted field of it, and
+/// all of them printed together. Reporting one finding per build would make a
+/// program binding four unadmitted functions four builds to correct; reporting
+/// one paragraph per *import* would hand the reader edits that collide, because
+/// both mechanisms hold one list per module. Two paragraphs asking separately
+/// for `env` ask for a duplicate key in a table and for two halves of one list
+/// on a command line, and applying either pair literally loses an import or
+/// fails to parse. Grouped, a paragraph asks for the whole edit for its module
+/// and the paragraphs can be applied in any order.
+///
+/// The source-level remedy names the module and the unadmitted fields rather
+/// than quoting a `use` clause: `fields` is the unadmitted subset of a set
+/// deduplicated across the program, so a clause spelled from it need not exist
+/// in any file, and the refusal carries no file or line to navigate by instead.
+/// For the same reason it asks for "every" binding of those names rather than
+/// "the" one: a field two files bind is one import here, and the refusal sees
+/// the deduplicated name, never the clauses behind it, so it cannot count them.
+/// "Drop every `host::env` binding of `clock_ms` and `sleep_ms`" holds of one
+/// clause carrying both names, of one per file, and of any mix of the two.
+///
+/// `infc` is handed a flag and has no manifest, so the flag is named as the
+/// mechanism and the manifest as where `infs build` will fill it from — not
+/// the other way round, and in both branches. Inverting it would describe a
+/// file this invocation never read, to a caller who may not have one, and the
+/// edit it asked for would be in a syntax the flag refuses: `--host-imports`
+/// takes `module.field`, never a TOML array. The manifest sentence carries its
+/// own "once that table exists" warning rather than leaving it to the book,
+/// because `Inference.toml` denies unknown fields: a reader who performs the
+/// edit the sentence spells out today does not merely get premature advice,
+/// they get a manifest no `infs` command on the project can load. The warning
+/// has to travel with the edit, since the diagnostic is all a direct `infc`
+/// caller — the only reader who can reach this message at all — ever sees.
+fn host_import_allowlist_refusal(
+    allowlist: Option<&HostImportAllowlist>,
+    declared: &[HostImport],
+) -> Option<String> {
+    let allowed = allowlist?;
+    let mut unadmitted: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> =
+        std::collections::BTreeMap::new();
+    for import in declared {
+        if allowed
+            .get(&import.module)
+            .is_some_and(|fields| fields.contains(&import.field))
+        {
+            continue;
+        }
+        unadmitted
+            .entry(import.module.as_str())
+            .or_default()
+            .insert(import.field.as_str());
+    }
+    if unadmitted.is_empty() {
+        return None;
+    }
+    let given = allowed
+        .iter()
+        .flat_map(|(module, fields)| fields.iter().map(move |field| format!("{module}.{field}")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut blocks = Vec::new();
+    for (module, fields) in &unadmitted {
+        let labels = fields
+            .iter()
+            .map(|field| host_import_label(module, field))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (noun, verb, pronoun) = if fields.len() == 1 {
+            ("host import", "is", "it")
+        } else {
+            ("host imports", "are", "them")
+        };
+        let pairs = fields
+            .iter()
+            .map(|field| format!("{module}.{field}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let names = serial_list(
+            &fields
+                .iter()
+                .map(|field| format!("`{field}`"))
+                .collect::<Vec<_>>(),
+        );
+        let remedy = format!(
+            "Add `{pairs}` to `--host-imports` to admit {pronoun}, or drop every \
+             `{HOST_SEGMENT}::{module}` binding of {names}."
+        );
+        if allowed.is_empty() {
+            blocks.push(format!(
+                "Error: {noun} {labels} {verb} not in this build's host-import allowlist: the \
+                 allowlist is present and empty, which forbids every host import. The allowlist \
+                 (`--host-imports`) names every host function the program may bind, and \
+                 `--host-imports=` declares that it binds none. {remedy} `infs build` will spell \
+                 that same empty policy as a declared-but-empty `[host-imports]` table in \
+                 Inference.toml once that table exists; today `infs` refuses to read a manifest \
+                 carrying that key at all."
+            ));
+        } else {
+            let table_edit = host_import_table_edit(module, fields, allowed.contains_key(*module));
+            blocks.push(format!(
+                "Error: {noun} {labels} {verb} not in this build's host-import allowlist. The \
+                 allowlist (`--host-imports`) names every host function the program may bind, \
+                 and this build was given `{given}`. {remedy} `infs build` will fill the flag \
+                 from a `[host-imports]` table in Inference.toml once that table exists, where \
+                 the same edit will be to {table_edit}; today `infs` refuses to read a manifest \
+                 carrying that key at all, so the flag reaches `infc` by hand."
+            ));
+        }
+    }
+    Some(blocks.join("\n\n"))
+}
+
+/// `items` as an English list: `a`, `a and b`, `a, b, and c`.
+fn serial_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [init @ .., last] => format!("{}, and {last}", init.join(", ")),
+    }
+}
+
+/// The one line a build that ships host imports prints: which functions the
+/// artifact will ask an embedder for, and whether a reviewed policy admitted
+/// them.
+///
+/// The parenthetical is the load-bearing half. Reserving `host` positionally
+/// means a two-segment `use { io_write } from host::io;` clause that used to
+/// link `host/io.wasm` now declares a host import of `io` instead — the file is
+/// no longer read, the embedder becomes responsible for the function, and
+/// nothing else in the toolchain says so. This line is the only compile-time
+/// surface that will ever tell that author, so it names every import rather
+/// than counting them.
+///
+/// The qualifier separates an import admitted by a policy from one admitted by
+/// the absence of one, which is the distinction a reviewer reading a build log
+/// needs and cannot otherwise recover: the two builds print the same names.
+///
+/// The pairs are rendered `env.clock_ms`, not the backticked
+/// [`host_import_label`] a diagnostic uses. A build-log line is read as plain
+/// text and its names are copied into `--host-imports`, which spells them this
+/// way; a diagnostic is read as prose, where the two halves have to be told
+/// apart from the dot joining them.
+///
+/// Sorted by `(module, field)`, which `declared` already is.
+fn host_import_inventory(declared: &[HostImport], allowlisted: bool) -> Option<String> {
+    if declared.is_empty() {
+        return None;
+    }
+    let names = declared
+        .iter()
+        .map(|import| format!("{}.{}", import.module, import.field))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let qualifier = if allowlisted { "" } else { " (no allowlist)" };
+    Some(format!("host imports{qualifier}: {names}"))
+}
+
 /// Renders a `wasm_to_v` failure with the user-facing diagnostic shape
 /// described in plan §6: a dedicated message for Rocq-stdlib shadowing,
 /// dedicated guidance for the `__` collision, and a generic invalid-Rocq-identifier
@@ -903,6 +1340,23 @@ fn run() {
         }
     };
 
+    // Read the host-import policy here for the reason the three resolutions
+    // above are here: a malformed entry is a mistake about the build, not about
+    // the program, and a policy reported after the parse and type check it was
+    // written to gate is a policy the user has to discard work to act on.
+    let host_allowlist = match args
+        .host_imports
+        .as_deref()
+        .map(parse_host_import_allowlist)
+        .transpose()
+    {
+        Ok(allowlist) => allowlist,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    };
+
     let output_path = args
         .out_dir
         .clone()
@@ -991,6 +1445,46 @@ fn run() {
         }
     }
 
+    // Before external resolution, which is what makes this the refusal a mixed
+    // proof build hears rather than the resolver's mixed-program one. See
+    // `host_import_proof_refusal` for why that ordering is worth stating.
+    //
+    // The predicate is "this build writes a `.v`", which takes both halves: the
+    // artifact is requested by `generate_v_output` and written only under
+    // `need_codegen`. On the request alone it would also refuse `--analyze
+    // --mode proof`, a run `normalize_args` has just warned writes no `.v` — an
+    // artifact that is never written is not one this refusal is owed about.
+    //
+    // The request is read rather than the mode, for the reason
+    // `external_spec_policy` gives: `--mode compile -v` is a supported spelling
+    // that does write a `.v`, and a gate on the mode alone would let it through
+    // with the imports quietly assumed away. `normalize_args` has already set
+    // the flag for every proof-mode spelling, so one predicate covers both.
+    if need_codegen
+        && args.generate_v_output
+        && let Some(tctx) = &typed_context
+        && let Some(refusal) = host_import_proof_refusal(&host_import_labels(tctx))
+    {
+        eprintln!("{refusal}");
+        process::exit(1);
+    }
+
+    // The target's refusal of a host import, asked before resolution for the
+    // reason the proof refusal is: resolution and the allowlist below each have
+    // a refusal whose remedy leads into this one — bind every extern to
+    // `host::…`, admit the import — and at a target that binds no host, a
+    // reader who follows either buys another build and, for the allowlist, a
+    // policy entry nothing can use. The words are code generation's, which
+    // still asks the same question as its own backstop.
+    if need_codegen
+        && let Some(tctx) = &typed_context
+        && let Err(refusal) =
+            inference_wasm_codegen::check_host_import_target_support(tctx, target)
+    {
+        eprintln!("Error: {refusal}");
+        process::exit(1);
+    }
+
     // Resolve every external `.wasm` the program binds, ahead of codegen, so a
     // resolution or validation failure aborts before any output is produced.
     let manifest_deps = match parse_manifest_deps(&args.wasm_deps) {
@@ -1012,6 +1506,60 @@ fn run() {
         }
         _ => ResolvedExternals::default(),
     };
+
+    // The registration caps, asked of the declarations the program made rather
+    // than of the import section they become. `spacewasm::check` over the
+    // finished bytes remains the backstop and the two run one body, so this can
+    // only bring the same finding forward — to a point where it can still name
+    // the `external fn` the author wrote instead of a two-level string in a
+    // module no file holds.
+    //
+    // Caps before policy, because an allowlist entry has to spell the import's
+    // final name. Asked the other way round, the allowlist tells the reader to
+    // admit a name no SpaceWasm embedder can register, the rename the caps then
+    // ask for leaves that entry matching nothing, and the renamed import is
+    // refused by the allowlist again: three builds, and a dead policy entry.
+    //
+    // Variant equality rather than a predicate: the reason is on
+    // `spacewasm::check`, which is also where the post-link caller's identical
+    // gate points.
+    if target == inference_wasm_codegen::Target::SpaceWasm {
+        let declared = externals
+            .host_imports
+            .iter()
+            .map(
+                |import| inference_target_conformance::spacewasm::DeclaredImportFacts {
+                    module: &import.module,
+                    field: &import.field,
+                    params: import.signature.params.len(),
+                    results: import.signature.results.len(),
+                },
+            )
+            .collect::<Vec<_>>();
+        if let Err(violations) =
+            inference_target_conformance::spacewasm::check_host_imports(&declared)
+        {
+            // The subject completes "the host imports … declares", which the
+            // declaration-level header opens with, so it names the program and
+            // not a file: at this point in the build there is no file, and the
+            // declarations are in the source whatever the output was to be
+            // called.
+            eprintln!("{}", violations.render("this program", "No file was written."));
+            process::exit(1);
+        }
+    }
+
+    // The allowlist is applied to what resolution produced, not to the
+    // declarations: a `(module, field)` two files declare is one import to an
+    // embedder, and a policy that refused it twice would ask for the same edit
+    // twice.
+    if let Some(refusal) =
+        host_import_allowlist_refusal(host_allowlist.as_ref(), &externals.host_imports)
+    {
+        eprintln!("{refusal}");
+        process::exit(1);
+    }
+
     let external_modules = &externals.modules;
     if need_codegen {
         let Some(tctx) = typed_context else {
@@ -1097,6 +1645,17 @@ fn run() {
         if !external_modules.is_empty() {
             println!("Linked {} external module(s)", external_modules.len());
         }
+        // Mutually exclusive with the line above: a program that binds both
+        // kinds is refused at resolution, so an artifact either merged modules
+        // or kept imports and never both. Two independent `if`s rather than an
+        // `else`, because the exclusivity is the resolver's invariant and not
+        // this block's — an `else` would silently hide the second line if that
+        // ever changed.
+        if let Some(inventory) =
+            host_import_inventory(&externals.host_imports, host_allowlist.is_some())
+        {
+            println!("{inventory}");
+        }
 
         // The Stellar value ABI is a post-link rewrite, not an emission: the
         // bytes above are the same module the default target produces, and this
@@ -1146,8 +1705,8 @@ fn run() {
         // a writing one.
         //
         // Variant equality rather than a predicate: the reason is on
-        // `spacewasm::check`, which is also where the second caller's identical
-        // gate points.
+        // `spacewasm::check`, which is also where `infs`'s identical gate in
+        // `wasm_opt.rs` points.
         if target == inference_wasm_codegen::Target::SpaceWasm {
             match inference_target_conformance::spacewasm::check(wasm_bytes) {
                 Ok(report) => {
@@ -1266,6 +1825,7 @@ mod tests {
             mode: None,
             wasm_lib_dirs: Vec::new(),
             wasm_deps: Vec::new(),
+            host_imports: None,
             target: None,
             wasm_features: Vec::new(),
             memory_pages: None,
@@ -1315,6 +1875,427 @@ mod tests {
             external_spec_policy(CliMode::Compile, false, true),
             ExternalSpecPolicy::Ignore,
             "the unreachable compile-mode adopt pairing must fail safe"
+        );
+    }
+
+    /// A resolved host import with the empty signature, for the message tests
+    /// below: nothing they assert reads the signature, and spelling one out
+    /// would suggest it does.
+    fn host_import(module: &str, field: &str) -> HostImport {
+        HostImport {
+            module: module.to_string(),
+            field: field.to_string(),
+            signature: inference::wasm_link::DeclaredSignature {
+                params: Vec::new(),
+                results: Vec::new(),
+            },
+        }
+    }
+
+    /// The three states `--host-imports` has to distinguish, read back off clap
+    /// rather than assumed.
+    ///
+    /// The middle row is the one the `Option` exists for and the one clap's
+    /// shape decides: `--host-imports=` arrives as a single empty value, not as
+    /// no values, so "declared and empty" is `Some([""])` on the way in and has
+    /// to be recognised rather than filtered. Pinning it here means a clap
+    /// upgrade that starts yielding `Some([])` — or `None` — fails on the parser
+    /// instead of silently turning the strictest policy into the absent one.
+    ///
+    /// The last case is what `require_equals` buys: without it clap reads the
+    /// source path as the flag's value, and the build then fails on a missing
+    /// file rather than on the policy the author was writing.
+    #[test]
+    fn host_imports_flag_round_trips_its_three_states() {
+        let absent = Cli::try_parse_from(["infc", "a.inf"]).unwrap();
+        assert_eq!(absent.host_imports, None, "no flag is no policy");
+
+        let empty = Cli::try_parse_from(["infc", "a.inf", "--host-imports="]).unwrap();
+        assert_eq!(
+            empty.host_imports,
+            Some(vec![String::new()]),
+            "`--host-imports=` must stay distinguishable from an absent flag"
+        );
+
+        let listed = Cli::try_parse_from(["infc", "a.inf", "--host-imports=env.clock_ms,f.command"])
+            .unwrap();
+        assert_eq!(
+            listed.host_imports,
+            Some(vec!["env.clock_ms".to_string(), "f.command".to_string()]),
+            "one occurrence carries a comma separated list"
+        );
+
+        assert!(
+            Cli::try_parse_from(["infc", "--host-imports", "a.inf"]).is_err(),
+            "a bare --host-imports must not swallow the source path"
+        );
+    }
+
+    /// The same three states after parsing, plus the entries that are not a host
+    /// import at all.
+    ///
+    /// The empty-allowlist row is asserted as an empty *map*, not as an error:
+    /// the single empty entry is a policy and not a typo. The malformed rows are
+    /// what separate it from a stray comma — an entry with no dot, an empty
+    /// half, or a second dot could never match an import module string.
+    ///
+    /// The paste row is what trimming is for: the flag's own list separator is
+    /// a comma, but the build-log line these names are read off of separates
+    /// them with `, `, and a policy that refused a quoted paste of it would
+    /// refuse it over a character the reader cannot see inside the backticks
+    /// quoting it.
+    ///
+    /// The `::` rows are transcriptions of a `use { f } from host::m;` clause,
+    /// and none may reach the shared message. `env::clock_ms` would be called
+    /// malformed without being told what is wrong with it, and
+    /// `host::env.clock_ms` is not malformed at all under the shared rule — it
+    /// parses as a module named `host::env`, which no declaration can produce,
+    /// so it would be accepted here and refused two phases later by the
+    /// allowlist, reading as a broken mechanism rather than as a typo.
+    ///
+    /// Each row pins the fault the entry actually carries and the one spelling
+    /// its author meant, whole: a refusal that gave every author the same
+    /// `env.clock_ms` example would pass a test asserting only the rule. The
+    /// `host::env.clock_ms` row is the one where naming the separator would be
+    /// wrong, since that entry already uses a dot; the three-name row is the
+    /// one where a correction would be a guess, and falls back to the example.
+    #[test]
+    fn parse_host_import_allowlist_reads_the_three_states() {
+        assert!(
+            parse_host_import_allowlist(&[String::new()])
+                .unwrap()
+                .is_empty(),
+            "`--host-imports=` is a declared and empty policy, not a malformed entry"
+        );
+
+        let listed = parse_host_import_allowlist(&[
+            "env.clock_ms".to_string(),
+            "env.sleep_ms".to_string(),
+            "fprime_core.telemetry".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(listed.len(), 2, "entries are grouped by import module");
+        assert_eq!(
+            listed["env"].iter().cloned().collect::<Vec<_>>(),
+            vec!["clock_ms".to_string(), "sleep_ms".to_string()]
+        );
+
+        let pasted =
+            parse_host_import_allowlist(&["env.clock_ms".to_string(), " env.sleep_ms".to_string()])
+                .unwrap();
+        assert_eq!(
+            pasted["env"].iter().cloned().collect::<Vec<_>>(),
+            vec!["clock_ms".to_string(), "sleep_ms".to_string()],
+            "a list pasted out of the inventory line keeps its `, ` separators"
+        );
+
+        for malformed in ["env", ".clock_ms", "env.", "a.b.c"] {
+            let err = parse_host_import_allowlist(&[
+                "fprime_core.telemetry".to_string(),
+                malformed.to_string(),
+            ])
+            .expect_err("an entry that is not a `module.field` pair must be refused");
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains(&format!("entry `{malformed}`")),
+                "the refusal quotes the whole entry it rejected: {rendered}"
+            );
+            assert!(
+                rendered.contains("`module.field` form"),
+                "the refusal states the form an entry takes: {rendered}"
+            );
+        }
+
+        let separator = "the separator here is a dot, not `::`.";
+        let prefix = "the `host::` prefix is not part of an import name.";
+        let example = "For example, `use { clock_ms } from host::env;` is written `env.clock_ms`.";
+        for (transcribed, fault, correction) in [
+            ("env::clock_ms", separator, "Write it `env.clock_ms`."),
+            ("fprime_core::telemetry", separator, "Write it `fprime_core.telemetry`."),
+            (
+                "host::fprime_core::telemetry",
+                "the separator here is a dot, not `::`, and the `host::` prefix is not part of \
+                 an import name.",
+                "Write it `fprime_core.telemetry`.",
+            ),
+            ("host::env.clock_ms", prefix, "Write it `env.clock_ms`."),
+            ("host::env", prefix, example),
+            ("a::b::c", separator, example),
+        ] {
+            let err = parse_host_import_allowlist(&[
+                "fprime_core.telemetry".to_string(),
+                transcribed.to_string(),
+            ])
+            .expect_err("an entry written with the source's path separator must be refused");
+            let rendered = err.to_string();
+            assert!(
+                rendered.starts_with(&format!(
+                    "invalid `--host-imports` entry `{transcribed}`: {fault} "
+                )),
+                "the refusal quotes the whole entry and names the fault it carries: {rendered}"
+            );
+            assert!(
+                rendered.ends_with(correction),
+                "the refusal ends at the spelling `{transcribed}` was meant to be: {rendered}"
+            );
+        }
+
+        for stray in ["", "  "] {
+            let err = parse_host_import_allowlist(&[
+                "fprime_core.telemetry".to_string(),
+                stray.to_string(),
+            ])
+            .expect_err("a list that names something and also carries a blank entry is a typo");
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("the list has an empty entry, which is a stray or trailing \
+                                   comma"),
+                "a blank entry is named rather than quoted back as nothing: {rendered}"
+            );
+            assert!(
+                rendered.contains("`--host-imports=` on its own is the empty allowlist"),
+                "the refusal separates the typo from the policy it looks like: {rendered}"
+            );
+        }
+    }
+
+    /// One host import reads as one, two read as two.
+    ///
+    /// The wording was written for a single import, and a program binding
+    /// several must not be told about "its" behavior — nor asked to remove "the
+    /// host imports" when it binds one. Nothing else in the message varies, so
+    /// the agreement is the whole of what this function decides, and both ends
+    /// of the sentence are asserted at both arities.
+    ///
+    /// The remedy is asserted whole at both, too. It asks for *every* request
+    /// for a `.v` to go, since a build passing both `-v` and `--mode proof` that
+    /// drops one is refused again; and it names the manifest setting, since a
+    /// project build receives `--mode proof` from `infs` and its author typed no
+    /// flag to drop.
+    #[test]
+    fn host_import_proof_refusal_agrees_with_its_subject() {
+        assert_eq!(
+            host_import_proof_refusal(&[]),
+            None,
+            "no host import, no refusal"
+        );
+
+        let one = host_import_proof_refusal(&["`env`.`clock_ms`".to_string()]).unwrap();
+        assert!(
+            one.contains("`env`.`clock_ms` is satisfied by the embedder, so its behavior"),
+            "{one}"
+        );
+        assert!(
+            one.contains("or remove the host import from the program."),
+            "one import is removed in the singular: {one}"
+        );
+
+        let many = host_import_proof_refusal(&[
+            "`env`.`clock_ms`".to_string(),
+            "`fprime_core`.`telemetry`".to_string(),
+        ])
+        .unwrap();
+        assert!(
+            many.contains(
+                "`env`.`clock_ms`, `fprime_core`.`telemetry` are satisfied by the embedder, so \
+                 their behavior"
+            ),
+            "{many}"
+        );
+        assert!(
+            many.contains("or remove the host imports from the program."),
+            "two imports are removed in the plural: {many}"
+        );
+
+        for refusal in [&one, &many] {
+            assert!(
+                refusal.contains(
+                    "Build this program without a proof artifact, or remove the host import"
+                ),
+                "the remedy is the artifact, not a mode: {refusal}"
+            );
+            assert!(
+                refusal.contains(
+                    "`-v` and `--mode proof` each request a `.v` on their own, so drop every one \
+                     of them this build passed;"
+                ),
+                "the remedy asks for every request to go, not one of two: {refusal}"
+            );
+            assert!(
+                refusal.ends_with(
+                    "`infs build` passes `--mode proof` on a project's behalf when its \
+                     Inference.toml sets `[build] mode = \"proof\"`, and there the request to \
+                     drop is that setting: make it `\"compile\"`."
+                ),
+                "a project build's author is told where the request they never typed comes \
+                 from: {refusal}"
+            );
+            assert!(
+                !refusal.contains("whichever"),
+                "a build passing both requests must not be told to drop one: {refusal}"
+            );
+        }
+    }
+
+    /// The edit an allowlist refusal asks for follows the allowlist it was
+    /// given: a module with no entry needs the key written, a module that has
+    /// one needs names added to the array it already has.
+    ///
+    /// The compiler is holding the allowlist, so a message that made the reader
+    /// check would be asking for work already done — and the two edits are not
+    /// interchangeable in a TOML table.
+    ///
+    /// Both branches are asserted to name `--host-imports` and to spell the
+    /// flag's own `module.field` edit, because that is the only remedy a direct
+    /// `infc` caller can perform: the manifest table is not implemented, and
+    /// `--host-imports` refuses the TOML array spelling the same sentence hands
+    /// an `infs build` reader. Both are asserted to say so, too — following the
+    /// TOML edit today produces a manifest `infs` cannot load at all, and the
+    /// warning is only of use where the edit is.
+    ///
+    /// The source-level half of the remedy is asserted to name the bindings
+    /// rather than to quote a `use` clause. The partial-admission row is what
+    /// separates the two: `fields` is the unadmitted subset of a deduplicated
+    /// set, so a clause rendered from it can be one no file contains, and a
+    /// reader who greps for it finds nothing. For the same reason every row
+    /// asserts "every … binding" and none "the … binding": a deduplicated name
+    /// may stand for a clause in each of several files, which the refusal
+    /// cannot count. The two- and three-name rows pin the names as one list
+    /// under that quantifier.
+    #[test]
+    fn host_import_allowlist_refusal_branches_on_the_module_entry() {
+        let declared = [host_import("env", "clock_ms")];
+
+        assert_eq!(
+            host_import_allowlist_refusal(None, &declared),
+            None,
+            "no allowlist is no policy"
+        );
+
+        let listed = parse_host_import_allowlist(&["env.clock_ms".to_string()]).unwrap();
+        assert_eq!(
+            host_import_allowlist_refusal(Some(&listed), &declared),
+            None,
+            "an admitted import is not refused"
+        );
+
+        let other_module =
+            parse_host_import_allowlist(&["fprime_core.telemetry".to_string()]).unwrap();
+        let refusal = host_import_allowlist_refusal(Some(&other_module), &declared).unwrap();
+        assert!(
+            refusal.contains("add `env = [\"clock_ms\"]`"),
+            "a module with no entry needs the key written: {refusal}"
+        );
+
+        let same_module = parse_host_import_allowlist(&["env.sleep_ms".to_string()]).unwrap();
+        let refusal = host_import_allowlist_refusal(Some(&same_module), &declared).unwrap();
+        assert!(
+            refusal.contains("add `\"clock_ms\"` to the `env` entry"),
+            "a module that already has an entry needs a name added to it: {refusal}"
+        );
+
+        let empty = parse_host_import_allowlist(&[String::new()]).unwrap();
+        let refusal = host_import_allowlist_refusal(Some(&empty), &declared).unwrap();
+        assert!(
+            refusal.contains("the allowlist is present and empty, which forbids every host import"),
+            "an empty allowlist says so rather than reporting an empty list: {refusal}"
+        );
+
+        for allowlist in [&other_module, &same_module, &empty] {
+            let rendered = host_import_allowlist_refusal(Some(allowlist), &declared).unwrap();
+            assert!(
+                rendered.contains(
+                    "Add `env.clock_ms` to `--host-imports` to admit it, or drop every \
+                     `host::env` binding of `clock_ms`."
+                ),
+                "every branch names the one mechanism this build has, in its own syntax: \
+                 {rendered}"
+            );
+            assert!(
+                rendered.contains("today `infs` refuses to read a manifest carrying that key"),
+                "the TOML edit must travel with the warning that it breaks `infs` today: \
+                 {rendered}"
+            );
+        }
+
+        let both = [host_import("env", "clock_ms"), host_import("env", "sleep_ms")];
+        let rendered = host_import_allowlist_refusal(Some(&same_module), &both).unwrap();
+        assert!(
+            rendered.contains("or drop every `host::env` binding of `clock_ms`."),
+            "only the unadmitted name is named, and not as a clause: {rendered}"
+        );
+        assert!(
+            !rendered.contains("the `host::env` binding"),
+            "a deduplicated name must not be told it has exactly one binding: {rendered}"
+        );
+        assert!(
+            !rendered.contains("use {"),
+            "no `use` clause is quoted, since the one rendered here is in no file: {rendered}"
+        );
+
+        let two = [host_import("env", "clock_ms"), host_import("env", "sleep_ms")];
+        let grouped = host_import_allowlist_refusal(Some(&other_module), &two).unwrap();
+        assert!(
+            !grouped.contains("\n\n"),
+            "one module is one paragraph however many of its fields are unadmitted: {grouped}"
+        );
+        for fragment in [
+            "host imports `env`.`clock_ms`, `env`.`sleep_ms` are not in this build's",
+            "Add `env.clock_ms,env.sleep_ms` to `--host-imports` to admit them",
+            "drop every `host::env` binding of `clock_ms` and `sleep_ms`.",
+            "add `env = [\"clock_ms\", \"sleep_ms\"]`",
+        ] {
+            assert!(
+                grouped.contains(fragment),
+                "the grouped refusal must carry `{fragment}`:\n{grouped}"
+            );
+        }
+
+        let three = [
+            host_import("env", "clock_ms"),
+            host_import("env", "sleep_ms"),
+            host_import("env", "wake"),
+        ];
+        let listed = host_import_allowlist_refusal(Some(&other_module), &three).unwrap();
+        assert!(
+            listed.contains(
+                "drop every `host::env` binding of `clock_ms`, `sleep_ms`, and `wake`."
+            ),
+            "three names read as a list, not as one clause carrying them: {listed}"
+        );
+
+        // A second module is a second paragraph, which is what makes the
+        // grouping a grouping rather than one block for everything.
+        let across = [host_import("env", "clock_ms"), host_import("io", "write")];
+        let split = host_import_allowlist_refusal(Some(&other_module), &across).unwrap();
+        assert_eq!(
+            split.matches("\n\n").count(),
+            1,
+            "two modules are two paragraphs: {split}"
+        );
+    }
+
+    /// The inventory line names every pair and says whether a policy admitted
+    /// them.
+    ///
+    /// The qualifier is the only difference between the two lines a reviewer
+    /// sees, and the pairs are rendered the way `--host-imports` spells them so
+    /// a name read out of a build log can be pasted straight back into the flag.
+    #[test]
+    fn host_import_inventory_marks_an_unpoliced_build() {
+        assert_eq!(host_import_inventory(&[], false), None);
+
+        let declared = [
+            host_import("env", "clock_ms"),
+            host_import("fprime_core", "telemetry"),
+        ];
+        assert_eq!(
+            host_import_inventory(&declared, true).unwrap(),
+            "host imports: env.clock_ms, fprime_core.telemetry"
+        );
+        assert_eq!(
+            host_import_inventory(&declared, false).unwrap(),
+            "host imports (no allowlist): env.clock_ms, fprime_core.telemetry"
         );
     }
 

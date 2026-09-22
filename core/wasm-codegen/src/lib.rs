@@ -179,9 +179,9 @@ pub fn codegen(
     // A user reading one has to be able to paste the name back into the command
     // that produced it, which the `Debug` form does not allow. Three of the four
     // are below; the fourth is the host-import target gate in
-    // `check_host_import_support`, whose proof-mode sibling is deliberately
-    // outside the set, because it names no target at all -- what it refuses is
-    // the mode.
+    // `check_host_import_target_support`, whose proof-mode sibling is
+    // deliberately outside the set, because it names no target at all -- what
+    // it refuses is the mode.
     if let Some(feature) = features.first_rejected_by(target) {
         cov_mark::hit!(wasm_codegen_target_rejects_feature);
         let name = target.as_str();
@@ -273,7 +273,8 @@ pub fn codegen(
 /// at every target: the body is the embedder's, so it is outside the artifact
 /// the proof is written about and the translation has no way to state an
 /// assumption about it. A target refuses one when its calling convention is
-/// unbound here, which is a claim about the runtime and not about the mode.
+/// unbound here, which is a claim about the runtime and not about the mode; that
+/// half is [`check_host_import_target_support`].
 ///
 /// Neither can fire unless the mode or the target asks for it, and both of
 /// those are a read of the configuration, so the bound externs are walked only
@@ -293,18 +294,11 @@ fn check_host_import_support(
     mode: CompilationMode,
     target: Target,
 ) -> anyhow::Result<()> {
-    let refused_by_mode = mode == CompilationMode::Proof;
-    let refused_by_target = !target.supports_host_imports();
-    if !refused_by_mode && !refused_by_target {
-        return Ok(());
-    }
-    let Some(origin) = first_host_import(typed_context) else {
-        return Ok(());
-    };
-    let fn_name = typed_context.arena().def_name(origin.decl);
-    let clause = origin.source_spelling();
-
-    if refused_by_mode {
+    if mode == CompilationMode::Proof
+        && let Some(origin) = first_host_import(typed_context)
+    {
+        let fn_name = typed_context.arena().def_name(origin.decl);
+        let clause = origin.source_spelling();
         cov_mark::hit!(wasm_codegen_proof_mode_rejects_host_import);
         return Err(anyhow::anyhow!(
             "Host imports are not yet modeled in the proof translation. `external fn \
@@ -314,6 +308,41 @@ fn check_host_import_support(
              `--mode compile`, or remove the host imports from the proof build."
         ));
     }
+    check_host_import_target_support(typed_context, target)
+}
+
+/// Refuses a program that binds a host import at a target whose host-call
+/// convention this toolchain does not bind.
+///
+/// Public, where its mode-keyed sibling is not, for a driver that resolves a
+/// program's externals, or holds them to a policy, before it calls
+/// [`codegen`]. Those steps have refusals of their own, and at such a target
+/// their remedies lead into this one: a program binding both kinds of extern is
+/// told to bind every one of them to the host, and a build whose policy does
+/// not admit an import is told to admit it — each advice this refusal then
+/// makes void. Asked first, the reader hears the refusal that governs the
+/// build. [`codegen`] still asks it, so a caller that does not is refused all
+/// the same, in the same words.
+///
+/// The mode half stays private because a driver writing a proof artifact
+/// refuses it in terms of its own flags, which this crate does not know.
+///
+/// # Errors
+///
+/// Returns the refusal, naming the first host binding the program carries,
+/// when `target` binds no host and the program binds at least one.
+pub fn check_host_import_target_support(
+    typed_context: &TypedContext,
+    target: Target,
+) -> anyhow::Result<()> {
+    if target.supports_host_imports() {
+        return Ok(());
+    }
+    let Some(origin) = first_host_import(typed_context) else {
+        return Ok(());
+    };
+    let fn_name = typed_context.arena().def_name(origin.decl);
+    let clause = origin.source_spelling();
 
     cov_mark::hit!(wasm_codegen_target_rejects_host_import);
     let name = target.as_str();
