@@ -302,6 +302,18 @@ pub use inference_type_checker::errors::TypeCheckError;
 /// the segment itself.
 pub use inference_type_checker::HOST_SEGMENT;
 
+/// Re-export of the provenance a bound `external fn` carries, so a caller
+/// holding a [`TypedContext`] can read what [`TypedContext::extern_origins`]
+/// returns without a direct dependency on `inference-type-checker`.
+///
+/// [`ExternKind`] is the half that has to travel: it decides whether an import
+/// survives linking, and a front end that must refuse — or account for — a
+/// host binding *before* the linker driver runs has no other way to tell one
+/// from a linked module. `infc` does exactly that, refusing a proof build that
+/// binds a host import ahead of resolution so the refusal a mixed program
+/// hears is the one that governs its build.
+pub use inference_type_checker::{ExternKind, ExternOrigin};
+
 pub mod extern_prelude;
 pub mod wasm_link;
 
@@ -987,16 +999,17 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 /// The pass-through is only sound because `main_wasm`'s import section is held
 /// to equal the declared host set, on `(module, field, params, results)`.
 ///
-/// That equality is what makes a later `[host-imports]` allowlist a control
-/// rather than documentation. An allowlist is checked against the *driver's*
-/// set — the declarations the type checker collected — while the artifact's
+/// That equality is what makes the `--host-imports` allowlist a control rather
+/// than documentation. `infc` checks that allowlist against the *driver's* set
+/// — the declarations the type checker collected — while the artifact's
 /// imports come from codegen's own `register_imports` walk. Two walks over two
 /// data structures agree only when something says so, and this is the only thing
 /// that says so before bytes ship: without it, an allowlist could pass while the
 /// artifact imported something else entirely. It is also what pins declared
-/// parameter count to emitted parameter count, which a later registration-cap
-/// check counts on — a cap measured against the declaration means nothing unless
-/// the artifact declares the same arity.
+/// parameter count to emitted parameter count, which the declaration-level
+/// registration-cap check (`spacewasm::check_host_imports`, run by `infc`
+/// before this function) counts on — a cap measured against the declaration
+/// means nothing unless the artifact declares the same arity.
 ///
 /// # The divergence it stands in for
 ///

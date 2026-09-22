@@ -326,7 +326,7 @@ impl Violation {
     /// are met at different moments and shortened by different edits, and a
     /// user told the wrong one changes the wrong thing.
     #[must_use]
-    pub fn authority(&self) -> &'static str {
+    pub(crate) fn authority(&self) -> &'static str {
         match self {
             Self::OutsideWasm1 { .. } => {
                 "SpaceWasm decodes WebAssembly 1.0 plus mutable globals, and nothing else. \
@@ -412,14 +412,18 @@ impl Violation {
     /// still name the edit, because for those there is one: a narrower
     /// instruction for the first, a smaller module for the second.
     ///
-    /// The two `ImportNameTooLong` arms are producible from source and lead
-    /// with the source edit, and they carry the linked-module alternative all
-    /// the same: this method cannot see which check produced the finding, and
-    /// the same sentence renders for a name read off a declaration and for one
-    /// read off an artifact's import section — where the import may be one a
-    /// linked module dragged in, with no `external fn` anywhere to rename.
+    /// The two `ImportNameTooLong` arms are producible from source and are the
+    /// source edit alone; the linked-module alternative an artifact-level
+    /// finding also owes its reader is `linked_alternative`'s, which says why
+    /// it is split off.
+    ///
+    /// Crate-private, as [`Self::authority`] is, because for an artifact-level
+    /// finding this is only part of what its reader is owed:
+    /// [`Violations::render`] is the one place the parts are joined, and a
+    /// caller assembling its own block from these would drop the alternative
+    /// with nothing to say it had.
     #[must_use]
-    pub fn remedy(&self) -> &'static str {
+    pub(crate) fn remedy(&self) -> &'static str {
         match self {
             Self::OutsideWasm1 { .. } => {
                 "Rebuild the linked module against the WebAssembly 1.0 baseline — a stock Rust \
@@ -458,17 +462,11 @@ impl Violation {
                  split the block so the jump crosses less of the stack."
             }
             Self::ImportNameTooLong { which, .. } => match which {
-                NamePart::Module => {
-                    "Shorten the module name this extern is bound under. If the import came \
-                     from a linked module rather than from a declaration in this program, \
-                     rebuild that module so it imports from a shorter module name."
-                }
+                NamePart::Module => "Shorten the module name this extern is bound under.",
                 NamePart::Field => {
-                    "Rename the `external fn` and the name in the `use { … }` clause that \
-                     binds it: the field name an import carries is the declaration's own \
-                     name. If the import came from a linked module rather than from a \
-                     declaration in this program, rebuild that module so it imports the \
-                     function under a shorter name."
+                    "Rename the `external fn`, and the name in each `use { … }` clause that \
+                     binds it, in every file that declares it: the field name an import \
+                     carries is the declaration's own name."
                 }
             },
             Self::ImportArityExceeded { .. } => {
@@ -483,6 +481,42 @@ impl Violation {
                  please report a compiler bug; if it was linked in, rebuild the external \
                  module."
             }
+        }
+    }
+
+    /// The remedy a reader whose import came from a linked module needs
+    /// instead, where there is a second reader at all.
+    ///
+    /// Split off [`Self::remedy`] because it is true of only one of the two
+    /// checks. [`crate::spacewasm::check`] reads a finished module's import
+    /// section, where the offending name may belong to an import a linked
+    /// module dragged in and there is no `external fn` anywhere to rename.
+    /// [`crate::spacewasm::check_host_imports`] is handed declarations, and a
+    /// finding read off a declaration always has an `external fn` behind it,
+    /// so there the alternative names a provenance the finding cannot have,
+    /// one line under a header that has just said these are the imports the
+    /// program declares. That is a fact about the input and not about which
+    /// programs a caller builds: it holds whatever the caller decides to hand
+    /// over, and would hold of a program that also linked a module.
+    ///
+    /// Only the two `ImportNameTooLong` arms have one. Every other shape that
+    /// splits on provenance is one no Inference declaration can produce, so its
+    /// remedy carries the split whole.
+    fn linked_alternative(&self) -> Option<&'static str> {
+        match self {
+            Self::ImportNameTooLong { which, .. } => Some(match which {
+                NamePart::Module => {
+                    "If the import came from a linked module rather than from a declaration \
+                     in this program, rebuild that module so it imports from a shorter module \
+                     name."
+                }
+                NamePart::Field => {
+                    "If the import came from a linked module rather than from a declaration \
+                     in this program, rebuild that module so it imports the function under a \
+                     shorter name."
+                }
+            }),
+            _ => None,
         }
     }
 }
@@ -560,7 +594,10 @@ impl Violations {
     ///
     /// The opening sentence is not the caller's, and is chosen by which check
     /// built the value: a declaration-level refusal cannot open by calling the
-    /// subject a module, because at that point there is none.
+    /// subject a module, because at that point there is none. So is the
+    /// provenance alternative a remedy may carry — see
+    /// `Violation::linked_alternative` — for the mirror-image reason: an
+    /// import read off a declaration has only ever had one provenance.
     ///
     /// An empty `consequence` omits that line, which is what the `Display` impl
     /// passes: a reader quoting the violations out of a build has no build to
@@ -584,10 +621,16 @@ impl Violations {
         for violation in &self.found {
             let _ = write!(
                 out,
-                "\n  {violation}.\n    {}\n    {}\n",
+                "\n  {violation}.\n    {}\n    {}",
                 violation.authority(),
                 violation.remedy()
             );
+            if self.checked == Checked::Artifact
+                && let Some(alternative) = violation.linked_alternative()
+            {
+                let _ = write!(out, " {alternative}");
+            }
+            out.push('\n');
         }
         out
     }

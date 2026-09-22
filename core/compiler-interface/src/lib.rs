@@ -167,7 +167,35 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// module that ships. So the gate is on [`TargetName::SpaceWasm`]'s own
 /// [`TargetName::abi_minor`] like every other name's, even though the artifact
 /// it protects is one an older compiler would have produced byte for byte.
-pub const COMPILER_ABI_MINOR: u32 = 7;
+///
+/// Minor 8 adds the additive `--host-imports=<list>` flag to `infc`, naming the
+/// host functions a build may bind as `module.field` pairs — the allowlist a
+/// program's `use … from host::<module>;` clauses are held to. It is backward
+/// compatible in the same sense as the minors above: omitting the flag applies
+/// no policy, which is what every earlier minor did with a host binding, so a
+/// minor-7 `infs` still pairs with a minor-8 `infc`, and loses nothing by it: a
+/// minor-7 `infs` predates the `Inference.toml [host-imports]` table, so it can
+/// hold no host-import policy to drop. The pairing callers must gate on is an
+/// `infs` that holds a policy talking to a minor-7 `infc`, and it is the most
+/// expensive ungated forward of the eight. A forward that *reaches* a minor-7
+/// `infc` fails loudly on a flag that compiler does not parse; what a caller
+/// must not do is decide the flag is unnecessary and omit it, because the build
+/// then succeeds and ships an artifact that asks an embedder for functions the
+/// project never admitted — the allowlist simply did not run. Nothing in the
+/// bytes records the difference: an artifact built under an allowlist and one
+/// built under none are the same module, so unlike a dropped `--target`, there
+/// is no wrong artifact to find later. What a skipped allowlist does leave is a
+/// positive marker rather than a missing check line — the `host imports:`
+/// inventory `infc` prints picks up a `(no allowlist)` qualifier — and that
+/// line is printed only by a program that binds at least one host import, and
+/// lives no longer than the build's output does. The empty spelling is the
+/// sharpest case. `--host-imports=` is a policy that admits nothing, and a
+/// caller that drops it turns a project declaring it binds no host functions at
+/// all into one that binds whatever its source happens to say. So the gate is
+/// on this constant, as it is for every flag minor: an `infs` that forwards
+/// must confirm it is talking to a minor-8 `infc` and refuse, never drop the
+/// flag and build.
+pub const COMPILER_ABI_MINOR: u32 = 8;
 
 /// A post-MVP WebAssembly proposal that a project may opt into.
 ///
@@ -1034,9 +1062,9 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one_dot_seven() {
+    fn abi_version_is_one_dot_eight() {
         assert_eq!(COMPILER_ABI_MAJOR, 1);
-        assert_eq!(COMPILER_ABI_MINOR, 7);
+        assert_eq!(COMPILER_ABI_MINOR, 8);
     }
 
     #[test]

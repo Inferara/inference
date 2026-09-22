@@ -247,6 +247,41 @@ pub(crate) struct Cli {
     #[clap(long = "wasm-dep", value_name = "NAME=PATH")]
     pub(crate) wasm_deps: Vec<String>,
 
+    /// The host functions this build may bind, as comma-separated
+    /// `<module>.<field>` entries; the `=` is required.
+    ///
+    /// Omitted, no policy applies and every host import the program declares is
+    /// allowed. `--host-imports=` with nothing after it is a declared, empty
+    /// allowlist that admits none. A list admits exactly the pairs it names, as
+    /// in `--host-imports=env.clock_ms,fprime_core.command`.
+    ///
+    /// Unlike `--wasm-dep`, `infs build` does not forward this flag yet — the
+    /// `Inference.toml [host-imports]` table it will fill it from is not
+    /// implemented — so direct `infc` callers pass it by hand.
+    //
+    // Maintainer notes, kept out of the doc comment because clap prints that
+    // verbatim as `--help`.
+    //
+    // An `Option<Vec<String>>` where `--wasm-features` below is a plain
+    // `Vec<String>`, because this flag has three states and that one has two.
+    // The empty allowlist is the state a security-minded project sets
+    // deliberately, and a `Vec<String>` cannot express it: an empty vector is
+    // already what an omitted flag produces, so declaring "this program binds
+    // no host functions at all" would be indistinguishable from never having
+    // said anything.
+    //
+    // `require_equals` is what keeps that empty spelling from swallowing the
+    // source path. Without it a bare `--host-imports prog.inf` reads the path
+    // as the list, and the build fails on a missing source file rather than on
+    // the policy the author was trying to write.
+    #[clap(
+        long = "host-imports",
+        value_name = "LIST",
+        require_equals = true,
+        value_delimiter = ','
+    )]
+    pub(crate) host_imports: Option<Vec<String>>,
+
     /// The runtime the emitted module is built for.
     ///
     /// Omitting the flag selects `inference_compiler_interface::TargetName`'s

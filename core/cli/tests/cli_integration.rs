@@ -364,15 +364,15 @@ fn abi_version_flag_prints_and_exits() {
     assert_eq!(version, expected);
 }
 
-/// Pins the ABI version string to the literal value the `spacewasm` target
-/// became requestable at. The `abi_version_flag_prints_and_exits` test above
-/// checks the binary against the shared constant; this one additionally asserts
-/// the concrete `1.7` so an accidental constant change is caught here too.
+/// Pins the ABI version string to the literal value `--host-imports` became
+/// requestable at. The `abi_version_flag_prints_and_exits` test above checks the
+/// binary against the shared constant; this one additionally asserts the
+/// concrete `1.8` so an accidental constant change is caught here too.
 ///
 /// Uses an exact trimmed equality (not `contains`) so a near-miss such as
-/// "11.7" or "1.70" — which would satisfy a substring match — cannot pass.
+/// "11.8" or "1.80" — which would satisfy a substring match — cannot pass.
 #[test]
-fn abi_version_is_one_dot_seven() {
+fn abi_version_is_one_dot_eight() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.arg("--abi-version");
     let assert = cmd.assert().success();
@@ -380,8 +380,8 @@ fn abi_version_is_one_dot_seven() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.trim(),
-        "1.7",
-        "ABI version must be exactly 1.7, not merely contain it"
+        "1.8",
+        "ABI version must be exactly 1.8, not merely contain it"
     );
 }
 
@@ -4366,4 +4366,998 @@ fn a_host_import_program_builds_and_keeps_its_import() {
         printed.contains("(import \"env\" \"clock_ms\""),
         "the import the author asked an embedder for must survive the link step:\n{printed}"
     );
+}
+
+// Host-import policy ---
+
+/// The one-extern host program every test in this section builds on: no `-L`,
+/// no `--wasm-dep`, and nothing on disk for `env`.
+const HOST_CLOCK_SOURCE: &str = "\
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+
+pub fn now() -> i64 {
+    return clock_ms();
+}
+";
+
+/// A program binding two host functions of one module, for the refusals that
+/// have to report more than one finding.
+const HOST_TWO_SOURCE: &str = "\
+external fn clock_ms() -> i64;
+external fn sleep_ms(n: i32);
+use { clock_ms, sleep_ms } from host::env;
+
+pub fn nap() -> i64 {
+    sleep_ms(1);
+    return clock_ms();
+}
+";
+
+/// A program that binds a host import *and* a linked module no search directory
+/// could resolve, which is what makes it a mixed program.
+const HOST_AND_LINKED_SOURCE: &str = "\
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+external fn add(a: i32, b: i32) -> i32;
+use { add } from no_such_module;
+
+pub fn sum() -> i32 {
+    return add(1, 2);
+}
+";
+
+/// Asserts a refused build left neither artifact in `out/`.
+///
+/// Both are checked on every refusal, not just the one the invocation asked
+/// for: the artifacts are cleared before the phases run, so a rejection that
+/// somehow wrote one would leave a runnable `.wasm` or a proof describing a
+/// program the build refused.
+fn assert_no_artifacts(root: &std::path::Path, stem: &str) {
+    for extension in ["wasm", "v"] {
+        let artifact = root.join("out").join(format!("{stem}.{extension}"));
+        assert!(
+            !artifact.exists(),
+            "a refused build must write no .{extension}: {}",
+            artifact.display()
+        );
+    }
+}
+
+/// Runs `infc` on `source` in a fresh directory and hands back the temp dir and
+/// the finished assertion, so a caller can read both streams and then look at
+/// what landed on disk.
+fn run_host_build(source: &str, args: &[&str]) -> (assert_fs::TempDir, assert_cmd::assert::Assert) {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", source);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).args(args);
+    let assert = cmd.assert();
+    (temp, assert)
+}
+
+/// A host-only program builds at both targets that bind a host-call convention,
+/// reports the import it will ask an embedder for, and ships it.
+///
+/// Both targets, because the inventory line and the declaration-level
+/// conformance check are the two things a successful host-import build now
+/// reports on, and only one of them is target-specific: a `spacewasm` build has
+/// to print its own conformance summary as well, and a check that refused a
+/// conformant host import would be caught here rather than by a user.
+///
+/// Fails if the inventory line stops naming the pair, if the qualifier is
+/// dropped from an unpoliced build, if the conformance summary is lost behind
+/// the declaration-level check, or if the import stops surviving into the
+/// artifact.
+#[test]
+fn a_host_only_program_builds_at_every_target_that_binds_a_host() {
+    for target in ["wasm32", "spacewasm"] {
+        let (temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &["--target", target]);
+        let assert = assert.success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+        assert!(
+            stdout.contains("host imports (no allowlist): env.clock_ms"),
+            "a build given no allowlist must say so while naming the pair, at {target}:\n{stdout}"
+        );
+        if target == "spacewasm" {
+            assert!(
+                stdout.contains("spacewasm: conformant with WebAssembly 1.0"),
+                "the conformance summary must still print for a host-import build:\n{stdout}"
+            );
+        }
+
+        let artifact = temp.child("out").child("prog.wasm");
+        assert!(
+            artifact.path().exists(),
+            "the {target} build must write an artifact"
+        );
+        let printed = wasmprinter::print_bytes(std::fs::read(artifact.path()).unwrap())
+            .expect("the artifact is a decodable module");
+        assert!(
+            printed.contains("(import \"env\" \"clock_ms\""),
+            "the import must survive into the {target} artifact:\n{printed}"
+        );
+    }
+}
+
+/// A host extern that is bound and never called is listed and shipped.
+///
+/// The import belongs to the binding, not to a call: it is part of what the
+/// artifact requires of its environment, and an interface that appeared and
+/// disappeared with the call graph would change what a deployment must provide
+/// every time a caller was edited out. So both the inventory line and the
+/// import section have to carry a function nothing in the program calls.
+#[test]
+fn a_bound_but_uncalled_host_extern_is_listed_and_shipped() {
+    let (temp, assert) = run_host_build(
+        "external fn telemetry(code: i32);\n\
+         use { telemetry } from host::fprime_core;\n\
+         \n\
+         pub fn main() -> i32 {\n    \
+             return 7;\n\
+         }\n",
+        &[],
+    );
+    let assert = assert.success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("host imports (no allowlist): fprime_core.telemetry"),
+        "an uncalled binding is still an import this artifact asks for:\n{stdout}"
+    );
+
+    let printed =
+        wasmprinter::print_bytes(std::fs::read(temp.child("out").child("prog.wasm").path()).unwrap())
+            .expect("the artifact is a decodable module");
+    assert!(
+        printed.contains("(import \"fprime_core\" \"telemetry\""),
+        "the import must ship whether or not the program calls it:\n{printed}"
+    );
+}
+
+/// An allowlist that admits the program's imports builds, and the inventory line
+/// drops the qualifier.
+///
+/// The qualifier is the whole of the difference between these two build logs —
+/// the bytes are identical and the names are the same — so a run under a policy
+/// must not carry it and a run without one must.
+#[test]
+fn an_admitted_host_import_builds_without_the_no_allowlist_qualifier() {
+    let (_temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &["--host-imports=env.clock_ms"]);
+    let assert = assert.success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("host imports: env.clock_ms"),
+        "an allowlisted build names the pairs it admitted:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("(no allowlist)"),
+        "a build given an allowlist must not be reported as unpoliced:\n{stdout}"
+    );
+}
+
+/// `--host-imports=` is a policy that admits nothing, and it is refused in its
+/// own words rather than as a list the import happens to be missing from.
+///
+/// The distinction is the point of the flag's third state: a reader told their
+/// import "is not in the allowlist" while the allowlist is empty would go
+/// looking for the entry that displaced it. The message says the allowlist is
+/// present and empty, and names the manifest shape that spells the same policy.
+///
+/// The flag fragment is asserted because this state is reachable *only* by
+/// typing `--host-imports=` on an `infc` command line: `infs` does not forward
+/// the flag and the manifest table is not implemented, so a refusal whose only
+/// remedy was a TOML edit would offer a reader nothing they could do.
+#[test]
+fn an_empty_allowlist_forbids_every_host_import() {
+    let (temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &["--host-imports="]);
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    for fragment in [
+        "host import `env`.`clock_ms` is not in this build's host-import allowlist",
+        "the allowlist is present and empty, which forbids every host import",
+        "The allowlist (`--host-imports`) names every host function the program may bind",
+        "Add `env.clock_ms` to `--host-imports` to admit it",
+        "`infs build` will spell that same empty policy as a declared-but-empty \
+         `[host-imports]` table in Inference.toml once that table exists",
+        "today `infs` refuses to read a manifest carrying that key at all",
+        "drop every `host::env` binding of `clock_ms`.",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the empty-allowlist refusal must carry `{fragment}`:\n{stderr}"
+        );
+    }
+    assert_no_artifacts(temp.path(), "prog");
+}
+
+/// An unadmitted host import is refused naming both the flag that carries the
+/// allowlist and the manifest table `infs build` will fill it from, and **every**
+/// unadmitted import is reported by one build.
+///
+/// One-at-a-time would make a program binding two unadmitted functions two
+/// builds to correct. The `infs` half of the sentence is asserted because
+/// `infc` has no manifest of its own: it names the flag as the mechanism and
+/// the table as where a project build will fill it from, and inverting that
+/// would describe a file this invocation never read. The flag edit is asserted
+/// in the flag's own `module.field` syntax, since `--host-imports` refuses the
+/// TOML array spelling the same sentence hands an `infs build` reader.
+///
+/// The two-import half asserts the *combined* edit, not just that both names
+/// appear. Two fields of one module share one list in either mechanism, so two
+/// separate edits would ask for a duplicate `env` key in a table and for two
+/// halves of one list on a command line — and a reader applying them literally
+/// would lose an import or write TOML that does not parse.
+#[test]
+fn every_unadmitted_host_import_is_reported_by_one_build() {
+    let (temp, assert) = run_host_build(
+        HOST_CLOCK_SOURCE,
+        &["--host-imports=fprime_core.command,fprime_core.telemetry"],
+    );
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    for fragment in [
+        "host import `env`.`clock_ms` is not in this build's host-import allowlist",
+        "The allowlist (`--host-imports`) names every host function the program may bind",
+        "this build was given `fprime_core.command, fprime_core.telemetry`",
+        "Add `env.clock_ms` to `--host-imports` to admit it",
+        "`infs build` will fill the flag from a `[host-imports]` table in Inference.toml \
+         once that table exists",
+        "where the same edit will be to add `env = [\"clock_ms\"]`",
+        "today `infs` refuses to read a manifest carrying that key at all",
+        "drop every `host::env` binding of `clock_ms`.",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the refusal must carry `{fragment}`:\n{stderr}"
+        );
+    }
+    assert_no_artifacts(temp.path(), "prog");
+
+    let (temp, assert) = run_host_build(HOST_TWO_SOURCE, &["--host-imports=fprime_core.command"]);
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    for fragment in [
+        "host imports `env`.`clock_ms`, `env`.`sleep_ms` are not in this build's",
+        "Add `env.clock_ms,env.sleep_ms` to `--host-imports` to admit them",
+        "where the same edit will be to add `env = [\"clock_ms\", \"sleep_ms\"]`",
+        "drop every `host::env` binding of `clock_ms` and `sleep_ms`.",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "both unadmitted imports must be one finding asking for one edit: `{fragment}` \
+             missing from\n{stderr}"
+        );
+    }
+    assert!(
+        !stderr.contains("add `env = [\"clock_ms\"]`"),
+        "a second block asking for the same key would be a duplicate TOML key:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+}
+
+/// An entry that is not a `module.field` pair is refused before any phase runs,
+/// with the whole entry quoted and the form spelled out.
+///
+/// Quoting the entry rather than the half that parsed is what makes a typo
+/// findable on a long comma-separated list, and the example in the message is
+/// the flag's own spelling, `=` included.
+///
+/// The ordering is under test, not just the wording: `infc` announces `Parsed:`
+/// on stdout the moment the front end succeeds, so a build that reached this
+/// refusal without printing it read the policy first. A source that parses and
+/// type-checks cleanly is fed deliberately — a mistake about the build has to
+/// preempt a program that has nothing wrong with it, which is the whole reason
+/// the flag is read beside the other pre-phase resolutions.
+///
+/// A blank entry is the second half, and it is not this message: quoting an
+/// empty entry back would name neither the stray comma that produced it nor the
+/// `--host-imports=` spelling it is one character away from.
+///
+/// An entry written `host::env.clock_ms` is the third, and it is the row that
+/// has to be run end to end rather than over the parser alone: it is not
+/// malformed under the `module.field` rule at all — it reads as a module named
+/// `host::env` — so under that rule alone it would reach the build, resolve,
+/// and the program's own `env`.`clock_ms` would be refused two phases later as
+/// missing from an allowlist that listed only a module named `host::env`.
+/// Asserting here that nothing is parsed is what pins the earlier refusal, and
+/// asserting the corrected spelling is what makes it one the reader can act
+/// on: each transcription is told the fault it actually carries and the entry
+/// it meant.
+#[test]
+fn a_malformed_host_import_entry_is_refused() {
+    let (temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &["--host-imports=env"]);
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    for fragment in [
+        "invalid `--host-imports` entry `env`",
+        "each entry is a host import in `module.field` form",
+        "--host-imports=env.clock_ms,fprime_core.command",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the refusal must carry `{fragment}`:\n{stderr}"
+        );
+    }
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        !stdout.contains("Parsed:"),
+        "a malformed allowlist entry must be refused before any phase runs:\n{stdout}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    for (transcribed, fault) in [
+        (
+            "--host-imports=env::clock_ms",
+            "entry `env::clock_ms`: the separator here is a dot, not `::`.",
+        ),
+        (
+            "--host-imports=host::env.clock_ms",
+            "entry `host::env.clock_ms`: the `host::` prefix is not part of an import name.",
+        ),
+    ] {
+        let (temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &[transcribed]);
+        let assert = assert.failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains(fault) && stderr.contains("Write it `env.clock_ms`."),
+            "{transcribed} must be told its own fault and the entry it meant:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("host-import allowlist"),
+            "{transcribed} must not reach the allowlist and read as a broken \
+             mechanism:\n{stderr}"
+        );
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+        assert!(
+            !stdout.contains("Parsed:"),
+            "{transcribed} must be refused before any phase runs:\n{stdout}"
+        );
+        assert_no_artifacts(temp.path(), "prog");
+    }
+
+    let (temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &["--host-imports=env.clock_ms,"]);
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    for fragment in [
+        "the list has an empty entry, which is a stray or trailing comma",
+        "`--host-imports=` on its own is the empty allowlist",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "a trailing comma must be named rather than quoted back as nothing: `{fragment}` \
+             missing from\n{stderr}"
+        );
+    }
+    assert_no_artifacts(temp.path(), "prog");
+}
+
+/// Every spelling that writes a `.v` is refused for a program binding a host
+/// import, including the one that keeps compile mode.
+///
+/// `--mode compile -v` is the spelling a gate on the mode alone would miss, and
+/// it is exactly the one that would have shipped a proof quietly assuming the
+/// import away. Both spellings are asserted against the same wording, because
+/// two refusals for one fact would be two wordings to keep in step.
+///
+/// The remedy is asserted to name the artifact rather than a mode. `-v` sets
+/// the `.v` request on its own, so "build with `--mode compile`" clears exactly
+/// one of the three spellings and sends `--mode compile -v` round the same
+/// refusal having changed nothing. The row passing both requests is why the
+/// remedy asks for every one of them to go: told to drop one of two, its reader
+/// would be refused again.
+///
+/// The analyze-only row is the other half of the predicate. `--analyze --mode
+/// proof` requests a `.v` and writes none — `normalize_args` says so in a
+/// warning on the same run — so a gate on the request alone would refuse a
+/// build in one breath for the mode it had just called irrelevant.
+#[test]
+fn a_proof_build_that_binds_a_host_import_is_refused_in_both_spellings() {
+    for spelling in [
+        vec!["--mode", "proof"],
+        vec!["--mode", "compile", "-v"],
+        vec!["--mode", "proof", "-v"],
+    ] {
+        let (temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &spelling);
+        let assert = assert.failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        for fragment in [
+            "Host imports are not yet modeled in the proof translation",
+            "`env`.`clock_ms` is satisfied by the embedder",
+            "the translation has no way to state an assumption about it",
+            "Build this program without a proof artifact, or remove the host import from the \
+             program.",
+            "`-v` and `--mode proof` each request a `.v` on their own, so drop every one of them \
+             this build passed;",
+        ] {
+            assert!(
+                stderr.contains(fragment),
+                "{spelling:?} must be refused with `{fragment}`:\n{stderr}"
+            );
+        }
+        assert!(
+            !stderr.contains("Build this program with `--mode compile`"),
+            "{spelling:?} must not be told to pass a flag it already passed:\n{stderr}"
+        );
+        assert_no_artifacts(temp.path(), "prog");
+    }
+
+    for spelling in [vec!["--analyze", "--mode", "proof"], vec!["--analyze", "-v"]] {
+        let (temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &spelling);
+        let assert = assert.success();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            !stderr.contains("Host imports are not yet modeled"),
+            "{spelling:?} writes no .v, so it is owed no proof refusal:\n{stderr}"
+        );
+        assert_no_artifacts(temp.path(), "prog");
+    }
+}
+
+/// Writes a program that binds one host import from two files, and returns the
+/// entry file.
+///
+/// `main.inf` and `lib/clock.inf` both declare and bind `env`.`clock_ms`, and
+/// only `lib/clock.inf` binds `env`.`sleep_ms`. So `clock_ms` is one import an
+/// embedder registers once behind two `use` clauses, and a message that names
+/// `sleep_ms` at all is proof the second file's declarations arrived.
+fn write_two_file_host_program(root: &std::path::Path) -> std::path::PathBuf {
+    let entry = write_source(
+        root,
+        "main.inf",
+        "use lib::clock;\n\
+         \n\
+         external fn clock_ms() -> i64;\n\
+         use { clock_ms } from host::env;\n\
+         \n\
+         pub fn main() -> i64 {\n    \
+             return clock_ms();\n\
+         }\n",
+    );
+    write_source(
+        root,
+        "lib/clock.inf",
+        "external fn clock_ms() -> i64;\n\
+         external fn sleep_ms(n: i32);\n\
+         use { clock_ms, sleep_ms } from host::env;\n\
+         \n\
+         pub fn now() -> i64 {\n    \
+             sleep_ms(1);\n    \
+             return clock_ms();\n\
+         }\n",
+    );
+    entry
+}
+
+/// One `(module, field)` declared and bound in two files is one host import,
+/// and the refusal that reads the declarations names it once.
+///
+/// A declaration's provenance is keyed on the declaration, so the same function
+/// reached from two files arrives as two origins. An embedder registers it once
+/// and the linker resolves it to one import, so a message that named it twice
+/// would report one function as two findings and then disagree with itself
+/// about the plural. The proof refusal is where this shows, because it is the
+/// one message read off the declarations rather than off what resolution
+/// produced — and every other host-import test here is single-file, so nothing
+/// else reaches the two-origin case at all.
+///
+/// The imported file binds a host function of its own, and the refusal is
+/// asserted to name it. Without that the test asserts its own premise nowhere:
+/// `clock_ms` is declared identically in both files, so a `lib/clock.inf` whose
+/// declarations never reached the typed context at all would leave one origin,
+/// one name, and every assertion green — with the deduplication under test
+/// never exercised and freely removable. `sleep_ms` appears in exactly one of
+/// the two files, so naming it is the same run proving the second file arrived.
+/// The singular agreement the wording also decides is covered by the unit test
+/// `host_import_proof_refusal_agrees_with_its_subject`, which is where it can
+/// be asserted against both arities.
+#[test]
+fn one_host_import_reached_from_two_files_is_named_once() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_two_file_host_program(temp.path());
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .args(["--mode", "proof"]);
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert_eq!(
+        stderr.matches("`env`.`clock_ms`").count(),
+        1,
+        "two declarations of one import are one name in a message:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "`env`.`clock_ms`, `env`.`sleep_ms` are satisfied by the embedder, so their \
+             behavior"
+        ),
+        "the imported file's own binding must reach the typed context, or the two-origin \
+         case is never exercised:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "main");
+}
+
+/// An allowlist refusal for an import two files bind names it once and asks for
+/// every binding of it, not for "the" one.
+///
+/// The refusal is read off what resolution produced, which is deduplicated, so
+/// it sees one `env`.`clock_ms` where the program holds a clause in each of two
+/// files. Told to drop "the" binding, a reader edits one file and is refused
+/// again by the other, so the source-level remedy quantifies over binding sites
+/// — and this is the one allowlist row with two sites for that to be right
+/// about. Every other allowlist test here builds a single file, where "the"
+/// and "every" read the same.
+///
+/// The fully admitted run is the control that keeps the premise honest: it
+/// names `sleep_ms`, which only `lib/clock.inf` binds, so the second file's
+/// clause really reached resolution; and it names `clock_ms` once, so the two
+/// clauses really are one import rather than two findings the refusal happens
+/// to phrase alike. Both runs share one directory, so the refused run's empty
+/// `out/` also shows it cleared the artifact the control left there.
+#[test]
+fn an_allowlist_refusal_asks_for_every_binding_of_an_import_two_files_bind() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_two_file_host_program(temp.path());
+
+    let control = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .current_dir(temp.path())
+        .arg(&entry)
+        .arg("--host-imports=env.clock_ms,env.sleep_ms")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&control.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("host imports: env.clock_ms, env.sleep_ms\n"),
+        "both files' bindings must reach resolution as one import each:\n{stdout}"
+    );
+
+    let refused = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .current_dir(temp.path())
+        .arg(&entry)
+        .arg("--host-imports=env.sleep_ms")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    assert_eq!(
+        stderr.matches("`env`.`clock_ms`").count(),
+        1,
+        "one import bound in two files is one finding:\n{stderr}"
+    );
+    for fragment in [
+        "host import `env`.`clock_ms` is not in this build's host-import allowlist",
+        "this build was given `env.sleep_ms`",
+        "Add `env.clock_ms` to `--host-imports` to admit it, or drop every `host::env` \
+         binding of `clock_ms`.",
+        "where the same edit will be to add `\"clock_ms\"` to the `env` entry",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the refusal must carry `{fragment}`:\n{stderr}"
+        );
+    }
+    assert!(
+        !stderr.contains("the `host::env` binding"),
+        "a name two files bind must not be told it has one binding:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("`env`.`sleep_ms`"),
+        "an admitted import must not be reported:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "main");
+}
+
+/// The proof refusal is raised before external resolution, so a program that is
+/// both mixed and a proof build hears the refusal that governs its build rather
+/// than the one whose remedy walks it into this one.
+///
+/// The compile-mode run is the control, and it is what keeps this test from
+/// being vacuous: the same source really does fail at resolution, with the
+/// mixed-program wording whose first remedy is to bind every extern to
+/// `host::…`. Following that from a proof build means rewriting every `use`
+/// clause and arriving here anyway.
+#[test]
+fn the_proof_refusal_preempts_external_resolution() {
+    let (temp, assert) = run_host_build(HOST_AND_LINKED_SOURCE, &[]);
+    let assert = assert.failure();
+    let control = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        control.contains("External module resolution failed")
+            && control.contains("host imports and statically linked modules cannot be combined"),
+        "the control run must reach resolution and be refused as mixed:\n{control}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    for spelling in [vec!["--mode", "proof"], vec!["-v"]] {
+        let (temp, assert) = run_host_build(HOST_AND_LINKED_SOURCE, &spelling);
+        let assert = assert.failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains("Host imports are not yet modeled in the proof translation"),
+            "{spelling:?} must hear the proof refusal:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("External module resolution failed"),
+            "{spelling:?} must not reach external resolution:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("cannot be combined"),
+            "{spelling:?} must not be told to bind every extern to `host::…`:\n{stderr}"
+        );
+        assert_no_artifacts(temp.path(), "prog");
+    }
+}
+
+/// A host import no SpaceWasm embedder could register is refused at that target,
+/// while the same program builds at a target whose embedder has no such limit.
+///
+/// Both caps are exercised from source: a 32-byte import module name, one past
+/// the 31-byte name type an embedder registers through, and a ten-parameter
+/// `external fn`, one past the fixed argument list a host call is dispatched
+/// with. The `wasm32` control is what makes this a *target* rule rather than a
+/// rule about declarations — without it, a refusal that fired everywhere would
+/// pass.
+///
+/// The authority sentence is asserted because it is what separates this from a
+/// decode limit: the module the caps refuse decodes perfectly well and simply
+/// cannot be bound to a host.
+///
+/// Both rows assert the declaration-level header and the absence of the
+/// artifact-level one, because the two checks share a body and find the same
+/// thing: without that a call site deleted or mis-wired would simply be caught
+/// by the post-link backstop and the test would stay green. The header is not
+/// the only difference, though. On the name row the artifact-level rendering
+/// also offers the linked-module alternative, which a finding read off a
+/// declaration cannot use, so that row asserts the remedy ends at the source
+/// edit — a second, independent sign that the declaration-level call site is
+/// the one that refused. The name row also pins which half of the import was
+/// measured — the module and the field are adjacent `&str` fields that a swap
+/// at the call site would silently exchange, and a length of 32 is reported
+/// either way.
+#[test]
+fn a_host_import_no_spacewasm_embedder_could_register_is_refused() {
+    let over_long = "m".repeat(32);
+    let long_name = format!(
+        "external fn ping();\n\
+         use {{ ping }} from host::{over_long};\n\
+         \n\
+         pub fn main() -> i32 {{\n    \
+             ping();\n    \
+             return 0;\n\
+         }}\n"
+    );
+
+    let (temp, assert) = run_host_build(&long_name, &["--target", "spacewasm"]);
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let measured_half = format!(
+        "import module name `{over_long}` on `{over_long}`.`ping` is 32 bytes; SpaceWasm \
+         accepts at most 31"
+    );
+    for fragment in [
+        "SpaceWasm conformance failed: the host imports this program declares cannot all be \
+         registered by a SpaceWasm embedder.",
+        "No file was written.",
+        measured_half.as_str(),
+        "This is a registration limit, not a decode limit",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the refusal must carry `{fragment}`:\n{stderr}"
+        );
+    }
+    assert!(
+        !stderr.contains("is not a module a SpaceWasm embedder can load"),
+        "the name cap must be caught over the declarations, not by the post-link \
+         backstop:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Shorten the module name this extern is bound under.\n"),
+        "a finding read off a declaration ends at the source edit:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("If the import came from a linked module"),
+        "a finding read off a declaration must not be offered a provenance it cannot \
+         have:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    let (_temp, assert) = run_host_build(&long_name, &["--target", "wasm32"]);
+    let assert = assert.success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains(&format!("host imports (no allowlist): {over_long}.ping")),
+        "the same program must build where no registration cap applies:\n{stdout}"
+    );
+
+    let wide = "external fn wide(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, \
+                h: i32, i: i32, j: i32);\n\
+                use { wide } from host::env;\n\
+                \n\
+                pub fn main() -> i32 {\n    \
+                    wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);\n    \
+                    return 0;\n\
+                }\n";
+    let (temp, assert) = run_host_build(wide, &["--target", "spacewasm"]);
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    for fragment in [
+        "SpaceWasm conformance failed: the host imports this program declares cannot all be \
+         registered by a SpaceWasm embedder.",
+        "import `env`.`wide` declares 10 parameters; SpaceWasm accepts at most 9",
+        "This is a registration limit, not a decode limit",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the arity refusal must carry `{fragment}`:\n{stderr}"
+        );
+    }
+    assert!(
+        !stderr.contains("is not a module a SpaceWasm embedder can load"),
+        "the arity cap must be caught over the declarations, not by the post-link \
+         backstop:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    let (_temp, assert) = run_host_build(wide, &["--target", "wasm32"]);
+    let assert = assert.success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("host imports (no allowlist): env.wide"),
+        "the arity cap is the target's, not the declaration's, so the same program must \
+         build where no registration cap applies:\n{stdout}"
+    );
+}
+
+/// A host import sitting exactly on both SpaceWasm registration caps builds.
+///
+/// The refusing rows above pin the measured numbers and so catch an off-by-one,
+/// but every one of them measures a quantity the wrong wiring would inflate,
+/// and both return unit. That leaves the accepting edge untested and one wiring
+/// mistake invisible: a call site handing `check_host_imports` the parameter
+/// count *plus* the result count still reports `declares 10 parameters` for the
+/// ten-parameter refusal, and still passes the one-result `env.clock_ms` used
+/// everywhere else, while wrongly refusing every conformant nine-parameter host
+/// import that returns a value. This fixture is that import — the cap in
+/// parameters, the cap in module-name bytes, and a result on top, so no count
+/// can absorb another and stay under.
+///
+/// Both numbers are built from the caps themselves, so an embedder that widens
+/// one moves the fixture with it rather than leaving a row that tests an
+/// interior point.
+#[test]
+fn a_host_import_exactly_at_both_spacewasm_caps_builds() {
+    use inference_target_conformance::spacewasm::{
+        MAX_HOST_FUNCTION_PARAMS, MAX_IMPORT_NAME_BYTES,
+    };
+
+    let at_cap = "m".repeat(MAX_IMPORT_NAME_BYTES);
+    let params = (0..MAX_HOST_FUNCTION_PARAMS)
+        .map(|index| format!("p{index}: i32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let arguments = (0..MAX_HOST_FUNCTION_PARAMS)
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "external fn widest({params}) -> i32;\n\
+         use {{ widest }} from host::{at_cap};\n\
+         \n\
+         pub fn main() -> i32 {{\n    \
+             return widest({arguments});\n\
+         }}\n"
+    );
+
+    let (temp, assert) = run_host_build(&source, &["--target", "spacewasm"]);
+    let assert = assert.success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains(&format!("host imports (no allowlist): {at_cap}.widest")),
+        "an import on both caps is conformant and must build:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("spacewasm: conformant with WebAssembly 1.0"),
+        "the post-link check must accept it too, or only the declaration-level one is \
+         measured:\n{stdout}"
+    );
+    assert!(
+        temp.child("out").child("prog.wasm").path().exists(),
+        "the accepted build must write its artifact"
+    );
+}
+
+/// At `--target spacewasm` the registration caps are asked before the
+/// allowlist, so the allowlist is never asked to admit a name no embedder can
+/// register.
+///
+/// An allowlist entry has to spell the import's final name. Asked first, the
+/// allowlist tells the reader to add an over-long module name to
+/// `--host-imports`; the caps then refuse that same name and ask for a rename,
+/// which leaves the new entry matching nothing and the renamed import refused
+/// by the allowlist again — three builds, and a reviewed policy admitting a
+/// name no embedder could ever register.
+///
+/// Two allowlists that do not admit the import are run: the empty one and one
+/// naming something else. The `wasm32` run of each is the control that keeps
+/// this from being vacuous: with no cap to fail, the same program under the
+/// same allowlist is refused by the allowlist, so it really is reachable here
+/// and it is the order that keeps it silent at SpaceWasm.
+#[test]
+fn the_registration_caps_are_asked_before_the_allowlist() {
+    use inference_target_conformance::spacewasm::MAX_IMPORT_NAME_BYTES;
+
+    let over_long = "m".repeat(MAX_IMPORT_NAME_BYTES + 1);
+    let source = format!(
+        "external fn ping();\n\
+         use {{ ping }} from host::{over_long};\n\
+         \n\
+         pub fn main() -> i32 {{\n    \
+             ping();\n    \
+             return 0;\n\
+         }}\n"
+    );
+
+    for allowlist in ["--host-imports=", "--host-imports=env.clock_ms"] {
+        let (temp, assert) = run_host_build(&source, &["--target", "spacewasm", allowlist]);
+        let assert = assert.failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains(
+                "SpaceWasm conformance failed: the host imports this program declares cannot \
+                 all be registered by a SpaceWasm embedder."
+            ),
+            "the registration cap must be what refuses, under {allowlist}:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("not in this build's host-import allowlist"),
+            "the allowlist must not be asked to admit a name no embedder can register, under \
+             {allowlist}:\n{stderr}"
+        );
+        assert_no_artifacts(temp.path(), "prog");
+
+        let (temp, assert) = run_host_build(&source, &["--target", "wasm32", allowlist]);
+        let assert = assert.failure();
+        let control = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            control.contains(&format!(
+                "host import `{over_long}`.`ping` is not in this build's host-import allowlist"
+            )),
+            "where no cap applies, {allowlist} must refuse the same import:\n{control}"
+        );
+        assert_no_artifacts(temp.path(), "prog");
+    }
+}
+
+/// At a target that binds no host, the target's refusal of a host import is
+/// heard before external resolution and before the allowlist, whose remedies
+/// it would make void.
+///
+/// Three rows. A plain host program is refused in code generation's words but
+/// by `infc`, ahead of code generation: the `Error:` prefix is `infc`'s, where
+/// the backstop inside code generation prints `Codegen failed:`. Under an
+/// empty allowlist, the other order tells the reader to admit the import, and
+/// the build that admits it is refused by the target anyway, leaving a policy
+/// entry nothing can use. A mixed program would otherwise hear resolution's
+/// refusal first, whose remedy — bind every extern to the host — walks its
+/// reader into this refusal having rewritten every clause.
+///
+/// The `wasm32` runs are the controls: the same allowlist and the same mixed
+/// program really are refused by the allowlist and by resolution where the
+/// target binds a host, so the absence of those wordings at `stellar` is the
+/// order at work and not a refusal that never had a chance to fire.
+#[test]
+fn a_host_import_at_a_target_that_binds_no_host_is_refused_first() {
+    let stellar_refusal = "Error: The `stellar` target does not support host imports. \
+                           `external fn clock_ms` is bound to `host::env`";
+
+    let (temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &["--target", "stellar"]);
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(stellar_refusal) && !stderr.contains("Codegen failed"),
+        "the target refusal must be raised by `infc` before code generation:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    let (temp, assert) =
+        run_host_build(HOST_CLOCK_SOURCE, &["--target", "stellar", "--host-imports="]);
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(stellar_refusal),
+        "the target refusal must win over the allowlist:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("host-import allowlist"),
+        "a reader must not be told to admit an import the target refuses:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    let (temp, assert) =
+        run_host_build(HOST_CLOCK_SOURCE, &["--target", "wasm32", "--host-imports="]);
+    let assert = assert.failure();
+    let control = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        control.contains("host import `env`.`clock_ms` is not in this build's host-import \
+                          allowlist"),
+        "the control must reach the allowlist:\n{control}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    let (temp, assert) = run_host_build(HOST_AND_LINKED_SOURCE, &["--target", "stellar"]);
+    let assert = assert.failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(stellar_refusal),
+        "the target refusal must win over resolution:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("External module resolution failed")
+            && !stderr.contains("cannot be combined"),
+        "a mixed program at `stellar` must not be told to bind every extern to the \
+         host:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    let (temp, assert) = run_host_build(HOST_AND_LINKED_SOURCE, &["--target", "wasm32"]);
+    let assert = assert.failure();
+    let control = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        control.contains("host imports and statically linked modules cannot be combined"),
+        "the control must reach resolution and be refused as mixed:\n{control}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+}
+
+/// `--help` documents `--host-imports` in its reader's terms: the three states
+/// and the fact that `infs build` does not forward it yet.
+///
+/// clap prints the field's doc comment as the help text, so a maintainer note
+/// left in it ships to every `infc --help`; the Rust type and the clap
+/// attribute behind the flag's shape are asserted absent for that reason. The
+/// not-forwarded sentence is pinned so that the change which retires it — the
+/// `[host-imports]` table landing in `infs` — has a test to update beside it,
+/// rather than leaving a stale clause in `--help` that nothing reads.
+#[test]
+fn help_documents_the_host_import_allowlist() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    let flowed = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    for fragment in [
+        "--host-imports=<LIST>",
+        "`--host-imports=` with nothing after it is a declared, empty allowlist that admits none",
+        "Unlike `--wasm-dep`, `infs build` does not forward this flag yet",
+    ] {
+        assert!(
+            flowed.contains(fragment),
+            "--help must carry `{fragment}`, got:\n{stdout}"
+        );
+    }
+    for internal in ["Option<Vec<String>>", "require_equals"] {
+        assert!(
+            !flowed.contains(internal),
+            "a maintainer note must not ship as help text: `{internal}` in\n{stdout}"
+        );
+    }
+}
+
+/// A program that binds no host import prints no host-import line at all.
+///
+/// The inventory line is the surface a reviewer scans a build log for, so it
+/// must not appear — with or without its qualifier — on the builds that have
+/// nothing to report. Asserted under an allowlist as well, since a policy given
+/// to a program with no host imports still names no imports.
+#[test]
+fn a_program_with_no_host_import_prints_no_inventory_line() {
+    for args in [vec![], vec!["--host-imports=env.clock_ms"]] {
+        let (_temp, assert) = run_host_build(COMPOUND_COPY_SOURCE, &args);
+        let assert = assert.success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+        assert!(
+            !stdout.contains("host imports"),
+            "a program binding no host import must print no inventory line, with {args:?}:\n{stdout}"
+        );
+    }
 }

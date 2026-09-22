@@ -488,10 +488,11 @@ infs run <path> (single-file mode)
 | `--memory-pages <n>` | Linear memory size of the emitted module, in 64 KiB pages |
 | `--stack-size <bytes>` | Shadow stack size, and the budget A036 measures call-chain frame usage against |
 | `--adopt-external-specs` | Carry a linked library's universal proof obligations into the program's proof artifact; proof mode only |
+| `--host-imports=<list>` | Allowlist the host functions the program may bind, as comma-separated `module.field` pairs; the `=` is required, and `--host-imports=` is an explicit empty allowlist that admits none. Omitted applies no policy |
 | `--commit-hash` | Print the build commit hash and exit; used by the `infs` handshake |
 | `--abi-version` | Print `<major>.<minor>` ABI version and exit; used by the `infs` handshake |
 
-> **Note:** The current ABI version is `1.7`.
+> **Note:** The current ABI version is `1.8`.
 
 The default behavior when no phase flag is supplied is full compilation with
 WASM output written to disk — equivalent to `--codegen -o`.
@@ -509,23 +510,27 @@ is parsed as `<major>.<minor>`:
 - **Unknown/old** (`infc` exits non-zero or prints `unknown`): silent; treated
   as graceful skip, equivalent to ABI unknown.
 
-The current ABI is `1.7` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 7` in
+The current ABI is `1.8` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 8` in
 `core/compiler-interface/src/lib.rs`). Each additive flag is gated at the minor
 it was introduced at, independently: `--out-dir` landed at minor 1,
 `--wasm-features` at minor 2, `--memory-pages` and `--stack-size` at minor 3,
-`--adopt-external-specs` at minor 4, and `--target` at minor 5. `infs` forwards
-each only to an `infc` that reports an ABI minor at or above the flag's own (or
-matches by commit hash) — an `infc` that reports minor 1, for instance,
-supports `--out-dir` but not `--wasm-features`. `--target` is gated on the
-*name* rather than on the flag: each target became requestable at its own minor
-(`wasm32` at 5, `stellar` at 6, `spacewasm` at 7), and an `infc` that parses the
-flag but predates a name would accept it and build for the default runtime — a
-wrong artifact rather than a refusal. That is true even where the two builds are
-the same bytes: dropping `spacewasm` produces the module a `wasm32` build
-produces and drops the target's acceptance envelope with it, so what the name
-was written for never runs. The default target is never forwarded at all, so a
-project that names none puts no floor under its compiler. Pairing a manifest
-with a non-default `[verification] output-dir` against an older `infc` is a hard
+`--adopt-external-specs` at minor 4, `--target` at minor 5, and
+`--host-imports` at minor 8. `infs` forwards each only to an `infc` that
+reports an ABI minor at or above the flag's own (or matches by commit hash) —
+an `infc` that reports minor 1, for instance, supports `--out-dir` but not
+`--wasm-features`. `infs` does not forward `--host-imports` yet — the
+`[host-imports]` manifest table it will read is not implemented — so nothing in
+a project build is gated on minor 8 today; a direct `infc` caller passes the
+flag by hand. `--target` is gated on the *name* rather than on the flag:
+each target became requestable at its own minor (`wasm32` at 5, `stellar` at
+6, `spacewasm` at 7), and an `infc` that parses the flag but predates a name
+would accept it and build for the default runtime — a wrong artifact rather
+than a refusal. That is true even where the two builds are the same bytes:
+dropping `spacewasm` produces the module a `wasm32` build produces and drops
+the target's acceptance envelope with it, so what the name was written for
+never runs. The default target is never forwarded at all, so a project that
+names none puts no floor under its compiler. Pairing a manifest with a
+non-default `[verification] output-dir` against an older `infc` is a hard
 error:
 
 ```text

@@ -82,9 +82,11 @@ pub struct HostImport {
 /// arms below are deliberately not among them: they name the field and the
 /// module separately, mirroring
 /// [`ExternalResolutionError::ConflictingWriteSet`], so a reader who already
-/// knows the linked diagnostic reads the host one without relearning it. The
-/// build-log line that renders a whole [`HostImport`] arrives with a later
-/// change.
+/// knows the linked diagnostic reads the host one without relearning it. Nor is
+/// `infc`'s build-log inventory of a program's host imports, which is the one
+/// worth naming here because it holds whole [`HostImport`]s and still spells
+/// each pair itself: a build log is not read as prose, and the reason that
+/// changes the rendering is stated where the line is printed.
 impl std::fmt::Display for HostImport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", host_import_label(&self.module, &self.field))
@@ -185,7 +187,16 @@ fn quoted_modules(modules: &[String]) -> String {
 /// separately, as [`ExternalResolutionError::ConflictingWriteSet`] does for the
 /// linked form — so a reader meeting one of them is reading a phrasing they
 /// already know rather than a second convention.
-pub(super) fn host_import_label(module: &str, field: &str) -> String {
+///
+/// Public because the message sites holding only the pair are not all in this
+/// crate: `infc` refuses a proof build that binds a host import before
+/// resolution has produced a [`HostImport`] to render, and holds two bare
+/// strings off an [`ExternOrigin`] instead. Spelling the label there would be
+/// the second convention this function exists to prevent.
+///
+/// [`ExternOrigin`]: inference_type_checker::ExternOrigin
+#[must_use = "the rendered label is the return value"]
+pub fn host_import_label(module: &str, field: &str) -> String {
     format!("`{module}`.`{field}`")
 }
 
@@ -1029,13 +1040,14 @@ mod tests {
         assert!(rendered.contains("missing"), "carries the io error: {rendered}");
     }
 
-    /// The one spelling of a host import, asserted directly because nothing in
-    /// this build calls it: the messages below reach it through
-    /// [`host_import_label`], and the inventory line that renders a whole
-    /// [`HostImport`] belongs to a later phase. Left unpinned, the two halves
-    /// could come to be quoted differently — and a reader copying a module name
-    /// out of a build log into an embedder's registration call has to get back
-    /// exactly the string the artifact carries.
+    /// The one spelling of a host import, asserted on its `Display` directly
+    /// because nothing in this crate renders one that way: the messages below
+    /// reach the spelling through [`host_import_label`], and `infc`'s inventory
+    /// line spells each pair itself (see the `Display` impl). Left unpinned,
+    /// the two halves could come to be quoted differently — and a reader
+    /// copying a module name out of a diagnostic into an embedder's
+    /// registration call has to get back exactly the string the artifact
+    /// carries.
     #[test]
     fn host_import_renders_both_names_quoted_separately() {
         let rendered = HostImport {
