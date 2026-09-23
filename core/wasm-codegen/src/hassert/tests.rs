@@ -2112,7 +2112,7 @@ spec S { fn f() forall { let a: i32 = @; assert(clock_ms() == a); } }
     );
     assert!(
         e.contains("which this translation cannot do yet"),
-        "a later phase may admit a host contract as an assumption, and the message must not \
+        "a host contract may one day be admitted as an assumption, so the message must not \
          read as the settled rule: {e}"
     );
     assert!(

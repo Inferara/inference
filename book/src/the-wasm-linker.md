@@ -21,6 +21,22 @@ every index reference into a unified index space, and removes the import section
 entirely. The output has no dangling imports, no relocation step, and no runtime
 loader. Verification then covers the actual deployed artifact, not a stand-in.
 
+One kind of import does survive, and it gets there by skipping the link rather
+than by passing through it. A `use { f } from host::<module>;` clause binds a
+*host import*: a function the embedder supplies at instantiation, with no
+`.wasm` in the build for the merge to fold in (see
+[Host Imports](external-functions-and-wasm-linking.md#host-imports)). For a
+program whose externs are all host imports, `inference::link_resolved` never
+calls the merge. It ships the code-generation bytes verbatim, after proving that
+the artifact's imports are exactly the declared host functions — see
+[The Host-Only Pass-Through](#the-host-only-pass-through). The merge itself is
+unchanged, and every module it produces still has no import section. A program
+that binds host imports and linked modules together is refused at external
+resolution, before any `.wasm` is searched for; a merge that lets a host import
+survive beside the modules it links is not built. A host import is also exactly
+the dangling import this section calls unverifiable, which is why a program that
+binds one is refused any build that writes a `.v`.
+
 ## Where the Linker Fits in the Pipeline
 
 Codegen produces an intermediate module whose external calls lower to
@@ -495,6 +511,53 @@ The Rocq translator (`core/wasm-to-v/src/rocq_names.rs`) maps every byte outside
 produced. A residual collision after sanitization (two modules that sanitize to
 one identifier) is still disambiguated by the translator's index suffix; the
 scheme removes the common cases rather than every possible one.
+
+## The Host-Only Pass-Through
+
+A program whose externs are all host imports has nothing to merge: there is no
+`.wasm` to fold in, and its imports are meant to survive for an embedder to
+satisfy. `inference::link_resolved` — the one place the choice between the two
+paths is made, and the path `infc` ships through — therefore returns the
+code-generation bytes unchanged. The language surface that produces such a
+program is described under
+[Host Imports](external-functions-and-wasm-linking.md#host-imports).
+
+What stands in for the merge's guarantee is one check: the artifact's import
+section must equal the declared host set, compared on module, field, parameters
+and results, in both directions. An import no declaration covers, a declaration
+no import covers, a signature that differs, one two-level name imported twice,
+and any import that is not a function — a memory, table, global or tag — are
+each refused. Bytes that do not decode are a refusal too, never an empty import
+list: an empty list compares equal to an empty declared set, so bytes that do
+not parse would otherwise pass as a module that imports nothing. The declared
+set comes from the external-module driver's walk over the type checker's extern
+provenance, and the import section from code generation's own walk over the
+same declarations. A disagreement between the two is the compiler contradicting
+itself rather than anything an author wrote, so each of these refusals
+(`inference::wasm_link::HostImportError`, reported by `infc` as `Link step
+failed: …`) ends by asking for a compiler-bug report.
+
+What is not checked is everything the merge's main-side gate exists for. That
+gate lets the merge assume a module it can rewrite — index spaces it can
+renumber, sections it can concatenate — and no rewrite happens here. So the
+pass-through accepts what the linker would refuse in a main module: a data or
+element segment, a start function, a table, a second memory, a float or `v128`
+in one of the module's own signatures, and a duplicated or malformed
+`inference.spec_funcs` or `inference.hspecs` custom section. No body is
+re-encoded through the [operator allow-list](#floating-point-exclusion), no
+tier is classified, and no write set is derived, since there is no foreign body
+to derive one from; that is why `mut` on a host parameter is an assertion
+rather than a checked contract (see
+[`mut` on a host parameter](external-functions-and-wasm-linking.md#mut-on-a-host-parameter-is-an-assertion-not-a-contract)).
+The shapes that pass are ones this compiler's code generation does not emit;
+what cannot be taken on trust about bytes nobody rewrote is that their surviving
+imports are the ones the author asked for, and that is what the check
+establishes.
+
+Nor does `validate_extern` run: there is no library to hold a declared signature
+against, and the consistency check among the declarations at resolution stands
+in for it (see
+[Declaring an External Function](external-functions-and-wasm-linking.md#declaring-an-external-function)).
 
 ## Error Reference
 

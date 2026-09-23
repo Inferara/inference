@@ -145,7 +145,11 @@ functions under. `wasm-features` entries are WebAssembly *proposal* names
 builds, single-file builds, and single-file `infs run`. `[wasm-dependencies]`
 entries have the same reach: project `build`, project `run`, single-file
 `build`, and single-file `run` all forward every declared entry to `infc`, and
-all four forward a `[host-imports]` table too. See
+all four forward a `[host-imports]` table too. The unknown-key refusal is
+younger than every released `infs`, though: a release through `v0.0.5` reads
+past a root table it does not know with no diagnostic, and for `[host-imports]`
+that means building under no policy at all, so a project that relies on its
+allowlist has to be built with an `infs` that knows the table. See
 `apps/infs/docs/inference-toml.md` for the full reference.
 
 ### Reserved Project Names

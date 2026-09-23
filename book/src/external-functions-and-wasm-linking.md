@@ -428,7 +428,7 @@ of the runtime, not of the program. `infs run` therefore builds such a program
 and then refuses to execute it, naming each function the artifact imports:
 
 ```text
-`infs run` cannot execute this program: out/main.wasm imports 3 functions that its embedder must supply.
+Error: `infs run` cannot execute this program: out/main.wasm imports 3 functions that its embedder must supply.
   env.clock_ms
   fprime_core.command
   fprime_core.telemetry
@@ -466,6 +466,12 @@ let instance = linker.instantiate(&mut store, &module)?;
 
 The signature it registers must be the one the `external fn` declared, since the
 artifact's import carries that type and instantiation checks it.
+
+Without an embedder of your own, the repository's SpaceWasm harness can stand in
+for one far enough to run such a program under the flight interpreter: `--host`
+registers a stub per import that answers zero and logs each call it receives.
+See [Running a module under the embedder
+harness](compilation_targets.md#running-a-module-under-the-embedder-harness).
 
 ## Calling an External Function
 
@@ -595,6 +601,35 @@ Tier-C support in a future release.
   [The WASM Linker](the-wasm-linker.md) for what that proof does and does not
   bound. Closing it is tracked in issue #420.
 
+A program that binds host imports (see [Host Imports](#host-imports)) meets
+restrictions of its own:
+
+- It cannot bind linked modules as well (`MixedHostAndLinked`); see [What is
+  refused, and by which layer](#what-is-refused-and-by-which-layer).
+- It has no proof artifact: `infc` refuses every build of it that writes a `.v`;
+  see [What is refused, and by which
+  layer](#what-is-refused-and-by-which-layer).
+- `mut` on a host parameter is not checked against what the embedder's function
+  writes (the build holds no body to derive a write set from), though
+  declarations of one pair must still agree and A047 still holds the call site
+  to it; see [`mut` on a host
+  parameter](#mut-on-a-host-parameter-is-an-assertion-not-a-contract).
+- It cannot build at `stellar`, which refuses host imports; see [What is
+  refused, and by which layer](#what-is-refused-and-by-which-layer).
+- An import module or field name has to be an Inference identifier, and nothing
+  maps a declaration onto any other import string: `wasi_snapshot_preview1` can
+  be bound, while field names such as Soroban's `_` and `0` cannot be spelled.
+- A project's `[build.wasm-opt]` step at any level but `"0"` may remove a host
+  import nothing calls; see [A bound host import ships whether or not it is
+  called](#a-bound-host-import-ships-whether-or-not-it-is-called).
+- [No contract travels with a host
+  import](#no-contract-travels-with-a-host-import): nothing in the build
+  describes what the function does, and its declaration holds an embedder to
+  nothing.
+- `infs run` refuses every artifact that still imports a function once the build
+  has finished, including a project's `[build.wasm-opt]` step; see [Running a
+  program that binds host imports](#running-a-program-that-binds-host-imports).
+
 ## Example: Two Libraries, One Module
 
 ```inference
@@ -617,6 +652,8 @@ of each export, and merges the bodies into a single output module.
 
 - [The WASM Linker](the-wasm-linker.md) — the subsystem deep-dive: merge algorithm, feasibility tiers, the Tier-B provenance proof, and the link-error taxonomy
 - [Projects and the infs Toolchain](projects-and-the-infs-toolchain.md) — declaring external `.wasm` modules in `Inference.toml` under `[wasm-dependencies]`
+- [Compilation Targets: SpaceWasm host imports](compilation_targets.md#host-imports) — the registration caps `infc` asks of a host import's declaration at `--target spacewasm`, and the conformance check that asks them again of the bytes
+- [Compilation Targets: the embedder harness](compilation_targets.md#running-a-module-under-the-embedder-harness) — running a host-import program under the SpaceWasm interpreter with `--host` stubs that log each call
 - `core/wasm-linker/README.md` — the merge algorithm, tier classification, and entry point API
 - `core/wasm-codegen/docs/function-calls-lowering.md` — three-stage index pre-scan and import section emission
 - `core/type-checker` — `ExternOrigin`, `extern_origins()`, and the `A024 ExternFunctionCall` analysis rule

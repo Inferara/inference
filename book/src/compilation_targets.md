@@ -41,6 +41,7 @@ At `--target spacewasm` only the first of those is refused. `--mode proof` and a
 | DWARF | Never | Not useful for formal verification |
 | wasm-opt | Never applied to proof-mode output | `[build.wasm-opt]` (`infs`'s opt-in Binaryen post-build step) explicitly skips proof/`-v` builds — Binaryen has no lowering for the non-det opcode family a spec function may carry |
 | Code inclusion | All (spec + executable) | Spec code defines properties; execution code is the verification target |
+| Host imports | None: `infc` refuses every build that writes a `.v` for a program binding `use { f } from host::<module>;`, at every target | The body is the embedder's, outside the artifact a proof is written about, and the translation has no way to state an assumption about it; see [Host Imports](external-functions-and-wasm-linking.md#host-imports) |
 | No non_det output | Identical to compile mode release | Nothing to formalize structurally |
 | Determinism | Bitwise reproducible | Same source must produce same `.v` file |
 
@@ -184,18 +185,25 @@ un-uploadable to any network still behind it.
 That constant is not permanent. It is the *minimum* the contract needs, and it
 must become the maximum of the minimum protocols of the host functions the
 contract imports once host imports are admitted at this target (issue #324).
-Until then a contract imports nothing, and the floor is the whole answer.
+Until then this target refuses every host import, so a contract imports nothing
+and the floor is the whole answer.
 
 #### What is not supported, and why
 
 - **Host imports — anything stateful.** Storage, ledger access, events,
   authorization, cross-contract calls and the host-object constructors all arrive
   as imported host functions. The language spells such a binding
-  `use { f } from host::<module>;`, and this target refuses it at code
-  generation: each of those host functions takes and returns the host's 64-bit
-  tagged word, and nothing in this toolchain maps an `external fn` onto one of
-  them. Issue #324 is where binding that convention is tracked. Everything below
-  follows from it.
+  `use { f } from host::<module>;`, and at this target `infc` refuses it before
+  external resolution, and so ahead of the allowlist, while code generation
+  refuses it again, in the same words, as the backstop for a caller that skips
+  that step. The refusal names one host binding — the first by module and field
+  name, not by position in the source — and says why: the Soroban host-call
+  convention is not bound by this toolchain, each of those host functions takes
+  and returns the host's 64-bit tagged word, and nothing here maps an
+  `external fn` onto one of them. It offers two ways out — remove the host
+  binding to build a contract, or build for `wasm32`, where a host import is
+  supported. Issue #324 is where binding that convention is tracked. Everything
+  below follows from it.
 - **Compound types and 64-bit integers at the contract boundary.** Both travel as
   host objects, which are built and read through those same imports.
 - **No `contractspecv0` section.** A contract normally ships a machine-readable
@@ -410,6 +418,62 @@ the target's, not the linker's, and the same external links without complaint at
 question afterwards, as the backstop for anything that reaches the module by some
 other route.
 
+#### Host imports
+
+This target admits the binding. A program that binds
+`use { f } from host::<module>;` compiles here, and its artifact carries the
+import for the embedder to satisfy — the module a `wasm32` build writes, since
+nothing on the emission path reads the target. What the target adds is a check
+against three registration caps. An embedder supplies an import by registering
+a host function under the import's two names, and the registration API names a
+host module and a host function through a 31-byte name type and builds a host
+function of at most nine parameters and one result, so an import outside those
+caps may decode, but it can never be bound. That API is the authority for all
+three, and `infc` asks them of the program's *declarations* — after external
+resolution, before the
+[allowlist](external-functions-and-wasm-linking.md#the-allowlist) and before
+any byte is emitted — so the refusal asks for an edit to the source rather than
+to an import section in a module no file holds. For a module name of 32 bytes:
+
+```inference
+external fn telemetry(channel: i32, value: i32) -> i32;
+use { telemetry } from host::fprime_core_telemetry_downlink_a;
+
+pub fn report(channel: i32) -> i32 {
+    return telemetry(channel, 7);
+}
+```
+
+```text
+$ infc main.inf --target spacewasm
+Parsed: main.inf
+Analyzed: main.inf
+SpaceWasm conformance failed: the host imports this program declares cannot all be registered by a SpaceWasm embedder.
+No file was written.
+
+  import name too long: import module name `fprime_core_telemetry_downlink_a` on `fprime_core_telemetry_downlink_a`.`telemetry` is 32 bytes; SpaceWasm accepts at most 31.
+    This is a registration limit, not a decode limit: the decoder reads a name of up to 32 bytes, but an embedder registers host modules and host functions through a 31-byte name type, so a 32-byte name decodes and can never be bound to a host. 31 is the cap that matters.
+    Shorten the module name this extern is bound under.
+```
+
+The declaration-level check takes on trust that the declarations are the imports
+the artifact will carry, so the post-link [conformance check](#conformance) asks
+the same three caps of the bytes as the backstop; the two cannot disagree about
+an import both see, because they run one rule. Why the caps are asked before the
+allowlist rather than after it is set out in
+[What is refused, and by which layer](external-functions-and-wasm-linking.md#what-is-refused-and-by-which-layer).
+Of the three caps, the one-result cap is unreachable from Inference source,
+since an `external fn` returns one value or none; it earns its findings on the
+byte-level path.
+
+Such a program has no proof path: `infc` refuses every build that writes a `.v`
+for a program that binds a host import, at every target, so the procedure in
+[Proving the `wasm32` build and deploying the SpaceWasm
+one](#proving-the-wasm32-build-and-deploying-the-spacewasm-one) does not apply to
+it. To run one, the embedder harness can register a stub per import — see the
+`--host` transcript in
+[Running a module under the embedder harness](#running-a-module-under-the-embedder-harness).
+
 #### Conformance
 
 Every SpaceWasm build checks the module it is about to write against every fixed
@@ -606,6 +670,11 @@ report = 0
 clock. A name longer than 31 bytes, more than nine parameters or more than one
 result is a usage error that names the interpreter's own refusal and the limit
 behind it, both read from the interpreter rather than restated by the harness.
+Two counts are usage errors as well, because the interpreter does not check them
+and would bind the excess imports to other stubs without a word: more than 256
+module names, which its one-byte host-module reference cannot address, and more
+than 65,536 stubs under one module name, whose positions its binder narrows to
+sixteen bits.
 
 A module whose imports have no stub is still a load failure. The interpreter's
 verdict names no import, so the harness reads the module a second time and
