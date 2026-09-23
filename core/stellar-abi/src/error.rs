@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use crate::meta::STELLAR_ENV_PROTOCOL;
 use crate::rewrite::{MAX_EXPORT_NAME_BYTES, MAX_VAL_PARAMETERS};
+use crate::spec::MAX_INPUT_NAME_BYTES;
 
 /// Why a module cannot become a Soroban contract.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -93,6 +94,37 @@ pub enum StellarAbiError {
     )]
     UnsupportedReturn { export: String, ty: String },
 
+    /// A parameter the source wrote as `_`.
+    ///
+    /// The contract spec records every parameter by name, and that name is how
+    /// a caller reaches it: `stellar contract invoke` passes each argument as
+    /// `--<name>`. A parameter with none cannot be described, and inventing one
+    /// would publish a name the author never wrote.
+    #[error(
+        "the export `{export}` leaves parameter {position} unnamed, written `_`; a contract \
+         method's parameters are named, because `stellar contract invoke` passes each one as \
+         `--<name>` and the contract spec section records that name, so name the parameter"
+    )]
+    UnnamedParameter {
+        export: String,
+        /// One-based, as [`StellarAbiError::UnsupportedParameter`] counts.
+        position: usize,
+    },
+
+    /// A parameter name wider than the field the contract spec records it in.
+    #[error(
+        "the export `{export}` names parameter {position} `{name}`, which is {len} bytes long; \
+         a contract method's parameter name is at most {MAX_INPUT_NAME_BYTES} bytes, the width \
+         of the contract spec section's input-name field, so shorten it"
+    )]
+    ParameterNameTooLong {
+        export: String,
+        /// One-based, as [`StellarAbiError::UnsupportedParameter`] counts.
+        position: usize,
+        name: String,
+        len: usize,
+    },
+
     /// A struct or array return, which is passed through a hidden pointer into
     /// linear memory and has no `Val` counterpart.
     #[error(
@@ -130,10 +162,19 @@ pub enum StellarAbiError {
     )]
     StartSectionPresent { function: u32 },
 
-    /// The module already carries `contractenvmetav0`, so it has been rewritten
-    /// once. Rewriting it again would wrap the wrappers.
-    #[error("the module already carries a `contractenvmetav0` section, so it is already a contract")]
-    AlreadyAContract,
+    /// The module already carries one of the three sections this pass writes —
+    /// `contractspecv0`, `contractmetav0` or `contractenvmetav0` — so it has
+    /// already been made a contract. Rewriting it again would wrap the wrappers
+    /// and write that section a second time, and a second copy is not merely
+    /// redundant. A spec reader either takes the first `contractspecv0` it
+    /// meets, as `soroban_spec::read::raw_from_wasm` (`soroban-spec` 28.0.0)
+    /// does, or merges every copy, and neither describes the contract this pass
+    /// produced.
+    #[error(
+        "the module already carries a `{section}` section, which this pass writes, so it has \
+         already been made a contract"
+    )]
+    AlreadyAContract { section: String },
 
     /// A declared environment protocol older than the one Soroban arrived in.
     /// The section it would produce is well formed, so nothing refuses it until

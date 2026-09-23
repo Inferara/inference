@@ -33,7 +33,11 @@ pub const STELLAR_ENV_PROTOCOL: u32 = 20;
 pub const STELLAR_ENV_PRE_RELEASE: u32 = 0;
 
 /// Name of the custom section carrying the declared environment version.
-pub(crate) const META_SECTION_NAME: &str = "contractenvmetav0";
+///
+/// `ENV_META_V0_SECTION_NAME` in `soroban-env-common` 28.0.2 (`src/meta.rs`),
+/// the name `soroban-env-host` 28.0.2 looks the section up by when it parses
+/// an uploaded contract (`src/vm/parsed_module.rs`).
+pub const ENV_META_SECTION_NAME: &str = "contractenvmetav0";
 
 /// `SC_ENV_META_KIND_INTERFACE_VERSION`, the only `SCEnvMetaEntry` kind a
 /// contract needs: the union discriminant that says the twelve bytes are an
@@ -53,7 +57,7 @@ pub(crate) fn metadata_payload(protocol: u32, pre_release: u32) -> [u8; 12] {
 /// The whole section, ready to append to a module.
 pub(crate) fn metadata_section(payload: &[u8]) -> CustomSection<'_> {
     CustomSection {
-        name: META_SECTION_NAME.into(),
+        name: ENV_META_SECTION_NAME.into(),
         data: payload.into(),
     }
 }

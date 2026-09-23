@@ -66,12 +66,24 @@ pub(crate) enum ValScalar {
 
 impl ValScalar {
     /// The scalar `ty` maps to, or `None` when the Val ABI cannot carry it.
+    ///
+    /// No wildcard arm: a type added to the descriptor does not compile here
+    /// until it is classified, as the source-level gate in code generation
+    /// classifies it.
     pub(crate) fn from_abi(ty: &AbiType) -> Option<Self> {
         match ty {
             AbiType::U32 => Some(Self::U32),
             AbiType::I32 => Some(Self::I32),
             AbiType::Bool => Some(Self::Bool),
-            _ => None,
+            AbiType::I8
+            | AbiType::U8
+            | AbiType::I16
+            | AbiType::U16
+            | AbiType::I64
+            | AbiType::U64
+            | AbiType::Enum { .. }
+            | AbiType::Struct { .. }
+            | AbiType::Array { .. } => None,
         }
     }
 }

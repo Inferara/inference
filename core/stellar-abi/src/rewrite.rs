@@ -1,5 +1,7 @@
-//! The rewrite itself: parse, refuse what the Val ABI cannot carry, synthesize
-//! one wrapper per exported function, and rebuild the module around them.
+//! The rewrite itself: parse, refuse what the Val ABI cannot carry and what the
+//! contract spec cannot record, synthesize one wrapper per exported function,
+//! rebuild the module around them, and append the three contract custom
+//! sections.
 //!
 //! # Why the wrappers go at the end
 //!
@@ -27,7 +29,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use inference_target_conformance::check_wasm1;
-use inference_wasm_codegen::{AbiReturn, ExportSignature};
+use inference_wasm_codegen::{AbiParam, AbiReturn, ExportSignature};
 use wasm_encoder::{Encode, ExportKind, ExportSection, Instruction, Module, RawSection};
 use wasmparser::{
     CompositeInnerType, ExternalKind, ImportSectionReader, Parser, Payload, SubType, TypeRef,
@@ -36,7 +38,13 @@ use wasmparser::{
 
 use crate::error::StellarAbiError;
 use crate::meta::{
-    META_SECTION_NAME, STELLAR_ENV_PROTOCOL, metadata_payload, metadata_section,
+    ENV_META_SECTION_NAME, STELLAR_ENV_PRE_RELEASE, STELLAR_ENV_PROTOCOL, metadata_payload,
+    metadata_section,
+};
+use crate::spec::{
+    CONTRACT_META_SECTION_NAME, CONTRACT_META_TOOLCHAIN_VERSION, MAX_INPUT_NAME_BYTES,
+    SPEC_SECTION_NAME, contract_meta_payload, contract_meta_section, function_entry,
+    spec_section,
 };
 use crate::val::{ValReturn, ValScalar, encode, render_return, render_type, unwrap_parameter,
     wrap_return};
@@ -53,6 +61,14 @@ pub const MAX_EXPORT_NAME_BYTES: usize = 32;
 
 /// The prefix the host reserves for itself.
 const RESERVED_EXPORT_PREFIX: &str = "__";
+
+/// The custom sections this pass writes, and so the ones an input may not
+/// already carry.
+const CONTRACT_SECTION_NAMES: [&str; 3] = [
+    SPEC_SECTION_NAME,
+    CONTRACT_META_SECTION_NAME,
+    ENV_META_SECTION_NAME,
+];
 
 /// The name of the standard WebAssembly name section.
 const NAME_SECTION_NAME: &str = "name";
@@ -268,8 +284,10 @@ impl<'a> ParsedModule<'a> {
                     pieces.push(Piece::Code);
                 }
                 Payload::CustomSection(reader) => {
-                    if reader.name() == META_SECTION_NAME {
-                        return Err(StellarAbiError::AlreadyAContract);
+                    if CONTRACT_SECTION_NAMES.contains(&reader.name()) {
+                        return Err(StellarAbiError::AlreadyAContract {
+                            section: reader.name().to_string(),
+                        });
                     }
                     if reader.name() == NAME_SECTION_NAME {
                         if name_section.is_some() {
@@ -402,7 +420,11 @@ fn read_u32_leb(bytes: &[u8], offset: &mut usize) -> Result<u32, StellarAbiError
     }
 }
 
-/// One wrapper to synthesize.
+/// One wrapper to synthesize, and the method the contract spec describes it as.
+///
+/// The spec entry is built from these same fields, so it describes exactly what
+/// the wrapper marshals: a parameter's scalar here is both the tag its unwrap
+/// demands and the type code the spec publishes for it.
 #[derive(Debug)]
 struct Wrapper {
     /// The contract method name, which the wrapper takes over from the function
@@ -415,12 +437,31 @@ struct Wrapper {
     index: u32,
     /// The type index of its `(i64 × n) -> i64` signature.
     type_index: u32,
-    params: Vec<ValScalar>,
+    params: Vec<WrapperParam>,
     ret: ValReturn,
+}
+
+/// One parameter of a wrapped method.
+#[derive(Debug)]
+struct WrapperParam {
+    /// The name the source declared, which the contract spec records and a
+    /// caller passes the argument by.
+    name: String,
+    /// The scalar the argument's `Val` must hold.
+    scalar: ValScalar,
 }
 
 /// Checks every exported function against its descriptor and lays out the
 /// wrappers, or returns the first refusal.
+///
+/// The rules run in one order, export by export: the method name, the
+/// parameter count, every parameter's type, the return, every parameter's
+/// name, and last whether the descriptor matches the module's own signature.
+/// Each rule is checked over all parameters before the next begins, so a
+/// descriptor breaking two of them is refused for the earlier rule wherever in
+/// the list the two parameters sit. The source-level gate in
+/// `inference-wasm-codegen` states the same rules in the same order, which is
+/// what lets one program earn the same refusal from both.
 fn plan_wrappers(
     module: &ParsedModule<'_>,
     exports: &[ExportSignature],
@@ -454,7 +495,7 @@ fn plan_wrappers(
             });
         }
 
-        let mut params = Vec::with_capacity(signature.params.len());
+        let mut scalars = Vec::with_capacity(signature.params.len());
         for (index, param) in signature.params.iter().enumerate() {
             let scalar = ValScalar::from_abi(&param.ty).ok_or_else(|| {
                 StellarAbiError::UnsupportedParameter {
@@ -463,7 +504,7 @@ fn plan_wrappers(
                     ty: render_type(&param.ty),
                 }
             })?;
-            params.push(scalar);
+            scalars.push(scalar);
         }
 
         if let AbiReturn::Sret(ty) = &signature.ret {
@@ -479,9 +520,10 @@ fn plan_wrappers(
             }
         })?;
 
-        check_signature_matches(module, entry, &params, ret)?;
+        let names = check_parameter_names(entry.name, &signature.params)?;
+        check_signature_matches(module, entry, &scalars, ret)?;
 
-        let arity = params.len();
+        let arity = scalars.len();
         let type_index = match module.val_wrapper_type(arity) {
             Some(existing) => existing,
             None => *wrapper_types.entry(arity).or_insert_with(|| {
@@ -498,6 +540,11 @@ fn plan_wrappers(
             .ok_or_else(|| StellarAbiError::MalformedModule {
                 reason: "the module exports more functions than an index can name".to_string(),
             })?;
+        let params = names
+            .into_iter()
+            .zip(scalars)
+            .map(|(name, scalar)| WrapperParam { name, scalar })
+            .collect();
         wrappers.push(Wrapper {
             export_name: entry.name.to_string(),
             inner: entry.index,
@@ -521,6 +568,56 @@ fn plan_wrappers(
     }
 
     Ok(wrappers)
+}
+
+/// Checks that every parameter has a name the contract spec can record, and
+/// returns the names in declaration order.
+///
+/// Two rules, each over every parameter before the next: a parameter written
+/// `_` has no name to record, and a name wider than the spec's input-name field
+/// cannot be recorded whole. Truncating it would not do either, because the
+/// name is also the `--<name>` flag `stellar contract invoke` passes the
+/// argument by, and a caller writes the name the author did.
+///
+/// An empty name counts as none. No identifier is empty, so only a hand-built
+/// descriptor carries one, and this pass is the net for exactly that caller:
+/// written out, it would be a zero-length input name, from which the CLI
+/// derives the flag `--`. Two parameters sharing a name are admitted:
+/// uniqueness is a producer invariant the type checker enforces with
+/// `DuplicateParameterName`, so a duplicate reaches this pass only from a
+/// hand-built descriptor, and this pass does not yet net it.
+fn check_parameter_names(
+    export: &str,
+    params: &[AbiParam],
+) -> Result<Vec<String>, StellarAbiError> {
+    let names = params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            param
+                .name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| StellarAbiError::UnnamedParameter {
+                    export: export.to_string(),
+                    position: index + 1,
+                })
+        })
+        .collect::<Result<Vec<&str>, _>>()?;
+
+    if let Some((index, name)) = names
+        .iter()
+        .enumerate()
+        .find(|(_, name)| name.len() > MAX_INPUT_NAME_BYTES)
+    {
+        return Err(StellarAbiError::ParameterNameTooLong {
+            export: export.to_string(),
+            position: index + 1,
+            name: (*name).to_string(),
+            len: name.len(),
+        });
+    }
+    Ok(names.into_iter().map(str::to_string).collect())
 }
 
 /// Checks that the module's own signature for an export is the one the
@@ -593,8 +690,13 @@ fn check_export_name(name: &str) -> Result<(), StellarAbiError> {
 }
 
 /// Rebuilds the module: every untouched section copied through by byte range,
-/// the four spliced sections rebuilt around their own entries, and the metadata
-/// section appended last.
+/// the four spliced sections rebuilt around their own entries, and three custom
+/// sections appended — `contractspecv0`, then `contractmetav0`, then the
+/// environment metadata section `contractenvmetav0` last.
+///
+/// The host imposes no order on custom sections; the environment metadata goes
+/// last so that every contract still ends with the exact bytes measured before
+/// the other two existed.
 fn assemble(wasm: &[u8], module: &ParsedModule<'_>, wrappers: &[Wrapper], protocol: u32) -> Vec<u8> {
     let type_body = rebuild_type_section(module, wrappers);
     let function_body = rebuild_function_section(module, wrappers);
@@ -603,7 +705,9 @@ fn assemble(wasm: &[u8], module: &ParsedModule<'_>, wrappers: &[Wrapper], protoc
     let name_body = module
         .name_section
         .map(|body| rebuild_name_section(body, wrappers));
-    let payload = metadata_payload(protocol, crate::meta::STELLAR_ENV_PRE_RELEASE);
+    let spec = spec_payload(wrappers);
+    let contract_meta = contract_meta_payload(CONTRACT_META_TOOLCHAIN_VERSION);
+    let env_meta = metadata_payload(protocol, STELLAR_ENV_PRE_RELEASE);
 
     let mut out = Module::new();
     for piece in &module.pieces {
@@ -645,8 +749,25 @@ fn assemble(wasm: &[u8], module: &ParsedModule<'_>, wrappers: &[Wrapper], protoc
             }
         }
     }
-    out.section(&metadata_section(&payload));
+    out.section(&spec_section(&spec));
+    out.section(&contract_meta_section(&contract_meta));
+    out.section(&metadata_section(&env_meta));
     out.finish()
+}
+
+/// The `contractspecv0` body: one function entry per wrapper, in the order the
+/// export section lists the methods.
+fn spec_payload(wrappers: &[Wrapper]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for wrapper in wrappers {
+        let inputs: Vec<(&str, ValScalar)> = wrapper
+            .params
+            .iter()
+            .map(|param| (param.name.as_str(), param.scalar))
+            .collect();
+        payload.extend(function_entry(&wrapper.export_name, &inputs, wrapper.ret));
+    }
+    payload
 }
 
 /// The type section with one `(i64 × n) -> i64` entry appended for every arity
@@ -711,9 +832,9 @@ fn rebuild_code_section(module: &ParsedModule<'_>, wrappers: &[Wrapper]) -> Vec<
 /// earlier parameters left on the stack are undisturbed.
 fn wrapper_body(wrapper: &Wrapper) -> Vec<u8> {
     let mut instructions: Vec<Instruction<'static>> = Vec::new();
-    for (local, scalar) in wrapper.params.iter().enumerate() {
+    for (local, param) in wrapper.params.iter().enumerate() {
         instructions.extend(unwrap_parameter(
-            *scalar,
+            param.scalar,
             u32::try_from(local).unwrap_or(u32::MAX),
         ));
     }
@@ -1029,19 +1150,24 @@ mod tests {
         }]
     }
 
-    /// A descriptor entry whose parameters have the given types, named `p0`,
-    /// `p1`, … in declaration order, the way a source that names every
-    /// parameter is described.
+    /// A descriptor entry whose parameters have the given types, named as
+    /// [`named_params`] names them.
     fn signature(name: &str, types: Vec<AbiType>, ret: AbiReturn) -> ExportSignature {
         ExportSignature {
             name: name.to_string(),
-            params: types
-                .into_iter()
-                .enumerate()
-                .map(|(index, ty)| AbiParam::named(format!("p{index}"), ty))
-                .collect(),
+            params: named_params(types),
             ret,
         }
+    }
+
+    /// Parameters of the given types, named `p0`, `p1`, … in declaration
+    /// order, the way a source that names every parameter is described.
+    fn named_params(types: Vec<AbiType>) -> Vec<AbiParam> {
+        types
+            .into_iter()
+            .enumerate()
+            .map(|(index, ty)| AbiParam::named(format!("p{index}"), ty))
+            .collect()
     }
 
     /// Every section as `(id, custom-section name, body bytes)`, in order. The
@@ -1200,7 +1326,8 @@ mod tests {
     /// The criterion, stated so that it is not self-contradictory: the rewrite
     /// splices into the type, function, code and export sections, so those four
     /// cannot be byte-identical. Everything else must be, and the only new
-    /// section is the metadata one at the end.
+    /// sections are the three contract custom sections at the end, the
+    /// environment metadata one last.
     #[test]
     fn every_section_the_rewrite_does_not_splice_is_byte_identical() {
         let input = add_fixture().build();
@@ -1216,9 +1343,18 @@ mod tests {
             .filter(|(id, ..)| !spliced.contains(id))
             .collect();
 
-        let last = after.pop().expect("the metadata section is appended");
-        assert_eq!(last.0, CUSTOM_SECTION_ID);
-        assert_eq!(last.1, "contractenvmetav0");
+        let appended = after.split_off(after.len() - 3);
+        assert_eq!(
+            appended
+                .iter()
+                .map(|(id, name, _)| (*id, name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (CUSTOM_SECTION_ID, "contractspecv0"),
+                (CUSTOM_SECTION_ID, "contractmetav0"),
+                (CUSTOM_SECTION_ID, "contractenvmetav0"),
+            ]
+        );
         assert_eq!(before, after);
     }
 
@@ -1454,6 +1590,416 @@ mod tests {
             section_body(&output, CUSTOM_SECTION_ID, "contractenvmetav0")[18..],
             [0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0]
         );
+    }
+
+    /// The names of every custom section of `wasm`, in order.
+    fn custom_section_names(wasm: &[u8]) -> Vec<String> {
+        sections(wasm)
+            .into_iter()
+            .filter(|(id, ..)| *id == CUSTOM_SECTION_ID)
+            .map(|(_, name, _)| name)
+            .collect()
+    }
+
+    /// The three sections a contract carries go after every section the input
+    /// had, the environment metadata one last. A name section and the
+    /// overflow-guard record are in the fixture so that "after every section
+    /// the input had" is measured against custom sections too.
+    #[test]
+    fn the_contract_sections_are_appended_spec_then_meta_then_environment_metadata() {
+        let mut fixture = add_fixture();
+        fixture.function_names = vec![(0, "add")];
+        fixture.checked = Some(vec![1, 1, 0]);
+        let output = rewrite(&fixture.build(), &add_descriptor(), STELLAR_ENV_PROTOCOL)
+            .expect("rewrites");
+
+        assert_eq!(
+            custom_section_names(&output),
+            vec![
+                "name",
+                "inference.checked",
+                SPEC_SECTION_NAME,
+                CONTRACT_META_SECTION_NAME,
+                "contractenvmetav0",
+            ]
+        );
+    }
+
+    /// The reference contract's method, described by the sixty bytes derived
+    /// by hand from the XDR definitions, reached through the whole rewrite.
+    #[test]
+    fn the_spec_section_describes_add_as_the_sixty_derived_bytes() {
+        let output = rewrite(&add_fixture().build(), &add_descriptor(), STELLAR_ENV_PROTOCOL)
+            .expect("rewrites");
+        let spec = section_body(&output, CUSTOM_SECTION_ID, "contractspecv0");
+        assert_eq!(
+            hex(&spec[15..]),
+            "00 00 00 00 00 00 00 00 00 00 00 03 61 64 64 00 00 00 00 02 \
+             00 00 00 00 00 00 00 01 61 00 00 00 00 00 00 04 \
+             00 00 00 00 00 00 00 01 62 00 00 00 00 00 00 04 \
+             00 00 00 01 00 00 00 04"
+        );
+        assert_eq!(&spec[..15], b"\x0econtractspecv0", "the body follows the section name");
+    }
+
+    /// A method returning nothing is described with an empty outputs vector.
+    /// Its wrapper still hands back a `Void` word — the Val ABI and the spec say
+    /// "nothing" in different ways, and the spec's way is no output at all.
+    #[test]
+    fn a_method_returning_nothing_is_described_with_no_outputs() {
+        let fixture = Fixture {
+            types: vec![(Vec::new(), Vec::new())],
+            functions: vec![0],
+            bodies: vec![vec![Instruction::End]],
+            exports: vec![("tick", ExportKind::Func, 0)],
+            ..Fixture::default()
+        };
+        let output = rewrite(
+            &fixture.build(),
+            &[signature("tick", Vec::new(), AbiReturn::Unit)],
+            STELLAR_ENV_PROTOCOL,
+        )
+        .expect("rewrites");
+        assert_eq!(
+            hex(&section_body(&output, CUSTOM_SECTION_ID, "contractspecv0")[15..]),
+            "00 00 00 00 00 00 00 00 00 00 00 04 74 69 63 6b 00 00 00 00 00 00 00 00"
+        );
+    }
+
+    /// Two methods, two entries, in the order the export section lists them —
+    /// not the order the descriptor happens to — and nothing between them: the
+    /// section body is their concatenation. `one(p0: i32) -> i32` is 44 bytes
+    /// and `two(p0: bool)` 40, each written out as derived from the XDR rules.
+    #[test]
+    fn the_spec_section_lists_every_method_in_export_order() {
+        let fixture = Fixture {
+            types: vec![
+                (vec![ValType::I32], vec![ValType::I32]),
+                (vec![ValType::I32], Vec::new()),
+            ],
+            functions: vec![0, 1],
+            bodies: vec![
+                vec![Instruction::LocalGet(0), Instruction::End],
+                vec![Instruction::End],
+            ],
+            exports: vec![("one", ExportKind::Func, 0), ("two", ExportKind::Func, 1)],
+            ..Fixture::default()
+        };
+        let output = rewrite(
+            &fixture.build(),
+            &[
+                signature("two", vec![AbiType::Bool], AbiReturn::Unit),
+                signature("one", vec![AbiType::I32], AbiReturn::Scalar(AbiType::I32)),
+            ],
+            STELLAR_ENV_PROTOCOL,
+        )
+        .expect("rewrites");
+
+        assert_eq!(
+            hex(&section_body(&output, CUSTOM_SECTION_ID, "contractspecv0")[15..]),
+            "00 00 00 00 00 00 00 00 00 00 00 03 6f 6e 65 00 00 00 00 01 \
+             00 00 00 00 00 00 00 02 70 30 00 00 00 00 00 05 \
+             00 00 00 01 00 00 00 05 \
+             00 00 00 00 00 00 00 00 00 00 00 03 74 77 6f 00 00 00 00 01 \
+             00 00 00 00 00 00 00 02 70 30 00 00 00 00 00 01 \
+             00 00 00 00"
+        );
+    }
+
+    /// A parameter name reaches the spec exactly as the descriptor spells it,
+    /// a leading underscore included.
+    #[test]
+    fn a_parameter_name_reaches_the_spec_as_spelled() {
+        let output = rewrite_one(
+            "f",
+            vec![AbiParam::named("_amount", AbiType::U32)],
+            AbiReturn::Scalar(AbiType::U32),
+        )
+        .expect("rewrites");
+        let spec = section_body(&output, CUSTOM_SECTION_ID, "contractspecv0");
+        assert!(
+            spec.windows(12)
+                .any(|window| window == b"\0\0\0\x07_amount\0"),
+            "{}",
+            hex(&spec)
+        );
+    }
+
+    /// The meta section's one entry: kind zero, the key `infver`, and the
+    /// toolchain's own version — read back from the bytes rather than compared
+    /// with a pinned version, so a version bump moves nothing here.
+    #[test]
+    fn the_contract_meta_section_carries_the_toolchain_version() {
+        let output = rewrite(&add_fixture().build(), &add_descriptor(), STELLAR_ENV_PROTOCOL)
+            .expect("rewrites");
+        let body = section_body(&output, CUSTOM_SECTION_ID, "contractmetav0");
+        let entry = &body[15..];
+
+        assert_eq!(entry[..4], [0, 0, 0, 0], "SC_META_V0");
+        assert_eq!(&entry[4..16], b"\0\0\0\x06infver\0\0");
+        let len = u32::from_be_bytes(entry[16..20].try_into().expect("four bytes")) as usize;
+        assert_eq!(
+            std::str::from_utf8(&entry[20..20 + len]),
+            Ok(CONTRACT_META_TOOLCHAIN_VERSION)
+        );
+        assert!(entry[20 + len..].iter().all(|byte| *byte == 0));
+        assert_eq!(entry.len() % 4, 0);
+    }
+
+    /// A one-method module whose function takes one `i32` per described
+    /// parameter and returns an `i32`, rewritten against `params` and `ret`.
+    fn rewrite_one(
+        name: &'static str,
+        params: Vec<AbiParam>,
+        ret: AbiReturn,
+    ) -> Result<Vec<u8>, StellarAbiError> {
+        let fixture = Fixture {
+            types: vec![(vec![ValType::I32; params.len()], vec![ValType::I32])],
+            functions: vec![0],
+            bodies: vec![vec![Instruction::I32Const(0), Instruction::End]],
+            exports: vec![(name, ExportKind::Func, 0)],
+            ..Fixture::default()
+        };
+        rewrite(
+            &fixture.build(),
+            &[ExportSignature {
+                name: name.to_string(),
+                params,
+                ret,
+            }],
+            STELLAR_ENV_PROTOCOL,
+        )
+    }
+
+    /// Thirty bytes is the width of the spec's input-name field and is
+    /// accepted — and written whole; thirty-one is refused, naming the
+    /// parameter by its position and the length it has.
+    #[test]
+    fn a_parameter_name_of_thirty_bytes_is_accepted_and_thirty_one_is_not() {
+        assert_eq!(MAX_INPUT_NAME_BYTES, 30, "the XDR bound, `string name<30>`");
+
+        let widest = "n".repeat(30);
+        let output = rewrite_one(
+            "f",
+            vec![AbiParam::named(widest.clone(), AbiType::U32)],
+            AbiReturn::Scalar(AbiType::U32),
+        )
+        .expect("a 30-byte name is accepted");
+        let mut recorded = vec![0, 0, 0, 30];
+        recorded.extend_from_slice(widest.as_bytes());
+        recorded.extend_from_slice(&[0, 0, 0, 0, 0, 4]);
+        assert!(
+            section_body(&output, CUSTOM_SECTION_ID, "contractspecv0")
+                .windows(recorded.len())
+                .any(|window| window == recorded),
+            "the 30-byte name is written whole, padded to 32, then its type code"
+        );
+
+        let too_wide = "n".repeat(31);
+        assert_eq!(
+            rewrite_one(
+                "f",
+                vec![
+                    AbiParam::named("a", AbiType::U32),
+                    AbiParam::named(too_wide.clone(), AbiType::U32),
+                ],
+                AbiReturn::Scalar(AbiType::U32),
+            ),
+            Err(StellarAbiError::ParameterNameTooLong {
+                export: "f".to_string(),
+                position: 2,
+                name: too_wide,
+                len: 31,
+            })
+        );
+    }
+
+    #[test]
+    fn an_unnamed_parameter_is_refused_by_position() {
+        assert_eq!(
+            rewrite_one(
+                "f",
+                vec![
+                    AbiParam::named("a", AbiType::U32),
+                    AbiParam::unnamed(AbiType::Bool),
+                ],
+                AbiReturn::Scalar(AbiType::U32),
+            ),
+            Err(StellarAbiError::UnnamedParameter {
+                export: "f".to_string(),
+                position: 2,
+            })
+        );
+    }
+
+    /// An empty name is no name. Only a hand-built descriptor can carry one,
+    /// and written out it would give a caller the flag `--`.
+    #[test]
+    fn an_empty_parameter_name_is_refused_as_unnamed() {
+        assert_eq!(
+            rewrite_one(
+                "f",
+                vec![
+                    AbiParam::named("a", AbiType::U32),
+                    AbiParam::named("", AbiType::U32),
+                ],
+                AbiReturn::Scalar(AbiType::U32),
+            ),
+            Err(StellarAbiError::UnnamedParameter {
+                export: "f".to_string(),
+                position: 2,
+            })
+        );
+    }
+
+    /// A one-method descriptor that breaks two rules, and the refusal for the
+    /// earlier of them.
+    type TwoRuleCase = (&'static str, Vec<AbiParam>, AbiReturn, StellarAbiError);
+
+    /// Rewrites each case's descriptor through [`rewrite_one`] and requires the
+    /// refusal the case names.
+    fn assert_each_is_refused_for_the_earlier_rule(cases: Vec<TwoRuleCase>) {
+        for (name, params, ret, expected) in cases {
+            let described = format!("{params:?} -> {ret:?}");
+            assert_eq!(rewrite_one(name, params, ret), Err(expected), "{name}: {described}");
+        }
+    }
+
+    /// The four rules that run before any parameter's name — the method name,
+    /// the parameter count, every parameter's type, the return — each row
+    /// breaking two that are adjacent in that order. With the rows of the test
+    /// below, every two rules adjacent in the whole order share a row, so a
+    /// check moved earlier or later changes which of the two some row reports.
+    #[test]
+    fn the_method_name_arity_types_and_return_are_checked_in_that_order() {
+        let mut last_is_u64 = vec![AbiType::U32; 33];
+        last_is_u64[32] = AbiType::U64;
+        assert_each_is_refused_for_the_earlier_rule(vec![
+            (
+                "__reserved",
+                named_params(vec![AbiType::U32; 33]),
+                AbiReturn::Scalar(AbiType::U32),
+                StellarAbiError::ReservedExportName {
+                    export: "__reserved".to_string(),
+                },
+            ),
+            (
+                "wide",
+                named_params(last_is_u64),
+                AbiReturn::Scalar(AbiType::U32),
+                StellarAbiError::TooManyParameters {
+                    export: "wide".to_string(),
+                    count: 33,
+                },
+            ),
+            (
+                "f",
+                named_params(vec![AbiType::U64]),
+                AbiReturn::Scalar(AbiType::U64),
+                StellarAbiError::UnsupportedParameter {
+                    export: "f".to_string(),
+                    position: 1,
+                    ty: "u64".to_string(),
+                },
+            ),
+        ]);
+    }
+
+    /// Descriptors that break two rules at once, each refused for the earlier
+    /// rule: the method name, the parameter count, every parameter's type, the
+    /// return, every parameter's name — `_` before length — and the module
+    /// signature last. Each row here pairs a parameter-name rule with one of
+    /// the rules around it, the signature with each of the two, so neither name
+    /// rule can move past it; the test above pairs the four that run before
+    /// them.
+    #[test]
+    fn the_refusal_order_is_name_arity_types_return_parameter_names_then_signature() {
+        let too_wide = "n".repeat(31);
+        assert_each_is_refused_for_the_earlier_rule(vec![
+            (
+                "__reserved",
+                vec![AbiParam::unnamed(AbiType::U32)],
+                AbiReturn::Scalar(AbiType::U32),
+                StellarAbiError::ReservedExportName {
+                    export: "__reserved".to_string(),
+                },
+            ),
+            (
+                "wide",
+                vec![AbiParam::unnamed(AbiType::U32); 33],
+                AbiReturn::Scalar(AbiType::U32),
+                StellarAbiError::TooManyParameters {
+                    export: "wide".to_string(),
+                    count: 33,
+                },
+            ),
+            (
+                "f",
+                vec![
+                    AbiParam::unnamed(AbiType::U32),
+                    AbiParam::named("amount", AbiType::U64),
+                ],
+                AbiReturn::Scalar(AbiType::U32),
+                StellarAbiError::UnsupportedParameter {
+                    export: "f".to_string(),
+                    position: 2,
+                    ty: "u64".to_string(),
+                },
+            ),
+            (
+                "f",
+                vec![AbiParam::unnamed(AbiType::U32)],
+                AbiReturn::Scalar(AbiType::U64),
+                StellarAbiError::UnsupportedReturn {
+                    export: "f".to_string(),
+                    ty: "u64".to_string(),
+                },
+            ),
+            (
+                "f",
+                vec![
+                    AbiParam::unnamed(AbiType::U32),
+                    AbiParam::named(too_wide.clone(), AbiType::U32),
+                ],
+                AbiReturn::Scalar(AbiType::U32),
+                StellarAbiError::UnnamedParameter {
+                    export: "f".to_string(),
+                    position: 1,
+                },
+            ),
+            (
+                "f",
+                vec![
+                    AbiParam::named(too_wide.clone(), AbiType::U32),
+                    AbiParam::unnamed(AbiType::U32),
+                ],
+                AbiReturn::Scalar(AbiType::U32),
+                StellarAbiError::UnnamedParameter {
+                    export: "f".to_string(),
+                    position: 2,
+                },
+            ),
+            (
+                "f",
+                vec![AbiParam::unnamed(AbiType::U32)],
+                AbiReturn::Unit,
+                StellarAbiError::UnnamedParameter {
+                    export: "f".to_string(),
+                    position: 1,
+                },
+            ),
+            (
+                "f",
+                vec![AbiParam::named(too_wide.clone(), AbiType::U32)],
+                AbiReturn::Unit,
+                StellarAbiError::ParameterNameTooLong {
+                    export: "f".to_string(),
+                    position: 1,
+                    name: too_wide,
+                    len: 31,
+                },
+            ),
+        ]);
     }
 
     /// The overflow-guard record is a list of raw function indices this crate
@@ -2330,15 +2876,54 @@ mod tests {
     }
 
     /// Rewriting a contract again would wrap the wrappers, so the second pass
-    /// is refused rather than performed.
+    /// is refused rather than performed — for the first of the three sections
+    /// the parse meets, which is the spec section.
     #[test]
     fn a_module_that_is_already_a_contract_is_refused() {
         let input = add_fixture().build();
         let once = rewrite(&input, &add_descriptor(), STELLAR_ENV_PROTOCOL).expect("rewrites");
         assert_eq!(
             rewrite(&once, &add_descriptor(), STELLAR_ENV_PROTOCOL),
-            Err(StellarAbiError::AlreadyAContract)
+            Err(StellarAbiError::AlreadyAContract {
+                section: "contractspecv0".to_string(),
+            })
         );
+    }
+
+    /// Each of the three sections is refused on its own, and the refusal names
+    /// the one it found. A second `contractspecv0` is the case with teeth: a
+    /// reader that takes the first one it meets, as `soroban-spec`'s does, would
+    /// invoke a module carrying a stale spec ahead of the rewrite's against the
+    /// stale one.
+    #[test]
+    fn an_input_carrying_any_contract_section_is_refused_naming_it() {
+        for section in ["contractspecv0", "contractmetav0", "contractenvmetav0"] {
+            let mut input = add_fixture().build();
+            let carried = {
+                let mut module = Module::new();
+                module.section(&CustomSection {
+                    name: section.into(),
+                    data: [0u8, 0, 0, 0].as_slice().into(),
+                });
+                module.finish()
+            };
+            input.extend_from_slice(&carried[8..]);
+
+            let refusal = rewrite(&input, &add_descriptor(), STELLAR_ENV_PROTOCOL);
+            assert_eq!(
+                refusal,
+                Err(StellarAbiError::AlreadyAContract {
+                    section: section.to_string(),
+                })
+            );
+            assert!(
+                refusal
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&format!("`{section}`")),
+                "the message must name the section"
+            );
+        }
     }
 
     #[test]
@@ -2426,6 +3011,16 @@ mod tests {
                 expected: "(i32)".to_string(),
                 found: "(i32) -> i32".to_string(),
             },
+            StellarAbiError::UnnamedParameter {
+                export: EXPORT.to_string(),
+                position: 1,
+            },
+            StellarAbiError::ParameterNameTooLong {
+                export: EXPORT.to_string(),
+                position: 1,
+                name: "n".repeat(31),
+                len: 31,
+            },
         ];
         for refusal in refusals {
             let message = refusal.to_string();
@@ -2433,7 +3028,7 @@ mod tests {
         }
     }
 
-    /// Two messages in full. A `#[error]` literal split across source lines
+    /// Five messages in full. A `#[error]` literal split across source lines
     /// keeps its indentation unless every break carries a continuation, and a
     /// substring assertion cannot see the runs of spaces that leaves behind —
     /// so the rendered text is compared whole.
@@ -2457,6 +3052,39 @@ mod tests {
             .to_string(),
             "the export `x` is 33 bytes long; a contract method name is at most 32 bytes, and a \
              longer one cannot be named by any caller"
+        );
+        assert_eq!(
+            StellarAbiError::UnnamedParameter {
+                export: "transfer".to_string(),
+                position: 2,
+            }
+            .to_string(),
+            "the export `transfer` leaves parameter 2 unnamed, written `_`; a contract method's \
+             parameters are named, because `stellar contract invoke` passes each one as \
+             `--<name>` and the contract spec section records that name, so name the parameter"
+        );
+        assert_eq!(
+            StellarAbiError::ParameterNameTooLong {
+                export: "transfer".to_string(),
+                position: 1,
+                name: "n".repeat(31),
+                len: 31,
+            }
+            .to_string(),
+            format!(
+                "the export `transfer` names parameter 1 `{}`, which is 31 bytes long; a \
+                 contract method's parameter name is at most 30 bytes, the width of the contract \
+                 spec section's input-name field, so shorten it",
+                "n".repeat(31)
+            )
+        );
+        assert_eq!(
+            StellarAbiError::AlreadyAContract {
+                section: "contractmetav0".to_string(),
+            }
+            .to_string(),
+            "the module already carries a `contractmetav0` section, which this pass writes, so \
+             it has already been made a contract"
         );
     }
 }
