@@ -455,13 +455,14 @@ fn plan_wrappers(
         }
 
         let mut params = Vec::with_capacity(signature.params.len());
-        for (index, ty) in signature.params.iter().enumerate() {
-            let scalar =
-                ValScalar::from_abi(ty).ok_or_else(|| StellarAbiError::UnsupportedParameter {
+        for (index, param) in signature.params.iter().enumerate() {
+            let scalar = ValScalar::from_abi(&param.ty).ok_or_else(|| {
+                StellarAbiError::UnsupportedParameter {
                     export: entry.name.to_string(),
                     position: index + 1,
-                    ty: render_type(ty),
-                })?;
+                    ty: render_type(&param.ty),
+                }
+            })?;
             params.push(scalar);
         }
 
@@ -859,7 +860,7 @@ fn wrapper_name_entries(wrappers: &[Wrapper]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inference_wasm_codegen::AbiType;
+    use inference_wasm_codegen::{AbiParam, AbiType};
     use wasm_encoder::{
         CodeSection, ConstExpr, CustomSection, EntityType, Function, FunctionSection,
         GlobalSection, GlobalType, ImportSection, IndirectNameMap, MemorySection, MemoryType,
@@ -1020,15 +1021,25 @@ mod tests {
     fn add_descriptor() -> Vec<ExportSignature> {
         vec![ExportSignature {
             name: "add".to_string(),
-            params: vec![AbiType::U32, AbiType::U32],
+            params: vec![
+                AbiParam::named("a", AbiType::U32),
+                AbiParam::named("b", AbiType::U32),
+            ],
             ret: AbiReturn::Scalar(AbiType::U32),
         }]
     }
 
-    fn signature(name: &str, params: Vec<AbiType>, ret: AbiReturn) -> ExportSignature {
+    /// A descriptor entry whose parameters have the given types, named `p0`,
+    /// `p1`, … in declaration order, the way a source that names every
+    /// parameter is described.
+    fn signature(name: &str, types: Vec<AbiType>, ret: AbiReturn) -> ExportSignature {
         ExportSignature {
             name: name.to_string(),
-            params,
+            params: types
+                .into_iter()
+                .enumerate()
+                .map(|(index, ty)| AbiParam::named(format!("p{index}"), ty))
+                .collect(),
             ret,
         }
     }

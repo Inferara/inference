@@ -15,6 +15,13 @@
 //! a spec-inner function are all absent, and the rest follow the order of the
 //! function exports in the export section, which also carries `memory` and
 //! `__stack_pointer` for a module with memory.
+//!
+//! Each parameter also carries the name the source gave it, since a contract
+//! spec, for one, calls an input by its name. The module's `name` custom section
+//! records a named parameter only as optional debug data, keyed by function and
+//! local index, which an optimizer may strip and which records nothing for `_`;
+//! the descriptor is the record a consumer reads. A parameter written `_` is
+//! recorded as having none, not given one.
 
 #[cfg(test)]
 mod export_abi_descriptor_tests {
@@ -24,7 +31,7 @@ mod export_abi_descriptor_tests {
     };
     use inf_wasmparser::{ExternalKind, Parser, Payload};
     use inference_wasm_codegen::{
-        AbiReturn, AbiType, CodegenOutput, CompilationMode, ExportSignature, Target,
+        AbiParam, AbiReturn, AbiType, CodegenOutput, CompilationMode, ExportSignature, Target,
     };
 
     /// The exported function names the emitted module carries, in export-section
@@ -152,8 +159,12 @@ pub fn k(n: u64) -> u64 {
 
         assert_eq!(
             signatures[0].params,
-            vec![AbiType::U32, AbiType::I32, AbiType::Bool],
-            "three parameters that all lower to `i32` keep their source types"
+            vec![
+                AbiParam::named("a", AbiType::U32),
+                AbiParam::named("b", AbiType::I32),
+                AbiParam::named("c", AbiType::Bool),
+            ],
+            "three parameters that all lower to `i32` keep their source types and names"
         );
         assert_eq!(signatures[0].ret, AbiReturn::Scalar(AbiType::U32));
 
@@ -162,9 +173,12 @@ pub fn k(n: u64) -> u64 {
 
         assert_eq!(
             signatures[2].params,
-            vec![AbiType::Struct {
-                name: "Point".to_string()
-            }],
+            vec![AbiParam::named(
+                "s",
+                AbiType::Struct {
+                    name: "Point".to_string()
+                }
+            )],
             "the sret pointer is not a declared parameter, so `h` has exactly one"
         );
         assert_eq!(
@@ -175,7 +189,7 @@ pub fn k(n: u64) -> u64 {
             }),
         );
 
-        assert_eq!(signatures[3].params, vec![AbiType::U64]);
+        assert_eq!(signatures[3].params, vec![AbiParam::named("n", AbiType::U64)]);
         assert_eq!(signatures[3].ret, AbiReturn::Scalar(AbiType::U64));
     }
 
@@ -263,7 +277,12 @@ pub fn wide(a: u32, b: i32, c: u64, d: i64) -> i64 {
 
         assert_eq!(
             signature(&output, "narrow").params,
-            vec![AbiType::U8, AbiType::I8, AbiType::U16, AbiType::I16],
+            vec![
+                AbiParam::named("a", AbiType::U8),
+                AbiParam::named("b", AbiType::I8),
+                AbiParam::named("c", AbiType::U16),
+                AbiParam::named("d", AbiType::I16),
+            ],
         );
         assert_eq!(
             signature(&output, "narrow").ret,
@@ -271,7 +290,12 @@ pub fn wide(a: u32, b: i32, c: u64, d: i64) -> i64 {
         );
         assert_eq!(
             signature(&output, "wide").params,
-            vec![AbiType::U32, AbiType::I32, AbiType::U64, AbiType::I64],
+            vec![
+                AbiParam::named("a", AbiType::U32),
+                AbiParam::named("b", AbiType::I32),
+                AbiParam::named("c", AbiType::U64),
+                AbiParam::named("d", AbiType::I64),
+            ],
         );
         assert_eq!(
             signature(&output, "wide").ret,
@@ -300,10 +324,13 @@ pub fn pick(c: Color, n: i32) -> Color {
         assert_eq!(
             pick.params,
             vec![
-                AbiType::Enum {
-                    name: "Color".to_string()
-                },
-                AbiType::I32,
+                AbiParam::named(
+                    "c",
+                    AbiType::Enum {
+                        name: "Color".to_string()
+                    }
+                ),
+                AbiParam::named("n", AbiType::I32),
             ],
         );
         assert_eq!(
@@ -360,20 +387,24 @@ pub fn first(g: [[i32; 2]; 3]) -> i32 {
 
         assert_eq!(
             signature(&output, "first").params,
-            vec![AbiType::Array {
-                elem: Box::new(AbiType::Array {
-                    elem: Box::new(AbiType::I32),
-                    len: 2,
-                }),
-                len: 3,
-            }],
+            vec![AbiParam::named(
+                "g",
+                AbiType::Array {
+                    elem: Box::new(AbiType::Array {
+                        elem: Box::new(AbiType::I32),
+                        len: 2,
+                    }),
+                    len: 3,
+                }
+            )],
         );
         assert_eq!(exported_function_arity(output.wasm(), "first"), (1, 1));
     }
 
     /// A parameter written `_: T` binds no name but still occupies an ABI slot:
     /// the caller pushes an argument for it. Dropping it from the descriptor
-    /// would shift every later parameter.
+    /// would shift every later parameter, and so would giving the later ones
+    /// its position in the naming.
     #[test]
     fn an_unnamed_parameter_occupies_a_described_slot() {
         let source = "\
@@ -388,9 +419,74 @@ pub fn ignore_first(_: u32, b: bool) -> i32 {
 
         assert_eq!(
             signature(&output, "ignore_first").params,
-            vec![AbiType::U32, AbiType::Bool],
+            vec![
+                AbiParam::unnamed(AbiType::U32),
+                AbiParam::named("b", AbiType::Bool),
+            ],
         );
         assert_eq!(exported_function_arity(output.wasm(), "ignore_first"), (2, 1));
+    }
+
+    /// Every way a function with a body can write a parameter, and the name
+    /// each one records: `_` records none, and a named parameter records its
+    /// spelling exactly — a leading underscore kept, a `mut` dropped, a name
+    /// longer than a Stellar contract spec admits kept whole, and the same name
+    /// in two exports recorded in each. The descriptor states what the source
+    /// wrote at every target; what a name is allowed to be is a target's
+    /// question.
+    #[test]
+    fn each_parameter_records_the_name_its_declaration_spells() {
+        let source = "\
+pub fn f(_: u32, b: i32) -> u32 {
+    return 0;
+}
+
+pub fn g(_: bool, _: u32, _kept: i32, mut counted: u32) -> u32 {
+    counted = counted + 1;
+    return counted;
+}
+
+pub fn h(forty_byte_parameter_name_recorded_whole: u32, b: bool) -> u32 {
+    return forty_byte_parameter_name_recorded_whole;
+}
+";
+        let output = codegen_output(source);
+
+        assert_eq!(
+            signature(&output, "f").params,
+            vec![
+                AbiParam::unnamed(AbiType::U32),
+                AbiParam::named("b", AbiType::I32),
+            ],
+        );
+        assert_eq!(
+            signature(&output, "g").params,
+            vec![
+                AbiParam::unnamed(AbiType::Bool),
+                AbiParam::unnamed(AbiType::U32),
+                AbiParam::named("_kept", AbiType::I32),
+                AbiParam::named("counted", AbiType::U32),
+            ],
+            "two `_` parameters are two unnamed slots, `_kept` is a name, and \
+             `mut` is not part of one"
+        );
+        let long = "forty_byte_parameter_name_recorded_whole";
+        assert_eq!(long.len(), 40, "the fixture's name is the length it claims");
+        assert_eq!(
+            signature(&output, "h").params,
+            vec![
+                AbiParam::named(long, AbiType::U32),
+                AbiParam::named("b", AbiType::Bool),
+            ],
+            "a name is recorded whole, and `b` is recorded again in its own export"
+        );
+        for name in ["f", "g", "h"] {
+            assert_eq!(
+                exported_function_arity(output.wasm(), name).0,
+                signature(&output, name).params.len(),
+                "`{name}`: a named parameter and an unnamed one each occupy one slot"
+            );
+        }
     }
 
     /// `main` is exported like any other entry-file `pub fn`, so it is described
@@ -461,8 +557,8 @@ pub fn entry(a: i32) -> i32 {
 }
 ";
         let math = "\
-pub fn double(a: i32) -> i32 {
-    return a * 2;
+pub fn double(n: i32) -> i32 {
+    return n * 2;
 }
 ";
         let output = codegen_output_multi_file_no_analysis(&[
@@ -475,6 +571,11 @@ pub fn double(a: i32) -> i32 {
             names_of(&output),
             exported_function_names(output.wasm()),
             "the descriptor and the export section agree across files"
+        );
+        assert_eq!(
+            signature(&output, "entry").params,
+            vec![AbiParam::named("a", AbiType::I32)],
+            "the entry export's name comes from its own declaration"
         );
     }
 
@@ -506,15 +607,21 @@ pub fn by_qualified_path(p: geom::Point) -> i32 {
 
         assert_eq!(
             signature(&output, "by_bare_name").params,
-            vec![AbiType::Enum {
-                name: "Level".to_string()
-            }],
+            vec![AbiParam::named(
+                "l",
+                AbiType::Enum {
+                    name: "Level".to_string()
+                }
+            )],
         );
         assert_eq!(
             signature(&output, "by_qualified_path").params,
-            vec![AbiType::Struct {
-                name: "geom::Point".to_string()
-            }],
+            vec![AbiParam::named(
+                "p",
+                AbiType::Struct {
+                    name: "geom::Point".to_string()
+                }
+            )],
             "a qualified annotation records the path it was written with"
         );
     }

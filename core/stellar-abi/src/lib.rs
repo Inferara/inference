@@ -98,13 +98,16 @@
 //!
 //! ```no_run
 //! use inference_stellar_abi::{STELLAR_ENV_PROTOCOL, rewrite};
-//! use inference_wasm_codegen::{AbiReturn, AbiType, ExportSignature};
+//! use inference_wasm_codegen::{AbiParam, AbiReturn, AbiType, ExportSignature};
 //!
 //! # fn main() -> Result<(), inference_stellar_abi::StellarAbiError> {
 //! # let linked: Vec<u8> = Vec::new();
 //! let exports = vec![ExportSignature {
 //!     name: "add".to_string(),
-//!     params: vec![AbiType::U32, AbiType::U32],
+//!     params: vec![
+//!         AbiParam::named("a", AbiType::U32),
+//!         AbiParam::named("b", AbiType::U32),
+//!     ],
 //!     ret: AbiReturn::Scalar(AbiType::U32),
 //! }];
 //! let contract = rewrite(&linked, &exports, STELLAR_ENV_PROTOCOL)?;
