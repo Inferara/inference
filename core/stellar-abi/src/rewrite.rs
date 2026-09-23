@@ -159,7 +159,8 @@ struct ParsedModule<'a> {
     /// every module that gets past [`ParsedModule::parse`], which refuses an
     /// import — but the two places that read it, [`ParsedModule::signature_of`]
     /// and the wrapper index in [`plan_wrappers`], are the only two in this
-    /// crate, and both are correct for a nonzero base the day host imports land.
+    /// crate, and both are correct for a nonzero base the day this target admits
+    /// host imports.
     imported_functions: u32,
     exports: Vec<ExportEntry<'a>>,
     /// The parameter and result types of every type-section entry, in index
@@ -1813,8 +1814,8 @@ mod tests {
     /// index against it is reachable through `rewrite`, and both are pinned
     /// here instead. WebAssembly puts imports first in the function index
     /// space, so a lookup that ignored the base would read the wrong function
-    /// the day host imports land, and would still validate whenever the arities
-    /// happened to line up.
+    /// the day this target admits host imports, and would still validate
+    /// whenever the arities happened to line up.
     #[test]
     fn a_signature_lookup_is_measured_from_the_import_base() {
         let module = ParsedModule {
