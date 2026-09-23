@@ -1748,7 +1748,11 @@ fn run() {
             // pre-link map is stale, so defer entirely to the embedded post-link
             // section (an empty explicit map makes the translator adopt it).
             // With no externals the merge is a byte-identical pass-through and
-            // the explicit map still cross-checks against the embedded one.
+            // the explicit map still cross-checks against the embedded one. A
+            // program binding a host import has externs and no external module,
+            // but it never reaches this block: the proof-artifact refusal runs
+            // before external resolution, so `external_modules` is empty here
+            // only for a program that binds no extern at all.
             let empty_spec_funcs = inference::FxHashMap::default();
             let explicit_spec_funcs = if external_modules.is_empty() {
                 codegen_output.spec_func_indices_by_spec()

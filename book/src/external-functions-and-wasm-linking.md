@@ -215,7 +215,12 @@ The call site is still held to it. A047 requires a compound argument passed to a
 linked external and exactly as an ordinary assignment through that binding
 would. So the *caller* is constrained by the declaration; only the declaration
 itself is unverified, and the write — when it happens — is performed by code
-outside the artifact and outside anything the proof translation describes.
+outside the artifact and outside anything the proof translation describes. A
+proof build that admitted host imports would therefore have to carry a `mut`
+host parameter as a frame condition on the call or refuse it, since nothing in
+the build derives a write set to check the declaration against; as it is, a
+proof build refuses any program that binds a host import (see [No contract
+travels with a host import](#no-contract-travels-with-a-host-import)).
 
 ### A bound host import ships whether or not it is called
 
@@ -464,13 +469,44 @@ linker.func_wrap("env", "clock_ms", || -> i64 { /* read the mission clock */ 0 }
 let instance = linker.instantiate(&mut store, &module)?;
 ```
 
-The signature it registers must be the one the `external fn` declared, since the
-artifact's import carries that type and instantiation checks it.
+An embedder of the SpaceWasm interpreter registers through `spacewasm`'s host
+API instead: one `HostModule` per import module name, handed to the engine
+before the artifact is decoded, because the decoder binds each import against
+that set as it reads it. For `clock_ms`, with `spacewasm` 0.7.1:
 
-Without an embedder of your own, the repository's SpaceWasm harness can stand in
-for one far enough to run such a program under the flight interpreter: `--host`
-registers a stub per import that answers zero and logs each call it receives.
-See [Running a module under the embedder
+```rust,ignore
+use core::ops::ControlFlow;
+use spacewasm::{Engine, HostFunction, HostModule, HostName, HostValList, Value};
+
+let clock_ms = HostFunction::try_new(
+    HostName::try_from_str("clock_ms")?,
+    HostValList::try_new("")?,  // no parameters
+    HostValList::try_new("I")?, // one i64 result
+    |_engine, _args| {
+        ControlFlow::Continue(Some(Value::I64(/* read the mission clock */ 0)))
+    },
+)?;
+let env = HostModule {
+    name: HostName::try_from_str("env")?,
+    globals: spacewasm::Vec::zero(),
+    functions: spacewasm::Vec::from_array([clock_ms])?,
+    memory: spacewasm::Vec::zero(),
+    table: spacewasm::Vec::zero(),
+};
+let hosts = spacewasm::Vec::from_array([env])?;
+let engine = Engine::new(stack_words, max_modules, hosts)?;
+```
+
+Either way, the signature registered must be the one the `external fn`
+declared, since the artifact's import carries that type and the runtime checks
+it when it binds the import: wasmtime at instantiation, SpaceWasm while it
+decodes the module.
+
+Without an embedder of your own, the repository's SpaceWasm harness is the
+ready-made way to try this: each `--host MODULE.FIELD=PARAMS[:RESULT]` builds a
+function like `clock_ms` above that answers zero and logs each call it
+receives, and the harness runs the program under the flight interpreter. See
+[Running a module under the embedder
 harness](compilation_targets.md#running-a-module-under-the-embedder-harness).
 
 ## Calling an External Function

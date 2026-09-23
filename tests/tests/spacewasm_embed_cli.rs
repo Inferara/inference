@@ -231,6 +231,23 @@ const FPRIME: &str = include_str!(
     "../test_data/codegen/wasm/extern_import/host_import_fprime/host_import_fprime.inf"
 );
 
+/// The F´ program's three host functions, each called whatever the call before
+/// it answered: `go` passes `command`'s answer to `telemetry` as the committed
+/// program does, then asks the clock and returns what it said.
+const FPRIME_EVERY_CALL: &str = r"external fn telemetry(channel: i32, value: i32) -> i32;
+external fn command(opcode: i32) -> i32;
+use { telemetry, command } from host::fprime_core;
+
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+
+pub fn go() -> i64 {
+    let ack: i32 = command(1);
+    let sent: i32 = telemetry(1, ack);
+    let now: i64 = clock_ms();
+    return now;
+}";
+
 /// The three stubs the F´ program imports, as the command line spells them.
 const FPRIME_STUBS: [&str; 6] = [
     "--host",
@@ -563,6 +580,37 @@ fn the_fprime_program_runs_against_stubs_that_answer_zero() {
     assert_eq!(
         run.err,
         "host call: fprime_core.command(1)\nhost call: fprime_core.telemetry(1, 0)\n",
+        "{}",
+        run.transcript()
+    );
+}
+
+/// Every host function the F´ program imports is logged when a compiled
+/// program calls all three, in the order it called them.
+///
+/// The committed program never reaches the clock under stubs that answer zero,
+/// so the row above sees two of its three imports. This program makes every
+/// call whatever the answers, so the third — the second host module, and the
+/// one `i64` result — is observed from the command line too, after the two
+/// `fprime_core` calls it follows. Fails if any of the three is logged under
+/// the wrong name, out of order, with its arguments rendered some other way,
+/// twice or not at all; if `command`'s zero stops reaching `telemetry`; or if
+/// `go` stops returning the clock's zero.
+#[test]
+fn a_program_calling_every_fprime_import_logs_all_three_in_call_order() {
+    let artifact = Artifact::compiled(FPRIME_EVERY_CALL);
+    let path = artifact.arg();
+    let mut argv = vec![path.as_str()];
+    argv.extend(FPRIME_STUBS);
+    argv.extend(["--invoke", "go"]);
+
+    let run = Run::of(&argv);
+    assert_eq!(run.code, support::exit::OK, "{}", run.transcript());
+    assert_eq!(run.out, "go = 0\n", "{}", run.transcript());
+    assert_eq!(
+        run.err,
+        "host call: fprime_core.command(1)\nhost call: fprime_core.telemetry(1, 0)\n\
+         host call: env.clock_ms()\n",
         "{}",
         run.transcript()
     );

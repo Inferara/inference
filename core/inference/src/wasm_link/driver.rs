@@ -110,11 +110,13 @@ impl std::fmt::Display for HostImport {
 /// *function* at a time, because a declaration is what an author wrote; a
 /// `.wasm` file, though, is supplied one *module* at a time, so two host
 /// functions of one module become one file and not two, and a remedy counted in
-/// functions would ask for a file that has no clause to come from. The other
-/// direction has the mirror problem: the list beside it is of linked modules,
-/// so "every one of these functions" would have no antecedent at all, and the
-/// functions it means are named nowhere — hence the modules are named again
-/// inside the sentence.
+/// functions would ask for a file that has no clause to come from. Nor does the
+/// message print a clause for that half to point back at — it prints the
+/// pairs — so the clauses are named by the modules they bind, which is also the
+/// list of files to provide. The other direction has the mirror problem: the
+/// list beside it is of linked modules, so "every one of these functions" would
+/// have no antecedent at all, and the functions it means are named nowhere —
+/// hence the modules are named again inside the sentence.
 ///
 /// A linked module whose name is a `::` path has no host spelling at all — a
 /// host module is the single flat string an embedder registers — so for those
@@ -127,8 +129,8 @@ impl std::fmt::Display for HostImport {
 /// hand buries the one fix under a form to fill in.
 fn mixed_remedy(host_modules: &[String], linked: &[String]) -> String {
     let to_linked = format!(
-        "drop `{HOST_SEGMENT}::` from the clauses above and provide a `.wasm` file for each of \
-         the modules they then name ({}) — one file per module, never one per function",
+        "drop `{HOST_SEGMENT}::` from the `use … from` clauses that bind {} and provide a `.wasm` \
+         file for each module they then name — one file per module, never one per function",
         quoted_modules(host_modules)
     );
     let to_host = format!(
