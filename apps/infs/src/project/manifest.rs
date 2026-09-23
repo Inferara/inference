@@ -118,6 +118,7 @@ pub const RESERVED_WORDS: &[&str] = &[
     "continue",
     "external",
     "unique",
+    "unit",
     // Problematic directory/file names
     "src",
     "out",
@@ -1574,7 +1575,7 @@ mod tests {
 
     #[test]
     fn test_validate_project_name_reserved_keywords() {
-        for &word in &["fn", "let", "struct", "type", "return", "if", "else"] {
+        for &word in &["fn", "let", "struct", "type", "return", "if", "else", "unit"] {
             let result = validate_project_name(word);
             assert!(result.is_err(), "Expected '{word}' to be rejected");
             assert!(result.unwrap_err().to_string().contains("reserved"));

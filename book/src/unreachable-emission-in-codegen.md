@@ -50,7 +50,7 @@ The `unreachable` instruction is [stack-polymorphic per the WASM specification](
 
 When the program is correct (all paths return), the `unreachable` is dead code and never executes. When the program has a bug (a path falls through without returning), the `unreachable` traps at runtime — a fail-fast behavior that prevents silent wrong results.
 
-For void functions (`unit` return type), no value is expected on the stack at `end`, so the `unreachable` is omitted.
+For void functions (`()` return type, or none), no value is expected on the stack at `end`, so the `unreachable` is omitted.
 
 ## WASM Specification Rationale
 

@@ -239,6 +239,29 @@ describe("Grammar: Arithmetic mode annotations", () => {
   });
 });
 
+describe("Grammar: Reserved word unit", () => {
+  it("unit declared as a function is keyword.other.reserved, not a function name", () => {
+    assertTokenScope("fn unit() {", "unit", "keyword.other.reserved.unit");
+    assertTokenNotScope("fn unit() {", "unit", "entity.name.function");
+  });
+
+  it("unit written as a return type is keyword.other.reserved", () => {
+    assertTokenScope("fn v() -> unit {", "unit", "keyword.other.reserved.unit");
+  });
+
+  it("unit called as a function is keyword.other.reserved, not a function name", () => {
+    assertTokenScope("unit();", "unit", "keyword.other.reserved.unit");
+    assertTokenNotScope("unit();", "unit", "entity.name.function");
+  });
+
+  it("an identifier that begins with unit is an ordinary name", () => {
+    assertTokenScope("unit_count(1)", "unit_count", "entity.name.function");
+    assertTokenNotScope("unit_count(1)", "unit_count", "keyword");
+    assertTokenScope("units(1)", "units", "entity.name.function");
+    assertTokenNotScope("units(1)", "units", "keyword");
+  });
+});
+
 describe("Grammar: Primitive types", () => {
   const primitives = [
     "i8",

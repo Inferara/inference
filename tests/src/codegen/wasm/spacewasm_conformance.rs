@@ -293,7 +293,7 @@ mod spacewasm_conformance_tests {
         Maxima(1, 1, 1),
     ),
     (
-        "codegen/wasm/void_forms/unit_return_type_spelled_unit/unit_return_type_spelled_unit.wasm",
+        "codegen/wasm/void_forms/unit_return_type_spelled_parens/unit_return_type_spelled_parens.wasm",
         Maxima(1, 1, 1),
     ),
     ("codegen/wasm/void_forms/void_return_inside_if/void_return_inside_if.wasm", Maxima(2, 2, 3)),

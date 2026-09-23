@@ -834,9 +834,6 @@ mod enum_tests {
 
     #[test]
     fn test_enum_single_variant() {
-        // NOTE: Avoid naming enums the same as builtin types (e.g., "Unit")
-        // because `from_builtin_str` is case-insensitive and would resolve
-        // the parameter type to the builtin instead of the enum.
         let source = r#"enum Single { Value } fn test_single(u: Single) {} fn test() { test_single(Single::Value); }"#;
         let result = try_type_check(source);
         assert!(

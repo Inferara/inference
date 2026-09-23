@@ -6,7 +6,7 @@ use inference_ast::nodes::{ArgKind, Def, Expr, SimpleTypeKind, Stmt, TypeNode};
 
 #[test]
 fn test_simple_type_kind_as_str_unit() {
-    assert_eq!(SimpleTypeKind::Unit.as_str(), "unit");
+    assert_eq!(SimpleTypeKind::Unit.as_str(), "()");
 }
 
 #[test]

@@ -3830,8 +3830,16 @@ mod tests {
             assert!(table.lookup_type("u32").is_some());
             assert!(table.lookup_type("u64").is_some());
             assert!(table.lookup_type("bool").is_some());
-            assert!(table.lookup_type("unit").is_some());
             assert!(table.lookup_type("string").is_some());
+        }
+
+        /// `unit` is a reserved word, not a builtin type name: the unit type is
+        /// spelled `()`, which never reaches the table as a name, so registering
+        /// the word would only give a type a second name no source can write.
+        #[test]
+        fn unit_is_not_registered_as_a_type_name() {
+            let table = SymbolTable::default();
+            assert!(table.lookup_type("unit").is_none());
         }
 
         #[test]

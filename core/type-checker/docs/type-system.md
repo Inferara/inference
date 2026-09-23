@@ -52,7 +52,7 @@ fn do_something() {
     // Implicitly returns unit
 }
 
-fn explicit_unit() -> unit {
+fn explicit_unit() -> () {
     return;  // Explicit unit return
 }
 ```
@@ -60,10 +60,15 @@ fn explicit_unit() -> unit {
 **AST Representation**: `Type::Simple(SimpleTypeKind::Unit)`
 **Type Checker Representation**: `TypeInfoKind::Unit`
 
-**Where unit is legal**: as a return type, in all three spellings — `-> ()`,
-`-> unit`, and an omitted return type. Code generation implements that
-directly, by giving the WebAssembly function an empty result list, so a bare
-`return;`, an explicit `return ();` and a bare `();` statement all compile.
+**How it is spelled**: `()`, and nothing else. `unit` is a reserved word, not
+a type name: the parser refuses it wherever a type or a name could be written,
+saying that the unit type is spelled `()`, so the type checker registers no
+name for the type at all.
+
+**Where unit is legal**: as a return type, in both spellings — `-> ()` and an
+omitted return type. Code generation implements that directly, by giving the
+WebAssembly function an empty result list, so a bare `return;`, an explicit
+`return ();` and a bare `();` statement all compile.
 
 **Where unit is rejected**: as the type of a *carrier* — a `let` or `const`
 binding, a parameter (including `_: ()` and an `external fn` parameter), a

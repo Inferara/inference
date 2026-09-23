@@ -593,7 +593,7 @@ The `name` field is validated according to these rules:
    - Underscores (`_`)
    - Hyphens (`-`)
 4. Cannot be a reserved keyword:
-   - Language keywords: `fn`, `let`, `mut`, `if`, `else`, `match`, `return`, `type`, `struct`, `impl`, `trait`, `pub`, `use`, `mod`, `assume`, `assert`, `forall`, `exists`, `unique`, etc.
+   - Language keywords: `fn`, `let`, `mut`, `if`, `else`, `match`, `return`, `type`, `struct`, `impl`, `trait`, `pub`, `use`, `mod`, `assume`, `assert`, `forall`, `exists`, `unique`, `unit`, etc.
    - Directory names: `src`, `out`, `target`, `proofs`, `tests`, `self`, `super`, `crate`
 
 ### Version Validation

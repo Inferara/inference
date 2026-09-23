@@ -822,7 +822,7 @@ Scopes use `Rc<RefCell<Scope>>` for shared ownership:
 Primitive types use the `SimpleTypeKind` enum instead of heap-allocated nodes, providing significant performance benefits:
 
 **Memory Efficiency**:
-- No `Rc` allocation for common types (i32, bool, unit, etc.)
+- No `Rc` allocation for common types (i32, bool, `()`, etc.)
 - Zero-cost representation: stack-allocated enum values
 - Smaller AST memory footprint for typical programs
 

@@ -144,6 +144,25 @@ parsing downstream:
   spelling, so the glued form is the only way to write a negative literal.)
 - **Reserved-but-not-keyword identifiers.** `constructor`, `proof`, and `uzumaki`
   lex as ordinary identifiers, matching the grammar's reserved-identifier rule.
+- **`unit` is a keyword no position accepts.** The unit type is spelled `()`,
+  and `unit` lexes as its own `UnitKw` so the grammar can refuse the word by
+  name rather than read it as an identifier naming a type nothing declares.
+  Where a type is written, the parser reports that the unit type is spelled
+  `()` and completes the node `()` would have produced, so lowering sees the
+  unit type and nothing after the parser has more to say. Where the position
+  says what a name names — a declared binding, parameter, field, function,
+  struct, enum, variant, constant, spec, type alias or type parameter, a
+  module path segment, an imported item, the last segment of a type path with
+  no type arguments — it reports what the word tried to name. Where it does
+  not — a reference in an expression such as `return unit;`, `s.unit` or
+  `unit::k()`, which may name a module, a type, a function, a field or a
+  value, and inside a type the base of a generic name, bare or at the end of a
+  path, and an array size — the identifier rule every name reaches reports
+  only that the word cannot be used as a name. In every case the word is
+  consumed as the name, which is what keeps one misuse to one diagnostic: a
+  keyword a position does not expect is otherwise read as whatever the rule
+  wants next, and cascades. Only the whole word is reserved; `units` and
+  `unit_count` are ordinary identifiers.
 
 ## Stage 2: SyntaxKind and TokenSet
 

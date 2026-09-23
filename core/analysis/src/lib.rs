@@ -174,7 +174,7 @@
 //!   non-scope. This is a gate on an unimplemented feature: it
 //!   is deleted whole the day strings land. See [`rules::string_not_supported`].
 //! - A049: the unit type has no value representation. `()` is legitimate as the
-//!   *absence* of a value — a return type of `()`, `unit`, or nothing at all —
+//!   *absence* of a value — a return type of `()`, or nothing at all —
 //!   and illegitimate as a value: a parameter declared `()` is given no argument
 //!   slot, a binding of it has nothing to store, an array of it has no element
 //!   size, and a struct field of it has no meaningful offset. The return

@@ -27,14 +27,9 @@ crate::rule! {
 }
 
 fn has_non_unit_return_type(arena: &AstArena, returns: Option<TypeId>) -> bool {
-    match returns {
-        None => false,
-        Some(type_id) => match &arena[type_id].kind {
-            TypeNode::Simple(SimpleTypeKind::Unit) => false,
-            TypeNode::Custom(ident_id) => arena[*ident_id].name != "unit",
-            _ => true,
-        },
-    }
+    returns.is_some_and(|type_id| {
+        !matches!(arena[type_id].kind, TypeNode::Simple(SimpleTypeKind::Unit))
+    })
 }
 
 fn check_defs(

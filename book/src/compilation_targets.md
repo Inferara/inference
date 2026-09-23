@@ -93,7 +93,7 @@ with `infc --target stellar` or `[build] target = "stellar"` in an
 | WASM proposals the module uses | `mutable-globals` only — a module with linear memory exports its mutable `__stack_pointer` global — and no instruction outside WebAssembly 1.0 | See "What the compiler emits" below |
 | Compilation mode | `compile` only | Proof mode emits the custom 0xfc non-deterministic instructions, which no Soroban host decodes |
 | Recorded `OptLevel` (compile) | `Oz` under `release`, `O0` under `debug` — no optimization pass currently acts on either | `Oz` is the target's `default_opt_level`, matching the toolchain convention for the platform |
-| Floats | Impossible — no float instruction can be emitted, at any target | The language has no floating-point type: `SimpleTypeKind` (`core/ast`) admits `unit`, `bool` and the eight integer widths and nothing else |
+| Floats | Impossible — no float instruction can be emitted, at any target | The language has no floating-point type: `SimpleTypeKind` (`core/ast`) admits the unit type `()`, `bool` and the eight integer widths and nothing else |
 
 #### The value ABI
 
@@ -326,7 +326,7 @@ a build may *contain* — the instruction set, and nothing else.
 | WASM proposals the module uses | `mutable-globals` only — a module with linear memory exports its mutable `__stack_pointer` global — and no instruction outside WebAssembly 1.0 | See "What the interpreter decodes" below |
 | Compilation mode | `compile` only | Proof mode emits the custom 0xfc non-deterministic instructions, which the interpreter's decoder does not define |
 | Recorded `OptLevel` (compile) | `Os` under `release`, `O0` under `debug` — no optimization pass currently acts on either | `Os` is the target's `default_opt_level`: size is the scarce resource on a flight computer |
-| Floats | Impossible — no float instruction can be emitted, at any target | The language has no floating-point type: `SimpleTypeKind` (`core/ast`) admits `unit`, `bool` and the eight integer widths and nothing else |
+| Floats | Impossible — no float instruction can be emitted, at any target | The language has no floating-point type: `SimpleTypeKind` (`core/ast`) admits the unit type `()`, `bool` and the eight integer widths and nothing else |
 | Emitted bytes | Identical to a `wasm32` compile-mode build of the same source | Nothing on the emission path reads a target; see the procedure below |
 
 #### What the interpreter decodes

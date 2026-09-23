@@ -852,6 +852,10 @@ fn suggest_sibling(expected_path: &Path) -> Option<String> {
 
 /// Finds the closest-named sibling `.inf` file to `target` (the missing file's
 /// stem) in the directory `missing` would have lived in, by edit distance.
+///
+/// Only a stem a `use` path can spell is a candidate. `unit.inf` or `fn.inf`
+/// can sit on disk, but no import names it, so offering it would trade the
+/// missing-file error for a parse error on the suggested fix.
 fn nearest_sibling(missing: &Path, target: &str) -> Option<String> {
     let dir = missing.parent()?;
     let entries = std::fs::read_dir(dir).ok()?;
@@ -865,6 +869,7 @@ fn nearest_sibling(missing: &Path, target: &str) -> Option<String> {
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|e| e.to_str()) == Some(SOURCE_EXTENSION))
         .filter_map(|path| path.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .filter(|stem| inference_parser::is_name(stem))
         .collect();
     stems.sort();
 
@@ -1947,6 +1952,35 @@ mod tests {
                 assert_eq!(suggestion.as_deref(), Some("airth"));
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_suggestion_names_a_file_no_import_can_spell() {
+        // `unit.inf` is one edit from the missing `unitz.inf`, but `unit` is a
+        // reserved word, so `use unit;` is a parse error: suggesting it would
+        // swap one refusal for another. A hard keyword (`fn.inf`, one edit from
+        // `fx`) is the same case, while a contextual keyword a `use` path does
+        // accept (`type.inf`, one edit from `typ`) is still offered.
+        let project = TempProject::new("suggest-unspellable");
+        project.write("unit.inf", "pub fn f() {}");
+        project.write("fn.inf", "pub fn g() {}");
+        project.write("type.inf", "pub fn h() {}");
+
+        for (import, expected) in [("unitz", None), ("fx", None), ("typ", Some("type"))] {
+            let entry = project.write("main.inf", &format!("use {import};\npub fn main() {{}}"));
+            let err = parse_project(&entry).expect_err("missing import must error");
+            let inference_err = err.downcast_ref::<InferenceError>().unwrap();
+            match inference_err {
+                InferenceError::ImportFileNotFound { suggestion, .. } => {
+                    assert_eq!(
+                        suggestion.as_deref(),
+                        expected,
+                        "`use {import};` must suggest only a stem an import can spell"
+                    );
+                }
+                other => panic!("unexpected error for `use {import};`: {other:?}"),
+            }
         }
     }
 

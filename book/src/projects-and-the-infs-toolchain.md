@@ -161,7 +161,7 @@ language keywords or conventional directory names are reserved and rejected
 `else`, `match`, `return`, `type`, `struct`, `impl`, `trait`, `pub`, `use`,
 `mod`, `ndet`, `assume`, `assert`, `forall`, `exists`, `spec`, `requires`,
 `ensures`, `invariant`, `const`, `enum`, `loop`, `break`, `continue`,
-`external`, `unique`; and the directory names `src`, `out`, `target`,
+`external`, `unique`, `unit`; and the directory names `src`, `out`, `target`,
 `proofs`, `tests`, `self`, `super`, `crate`.
 
 ### Reserved Module Segment

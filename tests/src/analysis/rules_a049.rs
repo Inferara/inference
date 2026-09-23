@@ -100,6 +100,20 @@ mod analysis_rules_tests {
         analyze(source).is_ok() && try_codegen_no_analysis(source).is_ok()
     }
 
+    /// The parser's refusal of the reserved word in a type position, verbatim:
+    /// the user-facing wording is pinned here rather than imported.
+    const UNIT_IS_NOT_A_TYPE: &str =
+        "`unit` is a reserved word, not a type: the unit type is spelled `()`";
+
+    /// Every syntax diagnostic `source` produces, in report order.
+    fn parse_messages(source: &str) -> Vec<String> {
+        inference_parser::parse(source)
+            .errors
+            .into_iter()
+            .map(|error| error.message)
+            .collect()
+    }
+
     // ---------------------------------------------------------------------
     // Fires
     // ---------------------------------------------------------------------
@@ -124,17 +138,15 @@ mod analysis_rules_tests {
         );
     }
 
-    /// `unit` is a builtin name for the same type, so the alias spelling is not
-    /// a way around the rule. The message names `()` because that is the
-    /// canonical spelling; this test is what pins the other one.
+    /// `unit` is not a second spelling of the type, so it is no way around the
+    /// rule: the parser refuses the word before analysis runs, and says what to
+    /// write instead. The binding this file's first test pins is therefore the
+    /// only way to declare one, and A049 is the only thing it meets.
     #[test]
-    fn a049_unit_keyword_spelling_is_the_same_type() {
-        let source = r#"
-            pub fn f() -> i32 { let u: unit = (); return 0; }
-        "#;
+    fn a049_unit_keyword_spelling_is_refused_before_analysis() {
         assert_eq!(
-            a049_positions(source),
-            vec!["the declared type of a variable", "a value"]
+            parse_messages("pub fn f() -> i32 { let u: unit = (); return 0; }"),
+            vec![UNIT_IS_NOT_A_TYPE]
         );
     }
 
@@ -382,16 +394,15 @@ mod analysis_rules_tests {
         );
     }
 
+    /// The exemption above is for the type, and `unit` does not name it: a
+    /// return type written with the word is a parse error, so no spelling of
+    /// the exempt position is left for the rule to judge besides `()` and an
+    /// omitted one.
     #[test]
-    fn a049_unit_keyword_return_type_is_exempt() {
-        let source = r#"
-            pub fn f() -> unit { return; }
-            pub fn main() -> i32 { return 0; }
-        "#;
-        assert_eq!(count_a049(source), 0);
-        assert!(
-            compiles(source),
-            "an exempt unit form must reach a generated module"
+    fn a049_unit_keyword_return_type_is_refused_before_analysis() {
+        assert_eq!(
+            parse_messages("pub fn f() -> unit { return; }\npub fn main() -> i32 { return 0; }"),
+            vec![UNIT_IS_NOT_A_TYPE]
         );
     }
 

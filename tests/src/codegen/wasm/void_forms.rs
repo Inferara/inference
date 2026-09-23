@@ -1,5 +1,5 @@
 //! The forms that carry no value: a bare `return;`, a `();` statement, and the
-//! two spellings of a unit return type.
+//! two ways a function says it returns nothing, `-> ()` and no arrow at all.
 //!
 //! None of these produces a value, and the point of the family is that producing
 //! nothing is a real lowering rather than a gap. A unit expression occupies no
@@ -7,9 +7,10 @@
 //! stack, and a `();` statement emits neither the value nor the `drop` a
 //! value-producing statement would need.
 //!
-//! Each row is a golden plus an execution run, because the two catch different
-//! mistakes: the golden pins which bytes are emitted, and the run pins that the
-//! module a host loads still computes the value the source says it does.
+//! Each fixture is a golden plus an execution run, because the two catch
+//! different mistakes: the golden pins which bytes are emitted, and the run pins
+//! that the module a host loads still computes the value the source says it
+//! does.
 
 #[cfg(test)]
 mod void_forms_tests {
@@ -99,14 +100,37 @@ mod void_forms_tests {
     }
 
     #[test]
-    fn unit_return_type_spelled_unit_test() {
-        assert_golden("unit_return_type_spelled_unit");
+    fn unit_return_type_spelled_parens_test() {
+        assert_golden("unit_return_type_spelled_parens");
     }
 
     #[test]
-    fn unit_return_type_spelled_unit_execution_test() {
-        let wasm_bytes = assert_golden("unit_return_type_spelled_unit");
+    fn unit_return_type_spelled_parens_execution_test() {
+        let wasm_bytes = assert_golden("unit_return_type_spelled_parens");
         assert_main_returns(&wasm_bytes, 9);
+    }
+
+    /// To code generation, `-> ()` is the same declaration as an omitted
+    /// return type, byte for byte, and the module it produces still runs.
+    ///
+    /// The comparison is against the no-arrow spelling rather than against a
+    /// golden, because that equality is the claim: code generation reads the
+    /// two as one declaration, so nothing in the emitted module may tell them
+    /// apart. `unit` is no third spelling — the parser refuses it — so these
+    /// two are the whole set. The claim is code generation's alone: proof
+    /// mode's reachability specs refuse any declared return type on an
+    /// `exists` or `unique` spec function, `-> ()` included, where they accept
+    /// the omitted one.
+    #[test]
+    fn unit_return_type_spelled_parens_is_an_omitted_return_type() {
+        let parens = wasm_codegen(
+            "fn v() -> () { return; }\npub fn main() -> i32 { v(); return 9; }",
+        );
+        let omitted = wasm_codegen("fn v() { return; }\npub fn main() -> i32 { v(); return 9; }");
+        inf_wasmparser::validate(&parens)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        assert_wasms_modules_equivalence(&omitted, &parens);
+        assert_main_returns(&parens, 9);
     }
 }
 
@@ -165,7 +189,7 @@ mod regenerate {
 
     #[test]
     #[ignore]
-    fn regenerate_unit_return_type_spelled_unit_wasm() {
-        regenerate_one("unit_return_type_spelled_unit");
+    fn regenerate_unit_return_type_spelled_parens_wasm() {
+        regenerate_one("unit_return_type_spelled_parens");
     }
 }

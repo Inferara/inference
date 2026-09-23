@@ -247,7 +247,7 @@ Statement::Expression(expression) => {
 
 | Call return type | Position in block | Drop emitted? | Reason |
 |-----------------|-------------------|---------------|--------|
-| `unit` (void) | anywhere | No | No value on stack |
+| `()` (void) | anywhere | No | No value on stack |
 | non-void | middle of block | Yes | Value not consumed; stack must be balanced |
 | non-void | last stmt of non-det block | No | Value is the block's result, consumed by enclosing context |
 | non-void | RHS of `let` | No | `local.set` consumes the value (different code path) |

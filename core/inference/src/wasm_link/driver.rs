@@ -292,7 +292,7 @@ pub enum ExternalResolutionError {
         limit: u64,
     },
     /// An `external fn`'s declared signature could not be lowered to WASM value
-    /// types (e.g. a `unit` parameter or an unsupported type form).
+    /// types (e.g. a `()` parameter or an unsupported type form).
     Signature {
         export_field: String,
         error: super::validate::LowerSignatureError,
@@ -691,10 +691,10 @@ fn mixed_provider_refusal(
 /// exactly the substitution this pipeline must never make.
 ///
 /// Signature lowering is kept, and is the one step that must not be skipped with
-/// the rest. It is the only refusal of a `unit` parameter or a type form that
+/// the rest. It is the only refusal of a `()` parameter or a type form that
 /// has no WASM value representation on the extern path, and codegen's
 /// `import_param_types` emits the import assuming that shape has already been
-/// rejected — a `unit` parameter would silently occupy no slot there and the
+/// rejected — a `()` parameter would silently occupy no slot there and the
 /// emitted import would have fewer parameters than the declaration a reader
 /// sees.
 ///
@@ -1021,7 +1021,7 @@ mod tests {
         }
         .to_string();
         assert!(rendered.contains("external fn `f`"), "{rendered}");
-        assert!(rendered.contains("unit"), "{rendered}");
+        assert!(rendered.contains("the unit type `()`"), "{rendered}");
     }
 
     #[test]
