@@ -70,7 +70,7 @@
 
 use crate::choice::{ChoiceClass, ChoiceCursor, ChoicePlan, ChoiceRun, FrameContract};
 use crate::errors::CodegenError;
-use crate::output::{AbiReturn, AbiType, ExportSignature};
+use crate::output::{AbiParam, AbiReturn, AbiType, ExportSignature};
 use crate::overflow_guard::{
     self, GuardKind, GuardScratchDemand, GuardScratchPool, GuardedOp, ModeSource, guard_kind,
 };
@@ -1733,8 +1733,14 @@ impl Compiler {
         let params = args
             .iter()
             .map(|arg| match &arg.kind {
-                ArgKind::Named { ty, .. } | ArgKind::Ignored { ty } | ArgKind::TypeOnly(ty) => {
+                ArgKind::Named { name: param, ty, .. } => {
                     Self::abi_type_from_type_id(arena, *ty, ctx, module_path)
+                        .map(|ty| AbiParam::named(arena[*param].name.clone(), ty))
+                }
+                // `_: T` binds no name, so the descriptor records the slot as
+                // unnamed rather than inventing a name for it.
+                ArgKind::Ignored { ty } => {
+                    Self::abi_type_from_type_id(arena, *ty, ctx, module_path).map(AbiParam::unnamed)
                 }
                 // A receiver is declared by the keyword `self` alone, so it
                 // names no type node to describe. The arm is unreachable: the
@@ -1744,9 +1750,18 @@ impl Compiler {
                 // exportable must resolve the receiver to its struct here, or
                 // every method export loses its descriptor silently and the
                 // count check in `export_signatures` is what fires.
-                ArgKind::SelfRef { .. } => None,
+                //
+                // A parameter declared by its type alone, the `external fn`
+                // shape, declines for a reason of its own and is unreachable
+                // too. It is refused as A050 before this descriptor is built:
+                // `visit_function_definition_body`, the only caller, returns
+                // that error first (`wasm_codegen_bare_type_param_rejected`),
+                // whether or not analysis ran, so no test can exercise it
+                // here. Declining is the conservative answer for it as well,
+                // and it keeps an unnamed entry meaning exactly `_: T`.
+                ArgKind::SelfRef { .. } | ArgKind::TypeOnly(_) => None,
             })
-            .collect::<Option<Vec<AbiType>>>()?;
+            .collect::<Option<Vec<AbiParam>>>()?;
         let ret = match returns {
             None => AbiReturn::Unit,
             Some(ty_id) => {

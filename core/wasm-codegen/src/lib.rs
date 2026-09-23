@@ -75,7 +75,7 @@ pub mod output;
 mod spec_section;
 pub mod target;
 
-pub use output::{AbiReturn, AbiType, CodegenOutput, ExportSignature};
+pub use output::{AbiParam, AbiReturn, AbiType, CodegenOutput, ExportSignature};
 pub use target::{
     CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, MemoryLayoutError,
     MemoryLayoutSource, OptLevel, Target,
@@ -769,12 +769,12 @@ fn check_stellar_export_types(
     typed_context: &TypedContext,
 ) -> anyhow::Result<()> {
     let name = &signature.name;
-    for (index, ty) in signature.params.iter().enumerate() {
-        if let Some(next_step) = stellar_refusal_reason(ty) {
+    for (index, param) in signature.params.iter().enumerate() {
+        if let Some(next_step) = stellar_refusal_reason(&param.ty) {
             cov_mark::hit!(wasm_codegen_stellar_gate_param_type);
             let declared_as = entry_file_parameter_name(typed_context, name, index);
             let parameter = stellar_parameter_label(declared_as.as_deref(), index);
-            let declared = render_abi_type(ty);
+            let declared = render_abi_type(&param.ty);
             return Err(anyhow::anyhow!(
                 "Stellar target: exported function '{name}' cannot be a contract method \
                  because {parameter} is declared '{declared}'. {STELLAR_SCALAR_SET} \
@@ -1696,13 +1696,13 @@ mod memory_layout_tests {
 #[cfg(test)]
 mod stellar_gate_tests {
     use super::{
-        AbiReturn, AbiType, ExportSignature, STELLAR_COMPOUND_NEXT_STEP,
+        AbiParam, AbiReturn, AbiType, ExportSignature, STELLAR_COMPOUND_NEXT_STEP,
         STELLAR_MAX_EXPORT_NAME_BYTES, STELLAR_MAX_EXPORT_PARAMS, check_stellar_exports,
         render_abi_type, stellar_parameter_label,
     };
     use inference_type_checker::typed_context::TypedContext;
 
-    fn signature(name: &str, params: Vec<AbiType>, ret: AbiReturn) -> ExportSignature {
+    fn signature(name: &str, params: Vec<AbiParam>, ret: AbiReturn) -> ExportSignature {
         ExportSignature {
             name: name.to_string(),
             params,
@@ -1710,11 +1710,26 @@ mod stellar_gate_tests {
         }
     }
 
+    /// Parameters of the given types, named `p0`, `p1`, … in declaration order —
+    /// the shape an ordinary source is described by. The position-only label a
+    /// parameter written `_` gets has tests of its own.
+    fn named_params(types: impl IntoIterator<Item = AbiType>) -> Vec<AbiParam> {
+        types
+            .into_iter()
+            .enumerate()
+            .map(|(index, ty)| AbiParam::named(format!("p{index}"), ty))
+            .collect()
+    }
+
     /// One admissible method, as a base to vary.
     fn admissible() -> ExportSignature {
         signature(
             "add",
-            vec![AbiType::U32, AbiType::I32, AbiType::Bool],
+            vec![
+                AbiParam::named("a", AbiType::U32),
+                AbiParam::named("b", AbiType::I32),
+                AbiParam::named("c", AbiType::Bool),
+            ],
             AbiReturn::Scalar(AbiType::U32),
         )
     }
@@ -1741,11 +1756,7 @@ mod stellar_gate_tests {
             AbiReturn::Scalar(AbiType::I32),
             AbiReturn::Scalar(AbiType::Bool),
         ] {
-            let sig = signature(
-                "method",
-                vec![AbiType::U32, AbiType::I32, AbiType::Bool],
-                ret.clone(),
-            );
+            let sig = signature("method", admissible().params, ret.clone());
             assert!(gate(&[sig]).is_ok(), "{ret:?} must be admissible");
         }
         assert!(gate(&[signature("no_params", Vec::new(), AbiReturn::Unit)]).is_ok());
@@ -1821,11 +1832,11 @@ mod stellar_gate_tests {
 
     #[test]
     fn the_arity_rule_is_exact_at_its_boundary() {
-        let widest = vec![AbiType::U32; STELLAR_MAX_EXPORT_PARAMS];
+        let widest = named_params(vec![AbiType::U32; STELLAR_MAX_EXPORT_PARAMS]);
         assert!(gate(&[signature("wide", widest, AbiReturn::Unit)]).is_ok());
 
         cov_mark::check!(wasm_codegen_stellar_gate_param_count);
-        let too_wide = vec![AbiType::U32; STELLAR_MAX_EXPORT_PARAMS + 1];
+        let too_wide = named_params(vec![AbiType::U32; STELLAR_MAX_EXPORT_PARAMS + 1]);
         assert_eq!(
             refusal(&[signature("wider", too_wide, AbiReturn::Unit)]),
             "Stellar target: exported function 'wider' takes 33 parameters, and a contract \
@@ -1842,7 +1853,10 @@ mod stellar_gate_tests {
         assert_eq!(
             refusal(&[signature(
                 "transfer",
-                vec![AbiType::U32, AbiType::U64],
+                vec![
+                    AbiParam::named("to", AbiType::U32),
+                    AbiParam::named("amount", AbiType::U64),
+                ],
                 AbiReturn::Unit
             )]),
             "Stellar target: exported function 'transfer' cannot be a contract method \
@@ -1897,7 +1911,7 @@ mod stellar_gate_tests {
         ];
         for (ty, diagnosis, next_step) in cases {
             let rendered = render_abi_type(&ty);
-            let message = refusal(&[signature("m", vec![ty.clone()], AbiReturn::Unit)]);
+            let message = refusal(&[signature("m", named_params([ty.clone()]), AbiReturn::Unit)]);
             assert!(
                 message.contains(&format!("is declared '{rendered}'")),
                 "the refusal of {ty:?} does not name the declared type: {message}"
@@ -1918,7 +1932,11 @@ mod stellar_gate_tests {
     /// issue #324.
     #[test]
     fn a_narrow_integer_is_refused_for_its_own_reason() {
-        let message = refusal(&[signature("clamp", vec![AbiType::U8], AbiReturn::Unit)]);
+        let message = refusal(&[signature(
+            "clamp",
+            named_params([AbiType::U8]),
+            AbiReturn::Unit,
+        )]);
         assert!(message.contains("Widen the declaration to 'u32' or 'i32'."), "{message}");
         assert!(
             !message.contains(STELLAR_COMPOUND_NEXT_STEP),
@@ -1967,7 +1985,7 @@ mod stellar_gate_tests {
     fn the_refusal_order_is_name_then_arity_then_type() {
         let everything_wrong = signature(
             "__wide-and-long",
-            vec![AbiType::U64; STELLAR_MAX_EXPORT_PARAMS + 1],
+            named_params(vec![AbiType::U64; STELLAR_MAX_EXPORT_PARAMS + 1]),
             AbiReturn::Scalar(AbiType::U64),
         );
         assert!(
@@ -1985,12 +2003,13 @@ mod stellar_gate_tests {
         );
 
         let narrow = ExportSignature {
-            params: vec![AbiType::U64],
+            params: named_params([AbiType::U64]),
             ..named
         };
+        let message = refusal(&[narrow]);
         assert!(
-            refusal(&[narrow]).contains("parameter 1 is declared 'u64'"),
-            "a parameter reports before the return"
+            message.contains("is declared 'u64'"),
+            "a parameter reports before the return: {message}"
         );
     }
 
@@ -2000,7 +2019,7 @@ mod stellar_gate_tests {
     fn one_bad_export_refuses_the_module() {
         let message = refusal(&[
             admissible(),
-            signature("wide", vec![AbiType::I64], AbiReturn::Unit),
+            signature("wide", named_params([AbiType::I64]), AbiReturn::Unit),
         ]);
         assert!(message.contains("exported function 'wide'"), "{message}");
     }

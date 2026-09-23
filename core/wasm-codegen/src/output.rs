@@ -99,6 +99,45 @@ pub enum AbiType {
     Array { elem: Box<AbiType>, len: u32 },
 }
 
+/// One declared parameter of an exported function: the name the source gave it
+/// and its source-level type.
+///
+/// `name` is the source spelling of a `name: T` parameter, exactly as written —
+/// a leading underscore included, a `mut` excluded, since `mut` qualifies the
+/// binding rather than naming it. `None` is the source's `_: T`, a parameter the
+/// author chose not to name, and the descriptor records that fact rather than
+/// inventing a name for it. A consumer that needs a name for every parameter, a
+/// contract-spec emitter for instance, decides what an unnamed one means to it.
+///
+/// The name is read off the exported declaration itself while it is compiled,
+/// not looked up afterwards by the function's name, so a same-named function in
+/// another file cannot lend its parameter names to an export that is not it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbiParam {
+    /// The name the source declared, or `None` for `_`.
+    pub name: Option<String>,
+
+    /// The declared type.
+    pub ty: AbiType,
+}
+
+impl AbiParam {
+    /// A parameter the source declared as `name: ty`.
+    #[must_use = "constructs a parameter description and has no other effect"]
+    pub fn named(name: impl Into<String>, ty: AbiType) -> Self {
+        Self {
+            name: Some(name.into()),
+            ty,
+        }
+    }
+
+    /// A parameter the source declared as `_: ty`.
+    #[must_use = "constructs a parameter description and has no other effect"]
+    pub fn unnamed(ty: AbiType) -> Self {
+        Self { name: None, ty }
+    }
+}
+
 /// What an exported function gives back.
 ///
 /// `Sret` is the compound-return calling convention: a function returning a
@@ -146,10 +185,11 @@ pub struct ExportSignature {
     /// The exported name, as it appears in the export section.
     pub name: String,
 
-    /// The parameters the source declared, in declaration order. A hidden `sret`
-    /// pointer is not one of them, and neither is a lowering-introduced
-    /// parameter.
-    pub params: Vec<AbiType>,
+    /// The parameters the source declared, in declaration order, each with the
+    /// name the source gave it — `None` for one written `_` — and its type. A
+    /// hidden `sret` pointer is not one of them, and neither is a
+    /// lowering-introduced parameter.
+    pub params: Vec<AbiParam>,
 
     /// What the function gives back.
     pub ret: AbiReturn,
@@ -582,7 +622,8 @@ mod tests {
 
     /// An output carries no export descriptor until one is attached, and the
     /// builder round-trips whatever it is given — including the two compound
-    /// shapes whose emitted `i32` says nothing about them.
+    /// shapes whose emitted `i32` says nothing about them, and a parameter the
+    /// source left unnamed beside one it named.
     #[test]
     fn export_signatures_round_trip_through_the_builder() {
         let output = sample_output();
@@ -591,14 +632,20 @@ mod tests {
         let described = output.with_export_signatures(vec![
             ExportSignature {
                 name: "scale".to_string(),
-                params: vec![AbiType::U32, AbiType::Bool],
+                params: vec![
+                    AbiParam::named("factor", AbiType::U32),
+                    AbiParam::unnamed(AbiType::Bool),
+                ],
                 ret: AbiReturn::Scalar(AbiType::U32),
             },
             ExportSignature {
                 name: "corners".to_string(),
-                params: vec![AbiType::Struct {
-                    name: "Point".to_string(),
-                }],
+                params: vec![AbiParam::named(
+                    "origin",
+                    AbiType::Struct {
+                        name: "Point".to_string(),
+                    },
+                )],
                 ret: AbiReturn::Sret(AbiType::Array {
                     elem: Box::new(AbiType::I32),
                     len: 4,
@@ -609,7 +656,20 @@ mod tests {
         let signatures = described.export_signatures();
         assert_eq!(signatures.len(), 2);
         assert_eq!(signatures[0].name, "scale");
-        assert_eq!(signatures[0].params, vec![AbiType::U32, AbiType::Bool]);
+        assert_eq!(
+            signatures[0].params,
+            vec![
+                AbiParam {
+                    name: Some("factor".to_string()),
+                    ty: AbiType::U32,
+                },
+                AbiParam {
+                    name: None,
+                    ty: AbiType::Bool,
+                },
+            ],
+            "`named` records the spelling it is given and `unnamed` records none"
+        );
         assert_eq!(
             signatures[1].ret,
             AbiReturn::Sret(AbiType::Array {
