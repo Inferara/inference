@@ -65,7 +65,7 @@ const ENVELOPE_REFUSED: &[&str] = &[
 const OPERATOR_EMITTING: &[&str] = &[];
 
 /// The fixtures whose emitted module declares an import, which resolves against
-/// a host-module set this tier leaves empty. See [`ENVELOPE_REFUSED`].
+/// a host-module set this sweep leaves empty. See [`ENVELOPE_REFUSED`].
 const IMPORT_EMITTING: &[&str] = &[
     "codegen/wasm/extern_import/host_import/host_import.inf",
     "codegen/wasm/extern_import/host_import_fprime/host_import_fprime.inf",
@@ -264,7 +264,7 @@ fn the_two_engines_agree_on_every_zero_parameter_export() {
             // and for the reason that sweep states its own: there, a module that
             // is both comes back with the verdict the decoder reaches first;
             // here no verdict is taken at all, and the reason to report is the
-            // one about the module rather than the one about this tier's empty
+            // one about the module rather than the one about this sweep's empty
             // host set.
             //
             // No source the target accepts can reach here: the gate is total

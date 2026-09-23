@@ -2,7 +2,7 @@
 //! in process by the real `spacewasm` flight interpreter — the runtime the
 //! `spacewasm` target is named for.
 //!
-//! Three things live here. `conformance_oracle` puts a hand-written module on
+//! Four things live here. `conformance_oracle` puts a hand-written module on
 //! both sides of every boundary the `spacewasm` target's checker models, in
 //! front of that checker and in front of the real decoder, and requires the two
 //! verdicts to be equal everywhere but one class — the references the
@@ -21,7 +21,13 @@
 //! *computes the same thing*: every exported zero-parameter function of every
 //! import-free single-file codegen fixture is run under both `wasmtime` and
 //! SpaceWasm, on the same bytes, and the two engines must agree on the value
-//! and on whether the call trapped.
+//! and on whether the call trapped. `host_imports` is where a program this
+//! compiler built runs against hosts whose answers are chosen per row: it
+//! binds its imports to hosts that record every call, and follows the values
+//! they answer through the program and back out. The CLI matrix runs the same
+//! program only against `--host` stubs that answer zero, the oracle registers
+//! a host only so that a hand-written module can load, and the sweeps register
+//! none.
 //!
 //! The interpreter's allocator is a pair of `no_mangle` symbols the library
 //! resolves its internal allocations to, so every binary that links it declares
@@ -39,4 +45,5 @@ spacewasm::global_allocator!(StdAllocator, StdAllocator);
 mod conformance_oracle;
 mod decode_sweep;
 mod differential;
+mod host_imports;
 mod support;
