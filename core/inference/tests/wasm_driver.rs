@@ -350,6 +350,9 @@ fn a_host_program_ships_the_codegen_bytes_unchanged() {
 fn a_mixed_host_and_linked_program_is_refused_before_anything_is_resolved() {
     const COST: &str =
         "the embedder then has to supply every function this program binds to `nowhere_on_disk`";
+    const TO_LINKED: &str = "drop `host::` from the `use … from` clauses that bind `env` and \
+                             provide a `.wasm` file for each module they then name — one file per \
+                             module, never one per function";
 
     let typed = typed_of(
         "external fn clock_ms() -> i64;\n\
@@ -386,11 +389,16 @@ fn a_mixed_host_and_linked_program_is_refused_before_anything_is_resolved() {
          prevent: {rendered}"
     );
     assert!(
-        rendered.contains("provide a `.wasm` file for each of the modules they then name (`env`)")
-            && rendered.contains("one file per module, never one per function"),
-        "the other half must say what to provide instead, counted the way files are actually \
-         supplied: two host functions of one module are one `.wasm`, so a remedy counted in \
-         functions asks for a file no clause can name: {rendered}"
+        rendered.contains(TO_LINKED),
+        "the other half must name the clauses it edits by the host modules they bind, and say \
+         what to provide instead, counted the way files are actually supplied: two host \
+         functions of one module are one `.wasm`, so a remedy counted in functions asks for a \
+         file no clause can name: {rendered}"
+    );
+    assert!(
+        !rendered.contains("the clauses above"),
+        "the message prints the host imports as pairs and no clause at all, so nothing in it can \
+         point back at one: {rendered}"
     );
     assert!(
         rendered.contains("bind every extern to its host spelling (`host::nowhere_on_disk`)"),
@@ -403,7 +411,7 @@ fn a_mixed_host_and_linked_program_is_refused_before_anything_is_resolved() {
         "the placeholder must not survive where every real name is in hand: {rendered}"
     );
     assert!(
-        !rendered.contains("not a rewrite of the clauses above"),
+        !rendered.contains("not a rewrite of the clauses that bind them"),
         "a flat linked name IS a straight rewrite — telling this author their clauses cannot be \
          rewritten sends them renaming a module that needs no new name: {rendered}"
     );
@@ -449,9 +457,14 @@ fn the_mixed_refusal_does_not_offer_a_rewrite_a_nested_module_cannot_take() {
         "the branch exists so that no host spelling of a `::` path is ever printed; one would \
          earn the front end's nested-module refusal on the next build: {rendered}"
     );
+    let straight_edit = rendered
+        .find("drop `host::` from the `use … from` clauses that bind `env`")
+        .unwrap_or_else(|| panic!("the straight edit is offered: {rendered}"));
+    let renaming = rendered
+        .find("move every extern to a host import")
+        .unwrap_or_else(|| panic!("the renaming exercise is offered: {rendered}"));
     assert!(
-        rendered.find("drop `host::` from the clauses above")
-            < rendered.find("move every extern to a host import"),
+        straight_edit < renaming,
         "the direction that is a straight edit leads, and the renaming exercise follows: an \
          author who reads only the first instruction must not be sent into a second refusal: \
          {rendered}"
