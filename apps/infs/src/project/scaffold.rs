@@ -245,11 +245,12 @@ infc_version = "{infc_version}"
 # 64-bit tagged word. "stellar" narrows what the project may contain: no proof
 # mode, no wasm-features, no [build.wasm-opt], no `infs run`, and an exported
 # function's parameters and return confined to the scalar set the convention
-# encodes. "spacewasm" is the SpaceWasm flight interpreter, and adds nothing to
-# the module: the artifact is the "wasm32" one byte for byte. It narrows only
-# what a build may contain -- no proof mode and no wasm-features -- and leaves
-# [build.wasm-opt] and `infs run` available. Names are matched exactly; an
-# unrecognized one is a load error, not a fall back to the default.
+# encodes, every parameter named in at most 30 bytes. "spacewasm" is the
+# SpaceWasm flight interpreter, and adds nothing to the module: the artifact is
+# the "wasm32" one byte for byte. It narrows only what a build may contain --
+# no proof mode and no wasm-features -- and leaves [build.wasm-opt] and
+# `infs run` available. Names are matched exactly; an unrecognized one is a
+# load error, not a fall back to the default.
 # target = "wasm32"
 # Compilation mode: "compile" (executable WASM) or "proof" (Rocq specs).
 mode = "compile"

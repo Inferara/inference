@@ -17,14 +17,15 @@
 //! # Why a rewriter and not an emitter
 //!
 //! Nothing code generation emits depends on the Stellar target: the bytes
-//! `codegen()` produces for it are the bytes it produces for Wasm32. The one
-//! Stellar-specific thing code generation holds is its source-level
-//! admissibility gate, which reads the export descriptor and emits nothing,
-//! which is what makes "prove the Wasm32 build, deploy the Stellar build" a
-//! theorem rather than a hope: the marshalling layer is a post-link pass over an
-//! artifact that has already been verified, and the wrappers it appends contain
-//! no arithmetic, no memory access and no control flow beyond one guard per
-//! argument.
+//! `codegen()` produces for it are the bytes it produces for Wasm32. What code
+//! generation holds for Stellar alone is refusals: the source-level
+//! admissibility gate over the export descriptor, and the host-import refusal.
+//! Each reads the program and emits nothing, so the Stellar bytes are the
+//! Wasm32 bytes — which is what makes "prove the Wasm32 build, deploy the
+//! Stellar build" a theorem rather than a hope: the marshalling layer is a
+//! post-link pass over an artifact that has already been verified, and the
+//! wrappers it appends contain no arithmetic, no memory access and no control
+//! flow beyond one guard per argument.
 //!
 //! # The rewrite
 //!
@@ -103,11 +104,13 @@
 //! unreachable method name, a surviving import, a start function.
 //!
 //! A parameter must also have a name the contract spec can record, because the
-//! name is how a caller reaches it: `stellar contract invoke` passes each
-//! argument as `--<name>`. A parameter written `_` is refused, and so is a name
-//! longer than [`MAX_INPUT_NAME_BYTES`], the width of the spec's input-name
-//! field. So is a module already carrying any of the three sections this pass
-//! writes: rewriting it would wrap the wrappers and ship the section twice.
+//! name is how a caller reaches it: `stellar contract invoke` takes each
+//! argument as a `--<name>` flag. A parameter with no name — written `_`, or
+//! given the empty string by a hand-built descriptor — is refused, and so is a
+//! name longer than [`MAX_INPUT_NAME_BYTES`], the width of the spec's
+//! input-name field. So is a module already carrying any of the three sections
+//! this pass writes: rewriting it would wrap the wrappers and ship the section
+//! twice.
 //!
 //! Two refusals are of things nothing downstream would reject. A module
 //! carrying two `name` custom sections is legal WebAssembly, but this pass

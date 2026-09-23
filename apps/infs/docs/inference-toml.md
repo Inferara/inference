@@ -218,10 +218,12 @@ The `[build]` section configures compilation settings.
   - Accepted values: `"wasm32"`, `"stellar"`, `"spacewasm"`.
   - `"stellar"` builds a Soroban smart contract: every exported method is
     rewritten to take and return the host's 64-bit tagged word, and the module
-    carries the environment-metadata section a host will not upload it without.
-    It narrows what a project may contain — no `mode = "proof"`, no
-    `wasm-features`, no `[build.wasm-opt]` (below), and an exported function's
-    parameters and return confined to the scalar set the convention encodes.
+    carries the environment-metadata section a host will not upload it without,
+    plus the contract spec and meta sections the tooling reads. It narrows what
+    a project may contain — no `mode = "proof"`, no `wasm-features`, no
+    `[build.wasm-opt]` (below), and an exported function's parameters and
+    return confined to the scalar set the convention encodes, every parameter
+    named in at most 30 bytes.
     The first three are refused by the manifest itself, at load time, in a
     message naming both keys, so they are invalid for every command rather than
     skipped by some; the last is enforced by the compiler, where the exports

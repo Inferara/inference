@@ -116,9 +116,10 @@ An argument whose tag is wrong traps. It is worth knowing what that looks like
 from the caller's side: a wrong tag, a wrong argument type and an out-of-range
 boolean all produce the byte-identical host report `WasmVm, InvalidAction` /
 `"VM call trapped: UnreachableCodeReached"`. A caller cannot tell which argument
-was wrong, or that the problem was a type at all. The build log is where that
-information is — `infc` prints one summary line naming each method and its value
-arity:
+was wrong, or that the problem was a type at all. The contract's
+`contractspecv0` section carries that information for tooling (see *Invoking a
+contract from the CLI* below), and the build log summarizes it: `infc` prints
+one summary line naming each method and its value arity:
 
 ```text
 Stellar contract: add/2, flip/1, nothing/0; env protocol 20; 558 bytes
@@ -137,7 +138,7 @@ the scalars the convention encodes without a host object:
 | Parameter | `u32`, `i32`, `bool` — at most 32 of them |
 | Return | `u32`, `i32`, `bool`, or nothing |
 | Name | 1–32 bytes of `[A-Za-z0-9_]`, not `__`-prefixed |
-| Parameter name | written (not `_`), 1–30 bytes |
+| Parameter name | any name but `_`, at most 30 bytes; a leading underscore is kept (`_x` is the flag `--_x`, and the CLI accepts `--x` too) |
 
 Everything else is refused at code generation, before any byte exists, naming the
 function and the offending element. The refusals differ because the reasons do:
@@ -163,16 +164,25 @@ function and the offending element. The refusals differ because the reasons do:
   unreachable — rename it."*
 - **A module with no exported function**: refused outright — it would upload with
   no method to call.
-- **A parameter written `_`**: *"…parameter `N` is unnamed ('_'). A contract
-  method's parameters are named: `stellar contract invoke` passes each one as
-  `--<name>`, and the contract's spec section records that name. Name the
-  parameter."*
-- **A parameter name over 30 bytes**: *"…parameter `N` has a name of `L` bytes,
-  and a contract method's parameter name is at most 30: the contract's spec
-  section records each name in a field that wide, and `stellar contract invoke`
-  passes the parameter as `--<name>`. Shorten the name."* (`N` is the
-  parameter's one-based position, and its name where it has one; `L` is the
-  name's length in bytes.)
+- **A parameter written `_`**: *"…because parameter 2 is written '_', which
+  gives it no name. A contract's `contractspecv0` section describes each
+  method's parameters by name, and `stellar contract invoke` takes each argument
+  as a `--<name>` flag built from it; the compiler does not invent a name you did
+  not write. Name the parameter — `_unused` if the body does not read it; a
+  leading underscore is kept as written. …"*
+- **A parameter name over 30 bytes**: *"…because parameter 2
+  'amount_in_the_smallest_currency' has a name of 31 bytes, and a contract
+  method's parameter name is at most 30 bytes: the contract's `contractspecv0`
+  section records each name whole in a field that wide, and a longer one would
+  leave the section unreadable to `stellar contract invoke` and every other tool
+  that reads it. Shorten the name. …"*
+
+Both are quoted for the second parameter of an exported `transfer`: each message
+opens by naming the function — *"Stellar target: exported function 'transfer'
+cannot be a contract method"* — labels the parameter by its one-based position
+and, where it has one, by its name (the second also gives the name's length in
+bytes), and closes, as the type refusals do, with the advice to remove `pub`
+from a function not meant to be a contract method.
 
 Within one exported function, both name rules run after its type and return
 rules, so a type or return refusal on that function is reported before a name
@@ -251,30 +261,33 @@ existed — the host imposes no order on custom sections, and this order is a
 choice made to keep that tail true.
 
 Because the host parses neither tooling section — measured in
-`tests/tests/stellar/envelope.rs`: well-formed and arbitrary-byte spec and meta
-sections all upload and invoke — their correctness is the toolchain's alone to
-check, and the CLI is strict about it: `Spec::new` (`soroban-spec-tools`
-28.0.0), the reader `stellar contract invoke` builds a call's arguments with
-from the deployed contract, and `stellar contract info interface` runs on a
-file, decodes all three sections and fails the command if any one does not
-decode (read from the CLI's source at v28.0.0; the tier mirrors it in
-`spec::every_contract_decodes_the_way_the_cli_reads_a_deployed_contract`). So a
-malformed `contractmetav0` or `contractspecv0` breaks `invoke` and `info
-interface` even though the host itself uploads and runs the contract without
-ever parsing either one, while `soroban-spec`'s and `stellar-xdr`'s readers
-refuse each of those bodies first.
+`tests/tests/stellar/envelope.rs`: well-formed sections, a spec of
+arbitrary bytes and a meta entry of a kind that does not exist all upload
+and invoke — their correctness is the toolchain's alone to check, and
+the CLI is strict about it: `Spec::new` (`soroban-spec-tools` 28.0.0),
+the reader `stellar contract invoke` builds a call's arguments with from
+the deployed contract, and `stellar contract info interface` runs on a
+file, decodes all three sections and fails the command if any one does
+not decode (read from the CLI's source at v28.0.0; the tier mirrors it in
+`spec::every_contract_decodes_the_way_the_cli_reads_a_deployed_contract`).
+So a malformed `contractmetav0` or `contractspecv0` breaks `invoke` and
+`info interface` even though the host itself uploads and runs the contract
+without ever parsing either one, while `soroban-spec`'s and `stellar-xdr`'s
+readers refuse each of those bodies first.
 
 #### Invoking a contract from the CLI
 
 Measured against `stellar` CLI 28.0.0 on a local `stellar/quickstart` network,
-2026-09-24; the full transcript is `tests/tests/stellar/MEASURED_ABI.md`'s "CLI
-measurement" chapter.
+2026-09-24; the transcript is `tests/tests/stellar/MEASURED_ABI.md`'s "CLI
+measurement" chapter. Commands and outputs are quoted verbatim; a line reading
+`…` marks lines elided, and home-directory paths are shortened.
 
 Reading the sections from a compiled `u32_methods.wasm` renders the interface
 in the SDK's own trait form:
 
 ```text
 $ stellar contract info interface --wasm u32_methods.wasm
+ℹ️ Loading contract spec from file...
 #[soroban_sdk::contractargs(name = "Args")]
 #[soroban_sdk::contractclient(name = "Client")]
 pub trait Contract {
@@ -287,13 +300,21 @@ Deploying it first funds a local key and returns a contract id:
 
 ```text
 $ stellar keys generate alice --network local --fund --overwrite
+❗️ Overwriting identity 'alice'
+✅ Key saved with alias alice in "…/.config/stellar/identity/alice.toml"
 ✅ Account alice funded on "Standalone Network ; February 2017"
+
 $ stellar contract deploy --wasm u32_methods.wasm --source alice --network local
-✅ Deployed!            (id CCRE5RTDJCATV2J4HLBZTKS5SNP2Q2S7EEJ3A572FZX7TSM47CDHDEE3)
+ℹ️ Uploading contract WASM…
+…
+✅ Transaction submitted successfully!
+✅ Deployed!
+CCRE5RTDJCATV2J4HLBZTKS5SNP2Q2S7EEJ3A572FZX7TSM47CDHDEE3
 ```
 
-`$ID` below stands for the contract id `deploy` printed, and `alice` is the
-funded local key `keys generate` created.
+`$ID` below stands for the contract id `deploy` printed, alone on the last line
+and the only one it writes to standard output, and `alice` is the funded local
+key `keys generate` created.
 
 Deployed and invoked with named arguments, the CLI reports it is simulating a
 read-only call and prints the answer:
@@ -309,7 +330,11 @@ the parameter and its declared type:
 
 ```text
 $ stellar contract invoke --id $ID --source alice --network local -- add --a two --b 40
-error: Failed to parse argument 'a': … Expected type u32 (unsigned 32-bit integer), but received: 'two'
+❌ error: Failed to parse argument 'a': expected ident at line 1 column 2
+
+Context: Expected type u32 (unsigned 32-bit integer), but received: 'two'
+
+Suggestion: Ensure the value is a valid integer within the type's range
 ```
 
 Contrast that with [the value ABI](#the-value-abi) above: a raw `Val` of the
@@ -319,8 +344,8 @@ whichever tag were wrong. The spec is what lets the CLI catch the mistake with
 the parameter's own name and type instead.
 
 Against a contract carrying neither section — what this toolchain produced
-before it emitted them (#466) — the same CLI panics on `info interface` and
-offers `invoke` no command at all.
+before it emitted them — the same CLI panics on `info interface` and offers
+`invoke` no command at all.
 
 #### What is not supported, and why
 
@@ -362,8 +387,9 @@ from is the module a `wasm32` build finishes with. That is what makes "prove one
 deploy the other" a statement about bytes rather than a hope, and it is why the
 Rocq path is refused here rather than qualified: `wasm_to_v` reads the linked,
 **pre-rewrite** bytes, so a `.v` written during a Stellar build would describe a
-module with different exports, different bodies and none of the custom sections
-that make it a contract — not the `.wasm` beside it on disk. `infc` refuses
+module whose exports point at different functions, with none of the value-ABI
+wrappers and none of the three contract sections the rewrite appends — not the
+`.wasm` beside it on disk. `infc` refuses
 that pairing and tells you to build the same source at `wasm32` instead.
 
 The procedure:

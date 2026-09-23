@@ -547,6 +547,11 @@ pub fn visible(a: i32) -> i32 {
 
     /// A `pub fn` in an imported file is intra-project visibility, not an export,
     /// so it is described nowhere — while the entry file's own exports still are.
+    ///
+    /// The imported file declares an `entry` of its own, whose parameter is `n`,
+    /// so a descriptor that found the export's declaration by name rather than
+    /// as the exported function itself would record `n` for `a`, and this test
+    /// would see it.
     #[test]
     fn a_public_function_in_an_imported_file_is_not_described() {
         let entry = "\
@@ -559,6 +564,10 @@ pub fn entry(a: i32) -> i32 {
         let math = "\
 pub fn double(n: i32) -> i32 {
     return n * 2;
+}
+
+pub fn entry(n: i32) -> i32 {
+    return n;
 }
 ";
         let output = codegen_output_multi_file_no_analysis(&[

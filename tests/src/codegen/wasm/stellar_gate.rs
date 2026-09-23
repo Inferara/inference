@@ -126,14 +126,24 @@ mod stellar_gate_tests {
         cov_mark::check!(wasm_codegen_stellar_gate_unnamed_param);
         let message = refused("pub fn f(a: u32, _: u32) -> u32 { return a; }");
         assert!(message.contains("exported function 'f'"), "{message}");
-        assert!(message.contains("parameter 2 is unnamed ('_')"), "{message}");
+        assert!(
+            message.contains("parameter 2 is written '_', which gives it no name"),
+            "{message}"
+        );
         assert!(message.contains("`--<name>`"), "{message}");
-        assert!(message.ends_with("Name the parameter."), "{message}");
+        assert!(
+            message.contains("Name the parameter — `_unused` if the body does not read it"),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("only an entry-file top-level 'pub fn' is exported."),
+            "{message}"
+        );
     }
 
-    /// Thirty bytes is the widest parameter name the contract's spec section
-    /// can record; thirty-one is refused, naming the parameter, its length and
-    /// the limit, and saying what to do.
+    /// Thirty bytes is the widest parameter name the contract's
+    /// `contractspecv0` section can record; thirty-one is refused, naming the
+    /// parameter, its length and the limit, and saying what to do.
     #[test]
     fn a_parameter_name_over_thirty_bytes_is_refused_and_thirty_is_not() {
         let widest = "n".repeat(30);
@@ -153,8 +163,12 @@ mod stellar_gate_tests {
             message.contains(&format!("parameter 1 '{too_long}' has a name of 31 bytes")),
             "{message}"
         );
-        assert!(message.contains("at most 30"), "{message}");
-        assert!(message.ends_with("Shorten the name."), "{message}");
+        assert!(message.contains("at most 30 bytes"), "{message}");
+        assert!(message.contains("Shorten the name."), "{message}");
+        assert!(
+            message.ends_with("only an entry-file top-level 'pub fn' is exported."),
+            "{message}"
+        );
     }
 
     /// An imported file's parameter name reaches neither kind of slot in the
@@ -218,7 +232,7 @@ mod stellar_gate_tests {
 
         let admissible = refusal_beside_import("pub fn transfer(_: u32) -> u32 { return 1; }");
         assert!(
-            admissible.contains("parameter 1 is unnamed ('_')"),
+            admissible.contains("parameter 1 is written '_'"),
             "{admissible}"
         );
         assert!(

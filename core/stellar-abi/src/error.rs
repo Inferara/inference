@@ -94,16 +94,19 @@ pub enum StellarAbiError {
     )]
     UnsupportedReturn { export: String, ty: String },
 
-    /// A parameter the source wrote as `_`.
+    /// A parameter with no name: one the source wrote as `_`, which the
+    /// descriptor records as `None`, or one a hand-built descriptor names with
+    /// the empty string, which would give a caller the flag `--`.
     ///
     /// The contract spec records every parameter by name, and that name is how
-    /// a caller reaches it: `stellar contract invoke` passes each argument as
-    /// `--<name>`. A parameter with none cannot be described, and inventing one
-    /// would publish a name the author never wrote.
+    /// a caller reaches it: `stellar contract invoke` takes each argument as a
+    /// `--<name>` flag. A parameter with none cannot be described, and
+    /// inventing one would publish a name the author never wrote.
     #[error(
-        "the export `{export}` leaves parameter {position} unnamed, written `_`; a contract \
-         method's parameters are named, because `stellar contract invoke` passes each one as \
-         `--<name>` and the contract spec section records that name, so name the parameter"
+        "the export `{export}` gives parameter {position} no name — `_` in the source, or an \
+         empty name in the descriptor; a contract method's parameters are named, because the \
+         `contractspecv0` section records each one by name and `stellar contract invoke` takes \
+         each argument as a `--<name>` flag, so name the parameter"
     )]
     UnnamedParameter {
         export: String,
@@ -115,7 +118,7 @@ pub enum StellarAbiError {
     #[error(
         "the export `{export}` names parameter {position} `{name}`, which is {len} bytes long; \
          a contract method's parameter name is at most {MAX_INPUT_NAME_BYTES} bytes, the width \
-         of the contract spec section's input-name field, so shorten it"
+         of the `contractspecv0` section's input-name field, so shorten it"
     )]
     ParameterNameTooLong {
         export: String,
@@ -164,15 +167,18 @@ pub enum StellarAbiError {
 
     /// The module already carries one of the three sections this pass writes —
     /// `contractspecv0`, `contractmetav0` or `contractenvmetav0` — so it has
-    /// already been made a contract. Rewriting it again would wrap the wrappers
-    /// and write that section a second time, and a second copy is not merely
-    /// redundant. A spec reader either takes the first `contractspecv0` it
-    /// meets, as `soroban_spec::read::raw_from_wasm` (`soroban-spec` 28.0.0)
-    /// does, or merges every copy, and neither describes the contract this pass
-    /// produced.
+    /// already been rewritten into a contract. Rewriting it again would wrap
+    /// the wrappers and write that section a second time, and a second copy is
+    /// not merely redundant. A spec reader either takes the first
+    /// `contractspecv0` it meets, as `soroban_spec::read::raw_from_wasm`
+    /// (`soroban-spec` 28.0.0) does, or merges every copy, and neither
+    /// describes the contract this pass produced.
     #[error(
-        "the module already carries a `{section}` section, which this pass writes, so it has \
-         already been made a contract"
+        "the module already carries a `{section}` section, one of the three this pass writes, \
+         so it has already been rewritten into a contract; rewriting it again would wrap the \
+         wrappers and append a second `{section}` after the first, and a reader takes the \
+         first copy it meets — the one already there — or merges both, and neither is the \
+         section this pass wrote"
     )]
     AlreadyAContract { section: String },
 

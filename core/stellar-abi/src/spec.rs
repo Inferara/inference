@@ -142,16 +142,21 @@ pub(crate) fn spec_type(scalar: ValScalar) -> u32 {
 ///
 /// Callers have checked the bounds the XDR declares — at most
 /// [`MAX_EXPORT_NAME_BYTES`] of method name, at most [`MAX_INPUT_NAME_BYTES`]
-/// of parameter name — so the encoding never has to truncate. The bounds are
-/// asserted in debug builds: an entry over either one would make a reader
-/// refuse the whole section, every other method's entry with it.
+/// of parameter name — so the encoding never has to truncate.
+///
+/// # Panics
+///
+/// On a name over either bound, in every build. That is a violated internal
+/// invariant, so a compiler bug, and a panic is the correct result: the entry
+/// written instead would make a reader refuse the whole section, every other
+/// method's entry with it.
 pub(crate) fn function_entry(
     name: &str,
     inputs: &[(&str, ValScalar)],
     output: ValReturn,
 ) -> Vec<u8> {
-    debug_assert!(name.len() <= MAX_EXPORT_NAME_BYTES, "method name `{name}`");
-    debug_assert!(
+    assert!(name.len() <= MAX_EXPORT_NAME_BYTES, "method name `{name}`");
+    assert!(
         inputs
             .iter()
             .all(|(input_name, _)| input_name.len() <= MAX_INPUT_NAME_BYTES),
@@ -347,11 +352,16 @@ mod tests {
 
         let header = 4 + 4 + (4 + 8);
         assert_eq!(entry[header..header + 4], [0, 0, 0, 32]);
+        // Spelled out without the encoder: an empty doc string, the name's
+        // length, the name — two or three bytes here, so zero-padded to one
+        // word — and the `u32` type code, 4.
         let input = |index: usize| {
-            let mut expected = vec![0, 0, 0, 0];
-            put_string(&mut expected, &format!("p{index}"));
-            put_u32(&mut expected, SC_SPEC_TYPE_U32);
-            expected
+            let name = format!("p{index}");
+            assert!(name.len() < 4, "every name here fits one word");
+            let length = u8::try_from(name.len()).expect("a short name");
+            let mut word = name.into_bytes();
+            word.resize(4, 0);
+            [vec![0, 0, 0, 0], vec![0, 0, 0, length], word, vec![0, 0, 0, 4]].concat()
         };
         let described: Vec<u8> = (0..32).flat_map(input).collect();
         assert_eq!(entry[header + 4..entry.len() - 8], described[..]);
@@ -359,8 +369,8 @@ mod tests {
     }
 
     /// A parameter name is written exactly as the author spelled it, a leading
-    /// underscore included: the spec must not carry a name nobody wrote, and
-    /// stripping could fold `x` and `_x` into one command-line flag.
+    /// underscore included: the spec must not carry a name the author did not
+    /// write.
     #[test]
     fn a_parameter_name_is_written_as_spelled() {
         let entry = function_entry("f", &[("_x", ValScalar::U32)], ValReturn::Void);

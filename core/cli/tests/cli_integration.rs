@@ -836,7 +836,7 @@ fn every_inadmissible_contract_shape_is_refused_with_no_artifact() {
         (
             "an unnamed parameter",
             "pub fn f(_: u32) -> u32 { return 1; }\n",
-            &["'f'", "parameter 1", "unnamed ('_')"],
+            &["'f'", "parameter 1", "is written '_'"],
         ),
         (
             "an over-long parameter name",
@@ -881,7 +881,8 @@ fn a_proof_artifact_is_refused_at_the_stellar_target() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
         stderr.contains("-v cannot be combined with --target stellar")
-            && stderr.contains("pre-rewrite"),
+            && stderr.contains("pre-rewrite")
+            && stderr.contains("none of the three contract sections"),
         "the refusal must name the divergence, got: {stderr}"
     );
     assert!(
