@@ -154,12 +154,17 @@ event list into a `Vec<Step>` that `build_tree` consumes to assemble the owned C
 A `fuel: Cell<u32>` (initialized to 256) lives on the `Parser`. `Parser::nth` — the single
 lookahead primitive every `current`/`at`/`nth_at`/`at_ts` call funnels through — decrements
 it on each peek and asserts it is non-zero, so a recovery loop that peeks without making
-progress trips the assertion in debug builds. Progress refills the fuel: consuming a token
-(`do_bump`) or completing a node (`Marker::complete`). Completing a node counts because a
-deeply nested but well-founded parse reaches end of input and then unwinds, closing one node
-per frame while only peeking at the `Eof` sentinel; that bounded, terminating unwind must not
-be mistaken for a non-advancing spin. A genuine spin neither bumps nor completes, so it still
-depletes the fuel and fails loudly rather than looping forever.
+progress trips the assertion, in release builds as in debug. Progress refills the fuel:
+consuming a token (`do_bump`) or completing a node the cursor has moved through since the
+node was opened (`Marker::complete`). Completing such a node counts because a deeply nested
+but well-founded parse reaches end of input and then unwinds, closing one node per frame
+while only peeking at the `Eof` sentinel; that bounded, terminating unwind must not be
+mistaken for a non-advancing spin. Completing a node opened at the cursor refills nothing: a
+recovery that reports and closes its node without consuming the token it could not use is
+retried by its loop, which closes a fresh empty node every round, and that is exactly the
+spin the guard exists to stop. So every loop that repeats until a closing token or end of
+input either advances or fails loudly within a few hundred rounds, whichever rule its body
+calls.
 
 ### Single `SyntaxKind` enum
 

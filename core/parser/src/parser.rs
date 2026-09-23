@@ -13,18 +13,27 @@
 //! recovery loop spinning forever. To turn that into a loud, immediate failure in
 //! development, the engine carries a [`fuel`](Parser) counter: every lookahead
 //! decrements it and every unit of *progress* refills it. If the fuel hits zero —
-//! meaning many lookaheads happened with no progress — a debug assertion fires.
-//! On real input the parser always advances, so the guard never trips; it exists
-//! purely as a development backstop.
+//! meaning many lookaheads happened with no progress — an assertion fires, in
+//! release builds as in debug. On real input the parser always advances, so the
+//! guard never trips; it exists purely as a development backstop.
 //!
-//! Progress is either consuming a token (`bump`) **or** completing a node
-//! ([`Marker::complete`]). Completing a node counts because a deeply nested but
-//! well-founded parse — e.g. hundreds of unterminated `fn f() {` blocks — reaches
-//! end of input and then *unwinds*, closing one node per frame while peeking (but
-//! not consuming) at the `Eof` sentinel. That unwind does many lookaheads at a
-//! fixed cursor yet is strictly terminating, so it must not be mistaken for a
-//! spin; each closed node refills the fuel. A true spin neither bumps nor
-//! completes, so it still depletes the fuel and trips the guard.
+//! Progress is either consuming a token (`bump`) **or** completing a node the
+//! cursor has moved through since the node was opened ([`Marker::complete`]).
+//! Completing such a node counts because a deeply nested but well-founded parse
+//! — e.g. hundreds of unterminated `fn f() {` blocks — reaches end of input and
+//! then *unwinds*, closing one node per frame while peeking (but not consuming)
+//! at the `Eof` sentinel. That unwind does many lookaheads at a fixed cursor yet
+//! is strictly terminating: each frame closes a node it opened before the cursor
+//! last moved, and there are only as many of those as there are open frames.
+//!
+//! Completing a node opened at the cursor is not progress. A recovery that
+//! reports an error and closes its node without consuming the token it could
+//! not use leaves its loop on that same token, and the loop would retry it
+//! forever, each round closing a fresh empty node, if closing one refilled the
+//! fuel. As it is, every loop that repeats until a closing token or end of input
+//! either moves the cursor or runs out of fuel within a few hundred rounds,
+//! whichever rule its body calls: a missing recovery arm fails as a panic naming
+//! the stuck parser, not as an allocation that grows without bound.
 
 use std::cell::Cell;
 
@@ -43,7 +52,8 @@ pub struct Parser<'i> {
     pos: usize,
     /// Events emitted so far, in order.
     events: Vec<Event>,
-    /// Advance-guard fuel: decremented on lookahead, refilled on `bump`.
+    /// Advance-guard fuel: decremented on lookahead, refilled on progress (see
+    /// the module docs).
     fuel: Cell<u32>,
 }
 
@@ -138,7 +148,8 @@ impl<'i> Parser<'i> {
     ///
     /// Used by item loops to assert forward progress: a handler that completes
     /// without consuming a token leaves this unchanged, which the loop detects
-    /// and recovers from rather than spinning forever.
+    /// and recovers from rather than retrying the handler until the advance
+    /// guard fires.
     #[must_use]
     pub fn pos(&self) -> usize {
         self.pos
@@ -201,7 +212,7 @@ impl<'i> Parser<'i> {
     pub fn start(&mut self) -> Marker {
         let pos = self.events.len() as u32;
         self.events.push(Event::tombstone());
-        Marker::new(pos)
+        Marker::new(pos, self.pos)
     }
 
     /// Records a diagnostic at the current position without consuming a token.
@@ -252,23 +263,29 @@ impl<'i> Parser<'i> {
 pub struct Marker {
     /// Index of this marker's tombstone `Start` event.
     pos: u32,
+    /// The token position the cursor was at when the node was opened.
+    opened_at: usize,
     /// Whether the marker was completed or abandoned (defused).
     defused: bool,
 }
 
 impl Marker {
-    fn new(pos: u32) -> Marker {
+    fn new(pos: u32, opened_at: usize) -> Marker {
         Marker {
             pos,
+            opened_at,
             defused: false,
         }
     }
 
     /// Completes the node as `kind`, patching its `Start` and pushing `Finish`.
     ///
-    /// Completing a node is structural progress, so it refills the advance-guard
-    /// fuel (see the module docs): an unwinding deep parse closes one node per
-    /// frame and must not be mistaken for a non-advancing spin.
+    /// Completing a node the cursor has moved through since it was opened is
+    /// structural progress, so it refills the advance-guard fuel: an unwinding
+    /// deep parse closes one such node per frame and must not be mistaken for a
+    /// non-advancing spin. A node opened at the cursor refills nothing, since
+    /// closing it is what a spinning recovery does on every round (see the
+    /// module docs).
     pub fn complete(mut self, p: &mut Parser, kind: SyntaxKind) -> CompletedMarker {
         self.defused = true;
         let idx = self.pos as usize;
@@ -277,7 +294,9 @@ impl Marker {
             _ => unreachable!("marker must point at its Start event"),
         }
         p.events.push(Event::Finish);
-        p.fuel.set(FUEL);
+        if p.pos != self.opened_at {
+            p.fuel.set(FUEL);
+        }
         CompletedMarker {
             pos: self.pos,
             kind,
@@ -328,7 +347,10 @@ impl CompletedMarker {
     ///
     /// This is how left-associative and postfix grammar rules retroactively wrap
     /// an already-parsed operand: `lhs.precede(p)` starts the binary expression
-    /// node whose first child is `lhs`.
+    /// node whose first child is `lhs`. For the advance guard the new node is
+    /// opened at the cursor, not where `lhs` began, so a postfix loop that wraps
+    /// its operand again and again without consuming a token is caught as the
+    /// spin it is.
     pub fn precede(self, p: &mut Parser) -> Marker {
         let new = p.start();
         match &mut p.events[self.pos as usize] {
@@ -511,5 +533,93 @@ mod tests {
             result.is_err(),
             "stuck lookahead must panic in debug builds"
         );
+    }
+
+    /// Runs `drive` and returns the message it panicked with, if it did.
+    fn panic_message(drive: impl FnOnce() + std::panic::UnwindSafe) -> Option<String> {
+        let payload = std::panic::catch_unwind(drive).err()?;
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        Some(message)
+    }
+
+    /// More rounds than the guard can allow a stuck loop, so a loop the guard
+    /// fails to stop still ends and the test reports it instead of hanging.
+    const ROUNDS_THE_GUARD_MUST_STOP: usize = FUEL as usize * 8;
+
+    /// A recovery that reports and closes its node without consuming the token
+    /// it could not use, retried by a loop that runs until end of input, is
+    /// stopped by the guard: closing an empty node is not progress.
+    #[test]
+    fn advance_guard_stops_a_loop_whose_recovery_consumes_nothing() {
+        let fired = panic_message(|| {
+            let toks = tokenize("unit");
+            let input = Input::new("unit", &toks);
+            let mut p = Parser::new(&input);
+            let mut rounds = 0;
+            while !p.at_eof() && rounds < ROUNDS_THE_GUARD_MUST_STOP {
+                let m = p.start();
+                p.error("expected an identifier");
+                m.complete(&mut p, SyntaxKind::Identifier);
+                rounds += 1;
+            }
+        });
+        assert!(
+            fired.as_deref().is_some_and(|message| message.starts_with("parser stuck")),
+            "the guard must stop the loop, but it ended with {fired:?}"
+        );
+    }
+
+    /// A postfix loop that wraps its operand in a new node round after round
+    /// without consuming a token is stopped too: the wrapping node is opened at
+    /// the cursor, whatever the operand inside it spans.
+    #[test]
+    fn advance_guard_stops_a_postfix_loop_that_consumes_nothing() {
+        let fired = panic_message(|| {
+            let toks = tokenize("a (");
+            let input = Input::new("a (", &toks);
+            let mut p = Parser::new(&input);
+            let m = p.start();
+            p.bump(SyntaxKind::Ident);
+            let mut lhs = m.complete(&mut p, SyntaxKind::Identifier);
+            let mut rounds = 0;
+            while p.at(SyntaxKind::LParen) && rounds < ROUNDS_THE_GUARD_MUST_STOP {
+                let call = lhs.precede(&mut p);
+                p.error("expected an argument list");
+                lhs = call.complete(&mut p, SyntaxKind::FunctionCallExpression);
+                rounds += 1;
+            }
+        });
+        assert!(
+            fired.as_deref().is_some_and(|message| message.starts_with("parser stuck")),
+            "the guard must stop the loop, but it ended with {fired:?}"
+        );
+    }
+
+    /// A deep parse that reaches end of input unwinds, each frame peeking for
+    /// its closing token and closing its node at the same cursor, and every
+    /// frame closes: a node the cursor moved through since it was opened is
+    /// progress, however many lookaheads the unwind makes in total.
+    #[test]
+    fn advance_guard_lets_a_deep_unwind_close_every_frame() {
+        let depth = FUEL as usize * 4;
+        let src = "(".repeat(depth);
+        let toks = tokenize(&src);
+        let input = Input::new(&src, &toks);
+        let mut p = Parser::new(&input);
+        let mut open = Vec::with_capacity(depth);
+        for _ in 0..depth {
+            let m = p.start();
+            p.bump(SyntaxKind::LParen);
+            open.push(m);
+        }
+        while let Some(m) = open.pop() {
+            p.expect(SyntaxKind::RParen);
+            m.complete(&mut p, SyntaxKind::ParenthesizedExpression);
+        }
+        assert!(p.at_eof());
     }
 }
