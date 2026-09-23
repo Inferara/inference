@@ -540,6 +540,15 @@ const STELLAR_MAX_EXPORT_NAME_BYTES: usize = 32;
 /// The prefix the Stellar host reserves for itself.
 const STELLAR_RESERVED_EXPORT_PREFIX: &str = "__";
 
+/// The longest parameter name an exported function may have at the Stellar
+/// target, in bytes.
+///
+/// The contract's spec section records each parameter's name in an XDR
+/// `string<30>` field, the `name` of `SCSpecFunctionInputV0`. The name has to
+/// be recorded whole and as written, because `stellar contract invoke` derives
+/// from it the `--<name>` flag a caller passes the argument by.
+const STELLAR_MAX_INPUT_NAME_BYTES: usize = 30;
+
 /// The set an exported function may be built from at the Stellar target, as
 /// every refusal restates it.
 const STELLAR_SCALAR_SET: &str = "This target currently carries only the scalar set: an \
@@ -633,6 +642,13 @@ fn stellar_parameter_label(name: Option<&str>, index: usize) -> String {
 /// [`codegen`] render. This gate is only ever reached at that one target, so
 /// there is no variant name to hand the reader back.
 ///
+/// The rules run in one order, export by export: the name, the parameter
+/// count, every parameter's type, the return, then every parameter's name. A
+/// program breaking two of them hears about the earlier one first, and a type
+/// refusal always precedes a name refusal, so a parameter written `_` with a
+/// type the target refuses is reported for its type, which is the change the
+/// author has to make regardless.
+///
 /// # The overlap with the Val-ABI rewriter is deliberate
 ///
 /// `inference-stellar-abi` refuses the same shapes again, after linking. That is
@@ -663,6 +679,7 @@ fn check_stellar_exports(exports: &[ExportSignature]) -> anyhow::Result<()> {
         check_stellar_export_name(&signature.name)?;
         check_stellar_export_arity(signature)?;
         check_stellar_export_types(signature)?;
+        check_stellar_parameter_names(signature)?;
     }
     Ok(())
 }
@@ -766,6 +783,58 @@ fn check_stellar_export_types(signature: &ExportSignature) -> anyhow::Result<()>
             ))
         }
     }
+}
+
+/// Refuses an exported parameter the contract's spec section cannot record.
+///
+/// A caller reaches a contract method's parameter by its name, so every
+/// parameter needs one, and the name must fit the spec's input-name field
+/// whole. Each rule runs over every parameter before the next begins, so a
+/// signature breaking both is refused for its unnamed parameter wherever the
+/// over-long one sits.
+///
+/// An empty name counts as none, as it does in the Val-ABI rewriter. No
+/// identifier is empty, so only a hand-built descriptor carries one — the
+/// footing of the empty export name, which both gates refuse — and the two
+/// gates must state the same rules for it as for anything else. Two
+/// parameters sharing a name are admitted: uniqueness is a producer invariant
+/// the type checker enforces with `DuplicateParameterName`, so a duplicate
+/// reaches this gate only from a hand-built descriptor, and neither gate yet
+/// refuses it.
+fn check_stellar_parameter_names(signature: &ExportSignature) -> anyhow::Result<()> {
+    let name = &signature.name;
+    if let Some(index) = signature
+        .params
+        .iter()
+        .position(|param| param.name.as_deref().is_none_or(str::is_empty))
+    {
+        cov_mark::hit!(wasm_codegen_stellar_gate_unnamed_param);
+        let parameter = stellar_parameter_label(None, index);
+        return Err(anyhow::anyhow!(
+            "Stellar target: exported function '{name}' cannot be a contract method because \
+             {parameter} is unnamed ('_'). A contract method's parameters are named: \
+             `stellar contract invoke` passes each one as `--<name>`, and the contract's spec \
+             section records that name. Name the parameter."
+        ));
+    }
+
+    let too_long = signature.params.iter().enumerate().find_map(|(index, param)| {
+        let param_name = param.name.as_deref()?;
+        (param_name.len() > STELLAR_MAX_INPUT_NAME_BYTES).then_some((index, param_name))
+    });
+    let Some((index, param_name)) = too_long else {
+        return Ok(());
+    };
+    cov_mark::hit!(wasm_codegen_stellar_gate_param_name_length);
+    let parameter = stellar_parameter_label(Some(param_name), index);
+    let len = param_name.len();
+    Err(anyhow::anyhow!(
+        "Stellar target: exported function '{name}' cannot be a contract method because \
+         {parameter} has a name of {len} bytes, and a contract method's parameter name is at \
+         most {STELLAR_MAX_INPUT_NAME_BYTES}: the contract's spec section records each name in \
+         a field that wide, and `stellar contract invoke` passes the parameter as `--<name>`. \
+         Shorten the name."
+    ))
 }
 
 /// Traverses every source file's typed AST and compiles all function and
@@ -1654,8 +1723,8 @@ mod memory_layout_tests {
 mod stellar_gate_tests {
     use super::{
         AbiParam, AbiReturn, AbiType, ExportSignature, STELLAR_COMPOUND_NEXT_STEP,
-        STELLAR_MAX_EXPORT_NAME_BYTES, STELLAR_MAX_EXPORT_PARAMS, check_stellar_exports,
-        render_abi_type, stellar_parameter_label,
+        STELLAR_MAX_EXPORT_NAME_BYTES, STELLAR_MAX_EXPORT_PARAMS, STELLAR_MAX_INPUT_NAME_BYTES,
+        check_stellar_exports, render_abi_type, stellar_parameter_label,
     };
 
     fn signature(name: &str, params: Vec<AbiParam>, ret: AbiReturn) -> ExportSignature {
@@ -1933,14 +2002,16 @@ mod stellar_gate_tests {
     }
 
     /// A descriptor that breaks several rules at once reports the name first,
-    /// then the arity, then the types. The order is what a user experiences as
-    /// "fix one thing and the next appears", so it is fixed here rather than
-    /// left to the order the checks happen to be written in.
+    /// then the arity, then the parameter types, then the return, then the
+    /// parameter names. The order is what a user experiences as "fix one thing
+    /// and the next appears", so it is fixed here rather than left to the order
+    /// the checks happen to be written in — and it is the Val-ABI rewriter's
+    /// order too, so both gates refuse one program for the same rule.
     #[test]
-    fn the_refusal_order_is_name_then_arity_then_type() {
+    fn the_refusal_order_is_name_arity_types_return_then_parameter_names() {
         let everything_wrong = signature(
             "__wide-and-long",
-            named_params(vec![AbiType::U64; STELLAR_MAX_EXPORT_PARAMS + 1]),
+            vec![AbiParam::unnamed(AbiType::U64); STELLAR_MAX_EXPORT_PARAMS + 1],
             AbiReturn::Scalar(AbiType::U64),
         );
         assert!(
@@ -1966,6 +2037,144 @@ mod stellar_gate_tests {
             message.contains("is declared 'u64'"),
             "a parameter reports before the return: {message}"
         );
+
+        let returns_wide = signature(
+            "f",
+            vec![AbiParam::unnamed(AbiType::U32)],
+            AbiReturn::Scalar(AbiType::U64),
+        );
+        let message = refusal(&[returns_wide]);
+        assert!(
+            message.contains("it returns 'u64'"),
+            "the return reports before the parameter names: {message}"
+        );
+
+        let typed = signature(
+            "f",
+            vec![
+                AbiParam::unnamed(AbiType::U32),
+                AbiParam::named("amount", AbiType::U64),
+            ],
+            AbiReturn::Unit,
+        );
+        let message = refusal(&[typed]);
+        assert!(
+            message.contains("parameter 2 'amount' is declared 'u64'"),
+            "every parameter's type reports before any parameter's name: {message}"
+        );
+
+        let too_long = "n".repeat(STELLAR_MAX_INPUT_NAME_BYTES + 1);
+        for (params, expected) in [
+            (
+                vec![
+                    AbiParam::unnamed(AbiType::U32),
+                    AbiParam::named(too_long.clone(), AbiType::U32),
+                ],
+                "parameter 1 is unnamed",
+            ),
+            (
+                vec![
+                    AbiParam::named(too_long.clone(), AbiType::U32),
+                    AbiParam::unnamed(AbiType::U32),
+                ],
+                "parameter 2 is unnamed",
+            ),
+        ] {
+            let message = refusal(&[signature("f", params, AbiReturn::Unit)]);
+            assert!(
+                message.contains(expected),
+                "every parameter is asked for a name before any is measured: {message}"
+            );
+        }
+    }
+
+    /// The unnamed-parameter refusal, pinned character for character: a
+    /// parameter written `_` has nothing for the spec to record and nothing for
+    /// a caller to pass it by.
+    #[test]
+    fn an_unnamed_parameter_is_refused_with_its_own_words() {
+        cov_mark::check!(wasm_codegen_stellar_gate_unnamed_param);
+        assert_eq!(
+            refusal(&[signature(
+                "transfer",
+                vec![
+                    AbiParam::named("to", AbiType::U32),
+                    AbiParam::unnamed(AbiType::U32),
+                ],
+                AbiReturn::Unit
+            )]),
+            "Stellar target: exported function 'transfer' cannot be a contract method because \
+             parameter 2 is unnamed ('_'). A contract method's parameters are named: \
+             `stellar contract invoke` passes each one as `--<name>`, and the contract's spec \
+             section records that name. Name the parameter."
+        );
+    }
+
+    /// An empty name is no name, as the rewriter treats it: only a hand-built
+    /// descriptor can carry one, and it earns the unnamed refusal, word for
+    /// word, rather than passing here to be written as a zero-length name.
+    #[test]
+    fn an_empty_parameter_name_is_refused_as_unnamed() {
+        assert_eq!(
+            refusal(&[signature(
+                "transfer",
+                vec![
+                    AbiParam::named("to", AbiType::U32),
+                    AbiParam::named("", AbiType::U32),
+                ],
+                AbiReturn::Unit
+            )]),
+            "Stellar target: exported function 'transfer' cannot be a contract method because \
+             parameter 2 is unnamed ('_'). A contract method's parameters are named: \
+             `stellar contract invoke` passes each one as `--<name>`, and the contract's spec \
+             section records that name. Name the parameter."
+        );
+    }
+
+    /// Thirty bytes is the width of the spec's input-name field and is
+    /// admitted; thirty-one is refused, naming the parameter, its length and
+    /// the limit. A leading underscore is part of a name, not a way of leaving
+    /// one out, so `_x` is admitted as written.
+    #[test]
+    fn the_parameter_name_rule_is_exact_at_its_boundary() {
+        assert_eq!(STELLAR_MAX_INPUT_NAME_BYTES, 30, "the XDR bound, `string name<30>`");
+        let widest = "n".repeat(30);
+        assert!(
+            gate(&[signature(
+                "f",
+                vec![AbiParam::named(widest, AbiType::U32)],
+                AbiReturn::Unit
+            )])
+            .is_ok()
+        );
+        assert!(
+            gate(&[signature(
+                "f",
+                vec![AbiParam::named("_x", AbiType::U32)],
+                AbiReturn::Unit
+            )])
+            .is_ok()
+        );
+
+        cov_mark::check!(wasm_codegen_stellar_gate_param_name_length);
+        let too_long = "n".repeat(31);
+        assert_eq!(
+            refusal(&[signature(
+                "f",
+                vec![
+                    AbiParam::named("a", AbiType::U32),
+                    AbiParam::named(too_long.clone(), AbiType::Bool),
+                ],
+                AbiReturn::Unit
+            )]),
+            format!(
+                "Stellar target: exported function 'f' cannot be a contract method because \
+                 parameter 2 '{too_long}' has a name of 31 bytes, and a contract method's \
+                 parameter name is at most 30: the contract's spec section records each name in \
+                 a field that wide, and `stellar contract invoke` passes the parameter as \
+                 `--<name>`. Shorten the name."
+            )
+        );
     }
 
     /// The first inadmissible export decides the message, so a module with a
@@ -1982,7 +2191,10 @@ mod stellar_gate_tests {
     /// The label of a refused parameter comes from its own descriptor entry: its
     /// name when the source gave one, its position alone when the source wrote
     /// `_`. A neighbour's name must never stand in for it, whichever of the two
-    /// is the unnamed one.
+    /// is the unnamed one. The type refusal and the length refusal render a
+    /// name when there is one, so a borrowed name would show in either. The
+    /// unnamed refusal is labelled `None` by construction; its row holds it to
+    /// the same position-alone spelling as a type refusal of `_`.
     #[test]
     fn a_refused_parameter_is_labelled_by_the_name_its_descriptor_carries() {
         let cases = [
@@ -2006,6 +2218,20 @@ mod stellar_gate_tests {
                     AbiParam::unnamed(AbiType::U64),
                 ],
                 "because parameter 2 is declared 'u64'.",
+            ),
+            (
+                vec![
+                    AbiParam::named("to", AbiType::U32),
+                    AbiParam::unnamed(AbiType::U32),
+                ],
+                "because parameter 2 is unnamed ('_').",
+            ),
+            (
+                vec![
+                    AbiParam::named("to", AbiType::U32),
+                    AbiParam::named("n".repeat(31), AbiType::U32),
+                ],
+                "because parameter 2 'nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn' has a name of 31 bytes,",
             ),
         ];
         for (params, label) in cases {

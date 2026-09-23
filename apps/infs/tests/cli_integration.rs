@@ -8514,8 +8514,9 @@ fn a_stellar_project_declaring_the_optimizer_fails_to_load() {
 }
 
 /// A Stellar project builds end to end against the real compiler, and what lands
-/// in `out/` is a contract: the metadata section a Soroban host refuses a module
-/// without.
+/// in `out/` is a contract: it carries the environment metadata a Soroban host
+/// refuses a module without, and the contract spec `stellar contract invoke`
+/// needs to type a caller's arguments.
 ///
 /// This is the chain the stub tests cannot cover — manifest, forward, and an
 /// `infc` that acts on the flag. A forward that reached a compiler which ignored
@@ -8543,6 +8544,11 @@ fn infs_build_on_a_stellar_project_writes_a_contract() {
     assert!(
         wasm.windows(17).any(|w| w == b"contractenvmetav0"),
         "the artifact must be a contract, not merely a module"
+    );
+    assert!(
+        wasm.windows(14).any(|w| w == b"contractspecv0"),
+        "the contract must describe its methods, or `stellar contract invoke` cannot type \
+         the arguments a caller passes"
     );
 }
 
@@ -8751,8 +8757,8 @@ fn a_spacewasm_project_requesting_a_feature_fails_to_load() {
 
 /// The optimizer table is *not* refused for a `SpaceWasm` project, which is the
 /// deliberate asymmetry with Stellar: what that refusal protects is a contract's
-/// value-ABI wrappers and its metadata section, and this target's module has
-/// neither.
+/// value-ABI wrappers and its `contractenvmetav0` section, and this target's
+/// module has neither.
 ///
 /// The manifest having loaded is asserted positively, through the `target:`
 /// echo: `forward_target` prints it after the manifest is read and before `infc`

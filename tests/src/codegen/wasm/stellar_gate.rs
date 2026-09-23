@@ -2,11 +2,12 @@
 //!
 //! A Stellar build's artifact is a contract, and a contract's method signature
 //! is narrower than an Inference function's: every parameter and every return
-//! has to fit in the host's tagged word without a host object behind it. The
-//! gate in `codegen()` is where a program that does not fit is refused, against
-//! the source the author wrote rather than against bytes. A second gate, over
-//! the same source, refuses a program that binds a host import; it has its own
-//! heading below.
+//! has to fit in the host's tagged word without a host object behind it, and
+//! every parameter has to carry a name the contract spec can record, since a
+//! caller passes each argument as `--<name>`. The gate in `codegen()` is where
+//! a program that does not fit is refused, against the source the author wrote
+//! rather than against bytes. A second gate, over the same source, refuses a
+//! program that binds a host import; it has its own heading below.
 //!
 //! The rules themselves are unit-tested where they live, against hand-built
 //! descriptors that can express shapes no source can — an empty export name, a
@@ -107,20 +108,68 @@ mod stellar_gate_tests {
     /// The parameter name comes from the export descriptor, which records a
     /// parameter written `_` as having none, so the refusal has to degrade to
     /// the position alone rather than to a wrong name or a panic.
+    ///
+    /// The parameter is inadmissible twice over — unnamed, and of a type the
+    /// target refuses — and the type is what the refusal reports: every
+    /// parameter's type is checked before any parameter's name.
     #[test]
     fn an_unnamed_parameter_is_reported_by_position() {
         let message = refused("pub fn ignore(_: u64) -> u32 { return 1; }");
         assert!(message.contains("parameter 1 is declared 'u64'"), "{message}");
     }
 
+    /// With an admissible type, a parameter written `_` reaches the name rule:
+    /// a caller passes each argument by the name the contract's spec records,
+    /// and this one has none to record.
+    #[test]
+    fn an_unnamed_parameter_of_an_admissible_type_is_refused_for_its_missing_name() {
+        cov_mark::check!(wasm_codegen_stellar_gate_unnamed_param);
+        let message = refused("pub fn f(a: u32, _: u32) -> u32 { return a; }");
+        assert!(message.contains("exported function 'f'"), "{message}");
+        assert!(message.contains("parameter 2 is unnamed ('_')"), "{message}");
+        assert!(message.contains("`--<name>`"), "{message}");
+        assert!(message.ends_with("Name the parameter."), "{message}");
+    }
+
+    /// Thirty bytes is the widest parameter name the contract's spec section
+    /// can record; thirty-one is refused, naming the parameter, its length and
+    /// the limit, and saying what to do.
+    #[test]
+    fn a_parameter_name_over_thirty_bytes_is_refused_and_thirty_is_not() {
+        let widest = "n".repeat(30);
+        assert!(
+            !accepted(&format!("pub fn f({widest}: u32) -> u32 {{ return {widest}; }}"))
+                .is_empty(),
+            "a 30-byte parameter name is admitted"
+        );
+
+        cov_mark::check!(wasm_codegen_stellar_gate_param_name_length);
+        let too_long = "n".repeat(31);
+        let message = refused(&format!(
+            "pub fn f({too_long}: u32) -> u32 {{ return {too_long}; }}"
+        ));
+        assert!(message.contains("exported function 'f'"), "{message}");
+        assert!(
+            message.contains(&format!("parameter 1 '{too_long}' has a name of 31 bytes")),
+            "{message}"
+        );
+        assert!(message.contains("at most 30"), "{message}");
+        assert!(message.ends_with("Shorten the name."), "{message}");
+    }
+
     /// An imported file's parameter name reaches neither kind of slot in the
-    /// entry file's same-named export. Both pairs import
+    /// entry file's same-named export. Every pair imports
     /// `transfer(elsewhere: u64)`. Beside an entry `transfer(amount: u64)` the
     /// refusal names `amount`: the import's name does not replace the export's
     /// own, which any lookup that tries the entry file first also gets right.
     /// Beside an entry `transfer(_: u64)` the refusal names the position alone:
     /// the import's name does not fill a slot the export left unnamed, which a
     /// lookup falling back to a same-named declaration elsewhere would do.
+    ///
+    /// Beside an entry `transfer(_: u32)` the stake is higher. The type is
+    /// admissible, so the name rule is the only thing refusing the export, and
+    /// a borrowed `elsewhere` would not merely mislabel a refusal — it would
+    /// admit the export and publish a name its author never wrote.
     ///
     /// Driven through `codegen` directly, because the multi-file helpers in the
     /// test utilities build for the default target only.
@@ -146,7 +195,7 @@ mod stellar_gate_tests {
                     ..inference_wasm_codegen::CodegenOptions::default()
                 },
             )
-            .expect_err("the entry file's export takes a `u64`")
+            .expect_err("the entry file's export is inadmissible")
             .to_string()
         };
 
@@ -165,6 +214,17 @@ mod stellar_gate_tests {
         assert!(
             !unnamed.contains("elsewhere"),
             "an imported file's parameter name filled a slot the export left unnamed: {unnamed}"
+        );
+
+        let admissible = refusal_beside_import("pub fn transfer(_: u32) -> u32 { return 1; }");
+        assert!(
+            admissible.contains("parameter 1 is unnamed ('_')"),
+            "{admissible}"
+        );
+        assert!(
+            !admissible.contains("elsewhere"),
+            "an imported file's parameter name filled a slot the export left unnamed: \
+             {admissible}"
         );
     }
 
@@ -305,11 +365,14 @@ mod stellar_gate_tests {
     /// is a narrowing of one target, not a new restriction on the language.
     #[test]
     fn the_default_target_accepts_what_stellar_refuses() {
+        let too_long = "n".repeat(31);
         for source in [
             "pub fn transfer(amount: u64) -> u32 { return 1; }",
             "pub fn corners() -> [i32; 4] { return [1, 2, 3, 4]; }",
             "fn helper(x: u32) -> u32 { return x; }",
             "pub fn __hidden() -> i32 { return 1; }",
+            "pub fn f(_: u32) -> u32 { return 1; }",
+            &format!("pub fn f({too_long}: u32) -> u32 {{ return {too_long}; }}"),
         ] {
             assert!(
                 codegen_with_target_mode_no_analysis(
