@@ -48,9 +48,9 @@ pub fn source_file(p: &mut Parser) {
         if at_item_start(p) {
             // Defense-in-depth: if a future `item` handler completes without
             // consuming any token, the cursor is unchanged and this loop would
-            // spin forever (the fuel guard does not catch it, since completing a
-            // marker refills the fuel). Bump the offending token into an Error
-            // node so any non-advancing handler degrades to a recoverable error.
+            // retry it until the advance guard panics. Bump the offending token
+            // into an Error node so any non-advancing handler degrades to a
+            // recoverable error instead.
             let before = p.pos();
             item(p);
             if p.pos() == before {
