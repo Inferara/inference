@@ -507,10 +507,11 @@ one the compiler wrote before the optimizer saw it.
 SpaceWasm is a library, not a program: it has no command line of its own, and a
 finished artifact answers "does it load?" only once something embeds it. This
 repository ships the smallest thing that does, as an example of the test crate.
-Every transcript below is a real run against one artifact — `out/main.wasm`,
-built by `infc main.inf --target spacewasm` from
+Every transcript below is a real run, so the figures can be re-derived rather
+than taken on trust, and all but the last two are against one artifact —
+`out/main.wasm`, built by `infc main.inf --target spacewasm` from
 `pub fn main() -> i32 { return 10; }`, whose `pub` is what puts `main` in the
-export section — so the figures can be re-derived rather than taken on trust:
+export section:
 
 ```bash
 cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm --invoke main
@@ -530,12 +531,7 @@ read, one the interpreter refused, a missing export, a trap, an exhausted fuel
 budget — so a script can tell them apart without reading the message. A trap
 prints the interpreter's own reason. Execution runs under an instruction budget
 that `--fuel N` sets, so a program that does not terminate fails the run instead
-of hanging it. A module importing functions no embedder supplied is a load
-failure, and the harness names each `module.field` it found. That is what a
-program binding `use { f } from host::<module>;` meets here: this target admits
-the binding and the artifact carries the import, but the harness registers no
-host module, so it reports the imports it could not satisfy instead of running
-the program.
+of hanging it.
 
 `--stats` reports what the module cost the interpreter — the IR pages it
 compiled to, the sixteen-bit words written into them against the words those
@@ -562,6 +558,74 @@ of JSON instead, which is the hook for tracking these numbers over time; the
 keys are documented where the harness is implemented, and the ratio is carried
 there at full precision — the two decimals above are a courtesy to a reader,
 not the figure.
+
+A program binding `use { f } from host::<module>;` compiles at this target and
+its artifact carries the import, but it loads only once something supplies that
+import — and the harness can stand in for an embedder just far enough to run
+it. `--host MODULE.FIELD=PARAMS[:RESULT]`, repeated once per import, registers
+a stub under the import's two names, with the signature spelled in the
+interpreter's own alphabet: one character per value type, `i` for `i32`, `I`
+for `i64`, `f` for `f32` and `d` for `f64`, so `env.clock_ms=:I` takes nothing
+and returns an `i64`. A stub answers zero of its result type, never traps and
+never reads guest memory, and each call it receives is printed to stderr as
+`host call: module.field(arg, …)`, ahead of the result of the invocation that
+made it. What that shows is which host functions the program asked for, with
+which arguments and in which order; what a real host would have answered is
+your embedder's to decide. For the F´ program
+
+```inference
+external fn telemetry(channel: i32, value: i32) -> i32;
+external fn command(opcode: i32) -> i32;
+use { telemetry, command } from host::fprime_core;
+
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+
+pub fn report(channel: i32) -> i64 {
+    let ack: i32 = command(channel);
+    let sent: i32 = telemetry(channel, ack);
+    if sent == 0 {
+        return 0;
+    }
+    return clock_ms();
+}
+```
+
+built into `out/main.wasm` the same way:
+
+```bash
+cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm \
+    --host fprime_core.telemetry=ii:i --host fprime_core.command=i:i \
+    --host env.clock_ms=:I --invoke report 1
+host call: fprime_core.command(1)
+host call: fprime_core.telemetry(1, 0)
+report = 0
+```
+
+`telemetry`'s stub answered zero, so `report` returned zero without asking the
+clock. A name longer than 31 bytes, more than nine parameters or more than one
+result is a usage error that names the interpreter's own refusal and the limit
+behind it, both read from the interpreter rather than restated by the harness.
+
+A module whose imports have no stub is still a load failure. The interpreter's
+verdict names no import, so the harness reads the module a second time and
+lists each `module.field` beside the spec it needs:
+
+```bash
+cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm --invoke report 1
+error: out/main.wasm does not load under the SpaceWasm interpreter: FunctionImportNotFound at byte 58
+  reading the Import section
+  it imports these, and no `--host` stub was registered for any of them:
+    fprime_core.telemetry: no stub; it needs `--host fprime_core.telemetry=ii:i`
+    fprime_core.command: no stub; it needs `--host fprime_core.command=i:i`
+    env.clock_ms: no stub; it needs `--host env.clock_ms=:I`
+  register a stub for each with `--host MODULE.FIELD=PARAMS[:RESULT]`, or run the module from the embedder that supplies them
+```
+
+An import registered with a stub of another signature is listed beside that
+stub and the half of its signature that differs. One no stub can supply — a
+global, say — is listed with the reason. A spec naming no import of the module
+is listed after the imports, which is where a misspelt name shows up.
 
 #### Proving the `wasm32` build and deploying the SpaceWasm one
 

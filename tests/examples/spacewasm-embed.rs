@@ -11,6 +11,19 @@
 //! cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm --invoke main
 //! ```
 //!
+//! A module binding host imports loads once each import has a stub. For an F´
+//! program importing `telemetry` and `command` from `fprime_core` and
+//! `clock_ms` from `env`:
+//!
+//! ```text
+//! cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm \
+//!     --host fprime_core.telemetry=ii:i --host fprime_core.command=i:i \
+//!     --host env.clock_ms=:I --invoke report 1
+//! ```
+//!
+//! Each stub answers zero and prints the calls it receives; what a stub is and
+//! is not is set out in the shared support module.
+//!
 //! An **example** rather than a `src/bin` target, because `spacewasm` is a
 //! dev-dependency of this package and only a test, an example or a bench sees
 //! one. The harness itself lives in the SpaceWasm tier's shared support module,

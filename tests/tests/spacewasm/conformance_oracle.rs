@@ -92,7 +92,7 @@ use wasm_encoder::{
 
 use crate::support::{
     EMBEDDER_MAX_CONTROL_FRAMES, EMBEDDER_MAX_STACK_DEPTH, FUEL, LoadedModule, Outcome,
-    SpaceWasmSession, decode, decode_with, decode_with_pages,
+    SpaceWasmSession, decode, decode_with, decode_with_pages, host_module, host_set,
 };
 
 /// A module with no host module registered, which is every row that declares no
@@ -164,14 +164,10 @@ fn host_exporting(module: &str, field: &str, params: usize) -> spacewasm::Vec<Ho
         HostValList::new(""),
         |_: &mut spacewasm::Engine, _: &[Value]| core::ops::ControlFlow::Continue(None),
     );
-    let module = HostModule {
-        name: HostName::try_from_str(module).expect("the row's module name is registrable"),
-        globals: spacewasm::Vec::zero(),
-        functions: spacewasm::Vec::from_array([function]).expect("one host function allocates"),
-        memory: spacewasm::Vec::zero(),
-        table: spacewasm::Vec::zero(),
-    };
-    spacewasm::Vec::from_array([module]).expect("one host module allocates")
+    host_set(vec![
+        host_module(module, vec![function], Vec::new())
+            .expect("the row's module name is registrable"),
+    ])
 }
 
 /// A module whose single function declares `params` parameters of `ty`.
@@ -849,14 +845,10 @@ fn host_with_global(module: &str, field: &str) -> spacewasm::Vec<HostModule> {
             .expect("one host global allocates")
             .into_global_value_dyn(),
     };
-    let module = HostModule {
-        name: HostName::try_from_str(module).expect("the row's module name is registrable"),
-        globals: spacewasm::Vec::from_array([global]).expect("one host global allocates"),
-        functions: spacewasm::Vec::zero(),
-        memory: spacewasm::Vec::zero(),
-        table: spacewasm::Vec::zero(),
-    };
-    spacewasm::Vec::from_array([module]).expect("one host module allocates")
+    host_set(vec![
+        host_module(module, Vec::new(), vec![global])
+            .expect("the row's module name is registrable"),
+    ])
 }
 
 /// The immutable `i32` an embedder supplies for the import-shift row.

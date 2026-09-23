@@ -37,14 +37,14 @@ use crate::support::{
 /// Modules the decoder is not being asked about, and why.
 ///
 /// Neither class is a SpaceWasm verdict on the compiler: an import needs a host
-/// module this tier registers none of, and a verification operator is a
+/// module this sweep registers none of, and a verification operator is a
 /// proof-toolchain instruction that is not WebAssembly at all. Membership is
 /// decided by reading the module rather than by naming files, and each class is
 /// then checked against the committed list of the goldens in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotDecodable {
     /// The module declares an import, which resolves against a host module set
-    /// this tier leaves empty.
+    /// this sweep leaves empty.
     HasImports,
     /// The module carries one of the compiler's custom `0xfc` verification
     /// operators, which no WebAssembly decoder accepts.
