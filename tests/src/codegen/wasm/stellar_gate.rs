@@ -104,50 +104,67 @@ mod stellar_gate_tests {
         assert!(message.contains("issue #324"), "{message}");
     }
 
-    /// The parameter name comes from the source, not from the descriptor, so a
-    /// parameter the source did not name has to degrade to its position rather
-    /// than to a wrong name or a panic.
+    /// The parameter name comes from the export descriptor, which records a
+    /// parameter written `_` as having none, so the refusal has to degrade to
+    /// the position alone rather than to a wrong name or a panic.
     #[test]
     fn an_unnamed_parameter_is_reported_by_position() {
         let message = refused("pub fn ignore(_: u64) -> u32 { return 1; }");
         assert!(message.contains("parameter 1 is declared 'u64'"), "{message}");
     }
 
-    /// A same-named function in an imported file must not lend its parameter
-    /// names to the entry file's export. The lookup is restricted to the entry
-    /// file for exactly this case: an imported `pub fn` is not exported, so it
-    /// has no entry in the descriptor and no business naming one.
+    /// An imported file's parameter name reaches neither kind of slot in the
+    /// entry file's same-named export. Both pairs import
+    /// `transfer(elsewhere: u64)`. Beside an entry `transfer(amount: u64)` the
+    /// refusal names `amount`: the import's name does not replace the export's
+    /// own, which any lookup that tries the entry file first also gets right.
+    /// Beside an entry `transfer(_: u64)` the refusal names the position alone:
+    /// the import's name does not fill a slot the export left unnamed, which a
+    /// lookup falling back to a same-named declaration elsewhere would do.
     ///
     /// Driven through `codegen` directly, because the multi-file helpers in the
     /// test utilities build for the default target only.
     #[test]
     fn a_same_named_import_does_not_lend_its_parameter_names() {
-        let typed_context = crate::utils::try_type_check_multi_file(&[
-            (Vec::new(), "pub fn transfer(amount: u64) -> u32 { return 1; }"),
-            (
-                vec!["lib"],
-                "pub fn transfer(elsewhere: u64) -> u32 { return 2; }",
-            ),
-        ])
-        .expect("the fixture type-checks");
+        let refusal_beside_import = |entry: &str| -> String {
+            let typed_context = crate::utils::try_type_check_multi_file(&[
+                (Vec::new(), entry),
+                (
+                    vec!["lib"],
+                    "pub fn transfer(elsewhere: u64) -> u32 { return 2; }",
+                ),
+            ])
+            .expect("the fixture type-checks");
 
-        let message = inference_wasm_codegen::codegen(
-            &typed_context,
-            "output",
-            inference_wasm_codegen::CodegenOptions {
-                target: Target::Stellar,
-                mode: CompilationMode::Compile,
-                opt_level: Target::Stellar.default_opt_level(),
-                ..inference_wasm_codegen::CodegenOptions::default()
-            },
-        )
-        .expect_err("the entry file's export takes a `u64`")
-        .to_string();
+            inference_wasm_codegen::codegen(
+                &typed_context,
+                "output",
+                inference_wasm_codegen::CodegenOptions {
+                    target: Target::Stellar,
+                    mode: CompilationMode::Compile,
+                    opt_level: Target::Stellar.default_opt_level(),
+                    ..inference_wasm_codegen::CodegenOptions::default()
+                },
+            )
+            .expect_err("the entry file's export takes a `u64`")
+            .to_string()
+        };
 
-        assert!(message.contains("parameter 1 'amount'"), "{message}");
+        let named = refusal_beside_import("pub fn transfer(amount: u64) -> u32 { return 1; }");
+        assert!(named.contains("parameter 1 'amount'"), "{named}");
         assert!(
-            !message.contains("elsewhere"),
-            "an imported file's parameter name reached an export it does not describe: {message}"
+            !named.contains("elsewhere"),
+            "an imported file's parameter name replaced the export's own: {named}"
+        );
+
+        let unnamed = refusal_beside_import("pub fn transfer(_: u64) -> u32 { return 1; }");
+        assert!(
+            unnamed.contains("parameter 1 is declared 'u64'"),
+            "{unnamed}"
+        );
+        assert!(
+            !unnamed.contains("elsewhere"),
+            "an imported file's parameter name filled a slot the export left unnamed: {unnamed}"
         );
     }
 
