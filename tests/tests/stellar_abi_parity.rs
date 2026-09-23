@@ -1,11 +1,12 @@
 //! Whether the two gates that state the Stellar admissibility policy agree.
 //!
 //! The policy — how many parameters a contract method may take, how long its
-//! name may be, which prefix is reserved, which types may cross the boundary —
-//! is stated twice. `inference-wasm-codegen` states it over the program the
-//! author wrote, before any file is produced. `inference-stellar-abi` states it
-//! again over the linked module and its export descriptor, where things the
-//! first gate cannot see arrive. The duplication is structural and stays:
+//! name may be, which prefix is reserved, which types may cross the boundary,
+//! whether each parameter is named and how long that name may be — is stated
+//! twice. `inference-wasm-codegen` states it over the program the author wrote,
+//! before any file is produced. `inference-stellar-abi` states it again over
+//! the linked module and its export descriptor, where things the first gate
+//! cannot see arrive. The duplication is structural and stays:
 //! `inference-wasm-codegen` cannot depend on `inference-stellar-abi`, because
 //! the dependency runs the other way.
 //!
@@ -151,12 +152,23 @@ fn named(len: usize) -> String {
     format!("pub fn {name}(v: u32) -> u32 {{ return v; }}")
 }
 
+/// An exported function whose one parameter is named in `len` ASCII bytes, of
+/// an admissible type, so the parameter-name rule is the only one the row can
+/// trip.
+fn parameter_named(len: usize) -> String {
+    let name: String = std::iter::repeat_n('p', len).collect();
+    format!("pub fn f({name}: u32) -> u32 {{ return {name}; }}")
+}
+
 /// The matrix: every rule both gates state, in every form Inference source can
 /// express, on both sides of each boundary.
 ///
 /// A return row declares an admissible parameter. Written with a parameter of
 /// the type under test, the source gate refuses at the parameter and never
 /// reaches its return check, so the row would agree about a rule it never ran.
+/// A parameter-name row declares admissible types for the same reason: both
+/// gates check every type before any name, so a row whose unnamed parameter
+/// were a `u64` would agree about the type rule and never reach the name one.
 fn rows() -> Vec<Row> {
     let rec = "struct Rec { a: u32; b: u32; }";
     let gate = "enum Gate { Off, On }";
@@ -216,6 +228,14 @@ fn rows() -> Vec<Row> {
         row("arity 33", &arity(33), false),
         row("a name of 32 bytes", &named(32), true),
         row("a name of 33 bytes", &named(33), false),
+        row("an unnamed parameter", "pub fn f(_: u32) -> u32 { return 1; }", false),
+        row("a 30-byte parameter name", &parameter_named(30), true),
+        row("a 31-byte parameter name", &parameter_named(31), false),
+        row(
+            "a leading-underscore parameter name",
+            "pub fn f(_amount: u32) -> u32 { return _amount; }",
+            true,
+        ),
         // Two name rules both gates state have no row here and never will: an
         // empty name and a name outside `[A-Za-z0-9_]`. An export name is an
         // Inference identifier, and the identifier grammar spells neither. See
@@ -270,6 +290,8 @@ fn is_admissibility_refusal(refusal: &StellarAbiError) -> bool {
             | StellarAbiError::ExportNameNotASymbol { .. }
             | StellarAbiError::TooManyParameters { .. }
             | StellarAbiError::UnsupportedParameter { .. }
+            | StellarAbiError::UnnamedParameter { .. }
+            | StellarAbiError::ParameterNameTooLong { .. }
             | StellarAbiError::UnsupportedReturn { .. }
             | StellarAbiError::CompoundReturn { .. }
             | StellarAbiError::ImportsUnsupported { .. }
@@ -278,6 +300,15 @@ fn is_admissibility_refusal(refusal: &StellarAbiError) -> bool {
 
 /// The verdict of the Val-ABI rewriter on the same source, reached without the
 /// source gate having seen it.
+fn val_abi_rewriter(row: &Row) -> Verdict {
+    match rewriter_outcome(row) {
+        Ok(()) => Verdict::Admitted,
+        Err(refusal) => Verdict::Refused(refusal.to_string()),
+    }
+}
+
+/// What the Val-ABI rewriter says about a row's program: nothing, or the
+/// admissibility rule it refused it under.
 ///
 /// Which of the two routes the module takes is the row's own: a host program's
 /// shipped artifact is code generation's bytes, and handing those to the merge
@@ -294,7 +325,7 @@ fn is_admissibility_refusal(refusal: &StellarAbiError) -> bool {
 /// over something the policy never mentions. A row that agrees for the wrong
 /// reason measures nothing while reading as coverage, which is worse than a row
 /// that fails.
-fn val_abi_rewriter(row: &Row) -> Verdict {
+fn rewriter_outcome(row: &Row) -> Result<(), StellarAbiError> {
     let Row {
         label,
         source,
@@ -315,14 +346,14 @@ fn val_abi_rewriter(row: &Row) -> Verdict {
     };
 
     match rewrite(&linked, built.export_signatures(), STELLAR_ENV_PROTOCOL) {
-        Ok(_) => Verdict::Admitted,
+        Ok(_) => Ok(()),
         Err(refusal) => {
             assert!(
                 is_admissibility_refusal(&refusal),
                 "row '{label}': the rewriter refused it over something other than method \
                  admissibility, so the row measures the module rather than the policy: {refusal}"
             );
-            Verdict::Refused(refusal.to_string())
+            Err(refusal)
         }
     }
 }
@@ -363,6 +394,94 @@ fn every_row_lands_where_the_stated_policy_puts_it() {
             admissible,
             "row '{label}': the policy admits this program: {admissible}. The source gate \
              {gate}"
+        );
+    }
+}
+
+/// Whether a refusal of the rewriter's is the rule a row expects.
+type RuleMatcher = fn(&StellarAbiError) -> bool;
+
+/// A program breaking two rules is refused for the same one of them by both
+/// gates.
+///
+/// Each gate pins its refusal order in a unit test of its own, and a unit test
+/// moves with the order it pins: reorder one gate's checks, update its test,
+/// and both suites stay green while the two gates name different rules for one
+/// program. Each row here breaks two rules, and both gates must report the
+/// earlier one — the rewriter by its variant, the source gate in the words its
+/// message spells that rule with. Every two rules adjacent in the order both
+/// gates state — the method name, the parameter count, every parameter's type,
+/// the return, every parameter's name, `_` before length — share a row, so
+/// moving any one check of either gate makes some row disagree.
+#[test]
+fn a_program_breaking_two_rules_is_refused_for_the_same_one_by_both_gates() {
+    let too_long = "p".repeat(31);
+    let every_unnamed = vec!["_: u32"; 33].join(", ");
+    let every_named: Vec<String> = (0..33).map(|index| format!("p{index}: u32")).collect();
+    let mut last_is_u64 = every_named.clone();
+    last_is_u64[32] = "p32: u64".to_string();
+    let cases: Vec<(&'static str, String, RuleMatcher, &str)> = vec![
+        (
+            "a reserved name, and 33 parameters",
+            format!("pub fn __wide({}) -> u32 {{ return p0; }}", every_named.join(", ")),
+            |refusal| matches!(refusal, StellarAbiError::ReservedExportName { .. }),
+            "a prefix the host reserves",
+        ),
+        (
+            "a reserved name, and an unnamed parameter",
+            "pub fn __f(_: u32) -> u32 { return 1; }".to_string(),
+            |refusal| matches!(refusal, StellarAbiError::ReservedExportName { .. }),
+            "a prefix the host reserves",
+        ),
+        (
+            "33 parameters, the last a u64",
+            format!("pub fn wide({}) -> u32 {{ return p0; }}", last_is_u64.join(", ")),
+            |refusal| matches!(refusal, StellarAbiError::TooManyParameters { count: 33, .. }),
+            "takes 33 parameters",
+        ),
+        (
+            "33 parameters, every one unnamed",
+            format!("pub fn wide({every_unnamed}) -> u32 {{ return 1; }}"),
+            |refusal| matches!(refusal, StellarAbiError::TooManyParameters { count: 33, .. }),
+            "takes 33 parameters",
+        ),
+        (
+            "a u64 parameter, and a u64 return",
+            "pub fn f(a: u64) -> u64 { return a; }".to_string(),
+            |refusal| matches!(refusal, StellarAbiError::UnsupportedParameter { position: 1, .. }),
+            "parameter 1 'a' is declared 'u64'",
+        ),
+        (
+            "an unnamed parameter, then a u64 one",
+            "pub fn f(_: u32, b: u64) -> u32 { return 1; }".to_string(),
+            |refusal| matches!(refusal, StellarAbiError::UnsupportedParameter { position: 2, .. }),
+            "parameter 2 'b' is declared 'u64'",
+        ),
+        (
+            "an unnamed parameter, and a u64 return",
+            "pub fn f(_: u32) -> u64 { return 1; }".to_string(),
+            |refusal| matches!(refusal, StellarAbiError::UnsupportedReturn { .. }),
+            "it returns 'u64'",
+        ),
+        (
+            "an over-long parameter name, then an unnamed one",
+            format!("pub fn f({too_long}: u32, _: u32) -> u32 {{ return {too_long}; }}"),
+            |refusal| matches!(refusal, StellarAbiError::UnnamedParameter { position: 2, .. }),
+            "parameter 2 is unnamed",
+        ),
+    ];
+    for (label, source, is_the_earlier_rule, fragment) in cases {
+        let gate = source_gate(&source);
+        assert!(
+            matches!(&gate, Verdict::Refused(message) if message.contains(fragment)),
+            "'{label}': the source gate must refuse it for the earlier rule, saying \
+             '{fragment}', but it {gate}"
+        );
+        let rewriter = rewriter_outcome(&row(label, &source, false));
+        assert!(
+            rewriter.as_ref().is_err_and(is_the_earlier_rule),
+            "'{label}': the rewriter must refuse it for the rule the source gate named \
+             ('{fragment}'), but it returned {rewriter:?}"
         );
     }
 }

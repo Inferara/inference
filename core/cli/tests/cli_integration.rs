@@ -737,11 +737,34 @@ fn a_stellar_build_carries_the_environment_metadata_section() {
     );
 }
 
-/// The summary line is the only place a build says what it just made
-/// deployable, and each field earns its place: a Soroban host reports a
+/// The two sections tooling reads: the contract spec, which `stellar contract
+/// invoke` needs to turn `--a 2 --b 40` into typed arguments, and the contract
+/// metadata naming the toolchain. Their bytes are the rewriter crate's
+/// business; what is asserted here is that both reach the file `infc` writes,
+/// and that the default build carries neither, so neither comes from code
+/// generation.
+#[test]
+fn a_stellar_build_carries_the_contract_spec_and_meta_sections() {
+    let (wasm, _) = compile_stellar(STELLAR_CONTRACT_SOURCE);
+    let plain = compile_source_with(&["--target", "wasm32"], STELLAR_CONTRACT_SOURCE);
+    for section in [&b"contractspecv0"[..], &b"contractmetav0"[..]] {
+        let name = String::from_utf8_lossy(section);
+        assert!(
+            wasm.windows(section.len()).any(|w| w == section),
+            "the written module must carry `{name}`"
+        );
+        assert!(
+            !plain.windows(section.len()).any(|w| w == section),
+            "the default target must not carry `{name}` — otherwise the check above is \
+             about code generation rather than about the rewrite"
+        );
+    }
+}
+
+/// The summary line is the one place the build log says what it just made
+/// deployable, and each field still earns its place: a Soroban host reports a
 /// wrong-arity call without naming the arity it expected, and reports a
-/// wrong-typed argument as an undiscriminated trap, so the build log is where a
-/// caller finds out what to send.
+/// wrong-typed argument as an undiscriminated trap.
 #[test]
 fn a_stellar_build_summarizes_the_contract_it_wrote() {
     let (wasm, stdout) = compile_stellar(STELLAR_CONTRACT_SOURCE);
@@ -773,8 +796,8 @@ fn a_stellar_build_summarizes_the_contract_it_wrote() {
 ///
 /// The library gate is covered in the `inference-tests` crate; what is exercised
 /// here is that the refusal survives the CLI — that `infc` reports it, exits
-/// non-zero, and leaves nothing on disk. The over-long name and the empty module
-/// are included because they are refusals about the *module*, not about a
+/// non-zero, and leaves nothing on disk. The over-long export name and the empty
+/// module are included because they are refusals about the *module*, not about a
 /// declaration, and a gate that only inspected parameter types would pass them.
 #[test]
 fn every_inadmissible_contract_shape_is_refused_with_no_artifact() {
@@ -809,6 +832,16 @@ fn every_inadmissible_contract_shape_is_refused_with_no_artifact() {
             "no exported function",
             "fn f() -> u32 { return 1; }\n",
             &["exports no function"],
+        ),
+        (
+            "an unnamed parameter",
+            "pub fn f(_: u32) -> u32 { return 1; }\n",
+            &["'f'", "parameter 1", "unnamed ('_')"],
+        ),
+        (
+            "an over-long parameter name",
+            "pub fn f(amount_in_the_smallest_currency: u32) -> u32 { return 1; }\n",
+            &["'f'", "parameter 1", "'amount_in_the_smallest_currency'", "31 bytes", "30"],
         ),
     ];
 

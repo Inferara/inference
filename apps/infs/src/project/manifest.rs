@@ -801,20 +801,21 @@ impl BuildConfig {
     ///   the target's rule set excludes. The predicate is per-proposal and the
     ///   vocabulary holds exactly one proposal, so a single question answers the
     ///   whole list; a second proposal turns this into a per-entry question.
-    /// - **`[build.wasm-opt]`.** A Stellar artifact carries two things nothing
-    ///   else in the toolchain produces: the value-ABI wrappers every exported
-    ///   method is reached through, and the `contractenvmetav0` custom section a
-    ///   host refuses to upload a module without. Whether an external Binaryen
-    ///   preserves a custom section, and what it does to the wrappers, is a
-    ///   property of whichever `wasm-opt` the machine happens to have — the
-    ///   version is not pinned by anything here — and a module that lost either
-    ///   is refused at upload or, worse, uploads and misdecodes its arguments. A
-    ///   build-time refusal costs a manifest edit; the alternative costs a
-    ///   deployment. Both of those are things one target's artifact carries and
-    ///   no other's does, which is what the name equality says. A target whose
-    ///   module is the default's bytes carries neither, so it keeps the
-    ///   optimizer — and wants it most, since the runtimes that narrow a build
-    ///   this way are the ones with the least room to load it into.
+    /// - **`[build.wasm-opt]`.** A Stellar artifact carries things nothing else
+    ///   in the toolchain produces, two of them the layer a host decodes: the
+    ///   value-ABI wrappers every exported method is reached through, and the
+    ///   `contractenvmetav0` custom section a host refuses to upload a module
+    ///   without. Whether an external Binaryen preserves a custom section, and
+    ///   what it does to the wrappers, is a property of whichever `wasm-opt` the
+    ///   machine happens to have — the version is not pinned by anything here —
+    ///   and a module that lost either is refused at upload or, worse, uploads
+    ///   and misdecodes its arguments. A build-time refusal costs a manifest
+    ///   edit; the alternative costs a deployment. Both of those are things one
+    ///   target's artifact carries and no other's does, which is what the name
+    ///   equality says. A target whose module is the default's bytes carries
+    ///   neither, so it keeps the optimizer — and wants it most, since the
+    ///   runtimes that narrow a build this way are the ones with the least room
+    ///   to load it into.
     ///
     /// The arms run in the order the per-key checks in [`Self::validate`] run —
     /// `mode`, then `wasm-features`, then the optimizer sub-table — so a manifest
@@ -2967,8 +2968,8 @@ target = "wasm32"
     /// The optimizer table *loads* for the `SpaceWasm` target, and the asymmetry
     /// with Stellar is deliberate rather than inherited from a name equality
     /// nobody revisited: what that arm protects is a contract's value-ABI
-    /// wrappers and its metadata section, and a target whose module is the
-    /// default's bytes has neither. A size-constrained runtime is the one that
+    /// wrappers and its `contractenvmetav0` section, and a target whose module
+    /// is the default's bytes has neither. A size-constrained runtime is the one that
     /// wants the optimizer most.
     ///
     /// Fails the moment the optimizer arm is generalized from the one target to

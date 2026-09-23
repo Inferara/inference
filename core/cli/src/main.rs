@@ -533,9 +533,10 @@ fn foreign_module_refusal(
 /// The Stellar target ships a module the Val-ABI rewriter produced, and that
 /// pass runs after linking — after the only bytes `wasm_to_v` ever sees. A proof
 /// artifact written from those bytes would describe a module with a different
-/// export section, different function bodies and a metadata section it does not
-/// mention, while claiming to be about the artifact beside it on disk. That is
-/// worse than no `.v` at all, so the pairing is refused rather than qualified.
+/// export section, different function bodies and none of the three custom
+/// sections that make it a contract, while claiming to be about the artifact
+/// beside it on disk. That is worse than no `.v` at all, so the pairing is
+/// refused rather than qualified.
 ///
 /// Only compile mode reaches here. `--mode proof` and a bare `-v` both resolve
 /// to proof mode in [`normalize_args`], and a proof-mode build for a target that
@@ -573,10 +574,11 @@ fn proof_artifact_refusal(
         "Error: -v cannot be combined with --target {}. The module this target \
          ships is rewritten into the Stellar value ABI after linking, and the \
          Rocq translation reads the pre-rewrite bytes: the .v would describe a \
-         module with different exports, different bodies and no environment \
-         metadata, not the .wasm written beside it. Build the same source at \
-         --target {} to obtain a .v — code generation is target-blind, so the \
-         pre-rewrite bytes of the two builds are the same module.",
+         module with different exports, different bodies and none of the \
+         custom sections that make it a contract, not the .wasm written beside \
+         it. Build the same source at --target {} to obtain a .v — code \
+         generation is target-blind, so the pre-rewrite bytes of the two builds \
+         are the same module.",
         inference_compiler_interface::TargetName::Stellar.as_str(),
         inference_compiler_interface::TargetName::DEFAULT.as_str(),
     ))
