@@ -674,6 +674,121 @@ A corrupted expected *type* can, because that is the one thing the default side
 reads from the table in order to read its untagged result at all. The two tests
 fail for different reasons, which is why both exist.
 
+## CLI measurement
+
+Everything above is measured in process. This chapter is measured with the tooling the spec
+section exists for: `stellar` CLI 28.0.0 (`stellar-xdr` 28.0.0, XDR revision
+`9c9c145953e80990d6ff1ae3a6a973a0ce6d0694` — the revision `core/stellar-abi/src/spec.rs` cites),
+reading four compiled fixtures from disk and then driving them on a local `stellar/quickstart`
+network in Docker. Measured on 2026-09-24 against the `infc` built from this branch. The commands
+are reproducible with the CLI installed and Docker running; the transcript is quoted verbatim
+except for paths. It confirms the reader table of [The contract spec
+section](#the-contract-spec-section), which was read from source: `info interface` decodes the
+sections from a file, `invoke` builds its commands and their typed flags from the deployed
+contract's spec, and a contract without one offers `invoke` no command at all.
+
+### Before: a contract without the sections
+
+The same CLI on a contract built at `main` before this change (no `contractspecv0`, no
+`contractmetav0`), fixture `pub fn f(_: u32, b: u32) -> u32 { return b; }`:
+
+| Command | Outcome |
+|---|---|
+| `stellar contract info env-meta --wasm f.wasm` | `Protocol: v20` — the environment metadata was already right |
+| `stellar contract info meta --wasm f.wasm` | `error: no meta present in provided WASM file` |
+| `stellar contract info interface --wasm f.wasm` | **the CLI panics**: `called Option::unwrap() on a None value` at `soroban-cli-28.0.0/src/commands/contract/info/interface.rs:61` |
+| deploy, then `stellar contract invoke --id … -- f --b 5` | `error: unexpected argument 'f' found` — the CLI builds its subcommands from the spec, so a contract without one offers no command at all |
+
+Uploading and deploying such a contract succeeds; only the tooling is blind to it.
+
+### After: reading the sections from disk
+
+```text
+$ stellar contract info interface --wasm u32_methods.wasm
+#[soroban_sdk::contractargs(name = "Args")]
+#[soroban_sdk::contractclient(name = "Client")]
+pub trait Contract {
+    fn identity(env: soroban_sdk::Env, x: u32) -> u32;
+    fn add(env: soroban_sdk::Env, a: u32, b: u32) -> u32;
+}
+
+$ stellar contract info meta --wasm u32_methods.wasm
+Contract meta:
+ • infver: 0.0.1
+
+$ stellar contract info env-meta --wasm u32_methods.wasm
+Contract env-meta:
+ • Protocol: v20
+```
+
+The interface is rendered in the Rust SDK's trait form; the parameter names are the source's, and
+`tick()` renders as `fn tick(env: soroban_sdk::Env);` — no return, which is what the empty
+outputs vector decodes to. `mixed.wasm` renders `fn choose(env: soroban_sdk::Env, a: u32, b: i32,
+c: bool) -> i32;`, all three type codes.
+
+### After: deploying and invoking with named arguments
+
+```text
+$ stellar keys generate alice --network local --fund --overwrite
+✅ Account alice funded on "Standalone Network ; February 2017"
+$ stellar contract deploy --wasm u32_methods.wasm --source alice --network local
+✅ Deployed!            (id CCRE5RTDJCATV2J4HLBZTKS5SNP2Q2S7EEJ3A572FZX7TSM47CDHDEE3)
+
+$ stellar contract invoke --id $ID --source alice --network local -- --help
+Commands:
+  identity
+  add
+  help      Print this message or the help of the given subcommand(s)
+
+$ stellar contract invoke --id $ID --source alice --network local -- add --help
+Options:
+      --b <u32>   Example:\n  --b 1
+      --a <u32>   Example:\n  --a 1
+
+$ stellar contract invoke --id $ID --source alice --network local -- add --a 2 --b 40
+ℹ️ Simulation identified as read-only. Send by rerunning with `--send=yes`.
+42
+```
+
+| Invocation | Answer |
+|---|---|
+| `u32_methods`: `add --a 2 --b 40` | `42` |
+| `u32_methods`: `identity --x 4294967295` | `4294967295` |
+| `bool_round_trip`: `negate --b true` / `--b false` | `false` / `true` |
+| `zero_parameter`: `tick` | an empty line, exit 0 — the void return |
+| `mixed`: `choose --a 1 --b -5 --c true` / `--c false` | `-5` / `0` |
+
+Every answer is the one the in-process tier measures for the same fixture and arguments. The CLI
+simulates a read-only call rather than sending a transaction; `--send=yes` would submit it.
+
+### After: what the CLI refuses before any host call
+
+| Invocation | CLI outcome |
+|---|---|
+| `add --a 2` | `error: Missing required argument 'b' of type u32 (unsigned 32-bit integer)`, with the suggestion `--b <value>` |
+| `add --a two --b 40` | `error: Failed to parse argument 'a': … Expected type u32 (unsigned 32-bit integer), but received: 'two'` |
+| `add --a -1 --b 40` | `error: unexpected argument '-1' found` — the argument parser reads `-1` as a flag for a `u32` parameter, while `--b -5` for the `i32` parameter of `choose` is accepted, so a negative literal is admitted exactly where the spec's type admits one |
+
+None of these reaches the network: the spec is what lets the CLI type the arguments, and a
+mistyped one is refused with the parameter's name and declared type instead of the
+undiscriminated `UnreachableCodeReached` trap a raw `Val` of the wrong tag earns from the host.
+
+### What the two sections cost
+
+Measured on the four contracts above (section sizes as encoded, header included):
+
+| Contract | Total | `contractspecv0` | `contractmetav0` | `contractenvmetav0` |
+|---|---|---|---|---|
+| `zero_parameter` (`tick()`) | 228 | 39 | 43 | 30 |
+| `bool_round_trip` (`negate(b)`) | 289 | 63 | 43 | 30 |
+| `mixed` (`choose(a, b, c)`) | 377 | 95 | 43 | 30 |
+| `u32_methods` (`identity(x)`, `add(a, b)`) | 479 | 123 | 43 | 30 |
+
+The spec section is 15 bytes of header plus one entry per method (24 bytes for a method with no
+parameters and no return, 16 more per one-letter parameter, 4 more for a returned scalar, and the
+name's padded length); the meta section is a fixed 43 bytes for the version string `0.0.1`. Both are
+custom sections, so a host that does not look for them pays nothing but the upload bytes.
+
 ## Corrections to the written ABI description
 
 1. **A two-result export is refused at module parse, not by `check_max_args`.**
