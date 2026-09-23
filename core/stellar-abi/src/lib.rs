@@ -16,8 +16,10 @@
 //!
 //! # Why a rewriter and not an emitter
 //!
-//! Nothing in code generation knows about Stellar. The bytes `codegen()`
-//! produces for the Stellar target are the same bytes it produces for Wasm32,
+//! Nothing code generation emits depends on the Stellar target: the bytes
+//! `codegen()` produces for it are the bytes it produces for Wasm32. The one
+//! Stellar-specific thing code generation holds is its source-level
+//! admissibility gate, which reads the export descriptor and emits nothing,
 //! which is what makes "prove the Wasm32 build, deploy the Stellar build" a
 //! theorem rather than a hope: the marshalling layer is a post-link pass over an
 //! artifact that has already been verified, and the wrappers it appends contain
@@ -60,7 +62,7 @@
 //!
 //! # The custom sections
 //!
-//! Each of the three has a different reader:
+//! Each of the three is written for a different primary reader:
 //!
 //! - `contractenvmetav0` is read by the **host**, at upload: it declares the
 //!   environment protocol, and a contract without it is refused. It is the one
@@ -80,7 +82,11 @@
 //!   Rust SDK's spec-shaking key, `rssdk_spec_shaking`, whose second version
 //!   lets it strip every user-defined type and event entry the data section
 //!   does not mark; function entries are always kept. This pass writes no such
-//!   marks, so it never writes that key.
+//!   marks, so it never writes that key. `stellar contract invoke` against a
+//!   deployed contract, and `stellar contract info interface`, decode it
+//!   through `Spec::new` (`soroban-spec-tools` 28.0.0) alongside the other two
+//!   sections, strictly: a `contractmetav0` entry that does not decode fails
+//!   the whole command, not just the metadata it was reading.
 //!
 //! Both of the tooling sections are XDR, hand-encoded against type codes
 //! published in the stellar-xdr repository at the revision the `stellar-xdr`
@@ -89,8 +95,9 @@
 //!
 //! # What it refuses
 //!
-//! The admissible set is M1: `u32`, `i32` and `bool` parameters, those three or
-//! nothing as a return. Everything else is a [`StellarAbiError`] naming the
+//! The admissible set is the scalar set the Val ABI encodes without a host
+//! object: `u32`, `i32` and `bool` parameters, those three or nothing as a
+//! return. Everything else is a [`StellarAbiError`] naming the
 //! export and the offending element rather than a guess — a 64-bit integer, a
 //! narrow integer, a struct, an array, an enum, a compound return, an
 //! unreachable method name, a surviving import, a start function.

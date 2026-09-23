@@ -29,12 +29,15 @@ let contract = inference_stellar_abi::rewrite(
 
 ## Why a rewriter and not an emitter
 
-Nothing in code generation knows about Stellar. The bytes `codegen()` produces
-for the Stellar target are the same bytes it produces for Wasm32, which is what
-makes *prove the Wasm32 build, deploy the Stellar build* a theorem rather than a
-hope: the marshalling layer is a post-link pass over an artifact that has already
-been verified, and the wrappers it appends contain no arithmetic, no memory
-access, and no control flow beyond one guard per argument.
+Nothing code generation emits depends on the Stellar target: the bytes
+`codegen()` produces for it are the bytes it produces for Wasm32. The one
+Stellar-specific thing code generation holds is its source-level
+admissibility gate, which reads the export descriptor and emits nothing,
+which is what makes *prove the Wasm32 build, deploy the Stellar build* a
+theorem rather than a hope: the marshalling layer is a post-link pass over an
+artifact that has already been verified, and the wrappers it appends contain
+no arithmetic, no memory access, and no control flow beyond one guard per
+argument.
 
 ## The rewrite
 
@@ -77,13 +80,20 @@ than merely convenient.
 
 ## The custom sections
 
-Each of the three sections a contract carries has a different reader.
+Each of the three sections a contract carries is written for a different
+primary reader.
 
 | Section | Read by | What it carries |
 |---|---|---|
 | `contractenvmetav0` | the host, at upload | the declared environment protocol; a contract without it is refused |
 | `contractspecv0` | tooling, at invoke and bindings time | every method: its name, each parameter's name and type, and its return |
-| `contractmetav0` | tooling; `stellar contract info meta` displays it | one entry, `infver`, the crate version the workspace declares (`CONTRACT_META_TOOLCHAIN_VERSION`) |
+| `contractmetav0` | tooling; `stellar contract info meta` displays it, and `soroban-spec`'s spec shaking reads it for its own key | one entry, `infver`, the crate version the workspace declares (`CONTRACT_META_TOOLCHAIN_VERSION`) |
+
+`stellar contract invoke` against a deployed contract and
+`stellar contract info interface` decode all three sections through
+`Spec::new` (`soroban-spec-tools` 28.0.0), and any one that does not decode
+fails the whole command, although the host uploads and runs the contract
+without parsing either tooling section.
 
 The environment metadata goes last, so every contract ends with the same 32
 measured bytes it ended with before the other two sections existed. The host
@@ -150,8 +160,9 @@ Two of those measurements are load-bearing and easy to lose:
 
 ## What it refuses
 
-The admissible set is M1: `u32`, `i32` and `bool` parameters; those three or
-nothing as a return. Every parameter is named, in at most 30 bytes, because a
+The admissible set is the scalar set the Val ABI encodes without a host
+object: `u32`, `i32` and `bool` parameters, those three or nothing as a
+return. Every parameter is named, in at most 30 bytes, because a
 caller reaches it by that name: `stellar contract invoke` passes each argument
 as `--<name>`. Every refusal is a `StellarAbiError` variant naming the export
 and the offending element:
