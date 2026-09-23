@@ -1,0 +1,12 @@
+// The unit type written out as a return type. `-> ()` declares the empty result
+// list an omitted return type declares: the function returns nothing, and code
+// generation gives it a type with no results.
+
+fn spelled_parens() -> () {
+    return;
+}
+
+pub fn main() -> i32 {
+    spelled_parens();
+    return 9;
+}

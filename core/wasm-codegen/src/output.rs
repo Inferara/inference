@@ -110,8 +110,8 @@ pub enum AbiType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbiReturn {
     /// The function gives nothing back and declares no WebAssembly result. The
-    /// three spellings that say so — no arrow, `-> ()` and `-> unit` — are one
-    /// declaration and are recorded identically.
+    /// two spellings that say so — no arrow and `-> ()` — are one declaration
+    /// and are recorded identically.
     Unit,
     /// The function gives back one value in a WebAssembly result: a `bool`, an
     /// integer of any width, or an enum tag. Never a struct or an array, which

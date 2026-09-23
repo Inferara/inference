@@ -938,7 +938,7 @@ pub enum SimpleTypeKind {
 ```inference
 i32
 bool
-unit  // or ()
+()    // the unit type; `unit` is a reserved word, not a type
 u64
 ```
 
@@ -946,7 +946,8 @@ u64
 - **Copy type**: No heap allocation, can be copied on stack
 - **No `id` or `location` fields**: Not a heap-allocated AST node
 - **Used in `Type::Simple` variant**: `Type::Simple(SimpleTypeKind::I32)`
-- **Canonical string representation**: `kind.as_str()` returns lowercase name
+- **Canonical string representation**: `kind.as_str()` returns the source
+  spelling — the keyword for a primitive, `()` for the unit type
 
 **Why Enum Instead of String** (Issue #50):
 
@@ -986,7 +987,7 @@ match ty {
 impl SimpleTypeKind {
     pub const fn as_str(&self) -> &'static str {
         match self {
-            SimpleTypeKind::Unit => "unit",
+            SimpleTypeKind::Unit => "()",
             SimpleTypeKind::Bool => "bool",
             SimpleTypeKind::I32 => "i32",
             // ... all variants

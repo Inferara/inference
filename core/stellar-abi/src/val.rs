@@ -215,7 +215,7 @@ pub(crate) fn render_type(ty: &AbiType) -> String {
 /// How a return type is named back to the user.
 pub(crate) fn render_return(ret: &AbiReturn) -> String {
     match ret {
-        AbiReturn::Unit => "unit".to_string(),
+        AbiReturn::Unit => "()".to_string(),
         AbiReturn::Scalar(ty) | AbiReturn::Sret(ty) => render_type(ty),
     }
 }
@@ -387,7 +387,7 @@ mod tests {
             }),
             "[[i32; 2]; 3]"
         );
-        assert_eq!(render_return(&AbiReturn::Unit), "unit");
+        assert_eq!(render_return(&AbiReturn::Unit), "()");
         assert_eq!(
             render_return(&AbiReturn::Sret(AbiType::Array {
                 elem: Box::new(AbiType::U32),

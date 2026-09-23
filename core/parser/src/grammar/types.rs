@@ -7,7 +7,7 @@
 
 use crate::grammar::expr;
 use crate::grammar::params;
-use crate::parser::Parser;
+use crate::parser::{CompletedMarker, Parser};
 use crate::syntax_kind::SyntaxKind;
 use crate::token_set::TokenSet;
 
@@ -25,11 +25,17 @@ const PRIMITIVE_TYPE_KW: TokenSet = TokenSet::new(&[
 ]);
 
 /// The tokens that can begin a `_type` (`_type` first set).
+///
+/// The reserved word `unit` is a member although no type is spelled with it:
+/// [`type_`] is where it is refused, so every position that asks whether a type
+/// starts here has to answer yes for it, or the refusal is never reached and
+/// the position reports its own "expected" diagnostic instead.
 pub(crate) const TYPE_START: TokenSet = PRIMITIVE_TYPE_KW.union(TokenSet::new(&[
     SyntaxKind::LParen,
     SyntaxKind::LBracket,
     SyntaxKind::FnKw,
     SyntaxKind::Ident,
+    SyntaxKind::UnitKw,
 ]));
 
 /// Whether the current token can begin a type.
@@ -84,11 +90,45 @@ pub(crate) fn at_ident_like(p: &Parser) -> bool {
     p.at_ts(IDENT_LIKE)
 }
 
+/// The tokens that can begin a `_name` (`_name` first set): the [`IDENT_LIKE`]
+/// tokens and the reserved word `unit`.
+///
+/// No name is spelled `unit`, but the word is a member for the reason it is one
+/// of [`TYPE_START`]: [`identifier`] is where it is refused, so a position that
+/// asks whether a name starts here has to answer yes for it, or the word is left
+/// in place and read as whatever the position expects next.
+pub(crate) const NAME_START: TokenSet = IDENT_LIKE.union(TokenSet::new(&[SyntaxKind::UnitKw]));
+
+/// Whether the current token can begin a name (see [`NAME_START`]).
+pub(crate) fn at_name_start(p: &Parser) -> bool {
+    p.at_ts(NAME_START)
+}
+
+/// The tokens that can begin a name in a position a dispatch decides on the
+/// bare [`SyntaxKind::Ident`] token before any name rule is reached: an
+/// identifier, and the reserved word `unit`.
+///
+/// Such a position does not take the contextual keywords of [`IDENT_LIKE`] (see
+/// there), but it does take `unit`, for the reason [`NAME_START`] does: the name
+/// rules are where the word is refused, so a dispatch that did not route it to
+/// one would leave it to be read as whatever the position expects next.
+pub(crate) const PLAIN_NAME_START: TokenSet =
+    TokenSet::new(&[SyntaxKind::Ident, SyntaxKind::UnitKw]);
+
 /// Parses a `_type`: an embedded type, a bracketed generic name, or a name
 /// (`_type`). Hidden rule: emits no node of its own.
 pub(crate) fn type_(p: &mut Parser) {
     match p.current() {
         kind if PRIMITIVE_TYPE_KW.contains(kind) => primitive_type(p),
+        // `unit::T` names a module and `unit T'` a generic type, not the unit
+        // type, so each parses as the name it is, the word takes the refusal a
+        // name gets, and the path or type arguments after it still parse.
+        SyntaxKind::UnitKw
+            if (p.nth_at(1, SyntaxKind::ColonColon) && p.at_joint()) || at_generic_name(p) =>
+        {
+            name(p);
+        }
+        SyntaxKind::UnitKw => reserved_unit_type(p),
         SyntaxKind::LParen => {
             // `( generic_name )` is the bracketed generic name; `( )` (joint) is
             // the unit type. Disambiguate on the token after `(`.
@@ -125,6 +165,22 @@ fn primitive_type(p: &mut Parser) {
     let m = p.start();
     p.bump_any();
     m.complete(p, kind);
+}
+
+/// The diagnostic for the reserved word `unit` written where a type belongs.
+const UNIT_IS_NOT_A_TYPE_MESSAGE: &str =
+    "`unit` is a reserved word, not a type: the unit type is spelled `()`";
+
+/// Refuses `unit` in a type position and completes the node `()` would have
+/// produced, so lowering sees the unit type and nothing after the parser has
+/// anything further to say about the position. The word is consumed, which is what keeps
+/// the declaration around it parsing as written: left in place, it would be read
+/// as whatever the enclosing rule expects next and cascade from there.
+fn reserved_unit_type(p: &mut Parser) {
+    let m = p.start();
+    p.error(UNIT_IS_NOT_A_TYPE_MESSAGE);
+    p.bump(SyntaxKind::UnitKw);
+    m.complete(p, SyntaxKind::TypeUnit);
 }
 
 /// `( )` (joint) — the unit type (`type_unit`).
@@ -164,9 +220,18 @@ fn fn_type(p: &mut Parser) {
 
 /// `( generic_name )` (`_bracketed_generic_name`). Hidden rule:
 /// emits no node; the inner `generic_name` is the only named child.
+///
+/// `(unit)` is the reserved word in a type position that happens to be
+/// bracketed, so it goes to [`type_`] and takes the refusal every other type
+/// position gives it, lowering as the unit type, rather than being read as a
+/// name.
 fn bracketed_generic_name(p: &mut Parser) {
     p.bump(SyntaxKind::LParen);
-    name(p);
+    if p.at(SyntaxKind::UnitKw) {
+        type_(p);
+    } else {
+        name(p);
+    }
     p.expect(SyntaxKind::RParen);
 }
 
@@ -180,9 +245,9 @@ fn bracketed_generic_name(p: &mut Parser) {
 /// `TypeQualifiedName` node therefore carries one `Identifier` child per segment,
 /// which lowering splits into a qualifier list plus the leaf.
 pub(crate) fn name(p: &mut Parser) {
-    if at_ident_like(p) && p.nth_at(1, SyntaxKind::ColonColon) && p.at_joint() {
+    if at_name_start(p) && p.nth_at(1, SyntaxKind::ColonColon) && p.at_joint() {
         let m = p.start();
-        identifier(p);
+        declared_name(p, NameRole::Module);
         p.bump(SyntaxKind::ColonColon);
         qualified_simple_name(p);
         while p.at(SyntaxKind::ColonColon) && p.prev_joint() {
@@ -207,8 +272,21 @@ pub(crate) fn name(p: &mut Parser) {
 /// primitive type keywords as identifier spellings in this one position. The
 /// resulting CST child is an `Identifier` node (the keyword token is remapped to
 /// `Ident`), keeping the arena byte-identical to the legacy `Builder`.
+///
+/// The reserved word `unit` gets no such pass: it is refused as the module a
+/// further `::` makes it, or as the type the path's last segment names. Followed
+/// by type arguments it is the base of a generic name instead, which parses as
+/// one so that the arguments do too, and the base takes the refusal the base of
+/// an unqualified generic name gets.
 fn qualified_simple_name(p: &mut Parser) {
-    if at_ident_like(p) {
+    if p.at(SyntaxKind::UnitKw) && !at_generic_name(p) {
+        let role = if p.nth_at(1, SyntaxKind::ColonColon) {
+            NameRole::Module
+        } else {
+            NameRole::Type
+        };
+        declared_name(p, role);
+    } else if at_name_start(p) {
         simple_name(p);
     } else if PRIMITIVE_TYPE_KW.contains(p.current()) {
         let m = p.start();
@@ -222,7 +300,7 @@ fn qualified_simple_name(p: &mut Parser) {
 /// Parses a `_simple_name`: a `generic_name` (`ident type_argument_list`) or a
 /// plain `identifier` (`_simple_name`). Hidden rule.
 pub(crate) fn simple_name(p: &mut Parser) {
-    if !at_ident_like(p) {
+    if !at_name_start(p) {
         p.error("expected an identifier");
         return;
     }
@@ -264,7 +342,10 @@ pub(crate) fn at_generic_name(p: &Parser) -> bool {
     for n in 1..=MAX_LOOKAHEAD {
         match p.nth(n) {
             SyntaxKind::Tick => return true,
-            SyntaxKind::Ident | SyntaxKind::ColonColon => {}
+            // `unit` stays in the run so a type argument spelled with it reaches
+            // the type rule that refuses it, rather than ending the generic name
+            // one token early and leaving the tick to cascade.
+            SyntaxKind::Ident | SyntaxKind::ColonColon | SyntaxKind::UnitKw => {}
             kind if PRIMITIVE_TYPE_KW.contains(kind) => {}
             _ => return false,
         }
@@ -305,17 +386,106 @@ fn next_type_argument(p: &Parser) -> bool {
     at_type_start(p)
 }
 
+/// What a name in a declaring position names, for the diagnostic that refuses
+/// the reserved word `unit` there.
+#[derive(Clone, Copy)]
+pub(crate) enum NameRole {
+    Binding,
+    Constant,
+    Enum,
+    Field,
+    Function,
+    ImportedItem,
+    Module,
+    Parameter,
+    Spec,
+    Struct,
+    Type,
+    TypeAlias,
+    TypeParameter,
+    Variant,
+}
+
+impl NameRole {
+    /// The thing named, with its article, as the diagnostic reads it.
+    fn noun(self) -> &'static str {
+        match self {
+            NameRole::Binding => "a binding",
+            NameRole::Constant => "a constant",
+            NameRole::Enum => "an enum",
+            NameRole::Field => "a field",
+            NameRole::Function => "a function",
+            NameRole::ImportedItem => "an imported item",
+            NameRole::Module => "a module",
+            NameRole::Parameter => "a parameter",
+            NameRole::Spec => "a spec",
+            NameRole::Struct => "a struct",
+            NameRole::Type => "a type",
+            NameRole::TypeAlias => "a type alias",
+            NameRole::TypeParameter => "a type parameter",
+            NameRole::Variant => "an enum variant",
+        }
+    }
+}
+
+/// The diagnostic for the reserved word `unit` written as the name of `role`.
+fn reserved_unit_name_message(role: NameRole) -> String {
+    format!("`unit` is a reserved word and cannot name {}", role.noun())
+}
+
+/// The diagnostic for the reserved word `unit` written where the syntax does
+/// not say what the name names.
+const UNIT_IS_NOT_A_NAME_MESSAGE: &str = "`unit` is a reserved word and cannot be used as a name";
+
+/// Parses a name whose position says what it names — a declaration's own name,
+/// a parameter, a field, a variant, a segment of a `use` path or of a type —
+/// which is an [`identifier`] unless it is the reserved word `unit`, refused
+/// here with the thing it tried to name.
+pub(crate) fn declared_name(p: &mut Parser, role: NameRole) {
+    if p.at(SyntaxKind::UnitKw) {
+        refuse_unit_name(p, reserved_unit_name_message(role));
+    } else {
+        identifier(p);
+    }
+}
+
+/// Reports `message` on the reserved word `unit` and completes the
+/// `Identifier` node with the word as its leaf, as the missing-identifier path
+/// completes the node without one.
+///
+/// Consuming the word is the difference that matters: left in place, it is read
+/// by the rest of the enclosing rule as whatever that rule expects next, which
+/// is how a keyword in a name position turns one fault into a screen of
+/// `expected …` lines. Kept as the name, it is also what a later reference to
+/// the same name resolves to.
+fn refuse_unit_name(p: &mut Parser, message: String) -> CompletedMarker {
+    let m = p.start();
+    p.error(message);
+    p.bump_remap(SyntaxKind::Ident);
+    m.complete(p, SyntaxKind::Identifier)
+}
+
 /// Wraps an identifier token in an `Identifier` node (`identifier`).
 ///
 /// Accepts a plain identifier or a contextual keyword in identifier position
 /// (see [`IDENT_LIKE`]), recording the leaf under [`SyntaxKind::Ident`] so the
 /// CST identifier reads uniformly regardless of the token's lexed keyword kind.
-pub(crate) fn identifier(p: &mut Parser) {
+///
+/// The reserved word `unit` is refused here, as a name that cannot name
+/// anything rather than as the thing it names. That is the refusal every name
+/// a position does not classify gets — mostly references in expressions, where
+/// the syntax often cannot tell: `unit::k()` may reach into a module or call an
+/// associated function of a type, and `unit()` may call a function or a
+/// parameter. A position that can tell goes through [`declared_name`] instead.
+pub(crate) fn identifier(p: &mut Parser) -> CompletedMarker {
+    if p.at(SyntaxKind::UnitKw) {
+        return refuse_unit_name(p, UNIT_IS_NOT_A_NAME_MESSAGE.to_string());
+    }
     let m = p.start();
     if at_ident_like(p) {
         p.bump_remap(SyntaxKind::Ident);
     } else {
         p.error("expected an identifier");
     }
-    m.complete(p, SyntaxKind::Identifier);
+    m.complete(p, SyntaxKind::Identifier)
 }

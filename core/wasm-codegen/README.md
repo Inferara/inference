@@ -306,7 +306,7 @@ Inference types map to WebAssembly types:
 
 | Inference Type | WASM Type | Notes                                      |
 |----------------|-----------|--------------------------------------------|
-| `unit`         | -         | Return type only: empty result list. Both spellings, `()` and `unit`, and an omitted return type are equivalent. As a parameter, binding, field or array element type it is rejected by analysis rule A049 — a unit value occupies no bytes and has no WebAssembly type to arrive in |
+| `()`           | -         | Return type only: empty result list. `-> ()` and an omitted return type are equivalent; `unit` is a reserved word the parser refuses, not a third spelling. As a parameter, binding, field or array element type it is rejected by analysis rule A049 — a unit value occupies no bytes and has no WebAssembly type to arrive in |
 | `bool`         | i32       |                                            |
 | `i8`, `u8`     | i32       |                                            |
 | `i16`, `u16`   | i32       |                                            |

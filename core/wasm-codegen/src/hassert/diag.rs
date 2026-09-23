@@ -57,7 +57,7 @@ pub(crate) enum PCode {
     /// A type with no place in a specification term. Three wordings live under
     /// this code, because three different facts land here:
     ///
-    /// - the type is not representable at all — `unit`, a function type, or an
+    /// - the type is not representable at all — `()`, a function type, or an
     ///   aggregate outside the representable surface (arrays of scalars at any
     ///   rank, and structs whose fields are scalars or *one-dimensional* scalar
     ///   arrays: the executable aggregate `@` surface, bounded by analysis

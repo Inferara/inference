@@ -141,6 +141,13 @@ pub enum SyntaxKind {
     U64Kw,
     BoolKw,
 
+    // -- Reserved word (token) --
+    /// `unit`, which no position accepts. The unit type is spelled `()`, and a
+    /// dedicated kind is what lets the grammar refuse the word by name, in a
+    /// type position and in a name position alike, instead of reading it as an
+    /// ordinary identifier that would name a type nothing declares.
+    UnitKw,
+
     // -- Punctuation (token) --
     LParen,
     RParen,
@@ -288,10 +295,11 @@ impl SyntaxKind {
     /// Maps an identifier spelling to its keyword kind, or `None` for a plain
     /// identifier.
     ///
-    /// This covers the language keywords, the nine type keywords, and the
-    /// `true`/`false`/`self` literals. The reserved identifiers `constructor`,
-    /// `proof` and `uzumaki` are intentionally absent: the grammar treats them as
-    /// ordinary identifiers, so they fall through to [`SyntaxKind::Ident`].
+    /// This covers the language keywords, the nine type keywords, the reserved
+    /// word `unit`, and the `true`/`false`/`self` literals. The reserved
+    /// identifiers `constructor`, `proof` and `uzumaki` are intentionally absent:
+    /// the grammar treats them as ordinary identifiers, so they fall through to
+    /// [`SyntaxKind::Ident`].
     #[must_use]
     pub fn from_keyword(text: &str) -> Option<SyntaxKind> {
         let kind = match text {
@@ -329,6 +337,7 @@ impl SyntaxKind {
             "u32" => SyntaxKind::U32Kw,
             "u64" => SyntaxKind::U64Kw,
             "bool" => SyntaxKind::BoolKw,
+            "unit" => SyntaxKind::UnitKw,
             "true" => SyntaxKind::TrueKw,
             "false" => SyntaxKind::FalseKw,
             _ => return None,
@@ -390,6 +399,7 @@ mod tests {
     fn keyword_table_maps_keywords() {
         assert_eq!(SyntaxKind::from_keyword("fn"), Some(SyntaxKind::FnKw));
         assert_eq!(SyntaxKind::from_keyword("bool"), Some(SyntaxKind::BoolKw));
+        assert_eq!(SyntaxKind::from_keyword("unit"), Some(SyntaxKind::UnitKw));
         assert_eq!(SyntaxKind::from_keyword("true"), Some(SyntaxKind::TrueKw));
         assert_eq!(SyntaxKind::from_keyword("false"), Some(SyntaxKind::FalseKw));
         assert_eq!(SyntaxKind::from_keyword("self"), Some(SyntaxKind::SelfKw));

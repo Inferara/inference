@@ -32,7 +32,7 @@
 //!
 //! | Inference Type | WASM Type |
 //! |----------------|-----------|
-//! | `unit`         | (none)    |
+//! | `()`           | (none)    |
 //! | `bool`         | i32       |
 //! | `i8`, `u8`     | i32       |
 //! | `i16`, `u16`   | i32       |
@@ -1297,7 +1297,7 @@ impl Compiler {
     /// the call site pushes the argument and the real `.wasm` export declares
     /// that parameter, so it is lowered as a real param just like a named or
     /// type-only one. This keeps the import signature in lock-step with the
-    /// validator's `lower_extern_signature`. A `unit` parameter cannot reach
+    /// validator's `lower_extern_signature`. A `()` parameter cannot reach
     /// this point: the validator rejects it (`LowerSignatureError::UnitParameter`)
     /// earlier in the pipeline. `module_path` is the declaring file's, which is
     /// the scope every named type in the signature is written in.
@@ -1655,26 +1655,20 @@ impl Compiler {
             }
             TypeNode::Custom(ident_id) => {
                 let name = &arena[*ident_id].name;
-                // `unit`, `string` and `String` are spelled as ordinary type
-                // *names*, so the parser hands them over as `Custom` rather than
-                // as a `Simple` kind: `-> unit` and `-> ()` reach here by
-                // different routes and must answer alike. They are resolved ahead
-                // of the struct/enum lookup because they are the type checker's
-                // own reserved names — nothing a user declares can carry one —
-                // and falling through would report a builtin as an unknown type.
-                // `bool` is a keyword and always arrives as
-                // `TypeNode::Simple(SimpleTypeKind::Bool)`, so it needs no arm
-                // here even though the type checker lists it beside these three.
-                match name.as_str() {
-                    "unit" => return Ok(None),
-                    "string" | "String" => {
-                        return Err(CodegenError::UnsupportedConstruct {
-                            construct: "a `string` value".to_string(),
-                            rule: "A048",
-                            location: None,
-                        });
-                    }
-                    _ => {}
+                // `string` and `String` are spelled as ordinary type *names*, so
+                // the parser hands them over as `Custom` rather than as a
+                // `Simple` kind. They are resolved ahead of the struct/enum
+                // lookup because they are the type checker's own reserved names
+                // — nothing a user declares can carry one — and falling through
+                // would report a builtin as an unknown type. `bool` and the unit
+                // type `()` always arrive as a `Simple` kind, so they need no arm
+                // here even though the type checker lists `bool` beside these two.
+                if matches!(name.as_str(), "string" | "String") {
+                    return Err(CodegenError::UnsupportedConstruct {
+                        construct: "a `string` value".to_string(),
+                        rule: "A048",
+                        location: None,
+                    });
                 }
                 if ctx.lookup_struct_in(name, module_path).is_some()
                     || ctx.lookup_enum_in(name, module_path).is_some()
@@ -1756,9 +1750,9 @@ impl Compiler {
         let ret = match returns {
             None => AbiReturn::Unit,
             Some(ty_id) => {
-                // `-> ()` and `-> unit` are the same declaration written two
-                // ways, and both normalize to the unit kind here, so the empty
-                // result list is described once.
+                // `-> ()` says what an omitted return type says, and it
+                // normalizes to the unit kind here, so the empty result list is
+                // described once for both.
                 let kind = TypeInfo::from_type_id(arena, ty_id).kind;
                 if matches!(kind, TypeInfoKind::Unit) {
                     AbiReturn::Unit

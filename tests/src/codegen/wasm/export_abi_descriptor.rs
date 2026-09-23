@@ -220,9 +220,10 @@ pub fn nothing() {
         assert!(signature(&output, "nothing").params.is_empty());
     }
 
-    /// `-> ()`, `-> unit` and no arrow at all are three spellings of one
-    /// declaration, and the descriptor must not distinguish them: they produce
-    /// the same empty result list in the module.
+    /// `-> ()` and no arrow at all are two spellings of one declaration, and the
+    /// descriptor must not distinguish them: they produce the same empty result
+    /// list in the module. There is no third: `unit` is a reserved word the
+    /// parser refuses.
     #[test]
     fn every_spelling_of_a_void_return_is_unit() {
         let source = "\
@@ -231,14 +232,11 @@ pub fn implicit() {
 
 pub fn parens() -> () {
 }
-
-pub fn named() -> unit {
-}
 ";
         let output = codegen_output(source);
 
-        assert_eq!(names_of(&output), vec!["implicit", "parens", "named"]);
-        for name in ["implicit", "parens", "named"] {
+        assert_eq!(names_of(&output), vec!["implicit", "parens"]);
+        for name in ["implicit", "parens"] {
             assert_eq!(
                 signature(&output, name).ret,
                 AbiReturn::Unit,

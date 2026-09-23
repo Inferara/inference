@@ -134,23 +134,21 @@ fn resolves_validates_and_reads_a_bound_extern() {
     assert_eq!(modules[0].bytes, lib);
 }
 
-/// A **linked** extern declared `-> unit` is validated against a library export
+/// A **linked** extern declared `-> ()` is validated against a library export
 /// that returns nothing, and refused against one that returns a value.
 ///
-/// The same lowering serves both kinds of extern, so correcting the reserved
-/// name moves the linked path too, and it moves it away from a signature code
-/// generation never emitted. A `-> unit` declaration used to lower to `(i32)`
-/// here while `register_imports` emitted `()`, so the library this validation
-/// accepted was the one whose export disagreed with the import the artifact
-/// declares — and the merge that followed spliced a value-returning body into a
-/// slot typed for none.
+/// The declaration lowers to the empty result list the import is emitted with,
+/// so the library this validation accepts is the one whose export agrees with
+/// the import the artifact declares. A lowering that answered `(i32)` here would
+/// accept the value-returning library instead, and the merge that followed
+/// would splice a value-returning body into a slot typed for none.
 #[test]
 fn a_linked_extern_returning_unit_is_validated_against_a_void_export() {
-    let void_lib = compile("pub fn ping() -> unit { return; }", "beeper");
+    let void_lib = compile("pub fn ping() -> () { return; }", "beeper");
     let valued_lib = compile("pub fn ping() -> i32 { return 1; }", "beeper");
 
     let typed = typed_of(
-        "external fn ping() -> unit;\n\
+        "external fn ping() -> ();\n\
          use { ping } from beeper;\n\
          pub fn use_it(x: i32) -> i32 { ping(); return x; }",
     );
@@ -160,7 +158,7 @@ fn a_linked_extern_returning_unit_is_validated_against_a_void_export() {
     let mut void_search = SearchPath::new();
     void_search.push_lib_dir(void_tree.root().to_path_buf());
     let resolved = resolve_external_modules(&typed, &void_search, None)
-        .expect("`-> unit` matches an export that returns nothing");
+        .expect("`-> ()` matches an export that returns nothing");
     assert_eq!(resolved.modules.len(), 1);
     assert_eq!(resolved.modules[0].bytes, void_lib);
 
@@ -169,7 +167,7 @@ fn a_linked_extern_returning_unit_is_validated_against_a_void_export() {
     let mut valued_search = SearchPath::new();
     valued_search.push_lib_dir(valued_tree.root().to_path_buf());
     let err = resolve_external_modules(&typed, &valued_search, None)
-        .expect_err("`-> unit` cannot be backed by an export that returns a value");
+        .expect_err("`-> ()` cannot be backed by an export that returns a value");
     let rendered = err.to_string();
     assert!(
         rendered.contains("declared () -> ()") && rendered.contains("found () -> (i32)"),
@@ -640,92 +638,78 @@ fn two_files_disagreeing_on_a_host_imports_write_set_are_rejected() {
     );
 }
 
-/// A `unit` parameter is refused on a host extern exactly as on a linked one.
+/// A `()` parameter is refused on a host extern exactly as on a linked one.
 ///
 /// The host path skips resolution, validation and the write-set fold, but it
 /// keeps signature lowering, and this is the reason. Lowering is the only
-/// refusal of a `unit` parameter on the extern path: code generation's import
-/// registration drops a `unit` argument silently, so without this the artifact
+/// refusal of a `()` parameter on the extern path: code generation's import
+/// registration drops a unit argument silently, so without this the artifact
 /// would declare an import with fewer parameters than the declaration a reader
 /// sees, and every call site would push an argument the import does not take.
-///
-/// Both spellings, because they reach the lowering by different routes. The
-/// parser's unit production fires only on `()`, so the bare name `unit` arrives
-/// as the named type a struct or enum arrives as — and a lowering that read the
-/// name as a struct would answer `i32`, admit the parameter, and leave code
-/// generation to drop it.
 #[test]
 fn a_unit_parameter_is_refused_on_a_host_extern() {
-    for spelling in ["()", "unit"] {
-        let typed = typed_of(&format!(
-            "external fn telemetry(a: {spelling});\n\
-             use {{ telemetry }} from host::fprime_core;\n\
-             pub fn use_it(x: i32) -> i32 {{ return x; }}"
-        ));
+    let typed = typed_of(
+        "external fn telemetry(a: ());\n\
+         use { telemetry } from host::fprime_core;\n\
+         pub fn use_it(x: i32) -> i32 { return x; }",
+    );
 
-        let err = resolve_external_modules(&typed, &SearchPath::new(), None)
-            .expect_err("a `unit` parameter has no WASM representation, on either kind of extern");
-        assert!(
-            matches!(
-                &err,
-                ExternalResolutionError::Signature { export_field, .. }
-                    if export_field == "telemetry"
-            ),
-            "`{spelling}` got: {err:?}"
-        );
-        assert!(
-            err.to_string().contains("`unit` cannot appear"),
-            "`{spelling}` got: {err}"
-        );
-    }
+    let err = resolve_external_modules(&typed, &SearchPath::new(), None)
+        .expect_err("a `()` parameter has no WASM representation, on either kind of extern");
+    assert!(
+        matches!(
+            &err,
+            ExternalResolutionError::Signature { export_field, .. }
+                if export_field == "telemetry"
+        ),
+        "got: {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("the unit type `()` has no value representation"),
+        "got: {err}"
+    );
 }
 
-/// A host extern returning `unit` builds end to end, in both spellings of the
-/// type.
+/// A host extern returning `()` builds end to end.
 ///
-/// The bare name reaches every lowering through the arm struct and enum names
-/// take, because the parser's unit production fires only on `()`. Code
-/// generation resolves the reserved name ahead of that arm and emits an import
-/// with no results; a driver lowering it as a struct pointer would declare
-/// `() -> (i32)` for the same declaration, and the artifact check — which
-/// compares the two lowerings against each other — would refuse a program with
+/// The declaration is lowered twice — by the driver into the declared host
+/// import, and by code generation into the import the artifact carries — and
+/// the artifact check compares the two. Both must give the empty result list: a
+/// driver answering `() -> (i32)` would have the check refuse a program with
 /// nothing wrong in it, telling its author their declaration disagrees with
 /// itself.
 #[test]
-fn a_host_extern_returning_unit_builds_in_both_spellings() {
-    for spelling in ["unit", "()"] {
-        let typed = typed_of(&format!(
-            "external fn tick() -> {spelling};\n\
-             use {{ tick }} from host::env;\n\
-             pub fn run(x: i32) -> i32 {{ tick(); return x; }}"
-        ));
+fn a_host_extern_returning_unit_builds_end_to_end() {
+    let typed = typed_of(
+        "external fn tick() -> ();\n\
+         use { tick } from host::env;\n\
+         pub fn run(x: i32) -> i32 { tick(); return x; }",
+    );
 
-        let externals = resolve_external_modules(&typed, &SearchPath::new(), None)
-            .unwrap_or_else(|e| panic!("`-> {spelling}` is a supported return spelling: {e}"));
-        assert_eq!(
-            externals.host_imports,
-            vec![HostImport {
-                module: "env".into(),
-                field: "tick".into(),
-                signature: DeclaredSignature {
-                    params: Vec::new(),
-                    results: Vec::new(),
-                },
-            }],
-            "a `{spelling}` return declares no result value"
-        );
+    let externals = resolve_external_modules(&typed, &SearchPath::new(), None)
+        .unwrap_or_else(|e| panic!("`-> ()` is a supported return type: {e}"));
+    assert_eq!(
+        externals.host_imports,
+        vec![HostImport {
+            module: "env".into(),
+            field: "tick".into(),
+            signature: DeclaredSignature {
+                params: Vec::new(),
+                results: Vec::new(),
+            },
+        }],
+        "a `()` return declares no result value"
+    );
 
-        let artifact = codegen(&typed, "tick").expect("codegen succeeds");
-        let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
-            .unwrap_or_else(|e| {
-                panic!("the declaration and the emitted import agree for `-> {spelling}`: {e}")
-            });
-        assert_eq!(
-            linked.wasm,
-            artifact.wasm(),
-            "a host program's artifact is the codegen output, byte for byte"
-        );
-    }
+    let artifact = codegen(&typed, "tick").expect("codegen succeeds");
+    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+        .unwrap_or_else(|e| panic!("the declaration and the emitted import agree: {e}"));
+    assert_eq!(
+        linked.wasm,
+        artifact.wasm(),
+        "a host program's artifact is the codegen output, byte for byte"
+    );
 }
 
 /// A real two-module host program, resolved and linked end to end, whose

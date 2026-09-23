@@ -177,6 +177,10 @@
           "match": "\\bwrapping\\b"
         },
         {
+          "name": "keyword.other.reserved.unit.inference",
+          "match": "\\bunit\\b"
+        },
+        {
           "name": "storage.modifier.mut.inference",
           "match": "\\bmut\\b"
         },

@@ -60,10 +60,11 @@ pub struct CompletionItem {
 ///
 /// This mirrors `inference_parser`'s `SyntaxKind::from_keyword` — keeping the
 /// full set, primitive type names included, means the completion list never
-/// drifts from what the parser actually treats as a keyword — with one
-/// deliberate omission. `type` is still a keyword to the lexer, because the
-/// grammar keeps a production for `type A = T;` in order to refuse it by name;
-/// offering it here would complete a declaration the parser rejects.
+/// drifts from what the parser actually treats as a keyword — with two
+/// deliberate omissions, both words the lexer knows only so the parser can
+/// refuse them by name, which offering them here would complete. `type` keeps
+/// a production for `type A = T;` in order to refuse the declaration, and
+/// `unit` is refused in every position, because the unit type is spelled `()`.
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "spec", "struct", "enum", "const", "external", "return", "loop", "if",
     "else", "assert", "break", "use", "from", "self", "pub", "assume", "forall", "exists",

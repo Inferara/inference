@@ -760,7 +760,7 @@ pub(crate) fn assert_wasms_modules_equivalence(expected: &[u8], actual: &[u8]) {
 
 pub(crate) fn parse_simple_type(type_name: &str) -> Option<SimpleTypeKind> {
     match type_name {
-        "unit" => Some(SimpleTypeKind::Unit),
+        "()" => Some(SimpleTypeKind::Unit),
         "bool" => Some(SimpleTypeKind::Bool),
         "i8" => Some(SimpleTypeKind::I8),
         "i16" => Some(SimpleTypeKind::I16),

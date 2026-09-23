@@ -201,7 +201,7 @@ if has_return_value {
 func.instruction(&Instruction::End);
 ```
 
-For void functions (`unit` return type), no value is expected at `end`, so the
+For void functions (`()` return type), no value is expected at `end`, so the
 `unreachable` is omitted.
 
 ### Runtime Behaviour

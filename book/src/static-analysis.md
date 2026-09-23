@@ -452,7 +452,7 @@ member once, the convention A048 and A049 already use.
 | A043 | an entry-file top-level `pub fn` may not use a reserved export name (`memory`, `__stack_pointer`) |
 | A046 | a unary minus applied to a numeric literal must be written glued to the digits (`-42`, never `- 42`) |
 | A048 | `string` has no value representation: no string literal, and no `string`/`String` as the type of a binding, parameter, return, or struct field |
-| A049 | the unit type has no value representation: no `()`/`unit` as the type of a binding, parameter, or struct field, and no unit literal outside `return;`, `return ();` and a bare `();` |
+| A049 | the unit type has no value representation: no `()` as the type of a binding, parameter, or struct field, and no unit literal outside `return;`, `return ();` and a bare `();` |
 | A050 | a parameter of a function with a body must be written `name: T` or `_: T`, never as a bare positional type |
 | A051 | generic code has no lowering: no `fn` declaring type parameters (`fn id T'`), and no type application (`Q i32'`) as a type or in expression position |
 
@@ -478,8 +478,8 @@ the type checker can act on it: there is no layout for a string in linear
 memory, no WebAssembly type to pass one in, and no term for a proof to describe
 one with. A049 draws a narrower line, between the *absence* of a value and a
 *value of nothing*. The first is what the unit type is for and is fully
-implemented, so `-> ()`, `-> unit` and an omitted return type all stay legal,
-as do `return;`, `return ();` and a bare `();` statement. The second — a unit
+implemented, so `-> ()` and an omitted return type both stay legal, as do
+`return;`, `return ();` and a bare `();` statement. The second — a unit
 binding, parameter, struct field or array element — is a declaration the
 compiler cannot honour, because a unit value occupies no bytes and has no
 WebAssembly type, so there is no slot for it to arrive in and nothing for a

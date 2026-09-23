@@ -4,7 +4,7 @@
 //! `ignore_argument`, the bare-type argument arm, and
 //! `type_argument_list_definition`.
 
-use crate::grammar::types;
+use crate::grammar::types::{self, NameRole};
 use crate::parser::Parser;
 use crate::syntax_kind::SyntaxKind;
 
@@ -39,17 +39,20 @@ const MUT_PARAMETER_MISSING_TYPE_MESSAGE: &str = "a `mut` parameter needs a type
      bare type";
 
 /// Whether a `mut` at the cursor qualifies a binding, i.e. whether it precedes
-/// one of the two argument forms that carry a mutability flag.
+/// one of the two argument forms that carry a mutability flag. A parameter
+/// named `unit` is still the named form: the name is refused on its own, and
+/// the `mut` before it is not a second fault.
 fn mut_qualifies_a_binding(p: &Parser) -> bool {
     p.nth_at(1, SyntaxKind::SelfKw)
-        || (p.nth_at(1, SyntaxKind::Ident) && p.nth_at(2, SyntaxKind::Colon))
+        || (types::PLAIN_NAME_START.contains(p.nth(1)) && p.nth_at(2, SyntaxKind::Colon))
 }
 
 /// Which diagnostic a non-qualifying `mut` at the cursor earns. Reached only
-/// when [`mut_qualifies_a_binding`] is false, so an identifier here is never
-/// followed by a `:`.
+/// when [`mut_qualifies_a_binding`] is false, so a name here is never followed
+/// by a `:`. A name spelled `unit` is still the named form missing its type, as
+/// it is the named form when the `:` is there.
 fn stray_mut_message(p: &Parser) -> &'static str {
-    if p.nth_at(1, SyntaxKind::Ident) {
+    if types::PLAIN_NAME_START.contains(p.nth(1)) {
         MUT_PARAMETER_MISSING_TYPE_MESSAGE
     } else {
         MUT_WITHOUT_BINDING_MESSAGE
@@ -63,7 +66,8 @@ fn stray_mut_message(p: &Parser) -> &'static str {
 /// - `self` / `mut self` → `self_reference`
 /// - `mut ident :` → `argument_declaration`
 /// - `_ :` → `ignore_argument`
-/// - `ident :` → `argument_declaration`
+/// - `ident :` → `argument_declaration`, and `unit :` too, so a parameter
+///   named with the reserved word is refused as a name rather than as a type
 /// - otherwise → a bare `_type` (the `TypeOnly` arm)
 ///
 /// A `mut` qualifying none of the binding forms is reported and dropped before
@@ -90,7 +94,9 @@ fn argument(p: &mut Parser) {
             }
         }
         SyntaxKind::Underscore if p.nth_at(1, SyntaxKind::Colon) => ignore_argument(p),
-        SyntaxKind::Ident if p.nth_at(1, SyntaxKind::Colon) => argument_declaration(p),
+        kind if types::PLAIN_NAME_START.contains(kind) && p.nth_at(1, SyntaxKind::Colon) => {
+            argument_declaration(p);
+        }
         _ => {
             if types::at_type_start(p) {
                 types::type_(p);
@@ -105,7 +111,7 @@ fn argument(p: &mut Parser) {
 fn argument_declaration(p: &mut Parser) {
     let m = p.start();
     mut_keyword(p);
-    types::identifier(p);
+    types::declared_name(p, NameRole::Parameter);
     p.expect(SyntaxKind::Colon);
     types::type_(p);
     m.complete(p, SyntaxKind::ArgumentDeclaration);
@@ -144,7 +150,7 @@ pub(crate) fn mut_keyword(p: &mut Parser) {
 pub(crate) fn type_argument_list_definition(p: &mut Parser) {
     let m = p.start();
     loop {
-        types::identifier(p);
+        types::declared_name(p, NameRole::TypeParameter);
         if p.at(SyntaxKind::Tick) && p.prev_joint() {
             p.bump(SyntaxKind::Tick);
         } else if p.at(SyntaxKind::Tick) {
@@ -154,7 +160,7 @@ pub(crate) fn type_argument_list_definition(p: &mut Parser) {
             p.expect(SyntaxKind::Tick);
             break;
         }
-        if !p.at(SyntaxKind::Ident) {
+        if !p.at_ts(types::PLAIN_NAME_START) {
             break;
         }
     }
@@ -162,7 +168,9 @@ pub(crate) fn type_argument_list_definition(p: &mut Parser) {
 }
 
 /// Whether the current position begins a `type_argument_list_definition`, i.e.
-/// `ident '` with the tick glued to the identifier.
+/// `ident '` with the tick glued to the identifier. The identifier may be the
+/// reserved word `unit`, let in only to be refused as a name (see
+/// [`types::PLAIN_NAME_START`]).
 pub(crate) fn at_type_argument_list_definition(p: &Parser) -> bool {
-    p.at(SyntaxKind::Ident) && p.nth_at(1, SyntaxKind::Tick)
+    p.at_ts(types::PLAIN_NAME_START) && p.nth_at(1, SyntaxKind::Tick)
 }
