@@ -30,11 +30,12 @@ let contract = inference_stellar_abi::rewrite(
 ## Why a rewriter and not an emitter
 
 Nothing code generation emits depends on the Stellar target: the bytes
-`codegen()` produces for it are the bytes it produces for Wasm32. The one
-Stellar-specific thing code generation holds is its source-level
-admissibility gate, which reads the export descriptor and emits nothing,
-which is what makes *prove the Wasm32 build, deploy the Stellar build* a
-theorem rather than a hope: the marshalling layer is a post-link pass over an
+`codegen()` produces for it are the bytes it produces for Wasm32. What code
+generation holds for Stellar alone is refusals: the source-level admissibility
+gate over the export descriptor, and the host-import refusal. Each reads the
+program and emits nothing, so the Stellar bytes are the Wasm32 bytes — which
+is what makes *prove the Wasm32 build, deploy the Stellar build* a theorem
+rather than a hope: the marshalling layer is a post-link pass over an
 artifact that has already been verified, and the wrappers it appends contain
 no arithmetic, no memory access, and no control flow beyond one guard per
 argument.
@@ -163,9 +164,9 @@ Two of those measurements are load-bearing and easy to lose:
 The admissible set is the scalar set the Val ABI encodes without a host
 object: `u32`, `i32` and `bool` parameters, those three or nothing as a
 return. Every parameter is named, in at most 30 bytes, because a
-caller reaches it by that name: `stellar contract invoke` passes each argument
-as `--<name>`. Every refusal is a `StellarAbiError` variant naming the export
-and the offending element:
+caller reaches it by that name: `stellar contract invoke` takes each argument
+as a `--<name>` flag. Every refusal is a `StellarAbiError` variant naming the
+export and the offending element:
 
 | Refusal | Variant |
 |---|---|
@@ -181,8 +182,8 @@ and the offending element:
 | `i64`, `u64`, a narrow integer, a struct, an array or an enum parameter | `UnsupportedParameter` |
 | the same as a return | `UnsupportedReturn` |
 | a struct or array return, passed through a hidden pointer | `CompoundReturn` |
-| a parameter written `_`, which the spec cannot record | `UnnamedParameter` |
-| a parameter name over 30 bytes, the width of the spec's input-name field | `ParameterNameTooLong` |
+| a parameter with no name — written `_`, or empty in a hand-built descriptor — which `contractspecv0` cannot record | `UnnamedParameter` |
+| a parameter name over 30 bytes, the width of the `contractspecv0` section's input-name field | `ParameterNameTooLong` |
 | a surviving import | `ImportsUnsupported` |
 | a start section | `StartSectionPresent` |
 | a module already carrying `contractspecv0`, `contractmetav0` or `contractenvmetav0` | `AlreadyAContract` |

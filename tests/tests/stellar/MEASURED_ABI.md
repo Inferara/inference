@@ -4,8 +4,10 @@ Every sequence below was assembled with `wasm-encoder`, uploaded to
 `soroban-env-host` 28.0.2 with `testutils`, and invoked. Nothing here is derived
 from reading the host's source: each byte column and each measured verdict is
 what a passing test in `wrappers.rs`, `envelope.rs`, `contracts.rs` and
-`spec.rs` executed, and the passages that cite the tooling's source instead say
-so where they do. The byte columns are pinned by
+`spec.rs` executed — except the [CLI measurement](#cli-measurement) chapter, a
+manual run with the external `stellar` CLI, recorded with its date and tool
+versions — and the passages that cite the tooling's source instead say so where
+they do. The byte columns are pinned by
 `wrappers::measured_sequences_encode_to_the_recorded_bytes`, and the two
 contract-spec runs by
 `spec::the_add_and_tick_entries_are_the_runs_the_measured_record_annotates`,
@@ -284,9 +286,9 @@ commit the installed CLI reports), and the published crates it locks:
 of its command (`cmd/soroban-cli/src/commands/contract/invoke.rs`) is
 `#[arg(skip)]`, commented "For testing only", and `stellar contract invoke
 --help` on the installed CLI lists no such flag. So `invoke` reads a spec
-through `Spec::new` alone. `from_wasm` is asserted here because #466's
-acceptance criterion names it and because it is the reader client code is
-generated from, not because `invoke` runs it.
+through `Spec::new` alone. `from_wasm` is asserted here because it is the
+reader client code is generated from (`stellar contract bindings rust`, the
+SDK's `contractimport!`), not because `invoke` runs it.
 
 Both readers decode with the `stellar-xdr` 28.0.0 readers the host is built
 on. The CLI 28.0.0 locks `soroban-spec` 28.0.0-rc.1 rather than 28.0.0, and the
@@ -302,7 +304,7 @@ case table):
 
 | Test | Asserts |
 |---|---|
-| `spec::every_fixture_spec_decodes_with_the_cli_reader_into_its_descriptor` | `soroban_spec::read::from_wasm` returns the entries — #466's acceptance criterion, asserted by the call it names. Every entry is `FunctionV0`, and the names in export order, each input's name and type, the outputs and the empty doc strings equal the export descriptor the rewrite consumed, kept from the one code generation run the contract was written from rather than recomputed beside it. The source-type-to-spec-type map is the test's own match, not the crate's table |
+| `spec::every_fixture_spec_decodes_with_the_cli_reader_into_its_descriptor` | `soroban_spec::read::from_wasm`, the reader client code is generated from, returns the entries. Every entry is `FunctionV0`, and the names in export order, each input's name and type, the outputs and the empty doc strings equal the export descriptor the rewrite consumed, kept from the one code generation run the contract was written from rather than recomputed beside it. The source-type-to-spec-type map is the test's own match, not the crate's table |
 | `spec::the_default_build_of_every_fixture_carries_no_spec_and_no_meta_section` | the control: the default build, and the Stellar target's code generation output before the link and the rewrite, are each `FromWasmError::NotFound` and carry no spec or metadata section |
 | `spec::every_fixture_spec_section_is_stellar_xdrs_own_encoding_of_its_descriptor` | the oracle: the section is byte for byte what `stellar-xdr`'s own writer produces for the descriptor's methods, one entry after another in export order |
 | `spec::every_contract_decodes_the_way_the_cli_reads_a_deployed_contract` | the `Spec::new` mirror: all three sections decode; the environment metadata is one interface-version entry for protocol 20 with a zero pre-release, both spelled as literals rather than read from the crate, the contract metadata one entry, the spec the descriptor's methods |
@@ -391,15 +393,15 @@ back into that one method. The same two runs are pinned inside the crate too
 (`core/stellar-abi/src/spec.rs`), against its own encoder; the pin here is the
 independent one.
 
-**A unit return is no outputs, not `Void` — a correction to the text of #466.**
-That text asks for four type codes, `Void` among them. A method that returns
-nothing is described by an *empty* outputs vector — the final zero count of the
-`tick` run — and `SC_SPEC_TYPE_VOID` (`2`) is emitted by nothing. That is what
-the Soroban SDK writes: its `derive_spec_fn.rs` has
-`ReturnType::Default => vec![]` (read from source, not executed, in
-`soroban-sdk-macros` 27.0.6 — the SDK release in this machine's registry; the
-CLI itself locks 28.0.0-rc.1). And it is what `soroban-spec` decodes back
-from `zero_parameter` and `params_only` here. Three codes are emitted:
+**A unit return is no outputs, not `Void` — a correction to the request that
+specified this section.** That request asks for four type codes, `Void` among
+them. A method that returns nothing is described by an *empty* outputs vector
+— the final zero count of the `tick` run — and `SC_SPEC_TYPE_VOID` (`2`) is
+emitted by nothing. That is what the Soroban SDK writes: its `derive_spec_fn.rs`
+has `ReturnType::Default => vec![]` (read from source, not executed, in
+`soroban-sdk-macros` 27.0.6 — the SDK release in this machine's registry;
+the CLI itself locks 28.0.0-rc.1). And it is what `soroban-spec` decodes
+back from `zero_parameter` and `params_only` here. Three codes are emitted:
 `SC_SPEC_TYPE_BOOL = 1`, `SC_SPEC_TYPE_U32 = 4`, `SC_SPEC_TYPE_I32 = 5`.
 
 **Provenance.** Read from source, not executed: the entry kind, the type codes
@@ -469,10 +471,10 @@ pinned in the crate, `core/stellar-abi/src/spec.rs`
 (`the_meta_entry_is_kind_key_and_value`). Provenance: `enum SCMetaKind` and
 `struct SCMetaV0` in `Stellar-contract-meta.x`, at the revision above.
 
-The host does not read it: the malformed-meta rows above upload and invoke.
-Tooling does, and the next two sentences are read from source, not executed.
-The CLI's `Spec::new` decodes every entry of it, so a meta section it could not
-decode would fail `stellar contract invoke` and
+The host does not read it: the malformed-meta rows above upload and
+invoke. Tooling does, and the next two sentences are read from source,
+not executed. The CLI's `Spec::new` decodes every entry of it, so a meta
+section it could not decode would fail `stellar contract invoke` and
 `stellar contract info interface` for the whole contract — which is what
 `spec::every_contract_decodes_the_way_the_cli_reads_a_deployed_contract` guards.
 And `soroban-spec` 28.0.0 (`src/shaking.rs`, `spec_shaking_version_for_meta`)
@@ -680,24 +682,27 @@ Everything above is measured in process. This chapter is measured with the tooli
 section exists for: `stellar` CLI 28.0.0 (`stellar-xdr` 28.0.0, XDR revision
 `9c9c145953e80990d6ff1ae3a6a973a0ce6d0694` — the revision `core/stellar-abi/src/spec.rs` cites),
 reading four compiled fixtures from disk and then driving them on a local `stellar/quickstart`
-network in Docker. Measured on 2026-09-24 against the `infc` built from this branch. The commands
-are reproducible with the CLI installed and Docker running; the transcript is quoted verbatim
-except for paths. It confirms the reader table of [The contract spec
-section](#the-contract-spec-section), which was read from source: `info interface` decodes the
-sections from a file, `invoke` builds its commands and their typed flags from the deployed
-contract's spec, and a contract without one offers `invoke` no command at all.
+network in Docker. Measured at 16:09 UTC on 2026-09-23 (the small hours of 2026-09-24 in this machine's time zone) against the `infc` built from
+this repository at `103f521`. The commands are reproducible with the CLI installed and Docker
+running. Commands and outputs are quoted verbatim; a line reading `…` marks lines elided, and
+home-directory paths are shortened. Only the CLI's own lines are quoted, not the exit codes the
+recording script logged beside them, and trailing spaces are dropped. It confirms the reader table
+of [The contract spec section](#the-contract-spec-section), which was read from source:
+`info interface` decodes the sections from a file, `invoke` builds its commands and their typed
+flags from the deployed contract's spec, and a contract without one offers `invoke` no command at
+all.
 
 ### Before: a contract without the sections
 
-The same CLI on a contract built at `main` before this change (no `contractspecv0`, no
-`contractmetav0`), fixture `pub fn f(_: u32, b: u32) -> u32 { return b; }`:
+The same CLI on a contract built at `main` `ba7c68b`, before the spec and meta sections were
+emitted, fixture `pub fn f(_: u32, b: u32) -> u32 { return b; }`:
 
 | Command | Outcome |
 |---|---|
-| `stellar contract info env-meta --wasm f.wasm` | `Protocol: v20` — the environment metadata was already right |
-| `stellar contract info meta --wasm f.wasm` | `error: no meta present in provided WASM file` |
-| `stellar contract info interface --wasm f.wasm` | **the CLI panics**: `called Option::unwrap() on a None value` at `soroban-cli-28.0.0/src/commands/contract/info/interface.rs:61` |
-| deploy, then `stellar contract invoke --id … -- f --b 5` | `error: unexpected argument 'f' found` — the CLI builds its subcommands from the spec, so a contract without one offers no command at all |
+| `stellar contract info env-meta --wasm ign.wasm` | ` • Protocol: v20` — the environment metadata was already right |
+| `stellar contract info meta --wasm ign.wasm` | `❌ error: no meta present in provided WASM file` |
+| `stellar contract info interface --wasm ign.wasm` | **the CLI panics**: ``called `Option::unwrap()` on a `None` value`` at `soroban-cli-28.0.0/src/commands/contract/info/interface.rs:61:35` |
+| deploy, then `stellar contract invoke --id $ID --source alice --network local -- f --b 5` | `error: unexpected argument 'f' found` — the CLI builds its subcommands from the spec, so a contract without one offers no command at all |
 
 Uploading and deploying such a contract succeeds; only the tooling is blind to it.
 
@@ -705,6 +710,7 @@ Uploading and deploying such a contract succeeds; only the tooling is blind to i
 
 ```text
 $ stellar contract info interface --wasm u32_methods.wasm
+ℹ️ Loading contract spec from file...
 #[soroban_sdk::contractargs(name = "Args")]
 #[soroban_sdk::contractclient(name = "Client")]
 pub trait Contract {
@@ -713,10 +719,12 @@ pub trait Contract {
 }
 
 $ stellar contract info meta --wasm u32_methods.wasm
+ℹ️ Loading contract spec from file...
 Contract meta:
  • infver: 0.0.1
 
 $ stellar contract info env-meta --wasm u32_methods.wasm
+ℹ️ Loading contract spec from file...
 Contract env-meta:
  • Protocol: v20
 ```
@@ -730,25 +738,64 @@ c: bool) -> i32;`, all three type codes.
 
 ```text
 $ stellar keys generate alice --network local --fund --overwrite
+❗️ Overwriting identity 'alice'
+✅ Key saved with alias alice in "…/.config/stellar/identity/alice.toml"
 ✅ Account alice funded on "Standalone Network ; February 2017"
-$ stellar contract deploy --wasm u32_methods.wasm --source alice --network local
-✅ Deployed!            (id CCRE5RTDJCATV2J4HLBZTKS5SNP2Q2S7EEJ3A572FZX7TSM47CDHDEE3)
 
+$ stellar contract deploy --wasm u32_methods.wasm --source alice --network local
+ℹ️ Uploading contract WASM…
+ℹ️ Simulating transaction…
+ℹ️ Signing transaction: c6f9677ee6e5ac3bb1cf010840d0080df3748a9c9c43eca33fed7ab9346c68ac
+🌎 Sending transaction…
+✅ Transaction submitted successfully!
+ℹ️ Deploying contract using wasm hash 453064c596e976b4a4752ef917c2ae2618f033f3d5cc8e96168210745d4e2700
+ℹ️ Simulating transaction…
+ℹ️ Signing transaction: b63ae3aec331f4482c60070960c120856e0c55fdd9449335ae405d999c87b17a
+🌎 Sending transaction…
+✅ Transaction submitted successfully!
+✅ Deployed!
+CCRE5RTDJCATV2J4HLBZTKS5SNP2Q2S7EEJ3A572FZX7TSM47CDHDEE3
+```
+
+Every line `deploy` printed but the last went to standard error; the contract id is the one line
+on standard output, and `$ID` below stands for it. The wasm hash it reports is the SHA-256 of
+`u32_methods.wasm`, so the bytes deployed are the file's.
+
+```text
 $ stellar contract invoke --id $ID --source alice --network local -- --help
+Usage: stellar contract invoke --id CCRE5RTDJCATV2J4HLBZTKS5SNP2Q2S7EEJ3A572FZX7TSM47CDHDEE3 --source alice --network local -- [COMMAND]
+
 Commands:
   identity
   add
   help      Print this message or the help of the given subcommand(s)
 
-$ stellar contract invoke --id $ID --source alice --network local -- add --help
 Options:
-      --b <u32>   Example:\n  --b 1
-      --a <u32>   Example:\n  --a 1
+  -h, --help  Print help
+
+$ stellar contract invoke --id $ID --source alice --network local -- add --help
+Usage Notes:
+Each arg has a corresponding --<arg_name>-file-path which is a path to a file containing the corresponding JSON argument.
+Note: The only types which aren't JSON are Bytes and BytesN, which are raw bytes
+
+Usage: add [OPTIONS]
+
+Options:
+      --b <u32>
+          Example:\n  --b 1
+
+      --a <u32>
+          Example:\n  --a 1
+
+  -h, --help
+          Print help (see a summary with '-h')
 
 $ stellar contract invoke --id $ID --source alice --network local -- add --a 2 --b 40
 ℹ️ Simulation identified as read-only. Send by rerunning with `--send=yes`.
 42
 ```
+
+`Example:\n  --b 1` is printed as it appears here: a backslash and an `n`, not a line break.
 
 | Invocation | Answer |
 |---|---|
@@ -757,25 +804,148 @@ $ stellar contract invoke --id $ID --source alice --network local -- add --a 2 -
 | `bool_round_trip`: `negate --b true` / `--b false` | `false` / `true` |
 | `zero_parameter`: `tick` | an empty line, exit 0 — the void return |
 | `mixed`: `choose --a 1 --b -5 --c true` / `--c false` | `-5` / `0` |
+| [`keep`](#a-leading-underscore-is-kept): `keep --_x 5 --y 37` / `keep --x 5 --y 37` | `42` / `42` |
 
-Every answer is the one the in-process tier measures for the same fixture and arguments. The CLI
-simulates a read-only call rather than sending a transaction; `--send=yes` would submit it.
+Every answer for the four fixtures is the one the in-process tier measures for the same fixture
+and arguments; `keep` is not one of its fixtures, and its answer is `5 + 37`. The CLI simulates a
+read-only call rather than sending a transaction; `--send=yes` would submit it.
 
 ### After: what the CLI refuses before any host call
 
 | Invocation | CLI outcome |
 |---|---|
-| `add --a 2` | `error: Missing required argument 'b' of type u32 (unsigned 32-bit integer)`, with the suggestion `--b <value>` |
-| `add --a two --b 40` | `error: Failed to parse argument 'a': … Expected type u32 (unsigned 32-bit integer), but received: 'two'` |
+| `add --a 2` | `❌ error: Missing required argument 'b' of type u32 (unsigned 32-bit integer)`, then, first of three under `Suggestions:`, `- Add the argument: --b <value>` |
+| `add --a two --b 40` | `❌ error: Failed to parse argument 'a': expected ident at line 1 column 2`, then `Context: Expected type u32 (unsigned 32-bit integer), but received: 'two'` |
 | `add --a -1 --b 40` | `error: unexpected argument '-1' found` — the argument parser reads `-1` as a flag for a `u32` parameter, while `--b -5` for the `i32` parameter of `choose` is accepted, so a negative literal is admitted exactly where the spec's type admits one |
 
 None of these reaches the network: the spec is what lets the CLI type the arguments, and a
 mistyped one is refused with the parameter's name and declared type instead of the
 undiscriminated `UnreachableCodeReached` trap a raw `Val` of the wrong tag earns from the host.
 
+### A leading underscore is kept
+
+A parameter's name reaches the spec exactly as the source spells it, a leading underscore
+included. Measured later the same day with the same CLI (interface read at 19:06 UTC, the deployed
+contract driven at 19:07 UTC on a fresh container, 2026-09-23), on this fixture compiled by the
+`infc` built from this repository at `2db9810`, whose code generation and rewrite are those of
+`103f521`:
+
+```inference
+// A leading underscore is kept as written: the spec input is `_x`, so the CLI flag is `--_x`.
+pub fn keep(_x: u32, y: u32) -> u32 {
+    return _x + y;
+}
+```
+
+Its interface, read from disk; then, the contract deployed as `u32_methods` was above and `$ID`
+standing for its id, its options and two invocations:
+
+```text
+$ stellar contract info interface --wasm underscore.wasm
+ℹ️ Loading contract spec from file...
+#[soroban_sdk::contractargs(name = "Args")]
+#[soroban_sdk::contractclient(name = "Client")]
+pub trait Contract {
+    fn keep(env: soroban_sdk::Env, _x: u32, y: u32) -> u32;
+}
+
+$ stellar contract invoke --id $ID --source alice --network local -- keep --help
+…
+Usage: keep [OPTIONS]
+
+Options:
+      --_x <u32>
+          Example:\n  --_x 1
+
+      --y <u32>
+          Example:\n  --y 1
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+$ stellar contract invoke --id $ID --source alice --network local -- keep --_x 5 --y 37
+ℹ️ Simulation identified as read-only. Send by rerunning with `--send=yes`.
+42
+
+$ stellar contract invoke --id $ID --source alice --network local -- keep --x 5 --y 37
+ℹ️ Simulation identified as read-only. Send by rerunning with `--send=yes`.
+42
+```
+
+The spec records the name as written, and the CLI takes `--x` as well as `--_x`: `--x` is an alias
+`--help` does not list. For a method with one such name, keeping the author's spelling costs a
+caller nothing.
+
+A method declaring both spellings is another matter. Measured at 19:43 UTC on 2026-09-23 with the
+same CLI on a fresh container, on this fixture compiled by the `infc` built from this repository at
+`2db9810` plus the uncommitted closing fixes; code generation and the rewrite are unchanged since
+`103f521`:
+
+```inference
+// Both spellings in one method: the spec records `x` and `_x` as two inputs.
+pub fn both(x: u32, _x: u32) -> u32 {
+    return x * 10 + _x;
+}
+```
+
+Its interface, read from disk; then, the contract deployed and `$ID` standing for its id, its
+options and three invocations:
+
+```text
+$ stellar contract info interface --wasm collide.wasm
+ℹ️ Loading contract spec from file...
+#[soroban_sdk::contractargs(name = "Args")]
+#[soroban_sdk::contractclient(name = "Client")]
+pub trait Contract {
+    fn both(env: soroban_sdk::Env, x: u32, _x: u32) -> u32;
+}
+
+$ stellar contract invoke --id $ID --source alice --network local -- both --help
+…
+Usage: both [OPTIONS]
+
+Options:
+      --x <u32>
+          Example:\n  --x 1
+
+      --_x <u32>
+          Example:\n  --_x 1
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+$ stellar contract invoke --id $ID --source alice --network local -- both --x 4 --_x 2
+error: the argument '--_x <u32>' cannot be used multiple times
+
+Usage: both [OPTIONS]
+
+For more information, try '--help'.
+
+$ stellar contract invoke --id $ID --source alice --network local -- both --_x 2 --x 4
+error: the argument '--_x <u32>' cannot be used multiple times
+
+Usage: both [OPTIONS]
+
+For more information, try '--help'.
+
+$ stellar contract invoke --id $ID --source alice --network local -- both --x 4
+❌ error: Missing required argument '_x' of type u32 (unsigned 32-bit integer)
+
+Suggestions:
+- Add the argument: --_x <value>
+- Or use a file: --_x-file-path <path-to-json-file>
+- Check the contract specification for required arguments
+```
+
+The CLI treats `--x` as an alias of `--_x`, so a method declaring both `x` and `_x` is described
+correctly by the spec and cannot be invoked from `stellar` CLI 28.0.0 at all; this toolchain
+records the names as written and does not refuse the pair.
+
 ### What the two sections cost
 
-Measured on the four contracts above (section sizes as encoded, header included):
+Measured on the four contracts above (each section's size field: its name and payload, not
+counting the one-byte section id and the one-byte size, so a whole section is 2 bytes more: spec
+41–125, meta 45, environment metadata 32):
 
 | Contract | Total | `contractspecv0` | `contractmetav0` | `contractenvmetav0` |
 |---|---|---|---|---|
@@ -784,10 +954,12 @@ Measured on the four contracts above (section sizes as encoded, header included)
 | `mixed` (`choose(a, b, c)`) | 377 | 95 | 43 | 30 |
 | `u32_methods` (`identity(x)`, `add(a, b)`) | 479 | 123 | 43 | 30 |
 
-The spec section is 15 bytes of header plus one entry per method (24 bytes for a method with no
-parameters and no return, 16 more per one-letter parameter, 4 more for a returned scalar, and the
-name's padded length); the meta section is a fixed 43 bytes for the version string `0.0.1`. Both are
-custom sections, so a host that does not look for them pays nothing but the upload bytes.
+The spec section's size field is 15 bytes for the section's name — a one-byte length and the
+fourteen bytes of `contractspecv0` — plus one entry per method: 16 bytes plus the method name's
+4-byte length and its bytes padded to a multiple of 4 (24 for `tick`), then 16 more per one-letter
+parameter and 4 more for a returned scalar; `identity(x) -> u32` is 48 and `add(a, b) -> u32` is
+60. The meta section's size field is 43 for the version string `0.0.1` (45 as a whole section).
+Both are custom sections, so a host that does not look for them pays nothing but the upload bytes.
 
 ## Corrections to the written ABI description
 
@@ -878,6 +1050,7 @@ custom sections, so a host that does not look for them pays nothing but the uplo
 | Well-formed spec + meta sections | accepted, invokes | — |
 | Arbitrary-bytes spec section | accepted, invokes | — |
 | Malformed `contractmetav0` entry | accepted, invokes | — |
+| Arbitrary-bytes spec section + malformed meta entry | accepted, invokes | — |
 
 The tag-mismatch trap is exactly what `soroban-sdk` produces, and the host
 reports it identically whether the offending tag is `Void`, `U32Val` where an
@@ -957,8 +1130,8 @@ shown byte-identical:
   two of `stellar_abi_parity`'s three).
 - Loosening the rewriter's parameter-name check alone by one byte, its constant
   untouched: **1 of 53 fails**, the over-bound test (and one of
-  `stellar_abi_parity`'s). In this debug build the crate's own `debug_assert!`
-  in its entry builder panics first, meeting a name wider than the constant.
+  `stellar_abi_parity`'s). The crate's own `assert!` in its entry builder
+  panics first, in every build, meeting a name wider than the constant.
 - Dropping the string padding again: **8 of 53 fail** — the six above and the
   two name-bound tests that read a section. The field-width test reads none and
   stays green.

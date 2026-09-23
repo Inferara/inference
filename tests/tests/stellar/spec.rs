@@ -18,8 +18,8 @@
 //!   --wasm <file>` runs over a local file, as the Soroban SDK's
 //!   `contractimport!` does; it is this binary's dependency. `invoke` has no
 //!   `--wasm` option in 28.0.0 and never runs it over a user's file. It is
-//!   asserted because #466's acceptance criterion names it, and because it is
-//!   the reader client code is generated from.
+//!   asserted because it is the reader client code is generated from
+//!   (`stellar contract bindings rust`, the SDK's `contractimport!`).
 //!
 //! Two derivations of the same bytes are held against each other. The
 //! compiler's section is hand-encoded in `core/stellar-abi`. The expected
@@ -103,9 +103,12 @@ struct Compiled {
     exports: Vec<ExportSignature>,
 }
 
-/// Every fixture of the case table in `contracts`, compiled.
+/// Every fixture of the case table in `contracts`, compiled: the thirteen
+/// `MEASURED_ABI.md` counts, so every sweep over them proves it swept.
 fn compiled_fixtures() -> Vec<Compiled> {
-    fixture_names().into_iter().map(compiled).collect()
+    let compiled: Vec<Compiled> = fixture_names().into_iter().map(compiled).collect();
+    assert_eq!(compiled.len(), 13, "MEASURED_ABI.md says thirteen fixtures");
+    compiled
 }
 
 /// One fixture, compiled by the route `infc --target stellar` takes, in one
@@ -350,11 +353,10 @@ fn respelled(section: &[u8], old: &str, new: &str) -> Vec<u8> {
     [&section[..*start], &new, &section[start + old.len()..]].concat()
 }
 
-/// The acceptance criterion #466 states, asserted by the call it names:
-/// every compiled contract's spec decodes with `soroban_spec::read::from_wasm`,
-/// and what it decodes to is the descriptor, method by method — the names in
-/// export order, every input's name and type, the outputs, the empty doc
-/// strings.
+/// Every compiled contract's spec decodes with `soroban_spec::read::from_wasm`,
+/// the reader client code is generated from, and what it decodes to is the
+/// descriptor, method by method — the names in export order, every input's
+/// name and type, the outputs, the empty doc strings.
 ///
 /// Every fixture is checked before the test fails, so a failure lists every
 /// fixture that disagrees rather than the first.
@@ -704,6 +706,39 @@ fn a_contract_whose_names_are_at_both_bounds_decodes_into_the_methods_it_declare
     let section = raw_from_wasm(&contract).expect("the contract carries a spec section");
     let oracle: Vec<u8> = expected.iter().flat_map(xdr).collect();
     assert_eq!(hex(&section), hex(&oracle), "the section is not stellar-xdr's own encoding");
+}
+
+/// A parameter written with a leading underscore keeps it: `MEASURED_ABI.md`'s
+/// `keep` fixture compiles, the CLI's reader decodes its one method with inputs
+/// named `_x` and `y`, and the section is byte for byte what `stellar-xdr`
+/// writes for that method.
+///
+/// No fixture of the case table names a parameter with a leading underscore,
+/// so without this contract no spec carrying one is ever decoded.
+#[test]
+fn a_leading_underscore_parameter_decodes_under_the_name_as_written() {
+    let contract = compile_for_stellar("pub fn keep(_x: u32, y: u32) -> u32 { return _x + y; }");
+
+    let entries = from_wasm(&contract)
+        .unwrap_or_else(|e| panic!("the CLI's reader refused the spec: {e} ({e:?})"));
+    let [ScSpecEntry::FunctionV0(function)] = entries.as_slice() else {
+        panic!("expected one method entry, got {entries:?}")
+    };
+    let names: Vec<String> =
+        function.inputs.iter().map(|input| input.name.to_utf8_string_lossy()).collect();
+    assert_eq!(names, ["_x", "y"], "the inputs are named as the source spells them");
+
+    let expected = function_spec_entry(
+        "keep",
+        &[("_x", ScSpecTypeDef::U32), ("y", ScSpecTypeDef::U32)],
+        Some(ScSpecTypeDef::U32),
+    );
+    let section = raw_from_wasm(&contract).expect("the contract carries a spec section");
+    assert_eq!(
+        hex(&section),
+        hex(&xdr(&expected)),
+        "the section is not stellar-xdr's own encoding"
+    );
 }
 
 /// One byte over either bound is refused by both gates before a contract is

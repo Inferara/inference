@@ -57,6 +57,14 @@ pub const MAX_VAL_PARAMETERS: usize = 32;
 
 /// The longest export name the host can turn into a `Symbol`. Exactly 32 is
 /// accepted; 33 is not nameable by any caller.
+///
+/// It is also the width of the method name in the contract spec: `name` of
+/// `SCSpecFunctionV0` (`Stellar-contract-spec.x`) is an `SCSymbol`,
+/// `typedef string SCSymbol<SCSYMBOL_LIMIT>` with `const SCSYMBOL_LIMIT = 32`
+/// in `Stellar-contract.x`, at the revision `spec.rs` cites; the host's
+/// `Symbol` limit is that same XDR constant. The spec encoder depends on this
+/// bound: it writes every method name whole, and an entry wider than the field
+/// would make a reader refuse the whole section.
 pub const MAX_EXPORT_NAME_BYTES: usize = 32;
 
 /// The prefix the host reserves for itself.
@@ -1852,6 +1860,40 @@ mod tests {
         );
     }
 
+    /// The name bound is a count of bytes, not of characters, because the
+    /// spec's field is: fifteen `é`, two bytes each, are thirty bytes and
+    /// admitted, and sixteen are thirty-two and refused with that length. The
+    /// parity test cannot state this row, because an Inference identifier is
+    /// ASCII; only a hand-built descriptor carries such a name.
+    #[test]
+    fn a_parameter_name_is_measured_in_bytes_not_characters() {
+        let at_bound = "é".repeat(15);
+        assert_eq!(at_bound.len(), 30);
+        assert!(
+            rewrite_one(
+                "f",
+                vec![AbiParam::named(at_bound, AbiType::U32)],
+                AbiReturn::Scalar(AbiType::U32),
+            )
+            .is_ok()
+        );
+
+        let over_bound = "é".repeat(16);
+        assert_eq!(
+            rewrite_one(
+                "f",
+                vec![AbiParam::named(over_bound.clone(), AbiType::U32)],
+                AbiReturn::Scalar(AbiType::U32),
+            ),
+            Err(StellarAbiError::ParameterNameTooLong {
+                export: "f".to_string(),
+                position: 1,
+                name: over_bound,
+                len: 32,
+            })
+        );
+    }
+
     /// A one-method descriptor that breaks two rules, and the refusal for the
     /// earlier of them.
     type TwoRuleCase = (&'static str, Vec<AbiParam>, AbiReturn, StellarAbiError);
@@ -3059,9 +3101,10 @@ mod tests {
                 position: 2,
             }
             .to_string(),
-            "the export `transfer` leaves parameter 2 unnamed, written `_`; a contract method's \
-             parameters are named, because `stellar contract invoke` passes each one as \
-             `--<name>` and the contract spec section records that name, so name the parameter"
+            "the export `transfer` gives parameter 2 no name — `_` in the source, or an empty \
+             name in the descriptor; a contract method's parameters are named, because the \
+             `contractspecv0` section records each one by name and `stellar contract invoke` \
+             takes each argument as a `--<name>` flag, so name the parameter"
         );
         assert_eq!(
             StellarAbiError::ParameterNameTooLong {
@@ -3073,8 +3116,8 @@ mod tests {
             .to_string(),
             format!(
                 "the export `transfer` names parameter 1 `{}`, which is 31 bytes long; a \
-                 contract method's parameter name is at most 30 bytes, the width of the contract \
-                 spec section's input-name field, so shorten it",
+                 contract method's parameter name is at most 30 bytes, the width of the \
+                 `contractspecv0` section's input-name field, so shorten it",
                 "n".repeat(31)
             )
         );
@@ -3083,8 +3126,11 @@ mod tests {
                 section: "contractmetav0".to_string(),
             }
             .to_string(),
-            "the module already carries a `contractmetav0` section, which this pass writes, so \
-             it has already been made a contract"
+            "the module already carries a `contractmetav0` section, one of the three this pass \
+             writes, so it has already been rewritten into a contract; rewriting it again would \
+             wrap the wrappers and append a second `contractmetav0` after the first, and a \
+             reader takes the first copy it meets — the one already there — or merges both, and \
+             neither is the section this pass wrote"
         );
     }
 }

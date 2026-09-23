@@ -2,8 +2,9 @@
 //!
 //! A Soroban contract method takes and returns 64-bit words. Every word is a
 //! tagged union: its low byte is a tag naming what the word holds, and the
-//! remaining bits are that tag's body. Three tags carry a scalar the scalar set
-//! can express, and one carries nothing:
+//! remaining bits are that tag's body. Four tags carry a `u32`, an `i32` or a
+//! `bool` — the scalars this ABI admits, a `bool` taking two because its tag is
+//! its value — and one carries nothing:
 //!
 //! | Tag | Value | Body |
 //! |---|---|---|

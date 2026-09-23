@@ -51,15 +51,20 @@
 //! way; the split is here because taking the wrong one turns a host row into a
 //! link failure that never reaches the gate under test.
 //!
-//! # Two rules this file cannot reach
+//! # Three rules this file cannot reach
 //!
-//! Both gates refuse an empty export name and a name outside `[A-Za-z0-9_]`.
-//! Neither is expressible in Inference source: an export name is an identifier,
-//! and the lexer spells an identifier `[A-Za-z_][A-Za-z0-9_]*` — never empty,
-//! and never carrying a character the two gates would refuse. Faking one would
-//! mean hand-assembling a module, which measures the rewriter against a
-//! hand-written descriptor rather than measuring the two gates against one
-//! program. Those two rules stay unit-tested inside each crate.
+//! Both gates refuse an empty export name, a name outside `[A-Za-z0-9_]`, and
+//! an empty parameter name, which each treats as no name at all. None is
+//! expressible in Inference source: an export name and a parameter name are
+//! identifiers, and the lexer spells an identifier `[A-Za-z_][A-Za-z0-9_]*` —
+//! never empty, and never carrying a character the two gates would refuse.
+//! Faking one would mean hand-assembling a module, which measures the rewriter
+//! against a hand-written descriptor rather than measuring the two gates
+//! against one program. Those three rules stay unit-tested inside each
+//! crate — the empty parameter name by the two
+//! `an_empty_parameter_name_is_refused_as_unnamed` tests, one in
+//! `inference-wasm-codegen`'s `stellar_gate_tests` and one in
+//! `inference-stellar-abi`'s `rewrite` module.
 //!
 //! # Why its own integration target
 //!
@@ -467,7 +472,7 @@ fn a_program_breaking_two_rules_is_refused_for_the_same_one_by_both_gates() {
             "an over-long parameter name, then an unnamed one",
             format!("pub fn f({too_long}: u32, _: u32) -> u32 {{ return {too_long}; }}"),
             |refusal| matches!(refusal, StellarAbiError::UnnamedParameter { position: 2, .. }),
-            "parameter 2 is unnamed",
+            "parameter 2 is written '_'",
         ),
     ];
     for (label, source, is_the_earlier_rule, fragment) in cases {
