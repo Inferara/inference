@@ -115,7 +115,7 @@ impl From<Decoded> for Answer {
             Decoded::I32(v) => Self::I32(v),
             Decoded::Bool(v) => Self::Bool(v),
             Decoded::Void => Self::Void,
-            other => panic!("the contract returned a word outside the M1 scalar set: {other:?}"),
+            other => panic!("the contract returned a word outside the scalar set: {other:?}"),
         }
     }
 }

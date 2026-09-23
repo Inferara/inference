@@ -70,7 +70,7 @@ pub enum StellarAbiError {
     )]
     TooManyParameters { export: String, count: usize },
 
-    /// A parameter type outside the M1 scalar set.
+    /// A parameter type outside the scalar set.
     #[error(
         "the export `{export}` takes `{ty}` at parameter {position}; a contract method parameter \
          must be `u32`, `i32` or `bool`"
@@ -87,7 +87,7 @@ pub enum StellarAbiError {
         ty: String,
     },
 
-    /// A return type outside the M1 scalar set.
+    /// A return type outside the scalar set.
     #[error(
         "the export `{export}` returns `{ty}`; a contract method must return `u32`, `i32`, \
          `bool` or nothing"

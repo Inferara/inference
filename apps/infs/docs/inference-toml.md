@@ -231,11 +231,12 @@ The `[build]` section configures compilation settings.
     set.
   - `"spacewasm"` builds for the SpaceWasm flight interpreter, and adds nothing
     to the module: the artifact is the `"wasm32"` one, byte for byte, with no
-    wrappers, no metadata section and no rewrite. What it narrows is what a
-    build may contain — no `mode = "proof"` and no `wasm-features`, both refused
-    by the manifest on load in a message naming both keys. `[build.wasm-opt]`
-    stays available, unlike at `"stellar"`: what that refusal protects is a
-    contract's wrappers and metadata section, and this target's module has
+    wrappers, none of the contract sections a Stellar build appends, and no
+    rewrite. What it narrows is what a build may contain — no `mode = "proof"`
+    and no `wasm-features`, both refused by the manifest on load in a message
+    naming both keys. `[build.wasm-opt]` stays available, unlike at
+    `"stellar"`: what that refusal protects is a contract's value-ABI wrappers
+    and its `contractenvmetav0` section, and this target's module has
     neither. `infs run` is available too, for the same reason — the artifact is
     plain WebAssembly and `main` keeps the shape a runtime invokes, so `infs run`
     builds the module and executes it locally under `wasmtime`. That runtime is

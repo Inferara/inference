@@ -121,8 +121,11 @@ information is — `infc` prints one summary line naming each method and its val
 arity:
 
 ```text
-Stellar contract: add/2, flip/1, nothing/0; env protocol 20; 359 bytes
+Stellar contract: add/2, flip/1, nothing/0; env protocol 20; 558 bytes
 ```
+
+That size includes the three contract sections the rewriter appends, not just
+the wrappers.
 
 #### What an exported function may declare
 
@@ -134,6 +137,7 @@ the scalars the convention encodes without a host object:
 | Parameter | `u32`, `i32`, `bool` — at most 32 of them |
 | Return | `u32`, `i32`, `bool`, or nothing |
 | Name | 1–32 bytes of `[A-Za-z0-9_]`, not `__`-prefixed |
+| Parameter name | written (not `_`), 1–30 bytes |
 
 Everything else is refused at code generation, before any byte exists, naming the
 function and the offending element. The refusals differ because the reasons do:
@@ -159,6 +163,22 @@ function and the offending element. The refusals differ because the reasons do:
   unreachable — rename it."*
 - **A module with no exported function**: refused outright — it would upload with
   no method to call.
+- **A parameter written `_`**: *"…parameter `N` is unnamed ('_'). A contract
+  method's parameters are named: `stellar contract invoke` passes each one as
+  `--<name>`, and the contract's spec section records that name. Name the
+  parameter."*
+- **A parameter name over 30 bytes**: *"…parameter `N` has a name of `L` bytes,
+  and a contract method's parameter name is at most 30: the contract's spec
+  section records each name in a field that wide, and `stellar contract invoke`
+  passes the parameter as `--<name>`. Shorten the name."* (`N` is the
+  parameter's one-based position, and its name where it has one; `L` is the
+  name's length in bytes.)
+
+Within one exported function, both name rules run after its type and return
+rules, so a type or return refusal on that function is reported before a name
+refusal on it, and each name rule runs over every parameter before the next
+begins. Functions are checked one at a time in export order, and the first
+refusal ends the build.
 
 `main` is a contract method like any other: it is exported under its own name and
 held to the same rules. There is no entry point to a contract, so nothing
@@ -168,11 +188,15 @@ Only the *entry file's* top-level `pub fn` declarations are exported, so an
 inadmissible type inside a private function, a method, or an imported file is not
 the gate's business.
 
-#### The metadata section and the declared protocol
+#### The custom sections
 
-Every contract carries a `contractenvmetav0` custom section declaring the
-environment protocol it was built for. A module without one is refused at upload
-by every Soroban host there has ever been, so the rewriter appends it
+A contract carries three contract sections beyond the ones every build has —
+the `name` section, and `inference.checked` where code generation wrote one —
+and each is written for a different primary reader.
+
+**`contractenvmetav0`.** Every contract carries this section, declaring the
+environment protocol it was built for. A module without one is refused at
+upload by every Soroban host there has ever been, so the rewriter appends it
 unconditionally, last in the module, as 32 fixed bytes.
 
 The declared protocol is **20**, with pre-release 0. The rule a host applies is
@@ -187,6 +211,116 @@ must become the maximum of the minimum protocols of the host functions the
 contract imports once host imports are admitted at this target (issue #324).
 Until then this target refuses every host import, so a contract imports nothing
 and the floor is the whole answer.
+
+**`contractspecv0`.** The XDR description of every method the contract exports:
+each method's name, each input's name and type, and what it returns. Read by
+**tooling**, never by the host: it is what `stellar contract invoke` reads to
+turn `--a 2 --b 40` into typed `Val` arguments, what `stellar contract info
+interface` renders, and what `stellar contract bindings rust` reads to write a
+client. A contract carrying no such section still uploads and is callable by the
+host, and so is one carrying a malformed one — the host never looks for it; the
+CLI, by contrast, offers such a contract no command. It is the tooling's
+readers, named below — `Spec::new` and `soroban_spec::read::from_wasm` — that
+refuse a malformed section. Its body is one `SCSpecEntry` per exported method,
+in export order, each the `FunctionV0` arm with an empty doc string, the
+method's name, one input per parameter — an empty doc string, the parameter's
+name exactly as the source spells it (a leading underscore included), and its
+type code — and the outputs. The type codes are `SC_SPEC_TYPE_BOOL = 1`,
+`SC_SPEC_TYPE_U32 = 4` and `SC_SPEC_TYPE_I32 = 5`, published in
+`Stellar-contract-spec.x` at the stellar-xdr revision
+`9c9c145953e80990d6ff1ae3a6a973a0ce6d0694` (`core/stellar-abi/src/spec.rs`
+records the provenance beside each constant). A method that returns nothing is
+described by an **empty** outputs vector, not by a fourth code,
+`SC_SPEC_TYPE_VOID = 2`: that is what `soroban-sdk` writes for a function with
+no return, and what the CLI expects.
+
+**`contractmetav0`.** One key-value entry about the contract itself:
+`SCMetaV0 { key: "infver", val }`, where `val` is the crate version the
+workspace declares (`CONTRACT_META_TOOLCHAIN_VERSION`; currently `0.0.1`) —
+the toolchain that produced the contract, not a network protocol. `stellar
+contract info meta` displays it. Tooling reads it too: `soroban-spec`'s spec
+shaking (`src/shaking.rs`) looks there for the Rust SDK's own key,
+`rssdk_spec_shaking`, and its absence means spec-shaking version 1, which is
+what this toolchain's single-entry section amounts to. The host reads none of
+this.
+
+The rewriter appends the three in one order: `contractspecv0`, then
+`contractmetav0`, then `contractenvmetav0` **last**, so a contract still ends
+with the same 32 measured bytes it ended with before the other two sections
+existed — the host imposes no order on custom sections, and this order is a
+choice made to keep that tail true.
+
+Because the host parses neither tooling section — measured in
+`tests/tests/stellar/envelope.rs`: well-formed and arbitrary-byte spec and meta
+sections all upload and invoke — their correctness is the toolchain's alone to
+check, and the CLI is strict about it: `Spec::new` (`soroban-spec-tools`
+28.0.0), the reader `stellar contract invoke` builds a call's arguments with
+from the deployed contract, and `stellar contract info interface` runs on a
+file, decodes all three sections and fails the command if any one does not
+decode (read from the CLI's source at v28.0.0; the tier mirrors it in
+`spec::every_contract_decodes_the_way_the_cli_reads_a_deployed_contract`). So a
+malformed `contractmetav0` or `contractspecv0` breaks `invoke` and `info
+interface` even though the host itself uploads and runs the contract without
+ever parsing either one, while `soroban-spec`'s and `stellar-xdr`'s readers
+refuse each of those bodies first.
+
+#### Invoking a contract from the CLI
+
+Measured against `stellar` CLI 28.0.0 on a local `stellar/quickstart` network,
+2026-09-24; the full transcript is `tests/tests/stellar/MEASURED_ABI.md`'s "CLI
+measurement" chapter.
+
+Reading the sections from a compiled `u32_methods.wasm` renders the interface
+in the SDK's own trait form:
+
+```text
+$ stellar contract info interface --wasm u32_methods.wasm
+#[soroban_sdk::contractargs(name = "Args")]
+#[soroban_sdk::contractclient(name = "Client")]
+pub trait Contract {
+    fn identity(env: soroban_sdk::Env, x: u32) -> u32;
+    fn add(env: soroban_sdk::Env, a: u32, b: u32) -> u32;
+}
+```
+
+Deploying it first funds a local key and returns a contract id:
+
+```text
+$ stellar keys generate alice --network local --fund --overwrite
+✅ Account alice funded on "Standalone Network ; February 2017"
+$ stellar contract deploy --wasm u32_methods.wasm --source alice --network local
+✅ Deployed!            (id CCRE5RTDJCATV2J4HLBZTKS5SNP2Q2S7EEJ3A572FZX7TSM47CDHDEE3)
+```
+
+`$ID` below stands for the contract id `deploy` printed, and `alice` is the
+funded local key `keys generate` created.
+
+Deployed and invoked with named arguments, the CLI reports it is simulating a
+read-only call and prints the answer:
+
+```text
+$ stellar contract invoke --id $ID --source alice --network local -- add --a 2 --b 40
+ℹ️ Simulation identified as read-only. Send by rerunning with `--send=yes`.
+42
+```
+
+A mistyped argument is refused by the CLI itself, before any host call, naming
+the parameter and its declared type:
+
+```text
+$ stellar contract invoke --id $ID --source alice --network local -- add --a two --b 40
+error: Failed to parse argument 'a': … Expected type u32 (unsigned 32-bit integer), but received: 'two'
+```
+
+Contrast that with [the value ABI](#the-value-abi) above: a raw `Val` of the
+wrong tag earns the host's undiscriminated `WasmVm, InvalidAction` /
+`"VM call trapped: UnreachableCodeReached"`, identically whichever argument and
+whichever tag were wrong. The spec is what lets the CLI catch the mistake with
+the parameter's own name and type instead.
+
+Against a contract carrying neither section — what this toolchain produced
+before it emitted them (#466) — the same CLI panics on `info interface` and
+offers `invoke` no command at all.
 
 #### What is not supported, and why
 
@@ -206,21 +340,15 @@ and the floor is the whole answer.
   below follows from it.
 - **Compound types and 64-bit integers at the contract boundary.** Both travel as
   host objects, which are built and read through those same imports.
-- **No `contractspecv0` section.** A contract normally ships a machine-readable
-  description of its methods' types, and `stellar contract invoke` uses it to
-  parse command-line arguments into `Val`s. Without it that CLI cannot type your
-  arguments, and a caller must encode them itself. This is scoped out on cost,
-  not on impossibility: the `SCSpecTypeDef` discriminants are published in
-  `Stellar-contract-spec.x`. Nobody should invent them; anybody may look them up.
 - **Proof mode.** `--mode proof` fails the build, and so does `--mode compile -v`
   — see the next section for why the second one is refused rather than allowed.
 - **`--wasm-features`.** `permits_bulk_memory()` is `false` for this target, so
   the one post-MVP family the compiler can emit is refused before a byte is
   emitted.
 - **`[build.wasm-opt]`.** Declaring it alongside `target = "stellar"` is a
-  load-time manifest error. Whether an external Binaryen preserves the wrappers
-  and the metadata section depends on which version is installed, and nothing in
-  the manifest pins one.
+  load-time manifest error. Whether an external Binaryen preserves the
+  wrappers and `contractenvmetav0` depends on which version is installed, and
+  nothing in the manifest pins one.
 - **`infs run`.** Refused. `run` executes the artifact through the `wasmtime` CLI,
   which passes each argument as a decimal — so `5` arrives as a word whose low
   byte is read as tag 5 and whose payload is empty, decoding to a zero-valued
@@ -234,9 +362,9 @@ from is the module a `wasm32` build finishes with. That is what makes "prove one
 deploy the other" a statement about bytes rather than a hope, and it is why the
 Rocq path is refused here rather than qualified: `wasm_to_v` reads the linked,
 **pre-rewrite** bytes, so a `.v` written during a Stellar build would describe a
-module with different exports, different bodies and no metadata section — not the
-`.wasm` beside it on disk. `infc` refuses that pairing and tells you to build the
-same source at `wasm32` instead.
+module with different exports, different bodies and none of the custom sections
+that make it a contract — not the `.wasm` beside it on disk. `infc` refuses
+that pairing and tells you to build the same source at `wasm32` instead.
 
 The procedure:
 
@@ -260,8 +388,8 @@ cargo test -p inference-tests --lib \
 To see the relationship in the artifacts themselves, disassemble both. Every
 function of the `wasm32` module appears in the Stellar module at the same index
 with the same body; what the Stellar module adds is one `(param i64 …)
-(result i64)` wrapper per exported method, appended after them, and the metadata
-section at the end.
+(result i64)` wrapper per exported method, appended after them, and the three
+custom sections at the end, the environment metadata last.
 
 **What the host accepts** — the runtime's wasmi configuration. This is the envelope a
 module is admitted against, not a description of what Inference puts in one:
@@ -314,10 +442,11 @@ underneath. Selected with `infc --target spacewasm` or
 `[build] target = "spacewasm"` in an `Inference.toml`.
 
 Unlike the Stellar target, this one imposes no calling convention and adds
-nothing to the module. There is no marshalling shell, no metadata section and no
-rewrite: the artifact a SpaceWasm build writes is, byte for byte, the artifact a
-`wasm32` build writes from the same source. What the target does is narrow what
-a build may *contain* — the instruction set, and nothing else.
+nothing to the module. There is no marshalling shell, none of the contract
+sections a Stellar build appends, and no rewrite: the artifact a SpaceWasm
+build writes is, byte for byte, the artifact a `wasm32` build writes from the
+same source. What the target does is narrow what a build may *contain* — the
+instruction set, and nothing else.
 
 | Setting | Value | Source |
 |---------|-------|--------|
@@ -724,8 +853,8 @@ to it, so it is the first link — not this one — that ties it to
 
 That `cmp` is a statement about *this* target and no other. The Stellar
 procedure above deliberately does not have one: a Stellar artifact carries
-appended wrappers and a metadata section, so its relationship to the proved
-module is "rewritten from", not "equal to".
+appended wrappers and the three contract sections, so its relationship to the
+proved module is "rewritten from", not "equal to".
 
 The same difference shows up as a command line that works here and not there.
 Proof mode is refused at both targets, for the same reason — it emits the custom

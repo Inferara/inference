@@ -606,7 +606,7 @@ section is measured on modules the **compiler** produced: `contracts.rs` reads
 target, the link and the Val-ABI rewrite — the three steps `infc --target
 stellar` runs — uploads the result and invokes it.
 
-Ten fixtures cover the M1 scalar set in every position: parameters with no
+Ten fixtures cover the scalar set in every position: parameters with no
 answer, an answer with no parameters, both together, neither, the widest method
 the host will dispatch to (32 `u32` parameters), a boolean round trip, a boolean
 computed from an unsigned argument, a negative integer round trip, `i32::MIN`

@@ -2,7 +2,7 @@
 //!
 //! A Soroban contract method takes and returns 64-bit words. Every word is a
 //! tagged union: its low byte is a tag naming what the word holds, and the
-//! remaining bits are that tag's body. Three tags carry a scalar the M1 type set
+//! remaining bits are that tag's body. Three tags carry a scalar the scalar set
 //! can express, and one carries nothing:
 //!
 //! | Tag | Value | Body |
@@ -52,11 +52,11 @@ const BODY_SHIFT: i64 = 32;
 
 /// A scalar the Val ABI can carry across a contract boundary.
 ///
-/// The M1 set. Everything else the source can declare at an export — a 64-bit
-/// integer, a narrow integer, a struct, an array, an enum — is refused rather
-/// than encoded, because each needs a decision this layer has no authority to
-/// take: a host object for the compound types, and a truncation-or-refuse rule
-/// for the narrow ones.
+/// The scalar set. Everything else the source can declare at an export — a
+/// 64-bit integer, a narrow integer, a struct, an array, an enum — is refused
+/// rather than encoded, because each needs a decision this layer has no
+/// authority to take: a host object for the compound types, and a
+/// truncation-or-refuse rule for the narrow ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ValScalar {
     U32,

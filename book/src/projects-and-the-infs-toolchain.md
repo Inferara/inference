@@ -118,10 +118,11 @@ generic unknown-target one.
 
 `target = "stellar"` narrows the rest of the manifest. It cannot be combined
 with a `[build.wasm-opt]` table — that pairing is itself a load error, because
-whether an external Binaryen preserves a contract's metadata section depends on
-a version nothing here pins — it admits no `wasm-features`, `mode = "proof"`
-is a load error too, and `infs run` refuses the project outright, since a
-contract is invoked by a Soroban host and not by a plain WebAssembly runtime.
+whether an external Binaryen preserves a contract's value-ABI wrappers and its
+`contractenvmetav0` section depends on a version nothing here pins — it admits
+no `wasm-features`, `mode = "proof"` is a load error too, and `infs run`
+refuses the project outright, since a contract is invoked by a Soroban host
+and not by a plain WebAssembly runtime.
 What an exported function may declare is narrowed too; see
 [Compilation Targets](compilation_targets.md).
 
@@ -129,12 +130,12 @@ What an exported function may declare is narrowed too; see
 admits no `wasm-features` and no `mode = "proof"`, on load, for the same reason
 — the interpreter decodes neither the post-MVP families nor the custom `0xfc`
 instructions. But it keeps `[build.wasm-opt]`, because what that refusal
-protects is a contract's wrappers and metadata section and this target's module
-has neither, and it keeps `infs run`, because the artifact is plain WebAssembly
-whose `main` a runtime can invoke. Nothing narrows what an exported function
-may declare: the bytes are the `"wasm32"` build's. The same load-time
-strictness applies to
-keys: every fixed-schema table rejects a key it does not recognize, naming the
+protects is a contract's wrappers and its `contractenvmetav0` section, and
+this target's module has neither, and it keeps `infs run`, because the
+artifact is plain WebAssembly whose `main` a runtime can invoke. Nothing
+narrows what an exported function may declare: the bytes are the `"wasm32"`
+build's. The same load-time strictness applies to keys: every fixed-schema
+table rejects a key it does not recognize, naming the
 offending key and the fields the table accepts — a misspelled `wasm_features`
 fails the build rather than silently shipping a differently-configured
 artifact. Three tables accept arbitrary keys, because their keys are the data:
