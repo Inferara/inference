@@ -216,22 +216,24 @@ const WASM_LIB_PATH_ENV: &str = "INFERENCE_WASM_LIB_PATH";
 /// empty name) is a hard error so a typo never silently falls through to the
 /// search path.
 ///
-/// A name whose first segment is [`HOST_SEGMENT`] is refused here, and here is
-/// the only place the dependency-key half of the reservation is enforced:
-/// `infs build` forwards one `--wasm-dep` per `Inference.toml
-/// [wasm-dependencies]` key, so a manifest key reaches this function and no
-/// other check stands between it and the search path. A direct
-/// `--wasm-dep host=x.wasm` would otherwise bind a file under the name a `use …
-/// from host::…;` clause reserves for the embedder — the search-path
-/// substitution the reservation exists to make impossible, reached through the
-/// one door that skips the search path entirely.
+/// A name whose first segment is [`HOST_SEGMENT`] is refused here. Unrefused,
+/// `--wasm-dep host=x.wasm` would bind a file under the name a `use … from
+/// host::…;` clause reserves for the embedder — the search-path substitution the
+/// reservation exists to make impossible, reached through the one door that
+/// skips the search path entirely. `infs` refuses an `Inference.toml
+/// [wasm-dependencies]` key under the segment itself, before it asks `infc` to
+/// build, so this refusal is the backstop: it is what a direct `--wasm-dep`
+/// caller meets, and what a manifest key meets when it is forwarded by an `infs`
+/// that predates that check. The manifest-facing copy of the rule is
+/// `validate_wasm_dependency_key` in `apps/infs/src/project/manifest.rs`, whose
+/// refusal follows this one, shortened, ending on its closing clause verbatim.
 ///
 /// The refusal carries the two source-level reservations' "reserved in this
 /// position and no longer resolves to a file" clause verbatim, and that clause
-/// is the whole of what makes the three one rule rather than three rules. This
-/// one reaches an author who typed no flag at all, whose project built
-/// yesterday; without it they read a rule they broke instead of a migration they
-/// owe.
+/// is the whole of what makes the three one rule rather than three rules. Its
+/// reader may have typed nothing new — a script that has passed `--wasm-dep
+/// host=…` for months, a project an older `infs` built yesterday — and without
+/// the clause they read a rule they broke instead of a migration they owe.
 ///
 /// The remedy is two branches because this is the only one of the three that can
 /// fire on a program whose *source* is already correct. An author with a working
@@ -798,15 +800,17 @@ fn host_import_proof_refusal(host: &[String]) -> Option<String> {
 }
 
 /// The `Inference.toml [host-imports]` edit that would admit `fields` under
-/// `module` once that table exists.
+/// `module`.
 ///
-/// The table will hold one array per module — the shape the Host Imports
-/// section of `book/src/external-functions-and-wasm-linking.md` documents — so
-/// the edit is not one shape but two: a module with no entry needs its key
-/// written, and a module that has one needs names added to the array already
-/// there. Deciding which is the compiler's job, because the compiler is the one
-/// holding the allowlist; a message that made the reader go and check would be
-/// asking for work already done.
+/// The table holds one array per module — the shape the Host Imports section of
+/// `book/src/external-functions-and-wasm-linking.md` documents — so the edit is
+/// not one shape but two: a module with no entry needs its key written, and a
+/// module that has one needs names added to the array already there. Deciding
+/// which is the compiler's job, because the compiler is the one holding the
+/// allowlist; a message that made the reader go and check would be asking for
+/// work already done. Reading the table's keys off the flag is sound because
+/// `infs` refuses an empty array on load, so every key it forwards arrives as at
+/// least one pair.
 ///
 /// `fields` is every unadmitted field of `module`; why they arrive together is
 /// [`host_import_allowlist_refusal`]'s.
@@ -860,17 +864,18 @@ fn host_import_table_edit(
 /// clause carrying both names, of one per file, and of any mix of the two.
 ///
 /// `infc` is handed a flag and has no manifest, so the flag is named as the
-/// mechanism and the manifest as where `infs build` will fill it from — not
-/// the other way round, and in both branches. Inverting it would describe a
-/// file this invocation never read, to a caller who may not have one, and the
-/// edit it asked for would be in a syntax the flag refuses: `--host-imports`
-/// takes `module.field`, never a TOML array. The manifest sentence carries its
-/// own "once that table exists" warning rather than leaving it to the book,
-/// because `Inference.toml` denies unknown fields: a reader who performs the
-/// edit the sentence spells out today does not merely get premature advice,
-/// they get a manifest no `infs` command on the project can load. The warning
-/// has to travel with the edit, since the diagnostic is all a direct `infc`
-/// caller — the only reader who can reach this message at all — ever sees.
+/// mechanism and the manifest as where `infs` fills it from — not the other way
+/// round, and in both branches. Inverting it would describe a file this
+/// invocation never read, to a caller who may not have one, and the edit it
+/// asked for would be in a syntax the flag refuses: `--host-imports` takes
+/// `module.field`, never a TOML array. The manifest sentence is there for the
+/// other reader, who reached this refusal through `infs build` or `infs run`
+/// and never typed the flag at all: `infs` filled it from their `[host-imports]`
+/// table, and the table is the thing they edit, in its own syntax. That holds
+/// for the empty policy as much as for a listed one — `infs` forwards
+/// `--host-imports=` from a header with no keys — so both branches spell the
+/// table edit, and the empty one spells it as a new key, since that table has
+/// none.
 fn host_import_allowlist_refusal(
     allowlist: Option<&HostImportAllowlist>,
     declared: &[HostImport],
@@ -926,24 +931,23 @@ fn host_import_allowlist_refusal(
              `{HOST_SEGMENT}::{module}` binding of {names}."
         );
         if allowed.is_empty() {
+            let table_edit = host_import_table_edit(module, fields, false);
             blocks.push(format!(
                 "Error: {noun} {labels} {verb} not in this build's host-import allowlist: the \
                  allowlist is present and empty, which forbids every host import. The allowlist \
                  (`--host-imports`) names every host function the program may bind, and \
-                 `--host-imports=` declares that it binds none. {remedy} `infs build` will spell \
-                 that same empty policy as a declared-but-empty `[host-imports]` table in \
-                 Inference.toml once that table exists; today `infs` refuses to read a manifest \
-                 carrying that key at all."
+                 `--host-imports=` declares that it binds none. {remedy} `infs` fills the flag \
+                 from the `[host-imports]` table in Inference.toml, where this empty policy is \
+                 the table with no keys and the same edit is to {table_edit} under it."
             ));
         } else {
             let table_edit = host_import_table_edit(module, fields, allowed.contains_key(*module));
             blocks.push(format!(
                 "Error: {noun} {labels} {verb} not in this build's host-import allowlist. The \
                  allowlist (`--host-imports`) names every host function the program may bind, \
-                 and this build was given `{given}`. {remedy} `infs build` will fill the flag \
-                 from a `[host-imports]` table in Inference.toml once that table exists, where \
-                 the same edit will be to {table_edit}; today `infs` refuses to read a manifest \
-                 carrying that key at all, so the flag reaches `infc` by hand."
+                 and this build was given `{given}`. {remedy} `infs` fills the flag from the \
+                 `[host-imports]` table in Inference.toml, where the same edit is to \
+                 {table_edit}."
             ));
         }
     }
@@ -2137,6 +2141,30 @@ mod tests {
         }
     }
 
+    /// Asserts that `rendered` names the `[host-imports]` table `infs` fills the
+    /// flag from, in the present tense, and spells the table edit — the half of
+    /// the remedy a project build's reader acts on — in the empty policy's own
+    /// sentence when the allowlist is empty.
+    fn assert_names_the_host_imports_table(rendered: &str, empty_policy: bool) {
+        let table_sentence = if empty_policy {
+            "`infs` fills the flag from the `[host-imports]` table in Inference.toml, \
+             where this empty policy is the table with no keys and the same edit is to add"
+        } else {
+            "`infs` fills the flag from the `[host-imports]` table in Inference.toml, \
+             where the same edit is to add"
+        };
+        assert!(
+            rendered.contains(table_sentence),
+            "every branch names the table `infs` fills the flag from, and its edit: {rendered}"
+        );
+        for retired in ["table exists", "today `infs`"] {
+            assert!(
+                !rendered.contains(retired),
+                "the table exists, so `{retired}` must not come back: {rendered}"
+            );
+        }
+    }
+
     /// The edit an allowlist refusal asks for follows the allowlist it was
     /// given: a module with no entry needs the key written, a module that has
     /// one needs names added to the array it already has.
@@ -2147,11 +2175,12 @@ mod tests {
     ///
     /// Both branches are asserted to name `--host-imports` and to spell the
     /// flag's own `module.field` edit, because that is the only remedy a direct
-    /// `infc` caller can perform: the manifest table is not implemented, and
-    /// `--host-imports` refuses the TOML array spelling the same sentence hands
-    /// an `infs build` reader. Both are asserted to say so, too — following the
-    /// TOML edit today produces a manifest `infs` cannot load at all, and the
-    /// warning is only of use where the edit is.
+    /// `infc` caller can perform: they have no manifest, and `--host-imports`
+    /// refuses the TOML array spelling the same sentence hands an `infs`
+    /// reader. Both are asserted to name the `[host-imports]` table and its edit
+    /// too, in the present tense, for the `infs` reader whose flag was filled
+    /// from it — and neither may carry the retired sentence that told that
+    /// reader the table did not exist yet.
     ///
     /// The source-level half of the remedy is asserted to name the bindings
     /// rather than to quote a `use` clause. The partial-admission row is what
@@ -2200,6 +2229,10 @@ mod tests {
             refusal.contains("the allowlist is present and empty, which forbids every host import"),
             "an empty allowlist says so rather than reporting an empty list: {refusal}"
         );
+        assert!(
+            refusal.contains("the same edit is to add `env = [\"clock_ms\"]` under it."),
+            "the empty policy's table has no keys, so its edit writes one: {refusal}"
+        );
 
         for allowlist in [&other_module, &same_module, &empty] {
             let rendered = host_import_allowlist_refusal(Some(allowlist), &declared).unwrap();
@@ -2211,11 +2244,7 @@ mod tests {
                 "every branch names the one mechanism this build has, in its own syntax: \
                  {rendered}"
             );
-            assert!(
-                rendered.contains("today `infs` refuses to read a manifest carrying that key"),
-                "the TOML edit must travel with the warning that it breaks `infs` today: \
-                 {rendered}"
-            );
+            assert_names_the_host_imports_table(&rendered, allowlist.is_empty());
         }
 
         let both = [host_import("env", "clock_ms"), host_import("env", "sleep_ms")];
@@ -2456,6 +2485,20 @@ mod tests {
     fn parse_manifest_deps_empty_input_yields_empty_map() {
         let deps = parse_manifest_deps(&[]).expect("should parse");
         assert!(deps.get("anything").is_none());
+    }
+
+    /// `infs` refuses a `[wasm-dependencies]` key under the contract crate's
+    /// copy of the reserved segment, and this binary refuses the `--wasm-dep`
+    /// under the type checker's. This crate is the one that sees both, so it is
+    /// where they are held equal: the tests on either side spell `host` out, and
+    /// a rename of one copy alone would pass every one of them.
+    #[test]
+    fn the_host_segment_infs_refuses_is_the_one_the_compiler_reserves() {
+        assert_eq!(
+            HOST_SEGMENT,
+            inference_compiler_interface::HOST_SEGMENT,
+            "the reserved segment has one spelling on both sides of the infs/infc contract"
+        );
     }
 
     #[test]

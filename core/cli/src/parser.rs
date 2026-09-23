@@ -255,9 +255,9 @@ pub(crate) struct Cli {
     /// allowlist that admits none. A list admits exactly the pairs it names, as
     /// in `--host-imports=env.clock_ms,fprime_core.command`.
     ///
-    /// Unlike `--wasm-dep`, `infs build` does not forward this flag yet — the
-    /// `Inference.toml [host-imports]` table it will fill it from is not
-    /// implemented — so direct `infc` callers pass it by hand.
+    /// `infs build` and `infs run` forward one entry per field of each
+    /// `Inference.toml [host-imports]` module, and a declared-but-empty table
+    /// as `--host-imports=`; direct `infc` callers may pass the list by hand.
     //
     // Maintainer notes, kept out of the doc comment because clap prints that
     // verbatim as `--help`.

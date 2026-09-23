@@ -232,8 +232,9 @@ That guarantee belongs to the compiler and its link step, and one optional
 `[build.wasm-opt]` has Binaryen rewrite `out/main.wasm` in place after `infc`
 exits, and at any `level` other than `"0"`, `wasm-opt` removes unused module
 elements — an imported function the program never calls among them (`-O0` runs
-no passes and keeps it). Nothing re-reads the import set afterwards, so the
-interface narrows with no diagnostic. The direction is safe: `wasm-opt` can
+no passes and keeps it). Nothing diagnoses the narrowing: `infs build` does not
+re-read the import set, and `infs run` re-reads it only to refuse an artifact
+that still imports a function. The direction is safe: `wasm-opt` can
 only drop imports and never invent one, so nothing escapes the allowlist that
 way. But a deployment sized against an uncalled host import is sized against
 the module `infc` wrote, not the one that shipped, so until the step is taught
@@ -248,11 +249,13 @@ in it, or pass `--no-wasm-opt`.
 | `use … from host;` with no module after it, or more than one segment after it | type checker |
 | Two declarations of one `(module, field)` at different signatures, or with different `mut` parameters | external resolution (`ConflictingHostSignature`, `ConflictingHostWriteSet`) |
 | A program binding both host imports and linked modules | external resolution (`MixedHostAndLinked`) |
-| `--wasm-dep host=…`, or an `Inference.toml [wasm-dependencies]` key spelled `host` | `infc` argument handling |
+| An `Inference.toml [wasm-dependencies]` key whose first segment is `host` (`host`, `host::io`) | `infs`, when it resolves the table to forward it on any build or run route, before `infc` is asked to build; `infc` argument handling for `--wasm-dep host=…` from a direct caller |
+| A malformed `[host-imports]` table — a key that is not one identifier, an empty array, a field that is not an identifier, a field listed twice | `infs` manifest validation, whenever the manifest is loaded |
 | Any build that writes a `.v` (`--mode proof`, a bare `-v`, or `--mode compile -v`) that binds a host import | `infc`, before external resolution |
 | A host import at a target that does not bind the host-call convention (`stellar`) | `infc`, before external resolution, in code generation's words; code generation itself for any other caller |
 | A host import no embedder could register — a module or field name over 31 bytes, or more than nine parameters — at `--target spacewasm` | `infc` over the declarations, after external resolution and before the allowlist; the post-link conformance check over the bytes |
 | A host import the build's allowlist does not admit | `infc`, after external resolution |
+| Executing an artifact that imports any function | `infs run`, after the build, from the artifact's import section |
 
 The proof refusal is raised before external resolution deliberately. A program
 that is both mixed and a proof build would otherwise hear the mixed-program
@@ -323,19 +326,51 @@ spells the entry its reader meant — for `fprime_core::telemetry` or
 `host::fprime_core::telemetry` alike, `fprime_core.telemetry` — naming as the
 fault whichever of the two mistakes the entry actually makes.
 
-`infs build` will fill the flag from an `Inference.toml [host-imports]` table,
-one array of field names per import module:
+A project keeps its allowlist in `Inference.toml`, one array of field names per
+import module, and `infs` fills the flag from it:
 
 ```toml
 [host-imports]
-fprime_core = ["telemetry", "clock_ms"]
+fprime_core = ["telemetry", "command"]
+env = ["clock_ms"]
 ```
 
-A table declared and left empty is how a project states that it binds no host
-functions at all — the state `--host-imports=` spells on a command line. That
-table is not implemented yet, and `Inference.toml` rejects keys it does not
-know, so writing one today leaves a manifest no `infs` command on the project
-can load. Until it lands the allowlist reaches `infc` by hand.
+The table has the flag's three states. Absent, no policy applies. Declared with
+no keys under it, it admits no host function at all — the state
+`--host-imports=` spells on a command line. With keys, it admits exactly the
+fields it lists. Every route that compiles a project — `infs build`, `infs run`,
+and both of their single-file forms — forwards it as *one* argument, since the
+flag requires its `=`:
+`--host-imports=env.clock_ms,fprime_core.command,fprime_core.telemetry`,
+sorted by module and then field whatever order the manifest listed them in, or
+exactly `--host-imports=` for the empty table. Each also echoes the policy
+before `infc` runs:
+
+```text
+host-imports allowlist: env.clock_ms, fprime_core.command, fprime_core.telemetry
+host-imports allowlist: empty (no host function admitted)
+```
+
+The echo is what shows a policy was applied; the [inventory
+line](#the-inventory-line) `infc` prints next says which imports that policy
+admitted. The forward is gated on compiler ABI 1.8, the minor `--host-imports`
+landed at, and an older `infc` is refused rather than handed the build without
+the flag: it would accept every host import the program binds, and the artifact
+it wrote would be byte for byte the one the table exists to police.
+
+The table is validated whenever the manifest is loaded, not only where it is
+forwarded — a malformed allowlist is a defect in a policy, and a project
+carrying one should not build anything. A key is one import module name:
+`host::env` and `env::v2` are both refused, because the module string an
+embedder registers is flat — it never contains `::` — and the `host::` prefix
+of the clause names the provider and is not part of it, so the key for
+`use { clock_ms } from host::env;` is `env`. Each value is a non-empty array of
+field names, each an identifier and none listed twice. The empty array is
+refused rather than read as "nothing from this module" because the flag has no
+spelling for a module with no admitted field; keeping every key populated keeps
+the table's modules and the flag's the same set, which is what lets an `infc`
+refusal tell its reader whether to add a key or to add a name to the entry
+already there.
 
 ### The inventory line
 
@@ -362,8 +397,9 @@ changed meaning:
   clause now, and is refused with the spelling to write instead.
 - `use { f } from host::io;` used to resolve `host/io.wasm` and link it. It is
   a **host import** of the module `io` now: no file is read, the embedder
-  becomes responsible for `f`, and the build still succeeds. No diagnostic is
-  issued anywhere — the inventory line is where the change shows up.
+  becomes responsible for `f`, and the build still succeeds. No build
+  diagnostic is issued — the inventory line is where the change shows up, and
+  `infs run` refuses the program, naming `io.f`.
 
 The remedy for either is to rename the module out of that first segment: the
 `.wasm` file or directory, the `[wasm-dependencies]` key or `--wasm-dep` name,
@@ -380,6 +416,56 @@ refused rather than qualified: a `.v` written over a module with an unmodelled
 hole in it would claim more than the artifact supports. Admitting host imports
 into a proof build later means giving the author a way to *state* the contract,
 so a host import's declaration may come to carry more than a signature.
+
+### Running a program that binds host imports
+
+A program that binds a host import runs under the embedder that supplies it,
+and `infs run` is not one: it supplies no host functions, and it does not let
+wasmtime stand in for an embedder either — not even for the WASI functions the
+wasmtime CLI provides on its own, which a program importing them could
+otherwise run against. Which host functions happen to be at hand is a property
+of the runtime, not of the program. `infs run` therefore builds such a program
+and then refuses to execute it, naming each function the artifact imports:
+
+```text
+`infs run` cannot execute this program: out/main.wasm imports 3 functions that its embedder must supply.
+  env.clock_ms
+  fprime_core.command
+  fprime_core.telemetry
+`infs run` supplies no host functions and does not stand in for an embedder, not even with the WASI functions the wasmtime CLI provides on its own, so it executes no artifact that imports a function. Run the program from your embedder, which supplies these functions. See the book's External Functions and WASM Linking chapter ("Running a program that binds host imports") for how an embedder registers them.
+```
+
+The refusal is decided from the artifact rather than from the manifest, because
+a `[host-imports]` table is an allowlist and not a declaration: a project can
+list functions it never binds, or bind them with no table at all. It is asked of
+the bytes that would run, too — in a project build, the bytes `[build.wasm-opt]`
+leaves behind, which may have lost an import nothing calls (see [A bound host
+import ships whether or not it is
+called](#a-bound-host-import-ships-whether-or-not-it-is-called)).
+
+An embedder registers each function under the two names its import carries,
+before it instantiates the module. For a program declaring
+
+```inference
+external fn telemetry(code: i32, value: i32);
+use { telemetry } from host::fprime_core;
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+```
+
+an embedder using wasmtime's Rust API registers:
+
+```rust,ignore
+let mut linker = wasmtime::Linker::new(&engine);
+linker.func_wrap("fprime_core", "telemetry", |code: i32, value: i32| {
+    /* forward to the flight software's telemetry channel */
+})?;
+linker.func_wrap("env", "clock_ms", || -> i64 { /* read the mission clock */ 0 })?;
+let instance = linker.instantiate(&mut store, &module)?;
+```
+
+The signature it registers must be the one the `external fn` declared, since the
+artifact's import carries that type and instantiation checks it.
 
 ## Calling an External Function
 

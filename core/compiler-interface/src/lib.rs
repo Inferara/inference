@@ -57,6 +57,13 @@
 //! [`MemoryLayout::resolve`] is the only way to name a layout other than the
 //! default, so the invariants hold by construction rather than by a check every
 //! consumer has to remember to run.
+//!
+//! # Host-import vocabulary
+//!
+//! [`HOST_SEGMENT`] is the module-path segment that names the embedder rather
+//! than a linked module. `infc` classifies a `use … from` clause by it and
+//! `infs` refuses an `Inference.toml [wasm-dependencies]` key under it, so the
+//! two must spell it alike.
 
 pub mod errors;
 
@@ -196,6 +203,18 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// must confirm it is talking to a minor-8 `infc` and refuse, never drop the
 /// flag and build.
 pub const COMPILER_ABI_MINOR: u32 = 8;
+
+/// The first segment of a `use … from` clause that names the embedder rather
+/// than a linked module: `use { clock_ms } from host::env;` binds a host import
+/// of the module `env`.
+///
+/// `infs` reads this copy to refuse a `[wasm-dependencies]` key the compiler
+/// would refuse as a `--wasm-dep`. The compiler's own is
+/// `inference_type_checker::HOST_SEGMENT`, a separate constant because the type
+/// checker does not depend on this crate; `infc`'s
+/// `the_host_segment_infs_refuses_is_the_one_the_compiler_reserves` holds the
+/// two equal.
+pub const HOST_SEGMENT: &str = "host";
 
 /// A post-MVP WebAssembly proposal that a project may opt into.
 ///

@@ -29,6 +29,11 @@
 //!   the role that separates them: the module loads under an embedder built
 //!   with a larger const generic, so the build succeeds and owes a warning
 //!   rather than a refusal.
+//! - `FAKE_WASM_OPT_FUNCTION_IMPORT=1`: write a module whose only content is
+//!   one function import, `env.f`. The compiler's module for a program that
+//!   binds no host import imports nothing, so this is the role that shows
+//!   whether `infs run` asks its import question of the optimized bytes or of
+//!   the compiler's.
 //! - otherwise: copy the positional input file to the `-o` target byte-for-byte
 //!   and exit 0 (the success path).
 //!
@@ -82,6 +87,12 @@ fn main() {
     if std::env::var("FAKE_WASM_OPT_DEEP_NESTING").as_deref() == Ok("1") {
         std::fs::write(&output, deeply_nested_module())
             .expect("fake wasm-opt: failed to write the deeply nested module");
+        return;
+    }
+
+    if std::env::var("FAKE_WASM_OPT_FUNCTION_IMPORT").as_deref() == Ok("1") {
+        std::fs::write(&output, function_import_module())
+            .expect("fake wasm-opt: failed to write the function-import module");
         return;
     }
 
@@ -190,6 +201,25 @@ fn deeply_nested_module() -> Vec<u8> {
     section(&mut module, 0x01, &[0x01, 0x60, 0x00, 0x00]);
     section(&mut module, 0x03, &[0x01, 0x00]);
     section(&mut module, 0x0A, &code);
+    module
+}
+
+/// A module whose only content is one function import, `env.f`, of type
+/// `[] -> []`.
+///
+/// Valid WebAssembly 1.0, so it passes the re-validation step and lands in
+/// `out/main.wasm` as the artifact `infs run` is about to execute.
+///
+/// Assembled by hand for the same reason: this fixture takes no dependencies.
+fn function_import_module() -> Vec<u8> {
+    let mut module = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+    section(&mut module, 0x01, &[0x01, 0x60, 0x00, 0x00]);
+    // One import: module `env`, field `f`, a function of type index 0.
+    section(
+        &mut module,
+        0x02,
+        &[0x01, 0x03, b'e', b'n', b'v', 0x01, b'f', 0x00, 0x00],
+    );
     module
 }
 

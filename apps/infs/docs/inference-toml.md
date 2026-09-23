@@ -40,6 +40,9 @@ enabled = true          # table presence enables; set false to keep it off
 level = "3"             # forwarded as -O<level>: "0".."4", "s", "z"
 auto-install = false    # download wasm-opt automatically if it is missing
 
+[host-imports]          # optional: the host functions the program may bind
+env = ["clock_ms"]      # import module -> the fields of it admitted
+
 [verification]
 output-dir = "proofs/"   # honored only in proof mode
 ```
@@ -60,8 +63,15 @@ TOML parse error at line 7, column 1
 unknown field `wasm_features`, expected one of `target`, `optimize`, `mode`, `wasm-features`, `wasm-opt`
 ```
 
-The exceptions are `[dependencies]` and `[wasm-dependencies]`, where the keys are
-the data: they name dependencies, so any well-formed name is accepted.
+The exceptions are the three tables whose keys are the data: `[dependencies]`
+and `[wasm-dependencies]`, whose keys name dependencies, and `[host-imports]`,
+whose keys name the import modules an embedder registers host functions under.
+Any well-formed name is accepted as a key there, except a `[wasm-dependencies]`
+key whose first segment is `host`: that segment is reserved for host imports,
+and such a key is refused on every build and run route. A host import needs no
+dependency entry, and belongs under [`[host-imports]`](#host-imports) if the
+project keeps an allowlist. `[wasm-dependencies]` and `[host-imports]` refuse a
+malformed key, naming it.
 
 The trade-off is deliberate. An older `infs` reading a manifest that uses a key
 added by a newer toolchain fails rather than ignoring it. That matches how the
@@ -69,7 +79,7 @@ compiler ABI gate treats toolchain/manifest skew — an error, never a silent
 downgrade that ships a differently-configured artifact than the manifest asked
 for.
 
-There is one exception among the keys a build acts on, and it is `[build]
+The promise has two gaps among the keys a build acts on. The first is `[build]
 target`. That key was parsed and recorded before it was consumed, so it was
 never protected by the unknown-key refusal above: an `infs` predating target
 forwarding reads `target = "spacewasm"`, discards it, and builds for the default
@@ -81,6 +91,14 @@ Every released `infs` through `v0.0.5` predates it. (`[build] optimize` is
 parsed and unvalidated in the same way, but nothing reads it, so no build can be
 downgraded by it.)
 
+The second is every root table added after `v0.0.5`: the unknown-key refusal is
+itself younger than every release, so an `infs` through `v0.0.5` reads past such
+a table with no diagnostic. `[host-imports]` is where that costs the most. Such
+an `infs` builds under no policy at all — the allowlist dropped silently, which
+is the one outcome the table exists to prevent. Every `infs` that has the
+refusal either forwards the table or refuses the manifest. A project that
+relies on its allowlist has to be built with an `infs` that knows the table.
+
 ## Settings Honored in Single-File Mode
 
 `infs build path/to/file.inf` and `infs run path/to/file.inf` compile one named
@@ -90,14 +108,21 @@ honor the same settings:
 
 | Setting | `infs build <path>` | `infs run <path>` |
 |---|---|---|
+| `[build] target` | honored | honored |
 | `[build] wasm-features` | honored | honored |
+| `[memory]` | honored | honored |
 | `[wasm-dependencies]` | honored | honored |
+| `[host-imports]` | honored | honored |
 
 `[build] wasm-features` is honored by both, with the same validation and the same
 ABI gate as project mode. This is deliberate rather than incidental: `infs build`,
 `infs build src/main.inf`, and `infs run src/main.inf` all write
 `out/main.wasm` for the same project, so if they disagreed about the instruction
 set, the artifact you ship would depend on which command last touched it.
+`[build] target` and `[memory]` are honored by both for the same reason, with
+the same validation and ABI gates as project mode: the first decides which
+runtime the artifact is built for, the second its linear memory and the shadow
+stack's share of it.
 
 `[wasm-dependencies]` is resolved identically everywhere: project `infs build`,
 project `infs run`, single-file `infs build <path>`, and single-file `infs run
@@ -107,10 +132,15 @@ accept `-L`/`--wasm-lib-dir` to add extra search directories beyond the
 manifest, so a file that imports an external module runs directly without a
 separate link step.
 
-Everything else in the manifest is project-mode configuration: `[build] mode`,
-`[verification] output-dir`, and `[build.wasm-opt]` are not consulted in
-single-file mode. A source file outside any project takes every default and never
-errors for want of a manifest.
+`[host-imports]` is honored by both for the reason `[build] wasm-features` is:
+the three commands write one artifact for one project, so a policy that
+`infs build` applied and `infs run src/main.inf` skipped would let the
+unpoliced run overwrite the policed build.
+
+Everything in the manifest but those five settings is project-mode
+configuration: `[build] mode`, `[verification] output-dir`, and
+`[build.wasm-opt]` are not consulted in single-file mode. A source file outside
+any project takes every default and never errors for want of a manifest.
 
 ## Section Reference
 
@@ -357,6 +387,100 @@ The resolved binary must report **Binaryen 116 or newer** (`wasm-opt --version`)
 
   This costs nothing for a program you build and run. It matters for a library, and it reaches most of them: `+`, `-`, `*` and unary `-` trap unless the source wrote `wrapping(...)` around them, so a library with any arithmetic at all carries the record and is marked once it is optimized. From then on no `exists`- or `unique`-quantified specification in a project that links it may reach it, whatever it calls. If some other project states one over a call into your library, build the library without `[build.wasm-opt]` (or with `--no-wasm-opt`) so its record stays exact. `forall` specifications and ordinary linking are unaffected either way, and a module whose arithmetic is written `wrapping(...)` throughout records nothing and is never marked.
 
+### [host-imports]
+
+The `[host-imports]` table is the project's allowlist of **host imports**: the
+functions a `use { … } from host::<module>;` clause binds, which the embedder
+supplies at instantiation rather than any `.wasm` this build links. It holds one
+array of field names per import module.
+
+#### Fields
+
+- **`<module>`** (array of strings): the host functions of the WebAssembly import
+  module `<module>` the program may bind.
+  - The key is the import module string an embedder registers functions under —
+    the one segment after `host::` in the clause that binds them. It is an ASCII
+    identifier; the string is flat, so `host::env` and `env::v2` are refused, and
+    the key for `use { clock_ms } from host::env;` is `env`.
+  - Each field is an ASCII identifier, the name the clause binds, listed once.
+  - The array names at least one field. `env = []` is refused — delete the key,
+    or list the fields — because the `--host-imports` flag the table is
+    forwarded as cannot spell a module with no admitted field. Every key
+    therefore reaches `infc` as at least one pair, so the table's modules and the
+    flag's are the same set, which is what lets an `infc` refusal tell you
+    whether to add a key or to add a name to the entry that is there.
+
+#### The three policies
+
+| Table | Policy | Forwarded as |
+|---|---|---|
+| absent | none: every host import the program declares is admitted | nothing |
+| `[host-imports]` with no keys | admits no host function at all | `--host-imports=` |
+| keys listed | admits exactly the listed fields | `--host-imports=env.clock_ms,fprime_core.command,…` |
+
+The empty table is a policy of its own, not the absence of one, and survives
+being written back by `infs`.
+
+#### Validation
+
+The table is validated when the manifest is loaded — unlike `[wasm-dependencies]`
+keys, which are checked only where they are forwarded. A malformed allowlist is
+a defect in a policy, so a manifest carrying one fails `infs build` and
+`infs run` alike, in both modes and before either looks for `infc` or wasmtime,
+naming the offending key (and field). Refused: a key that is not one
+identifier, a value that is not an array of strings, an empty array, a field
+that is not an identifier, and a field listed twice.
+
+#### Forwarding
+
+`infs build` and `infs run`, in project mode and single-file mode alike, forward
+the table as **one** argument, since `infc` requires the `=`:
+`--host-imports=` followed by every `module.field` pair, sorted by module and
+then field and joined by `,` with no spaces, whatever order the manifest listed
+them in. Each echoes the policy before `infc` runs, in the same order:
+
+```text
+host-imports allowlist: env.clock_ms, fprime_core.command, fprime_core.telemetry
+host-imports allowlist: empty (no host function admitted)
+```
+
+The echo shows that a policy was applied; `infc`'s own `host imports: …` line
+then names the imports it admitted (a build with no table prints `host imports
+(no allowlist): …` instead). The empty policy is echoed as what it admits
+rather than as `none`, which would read as that absent state.
+
+The forward requires an `infc` with ABI 1.8 or newer. An older one is refused
+with remediation rather than handed the build without the flag, since it would
+accept every host import the program binds and write an artifact identical to
+one the table had policed.
+
+#### Running a program that binds host imports
+
+`infs run` builds a program that binds host imports and then refuses to execute
+it. It supplies no host functions and does not let wasmtime stand in for the
+embedder the program is written for — not even for the WASI functions the
+wasmtime CLI provides on its own. The refusal names each imported function; run
+the program from the embedder that supplies them. It is decided from the built
+artifact rather than from this table, which is an allowlist and not a
+declaration, so a program that binds no host function runs whatever the table
+lists. The book's [Running a program that binds host
+imports](../../../book/src/external-functions-and-wasm-linking.md#running-a-program-that-binds-host-imports)
+section shows how an embedder registers the functions a program imports.
+
+#### Example
+
+```toml
+[host-imports]
+fprime_core = ["telemetry", "command"]
+env = ["clock_ms"]
+```
+
+A project that binds no host function at all says so with the header alone:
+
+```toml
+[host-imports]
+```
+
 ### [verification]
 
 The `[verification]` section configures Rocq (Coq) proof generation.
@@ -425,6 +549,18 @@ output-dir = "proofs/"
 Because `[package]` now rejects keys it does not recognize, a manifest that still
 carries one of these fails to load rather than ignoring it. Delete the key; no
 replacement is needed.
+
+**Added tables:**
+- `[host-imports]`: the host-import allowlist, one array of field names per
+  import module (see [`[host-imports]`](#host-imports)). An `infs` that predates
+  the table but has the unknown-key refusal rejects a manifest carrying it; one
+  that predates the refusal too — every release through `v0.0.5` — ignores it
+  and builds with no policy (see [Unknown Keys](#unknown-keys)).
+  - Each field is a plain string today. An entry may later become an untagged
+    `String | { name = …, … }`, so a producer has somewhere to attach a
+    contract-spec name, or a name mapping for an import string that is not an
+    identifier; an `infs` that predates the table form refuses such an entry,
+    naming its key, rather than misreading it.
 
 ## Validation Rules
 

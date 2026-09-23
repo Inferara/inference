@@ -53,7 +53,9 @@ use anyhow::{Context, Result, bail};
 use inf_wasmparser::{Parser, Payload, WasmFeatures};
 use inference_compiler_interface::TargetName;
 
-use crate::artifact::{ArtifactScan, CHECKED_SECTION_NAME, scan_artifact};
+use crate::artifact::{
+    ArtifactScan, CHECKED_SECTION_NAME, VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS, scan_artifact,
+};
 use crate::commands::build::BuildMode;
 use crate::project::ProjectContext;
 use crate::toolchain::binaryen;
@@ -180,21 +182,21 @@ pub(crate) fn post_build_optimize(
     // afterwards would answer the same question about bytes whose functions
     // have already moved. `wasm_path` is absolute; the scan is given the
     // conventional relative spelling the refusal below uses, so the two
-    // failures name one file.
+    // failures name one file. The import list is not this step's question:
+    // `infs run` asks it of the bytes this step leaves behind.
     let (uses_bulk_memory, records_overflow_guards) =
         match scan_artifact(&wasm_bytes, Path::new("out/main.wasm"))? {
             ArtifactScan::VerificationConstruct(construct) => bail!(
                 "`[build.wasm-opt]` is enabled but `out/main.wasm` contains the \
                  verification-only construct `{construct}`, which wasm-opt cannot \
-                 process. Verification constructs (forall/exists/assume/unique and \
-                 `@`/uzumaki) belong in `spec` blocks, which compile-mode builds \
-                 strip. Move the construct into a `spec` block, or disable \
-                 optimization (`enabled = false` under `[build.wasm-opt]`, or pass \
-                 `--no-wasm-opt`)."
+                 process. {VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS}. Move the construct \
+                 into a `spec` block, or disable optimization (`enabled = false` under \
+                 `[build.wasm-opt]`, or pass `--no-wasm-opt`)."
             ),
             ArtifactScan::Executable {
                 uses_bulk_memory,
                 records_overflow_guards,
+                function_imports: _,
             } => (uses_bulk_memory, records_overflow_guards),
         };
 

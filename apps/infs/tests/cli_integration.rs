@@ -2311,6 +2311,35 @@ fn write_infc_stub(
     argv_log: &std::path::Path,
     probe_log: Option<&std::path::Path>,
 ) -> std::path::PathBuf {
+    write_infc_stub_reporting(
+        dir,
+        name,
+        argv_log,
+        probe_log,
+        "nope",
+        inference_compiler_interface::COMPILER_ABI_MINOR,
+    )
+}
+
+/// [`write_infc_stub`] with the handshake answers supplied: `--commit-hash`
+/// prints `commit` and `--abi-version` prints the current major with
+/// `abi_minor`.
+///
+/// Both are parameters because an ABI gate has two ways to be cleared, and a
+/// test of one must be able to hold the other shut: a stub reporting a minor
+/// below the gate *and* the commit `infs` was built from is the only arrangement
+/// in which a forwarded flag proves the commit-match short-circuit fired.
+///
+/// Unix-only: relies on an executable shell script.
+#[cfg(unix)]
+fn write_infc_stub_reporting(
+    dir: &assert_fs::TempDir,
+    name: &str,
+    argv_log: &std::path::Path,
+    probe_log: Option<&std::path::Path>,
+    commit: &str,
+    abi_minor: u32,
+) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let record_probe = probe_log.map_or_else(String::new, |log| {
@@ -2321,12 +2350,11 @@ fn write_infc_stub(
     stub.write_str(&format!(
         "#!/bin/sh\n\
          case \"$1\" in\n\
-           --commit-hash) {record_probe}printf 'nope\\n'; exit 0 ;;\n\
-           --abi-version) {record_probe}printf '{}.{}\\n'; exit 0 ;;\n\
+           --commit-hash) {record_probe}printf '{commit}\\n'; exit 0 ;;\n\
+           --abi-version) {record_probe}printf '{}.{abi_minor}\\n'; exit 0 ;;\n\
            *) printf '%s\\n' \"$@\" >> '{}'; exit 0 ;;\n\
          esac\n",
         inference_compiler_interface::COMPILER_ABI_MAJOR,
-        inference_compiler_interface::COMPILER_ABI_MINOR,
         argv_log.display()
     ))
     .unwrap();
@@ -3129,10 +3157,61 @@ fn single_file_command_argv(
     logged_argv(log.path())
 }
 
+/// Asserts that single-file `build`'s line carries all four forwarding families
+/// the wire-order comparison below is about, each with its value — the lib dir,
+/// the manifest dependency and the feature request each followed by it, and the
+/// host-import policy fused into its one `--host-imports=` entry.
+///
+/// Asserted before the comparison, so two empty blocks could never agree
+/// vacuously. `lib_dir` is the `-L` the invocation passed and `project` the root
+/// whose `libs/arith.wasm` the dependency resolves to.
+#[cfg(unix)]
+fn assert_build_carries_every_forwarded_family(
+    build_argv: &[&str],
+    lib_dir: &std::path::Path,
+    project: &std::path::Path,
+) {
+    let build_external = &build_argv[1..];
+    let expected_dep = format!(
+        "arith={}",
+        project
+            .canonicalize()
+            .unwrap()
+            .join("libs")
+            .join("arith.wasm")
+            .display()
+    );
+    assert_eq!(
+        argv_values_after(build_external, "--wasm-lib-dir"),
+        vec![Some(lib_dir.to_str().unwrap())],
+        "`build` must carry the lib dir, got argv: {build_argv:?}"
+    );
+    assert_eq!(
+        argv_values_after(build_external, "--wasm-dep"),
+        vec![Some(expected_dep.as_str())],
+        "`build` must carry the manifest dependency, got argv: {build_argv:?}"
+    );
+    assert_eq!(
+        argv_values_after(build_external, "--wasm-features"),
+        vec![Some("bulk-memory")],
+        "`build` must carry the manifest feature request, got argv: {build_argv:?}"
+    );
+    let host_import_entries: Vec<&str> = build_external
+        .iter()
+        .copied()
+        .filter(|entry| entry.starts_with("--host-imports"))
+        .collect();
+    assert_eq!(
+        host_import_entries,
+        [HOST_IMPORTS_TOKEN],
+        "`build` must carry the host-import policy as one entry, got argv: {build_argv:?}"
+    );
+}
+
 /// The wire order single-file `run` presents matches single-file `build`,
 /// compared against `build`'s *observed* command line rather than a transcribed
-/// copy of it:
-/// `<source> [phase flags] [--wasm-lib-dir …]* [--wasm-dep …]* [--wasm-features …]`.
+/// copy of it: `<source> [phase flags] [--wasm-lib-dir …]* [--wasm-dep …]*
+/// [--wasm-features …] [--host-imports=…]`.
 ///
 /// Order is not semantically load-bearing to `infc`'s parser, but "the two
 /// single-file commands present one project to `infc` identically" is the whole
@@ -3148,9 +3227,9 @@ fn single_file_command_argv(
 /// routes silently disagreeing about the project they write the same
 /// `out/main.wasm` for.
 ///
-/// The manifest declares both a feature request and a dependency and the
-/// invocation adds a lib dir, so all three blocks are on the line at once — the
-/// only arrangement in which their relative order is observable.
+/// The manifest declares a feature request, a dependency and a `[host-imports]`
+/// table and the invocation adds a lib dir, so all four blocks are on the line
+/// at once — the only arrangement in which their relative order is observable.
 ///
 /// The phase flags are the one legitimate difference and are factored out
 /// explicitly: `run` compiles through `--parse --codegen -o` because it then
@@ -3169,7 +3248,10 @@ fn single_file_run_wire_order_matches_single_file_build() {
         &temp,
         "demo",
         PROJECT_MAIN_EXTERN_SRC,
-        &format!("[build]\nwasm-features = [\"bulk-memory\"]\n\n{ARITH_DEPENDENCY_TABLE}"),
+        &format!(
+            "[build]\nwasm-features = [\"bulk-memory\"]\n\n{ARITH_DEPENDENCY_TABLE}\n\
+             {HOST_IMPORTS_TABLE}"
+        ),
     );
 
     let vendor = temp.child("vendor");
@@ -3211,34 +3293,7 @@ fn single_file_run_wire_order_matches_single_file_build() {
     let build_external = &build_argv[1..];
     let run_external = &run_argv[4..];
 
-    // Asserted before the comparison, so two empty blocks could never agree
-    // vacuously: all three families really are on `build`'s line, each with an
-    // adjacent value.
-    let expected_dep = format!(
-        "arith={}",
-        temp.path()
-            .canonicalize()
-            .unwrap()
-            .join("libs")
-            .join("arith.wasm")
-            .display()
-    );
-    assert_eq!(
-        argv_values_after(build_external, "--wasm-lib-dir"),
-        vec![Some(vendor.path().to_str().unwrap())],
-        "`build` must carry the lib dir, got argv: {build_argv:?}"
-    );
-    assert_eq!(
-        argv_values_after(build_external, "--wasm-dep"),
-        vec![Some(expected_dep.as_str())],
-        "`build` must carry the manifest dependency, got argv: {build_argv:?}"
-    );
-    assert_eq!(
-        argv_values_after(build_external, "--wasm-features"),
-        vec![Some("bulk-memory")],
-        "`build` must carry the manifest feature request, got argv: {build_argv:?}"
-    );
-
+    assert_build_carries_every_forwarded_family(&build_argv, vendor.path(), temp.path());
     assert_eq!(
         run_external, build_external,
         "past the phase flags the two single-file commands must present one \
@@ -3252,15 +3307,17 @@ fn single_file_run_wire_order_matches_single_file_build() {
             .position(|entry| *entry == flag)
             .unwrap_or_else(|| panic!("`{flag}` must be on the wire, got argv: {run_argv:?}"))
     };
-    let (lib_dir, dep, features) = (
+    let (lib_dir, dep, features, host_imports) = (
         position("--wasm-lib-dir"),
         position("--wasm-dep"),
         position("--wasm-features"),
+        position(HOST_IMPORTS_TOKEN),
     );
     assert!(
-        lib_dir < dep && dep < features,
+        lib_dir < dep && dep < features && features < host_imports,
         "the blocks must appear in the documented order (lib dirs, then \
-         dependencies, then features), got argv: {run_argv:?}"
+         dependencies, then features, then the host-import policy), got argv: \
+         {run_argv:?}"
     );
 }
 
@@ -3336,6 +3393,11 @@ fn single_file_run_without_a_feature_request_performs_no_handshake() {
          argv: {argv:?}"
     );
     assert!(
+        !argv.iter().any(|entry| entry.starts_with("--host-imports")),
+        "a manifest with no `[host-imports]` table must forward no policy, got \
+         argv: {argv:?}"
+    );
+    assert!(
         probes.is_empty(),
         "single-file `run` must not run the compatibility handshake when there \
          is no feature request to gate, got probes: {probes:?}"
@@ -3355,6 +3417,12 @@ fn single_file_run_without_a_feature_request_performs_no_handshake() {
 /// the matching-commit short-circuit would answer compatibility after
 /// `--commit-hash` alone, so the second call is the stub's doing, and asserting
 /// the pair keeps the sequence itself visible.
+///
+/// A `[host-imports]` table is gated the same way, on its presence rather than
+/// its content, so both of its forwarded shapes are rows here. The
+/// declared-empty table is the one that matters: a probe keyed on there being
+/// any pair to send would skip it, and hand the strictest policy to a compiler
+/// that could not honor it — or leave it off the command line altogether.
 #[cfg(unix)]
 #[test]
 fn single_file_run_with_a_feature_request_performs_the_handshake() {
@@ -3378,6 +3446,26 @@ fn single_file_run_with_a_feature_request_performs_the_handshake() {
         "a feature request must be gated on the handshake, which a \
          mismatched-commit stub answers in two calls, got probes: {probes:?}"
     );
+
+    for (table, token) in [
+        ("[host-imports]\n", "--host-imports="),
+        (
+            "[host-imports]\nenv = [\"clock_ms\"]\n",
+            "--host-imports=env.clock_ms",
+        ),
+    ] {
+        let (logged, probes) = single_file_run_argv_and_probes(table);
+        let argv: Vec<&str> = logged.lines().collect();
+        assert!(
+            argv.contains(&token),
+            "the `[host-imports]` policy must reach infc as `{token}`, got argv: {argv:?}"
+        );
+        assert_eq!(
+            probes,
+            ["--commit-hash", "--abi-version"],
+            "a `[host-imports]` table must be gated on the handshake, got probes: {probes:?}"
+        );
+    }
 }
 
 /// Neutrality inside a project: a manifest with no `[wasm-dependencies]` table
@@ -8646,4 +8734,780 @@ fn a_spacewasm_project_declaring_the_optimizer_still_loads() {
                     .not(),
             );
     }
+}
+
+// ---------------------------------------------------------------------------
+// [host-imports]: forwarding, validation, and `infs run` on an artifact that
+// imports functions
+//
+// The allowlist reaches `infc` from every route that spawns it, as one argv
+// token, and only to a compiler that can honor it. A malformed table fails every
+// command that loads the manifest, and a `[wasm-dependencies]` key under the
+// reserved `host` segment is refused before a compiler is asked to build.
+// `infs run` builds a program that binds host imports and then refuses to
+// execute it: it supplies no host functions and stands in for no embedder.
+// ---------------------------------------------------------------------------
+
+/// `src/main.inf` binding three host imports from two modules, in the F´
+/// flight-software vocabulary: a telemetry channel and a command dispatcher from
+/// `fprime_core`, and a clock from `env`. `clock_ms` is bound and never called,
+/// which ships its import all the same.
+const PROJECT_MAIN_HOST_SRC: &str = "external fn telemetry(channel: i32, value: i32) -> i32;\n\
+     external fn command(opcode: i32) -> i32;\n\
+     use { telemetry, command } from host::fprime_core;\n\
+     external fn clock_ms() -> i64;\n\
+     use { clock_ms } from host::env;\n\n\
+     pub fn main() -> i32 {\n    let ack: i32 = command(1);\n    return telemetry(1, ack);\n}\n";
+
+/// A `[host-imports]` table admitting all three of those, written out of sorted
+/// order in both directions — modules and the fields of one — so a forward that
+/// kept the manifest's order is told apart from one that sorts.
+const HOST_IMPORTS_TABLE: &str =
+    "[host-imports]\nfprime_core = [\"telemetry\", \"command\"]\nenv = [\"clock_ms\"]\n";
+
+/// The one argv token [`HOST_IMPORTS_TABLE`] is forwarded as.
+#[cfg(unix)]
+const HOST_IMPORTS_TOKEN: &str =
+    "--host-imports=env.clock_ms,fprime_core.command,fprime_core.telemetry";
+
+/// The echo [`HOST_IMPORTS_TABLE`] prints, in the token's order.
+const HOST_IMPORTS_ECHO: &str =
+    "host-imports allowlist: env.clock_ms, fprime_core.command, fprime_core.telemetry";
+
+/// The four routes that spawn `infc` on behalf of a project: the command, and
+/// the source file a single-file route names.
+#[cfg(unix)]
+fn project_routes() -> [(&'static str, Option<std::path::PathBuf>); 4] {
+    let entry = joined(&["src", "main.inf"]);
+    [
+        ("build", None),
+        ("build", Some(entry.clone())),
+        ("run", None),
+        ("run", Some(entry)),
+    ]
+}
+
+/// How many lines of `stdout` are exactly `line`.
+#[cfg(unix)]
+fn count_lines(stdout: &str, line: &str) -> usize {
+    stdout.lines().filter(|entry| entry.trim() == line).count()
+}
+
+/// What one route put on the wire, and what it printed.
+#[cfg(unix)]
+struct Forwarded {
+    /// Every argv entry of the compile invocation, in order.
+    argv: Vec<String>,
+    /// Every handshake probe, in order.
+    probes: Vec<String>,
+    stdout: String,
+}
+
+#[cfg(unix)]
+impl Forwarded {
+    /// The argv entries that carry the host-import flag, in either spelling —
+    /// the fused token or a bare flag a split value would follow.
+    fn host_import_entries(&self) -> Vec<&str> {
+        self.argv
+            .iter()
+            .map(String::as_str)
+            .filter(|entry| entry.starts_with("--host-imports"))
+            .collect()
+    }
+}
+
+/// Runs `infs <command> [source]` over a fresh project whose manifest carries
+/// `manifest_extra`, through a logging stub that reports `commit` and ABI minor
+/// `abi_minor`, and returns the output alongside the two logs.
+///
+/// The stub compiles nothing, so the outcome is not asserted here: a `build`
+/// succeeds and a `run` stops at its missing-artifact guard, and a caller that
+/// expects a refusal asserts that instead.
+#[cfg(unix)]
+fn forward_through_stub(
+    command: &str,
+    source: Option<&std::path::Path>,
+    manifest_extra: &str,
+    commit: &str,
+    abi_minor: u32,
+) -> (std::process::Output, Forwarded) {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_HOST_SRC, manifest_extra);
+    let argv_log = temp.child("argv.log");
+    let probe_log = temp.child("probe.log");
+    let stub = write_infc_stub_reporting(
+        &temp,
+        "infc_stub",
+        argv_log.path(),
+        Some(probe_log.path()),
+        commit,
+        abi_minor,
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg(command);
+    if let Some(source) = source {
+        cmd.arg(source);
+    }
+    let output = cmd.output().expect("infs must run");
+    let forwarded = Forwarded {
+        argv: std::fs::read_to_string(argv_log.path())
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        probes: logged_probes(probe_log.path()),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+    };
+    (output, forwarded)
+}
+
+/// The three policies reach `infc` from every route in the one spelling it
+/// accepts: a listed table as *one* token, sorted and comma-joined with no spaces;
+/// a declared-empty table as exactly `--host-imports=`; no table as nothing at
+/// all. Each is echoed to stdout in the token's order — `empty (no host function
+/// admitted)` for the empty policy, never a `none` that reads as no policy —
+/// except the absent one, which prints nothing.
+///
+/// One token rather than two because `infc` declares the flag `require_equals`
+/// and refuses `--host-imports env.clock_ms` as two entries — the opposite of
+/// `--wasm-features`, which travels as two. A forward copied from that
+/// neighbour would put a bare `--host-imports` on the wire, which the
+/// entries-carrying-the-flag assertion below reports as a second entry.
+///
+/// Every route is driven because each spawns `infc` from its own call site, and
+/// a project is only as policed as its least-equipped route: `infs run
+/// src/main.inf` skipping the table would overwrite the artifact `infs build`
+/// policed with one nothing policed.
+#[cfg(unix)]
+#[test]
+fn every_route_forwards_the_host_import_policy_as_one_token() {
+    let minor = inference_compiler_interface::COMPILER_ABI_MINOR;
+    for (command, source) in project_routes() {
+        if command == "run" && !require_wasmtime() {
+            continue;
+        }
+        let route = format!("`infs {command}` {source:?}");
+
+        let (_, listed) = forward_through_stub(
+            command,
+            source.as_deref(),
+            HOST_IMPORTS_TABLE,
+            "nope",
+            minor,
+        );
+        assert_eq!(
+            listed.host_import_entries(),
+            [HOST_IMPORTS_TOKEN],
+            "{route} must forward the table as one sorted token, got argv: {:?}",
+            listed.argv
+        );
+        assert_eq!(
+            count_lines(&listed.stdout, HOST_IMPORTS_ECHO),
+            1,
+            "{route} must echo the allowlist once, in the token's order, got:\n{}",
+            listed.stdout
+        );
+
+        let (_, empty) = forward_through_stub(
+            command,
+            source.as_deref(),
+            "[host-imports]\n",
+            "nope",
+            minor,
+        );
+        assert_eq!(
+            empty.host_import_entries(),
+            ["--host-imports="],
+            "{route} must forward the declared-empty table as the empty policy, got \
+             argv: {:?}",
+            empty.argv
+        );
+        assert_eq!(
+            count_lines(
+                &empty.stdout,
+                "host-imports allowlist: empty (no host function admitted)"
+            ),
+            1,
+            "{route} must echo the empty policy as what it admits, got:\n{}",
+            empty.stdout
+        );
+
+        let (_, absent) = forward_through_stub(command, source.as_deref(), "", "nope", minor);
+        assert!(
+            absent.host_import_entries().is_empty(),
+            "{route} with no table must forward no policy, got argv: {:?}",
+            absent.argv
+        );
+        assert!(
+            !absent.argv.is_empty(),
+            "{route} must still have spawned the compiler, or the absence above is vacuous"
+        );
+        assert!(
+            !absent.stdout.contains("host-imports allowlist"),
+            "{route} with no table must echo nothing, got:\n{}",
+            absent.stdout
+        );
+    }
+}
+
+/// An `infc` older than the flag is refused with remediation, on every route,
+/// before the compiler is asked to build anything: the refusal names the flag,
+/// the minor, the remedy, what removing the table would cost instead, and what
+/// dropping the flag would cost.
+///
+/// The consequence clause is the part a reader cannot reconstruct. Told only
+/// that the compiler is too old, the obvious response is to delete the table —
+/// or to wish `infs` had quietly built without it — and a build without it is
+/// byte for byte the build the table exists to police.
+///
+/// The probes are asserted to have run and the build argv to be empty, so the
+/// refusal is shown to be the gate's and not something that stopped the route
+/// earlier. The same compiler with no table is the control: every route still
+/// asks it to build, with no policy on the wire, and both build routes succeed,
+/// so the refusal is shown to answer the table, not the compiler's minor.
+#[cfg(unix)]
+#[test]
+fn an_infc_predating_the_allowlist_is_refused_on_every_route() {
+    for (command, source) in project_routes() {
+        if command == "run" && !require_wasmtime() {
+            continue;
+        }
+        let route = format!("`infs {command}` {source:?}");
+        for table in [HOST_IMPORTS_TABLE, "[host-imports]\n"] {
+            let (output, forwarded) =
+                forward_through_stub(command, source.as_deref(), table, "nope", 7);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{route} must refuse a minor-7 infc, got stderr:\n{stderr}"
+            );
+            assert!(
+                stderr.contains(
+                    "the resolved infc does not support `--host-imports` (requires infc ABI ≥ \
+                     1.8); update the toolchain. Removing `[host-imports]` from "
+                ) && stderr.contains(
+                    "Inference.toml also lets the build run, but with no host-import policy \
+                     at all. The build is refused rather than run without the flag: an older \
+                     infc would admit every host import the program binds, and nothing in the \
+                     artifact would show that the table was never applied."
+                ),
+                "{route} must carry the gated refusal with its consequence, got:\n{stderr}"
+            );
+            assert!(
+                forwarded.argv.is_empty(),
+                "{route} must not ask the compiler to build, got argv: {:?}",
+                forwarded.argv
+            );
+            assert_eq!(
+                forwarded.probes,
+                ["--commit-hash", "--abi-version"],
+                "{route} must have run the handshake that refused it"
+            );
+        }
+
+        let (output, absent) = forward_through_stub(command, source.as_deref(), "", "nope", 7);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("does not support `--host-imports`"),
+            "{route} with no table must not be gated on the flag, got:\n{stderr}"
+        );
+        assert!(
+            !absent.argv.is_empty(),
+            "{route} with no table must still ask a minor-7 infc to build, got stderr:\n{stderr}"
+        );
+        assert!(
+            absent.host_import_entries().is_empty(),
+            "{route} with no table must forward no policy, got argv: {:?}",
+            absent.argv
+        );
+        if command == "build" {
+            assert!(
+                output.status.success(),
+                "{route} with no table must build against a minor-7 infc, got stderr:\n{stderr}"
+            );
+        }
+    }
+}
+
+/// The two ways past the gate: a compiler reporting minor 8, and one reporting
+/// minor 7 whose commit matches this `infs` — the short-circuit every other
+/// predicate honors, which must answer without the ABI probe at all.
+///
+/// The commit row holds the minor below the gate deliberately: with a
+/// passing minor a forwarded flag would not show which of the two let it
+/// through.
+#[cfg(unix)]
+#[test]
+fn the_allowlist_gate_opens_at_minor_eight_or_on_a_matching_commit() {
+    let (output, at_eight) = forward_through_stub("build", None, HOST_IMPORTS_TABLE, "nope", 8);
+    assert!(
+        output.status.success(),
+        "a minor-8 infc must be sent the flag"
+    );
+    assert_eq!(at_eight.host_import_entries(), [HOST_IMPORTS_TOKEN]);
+    assert_eq!(at_eight.probes, ["--commit-hash", "--abi-version"]);
+
+    let commit = env!("INFS_GIT_COMMIT");
+    if commit == "unknown" {
+        eprintln!(
+            "note: skipping the commit-match row, this infs was built outside a git \
+             checkout and has no commit to match"
+        );
+        return;
+    }
+    let (output, matched) = forward_through_stub("build", None, HOST_IMPORTS_TABLE, commit, 7);
+    assert!(
+        output.status.success(),
+        "a same-build infc must be sent the flag whatever minor it reports, got stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(matched.host_import_entries(), [HOST_IMPORTS_TOKEN]);
+    assert_eq!(
+        matched.probes,
+        ["--commit-hash"],
+        "a matching commit answers the handshake without the ABI probe"
+    );
+}
+
+/// `infs run` builds a program that binds host imports, then refuses to execute
+/// it: it supplies no host functions and does not stand in for an embedder, so
+/// handing the artifact to wasmtime would fail on an unknown import, in words
+/// that read as a broken build.
+///
+/// The whole diagnosis is pinned — the count, one `module.field` line per import
+/// sorted by module and then field, the policy, where the program does run, and
+/// the book's chapter and section. The book itself is read too, so renaming the
+/// chapter or the section the refusal names reds this test rather than leaving
+/// the refusal pointing at a heading that is gone. `out/main.wasm` is asserted
+/// to exist, because the refusal is decided from the artifact and so must follow
+/// the build rather than precede it; and wasmtime is asserted never to have been
+/// invoked.
+#[test]
+fn infs_run_refuses_a_project_whose_artifact_imports_host_functions() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_HOST_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+    let assert = cmd.assert().code(1);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    let expected = format!(
+        "`infs run` cannot execute this program: {} imports 3 functions that its \
+         embedder must supply.\n  env.clock_ms\n  fprime_core.command\n  \
+         fprime_core.telemetry\n`infs run` supplies no host functions and does not stand \
+         in for an embedder, not even with the WASI functions the wasmtime CLI provides \
+         on its own, so it executes no artifact that imports a function. Run the program \
+         from your embedder, which supplies these functions. See the book's External \
+         Functions and WASM Linking chapter (\"Running a program that binds host \
+         imports\") for how an embedder registers them.",
+        joined(&["out", "main.wasm"]).display()
+    );
+    assert!(
+        stderr.contains(&expected),
+        "the refusal must read exactly:\n{expected}\ngot:\n{stderr}"
+    );
+    assert!(
+        temp.child("out").child("main.wasm").path().is_file(),
+        "the refusal is decided from the artifact, so the build must have happened"
+    );
+    assert!(
+        !stdout.contains("Invoking 'main'"),
+        "wasmtime must never be invoked on the refused artifact, got:\n{stdout}"
+    );
+
+    let chapter_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("book")
+        .join("src")
+        .join("external-functions-and-wasm-linking.md");
+    let chapter = std::fs::read_to_string(&chapter_path)
+        .unwrap_or_else(|err| panic!("the book chapter must be readable: {err}"));
+    for heading in [
+        "# External Functions and WASM Linking",
+        "### Running a program that binds host imports",
+    ] {
+        assert!(
+            chapter.lines().any(|line| line == heading),
+            "the refusal names `{heading}`, so the book must still carry it as a heading"
+        );
+    }
+}
+
+/// The same refusal on the single-file path, naming the artifact that path
+/// writes — `out/<stem>.wasm` — and in the singular for a program binding one
+/// host import, so every agreement in the sentence is exercised. Single-file
+/// `run` refuses from its own call site, so it is asserted on its own that
+/// wasmtime never ran: a refusal printed after an attempt to execute would read
+/// the same.
+#[test]
+fn infs_run_refuses_a_single_file_whose_artifact_imports_a_host_function() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    temp.child("sensor.inf")
+        .write_str(
+            "external fn clock_ms() -> i64;\nuse { clock_ms } from host::env;\n\n\
+             pub fn main() -> i32 {\n    return 0;\n}\n",
+        )
+        .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("sensor.inf");
+    let assert = cmd.assert().code(1);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    let expected = format!(
+        "`infs run` cannot execute this program: {} imports 1 function that its embedder \
+         must supply.\n  env.clock_ms\n`infs run` supplies no host functions and does not \
+         stand in for an embedder, not even with the WASI functions the wasmtime CLI \
+         provides on its own, so it executes no artifact that imports a function. Run the \
+         program from your embedder, which supplies this function. See the book's \
+         External Functions and WASM Linking chapter (\"Running a program that binds host \
+         imports\") for how an embedder registers it.",
+        joined(&["out", "sensor.wasm"]).display()
+    );
+    assert!(
+        stderr.contains(&expected),
+        "the refusal must read exactly:\n{expected}\ngot:\n{stderr}"
+    );
+    assert!(
+        temp.child("out").child("sensor.wasm").path().is_file(),
+        "the refusal is decided from the artifact, so the build must have happened"
+    );
+    assert!(
+        !stdout.contains("Invoking 'main'"),
+        "wasmtime must never be invoked on the refused artifact, got:\n{stdout}"
+    );
+}
+
+/// In project mode the refusal reads the bytes `[build.wasm-opt]` left behind,
+/// which are the bytes wasmtime would execute, not the ones the compiler wrote.
+///
+/// The program binds no host import, so the compiler's module imports nothing,
+/// and the fake optimizer replaces it with a valid module importing `env.f`.
+/// Only a refusal asked of the optimized bytes names `env.f`: one asked before
+/// the optimizer ran would pass the compiler's module and hand the optimized
+/// one to wasmtime, which fails on the unknown import in its own words.
+#[test]
+fn infs_run_refuses_a_function_import_the_optimizer_left_in_the_artifact() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"s\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_FUNCTION_IMPORT", "1")
+        .current_dir(temp.path())
+        .arg("run");
+    let assert = cmd.assert().code(1);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    let expected = format!(
+        "`infs run` cannot execute this program: {} imports 1 function that its embedder \
+         must supply.\n  env.f\n",
+        joined(&["out", "main.wasm"]).display()
+    );
+    assert!(
+        stderr.contains(&expected),
+        "the refusal must name the import the optimizer left, reading:\n{expected}\ngot:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Invoking 'main'"),
+        "wasmtime must never be invoked on the refused artifact, got:\n{stdout}"
+    );
+}
+
+/// A `[host-imports]` table alone never stops `infs run`: the refusal is
+/// decided from the artifact, and a program binding no host import builds one
+/// that imports nothing, under the declared-empty table and a listed one alike.
+///
+/// The declared-empty row is also what sends `--host-imports=` to the real
+/// compiler for a program with no host import — the documented way for a
+/// project to say it binds none — so the build is asserted to succeed and echo
+/// the policy before the run is. A refusal keyed on the manifest declaring the
+/// table, rather than on the artifact importing a function, fails both rows.
+#[test]
+fn a_host_imports_table_alone_does_not_stop_infs_run() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    for (table, echo) in [
+        (
+            "[host-imports]\n",
+            "host-imports allowlist: empty (no host function admitted)",
+        ),
+        (
+            "[host-imports]\nenv = [\"clock_ms\"]\n",
+            "host-imports allowlist: env.clock_ms",
+        ),
+    ] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, table);
+
+        let mut build = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        build
+            .env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("build");
+        let stdout = stdout_of(&build.assert().success());
+        assert!(
+            stdout.lines().any(|line| line.trim() == echo),
+            "`infs build` under `{table}` must echo `{echo}`, got:\n{stdout}"
+        );
+        assert!(
+            temp.child("out").child("main.wasm").path().is_file(),
+            "`infs build` under `{table}` must write out/main.wasm"
+        );
+
+        let mut run = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        run.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("run");
+        let assert = run.assert().success();
+        let stdout = stdout_of(&assert);
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stdout.contains("Invoking 'main'"),
+            "`infs run` under `{table}` must execute a program that imports nothing, got:\n{stdout}"
+        );
+        assert!(
+            !stderr.contains("cannot execute this program"),
+            "`infs run` under `{table}` must not refuse a program that imports nothing, got:\n\
+             {stderr}"
+        );
+    }
+}
+
+/// A `[wasm-dependencies]` key under the reserved `host` segment is refused on
+/// the `infs` side, naming the key and the reason, before any compiler is asked
+/// to build — on every route, since each resolves the table on its own path.
+///
+/// `infc` refuses the `--wasm-dep` such a key becomes as well, and that is
+/// exactly why the build argv is asserted empty: without the manifest-side
+/// check the key would still be refused, in `infc`'s words about a flag the
+/// reader never typed.
+#[cfg(unix)]
+#[test]
+fn a_host_wasm_dependency_key_is_refused_before_infc_builds() {
+    for key in ["host", "host::a"] {
+        let table = format!("[wasm-dependencies]\n\"{key}\" = {{ path = \"libs/a.wasm\" }}\n");
+        for (command, source) in project_routes() {
+            if command == "run" && !require_wasmtime() {
+                continue;
+            }
+            let route = format!("`infs {command}` {source:?}");
+            let (output, forwarded) = forward_through_stub(
+                command,
+                source.as_deref(),
+                &table,
+                "nope",
+                inference_compiler_interface::COMPILER_ABI_MINOR,
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{route} must refuse `{key}`, got stderr:\n{stderr}"
+            );
+            assert!(
+                stderr.contains(&format!(
+                    "invalid [wasm-dependencies] key `{key}`: `host` is reserved as the first \
+                     segment of a `use … from` clause for imports the embedder supplies"
+                )),
+                "{route} must name the key and the reserved segment, got:\n{stderr}"
+            );
+            assert!(
+                forwarded.argv.is_empty(),
+                "{route} must refuse before asking the compiler to build, got argv: {:?}",
+                forwarded.argv
+            );
+        }
+    }
+}
+
+/// A malformed `[host-imports]` table fails every command that loads the
+/// manifest, naming the key, and fails it on load rather than where the table
+/// is forwarded.
+///
+/// No `infs` command loads a manifest without forwarding the table, so the
+/// eagerness cannot be shown by a command that never forwards; `infs run` with
+/// wasmtime off the path stands in for one, in both modes. Each `run` route
+/// probes for the runtime before it forwards anything, so a check made at the
+/// forward would sit behind the probe and these rows would report the missing
+/// runtime instead. The project rows take the manifest through discovery, the
+/// single-file rows through the other loader, the walk up from a source file.
+#[test]
+fn a_malformed_host_imports_table_fails_every_command_that_loads_it() {
+    let cases = [
+        ("\"a::b\" = [\"f\"]\n", "invalid [host-imports] key `a::b`"),
+        ("\"9x\" = [\"f\"]\n", "invalid [host-imports] key `9x`"),
+        (
+            "env = \"clock_ms\"\n",
+            "invalid [host-imports] entry `env`: the value must be an array of strings",
+        ),
+        ("env = []\n", "invalid [host-imports] entry `env = []`"),
+        (
+            "env = [\"clock_ms\", \"clock_ms\"]\n",
+            "invalid [host-imports] entry `env`: `\"clock_ms\"` is listed twice",
+        ),
+        (
+            "env = [\"clock-ms\"]\n",
+            "invalid [host-imports] entry `env`: `\"clock-ms\"` is not a host function name",
+        ),
+    ];
+    for (body, refusal) in cases {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(
+            &temp,
+            "demo",
+            PROJECT_MAIN_HOST_SRC,
+            &format!("[host-imports]\n{body}"),
+        );
+
+        let invocations: [(&str, Option<std::path::PathBuf>); 4] = [
+            ("build", None),
+            ("build", Some(joined(&["src", "main.inf"]))),
+            ("run", None),
+            ("run", Some(joined(&["src", "main.inf"]))),
+        ];
+        for (command, source) in invocations {
+            let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+            cmd.current_dir(temp.path()).arg(command);
+            if let Some(source) = &source {
+                cmd.arg(source);
+            }
+            if command == "run" {
+                cmd.env("PATH", path_without_tools());
+            }
+            let assert = cmd.assert().code(1);
+            let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+            assert!(
+                stderr.contains(refusal),
+                "`infs {command}` {source:?} must refuse `{body}` with `{refusal}`, got:\n{stderr}"
+            );
+            assert!(
+                !stderr.contains("wasmtime not found"),
+                "the manifest must be refused on load, ahead of the runtime probe, got:\n{stderr}"
+            );
+        }
+        assert!(
+            !temp.child("out").path().exists(),
+            "a refused manifest must build nothing"
+        );
+    }
+}
+
+/// End to end through the real compiler, at the one target that checks what a
+/// host import may be named: the table is forwarded, `infc` accepts it in the
+/// spelling it was given, and the build log shows each step in order — the
+/// target, the policy `infs` applied, the imports `infc` admitted under it (with
+/// no `(no allowlist)` qualifier), and the conformance summary.
+///
+/// The second project's table omits `env`, and its build fails with `infc`'s own
+/// refusal — which is what proves the flag reached a real compiler at all, and
+/// in a spelling it parses: a flag it could not read would fail differently, and
+/// a flag it never received would build.
+#[test]
+fn a_host_imports_table_reaches_the_real_compiler() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_HOST_SRC,
+        &format!("{SPACEWASM_BUILD_TABLE}\n{HOST_IMPORTS_TABLE}"),
+    );
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    let stdout = stdout_of(&cmd.assert().success());
+
+    let position = |line: &str| {
+        stdout
+            .find(line)
+            .unwrap_or_else(|| panic!("the build log must carry `{line}`, got:\n{stdout}"))
+    };
+    let order = [
+        position("target: spacewasm\n"),
+        position(&format!("{HOST_IMPORTS_ECHO}\n")),
+        position("host imports: env.clock_ms, fprime_core.command, fprime_core.telemetry\n"),
+        position("spacewasm: conformant with WebAssembly 1.0"),
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "the build log must read target, policy, admitted imports, conformance, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("(no allowlist)"),
+        "a build given a table must not be reported as unpoliced, got:\n{stdout}"
+    );
+    assert!(
+        temp.child("out").child("main.wasm").path().is_file(),
+        "the admitted build must write out/main.wasm"
+    );
+
+    let omitting = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &omitting,
+        "demo",
+        PROJECT_MAIN_HOST_SRC,
+        &format!(
+            "{SPACEWASM_BUILD_TABLE}\n[host-imports]\nfprime_core = [\"telemetry\", \"command\"]\n"
+        ),
+    );
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(omitting.path())
+        .arg("build");
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    for fragment in [
+        "host import `env`.`clock_ms` is not in this build's host-import allowlist",
+        "this build was given `fprime_core.command, fprime_core.telemetry`",
+        "`infs` fills the flag from the `[host-imports]` table in Inference.toml, where \
+         the same edit is to add `env = [\"clock_ms\"]`.",
+    ] {
+        assert!(
+            stderr.contains(fragment),
+            "the compiler's refusal must reach the reader, carrying `{fragment}`:\n{stderr}"
+        );
+    }
+    assert!(
+        !omitting.child("out").child("main.wasm").path().exists(),
+        "a refused build must write no artifact"
+    );
 }
