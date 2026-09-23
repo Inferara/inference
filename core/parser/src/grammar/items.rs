@@ -186,9 +186,9 @@ pub(crate) fn spec_definition(p: &mut Parser) {
     while !p.at(SyntaxKind::RBrace) && !p.at_eof() {
         if at_definition_start(p) {
             // Defense-in-depth: a `definition` handler that consumes nothing
-            // (e.g. a future non-advancing routing) would spin this loop, since
-            // completing a marker refills the fuel guard. Detect the unchanged
-            // cursor and bump the offending token into an Error node.
+            // (e.g. a future non-advancing routing) would be retried by this
+            // loop until the advance guard panics. Detect the unchanged cursor
+            // and bump the offending token into an Error node instead.
             let before = p.pos();
             definition(p);
             if p.pos() == before {
@@ -274,8 +274,8 @@ pub(crate) fn struct_definition(p: &mut Parser) {
     p.expect(SyntaxKind::LBrace);
     while !p.at(SyntaxKind::RBrace) && !p.at_eof() {
         // Defense-in-depth: capture the cursor so a member handler that consumes
-        // nothing degrades to a recoverable error instead of spinning the loop
-        // (completing a marker refills the fuel guard, so it cannot catch this).
+        // nothing degrades to a recoverable error instead of being retried by
+        // the loop until the advance guard panics.
         let before = p.pos();
         match p.current() {
             SyntaxKind::Ident => {

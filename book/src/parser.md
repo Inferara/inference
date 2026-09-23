@@ -371,11 +371,16 @@ depending on context:
 incorrectly, loop forever by retrying a recovery path that consumes nothing. The
 parser borrows matklad's safeguard: a fuel counter
 (`const FUEL: u32 = 256`, a `Cell<u32>`) is decremented on every lookahead and
-refilled whenever real progress is made — a token is bumped *or* a node is
-completed. An assertion fires (in debug *and* release) the moment fuel hits zero,
-turning a would-be infinite loop into an immediate, localized crash during
-development rather than a hang in production. On well-formed grammar rules the
-guard never trips; it is a backstop, not part of normal control flow.
+refilled whenever real progress is made — a token is bumped, *or* a node is
+completed that the cursor has moved through since it was opened, which is how a
+deep parse unwinding at end of input closes its frames. Closing a node opened at
+the cursor is not progress: a recovery that reports an error and closes its node
+without consuming the token it could not use would otherwise be retried by its
+loop forever, each round refilling the fuel it spent. An assertion fires (in
+debug *and* release) the moment fuel hits zero, turning a would-be infinite loop
+into an immediate, localized crash during development rather than a hang in
+production. On well-formed grammar rules the guard never trips; it is a
+backstop, not part of normal control flow.
 
 **Lowering is total.** Because the grammar can produce a node whose expected child
 was lost to recovery (e.g. `a.` with no name after the dot), the lowering never
