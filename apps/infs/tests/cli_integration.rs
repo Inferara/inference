@@ -6570,6 +6570,74 @@ fn wasm_opt_garbage_output_fails_revalidation_and_preserves_artifact() {
     );
 }
 
+/// Optimized bytes carrying a verification construct are refused before they
+/// land, and the original `out/main.wasm` is left exactly as `infc` wrote it.
+///
+/// The re-validation step cannot catch this one: the workspace validator
+/// decodes the verification opcodes as ordinary operators, so the module the
+/// fake optimizer writes validates. What refuses it is the scan of the bytes
+/// about to land, which the build makes anyway to learn what they import. The
+/// original is compared byte for byte against a `--no-wasm-opt` build of the
+/// same project, since the refused module is valid too and a validity check
+/// could not tell the two apart.
+#[test]
+fn wasm_opt_output_carrying_a_verification_construct_is_refused_and_leaves_the_original() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut unoptimized = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    unoptimized
+        .env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--no-wasm-opt");
+    unoptimized.assert().success();
+    let original = read_project_artifact(&temp);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_VERIFICATION_CONSTRUCT", "1")
+        .current_dir(temp.path())
+        .arg("build");
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    let expected = format!(
+        "wasm-opt produced an artifact carrying the verification-only construct \
+         `i32.uzumaki`, which the artifact it was given did not carry. The original {} is \
+         unchanged; try `--no-wasm-opt`, or a different Binaryen version.",
+        temp.path()
+            .canonicalize()
+            .unwrap()
+            .join("out")
+            .join("main.wasm")
+            .display()
+    );
+    assert!(
+        stderr.contains(&expected),
+        "the refusal must read exactly:\n{expected}\ngot:\n{stderr}"
+    );
+    assert_eq!(
+        read_project_artifact(&temp),
+        original,
+        "the refused output must leave the artifact infc wrote in place"
+    );
+    assert!(
+        !temp.child("out").child("main.wasm.opt").path().exists(),
+        "the temp file must be cleaned up after the refusal"
+    );
+}
+
 /// Project `run` applies the same optimization `build` does — it runs exactly
 /// what it ships — so an enabled table spawns the optimizer, and `main`'s return
 /// value (42) still surfaces. Gated on wasmtime.
@@ -9199,16 +9267,25 @@ fn infs_run_refuses_a_single_file_whose_artifact_imports_a_host_function() {
     );
 }
 
-/// In project mode the refusal reads the bytes `[build.wasm-opt]` left behind,
-/// which are the bytes wasmtime would execute, not the ones the compiler wrote.
+/// Optimized bytes importing a function the compiler's module did not import
+/// are refused before they land, and the original `out/main.wasm` is left
+/// exactly as `infc` wrote it.
 ///
-/// The program binds no host import, so the compiler's module imports nothing,
-/// and the fake optimizer replaces it with a valid module importing `env.f`.
-/// Only a refusal asked of the optimized bytes names `env.f`: one asked before
-/// the optimizer ran would pass the compiler's module and hand the optimized
-/// one to wasmtime, which fails on the unknown import in its own words.
+/// The allowlist was asked about the imports `infc` emitted, so an import the
+/// optimizer added is one no policy admitted, and the step refuses it rather
+/// than report it. The program binds three host imports, and the fake optimizer
+/// replaces its module with one importing only `env.f`: the set lost three
+/// imports and gained one, and the refusal names the gain alone, since the
+/// losses are what an optimizer may do.
+///
+/// The original is compared byte for byte against a `--no-wasm-opt` build of
+/// the same project, since the refused module is valid too and a validity check
+/// could not tell the two apart. `infs run` builds before it runs, so under the
+/// same optimizer it is refused by the same step, before wasmtime and before the
+/// import question it would otherwise have asked of `env.f`, and it too leaves
+/// the original in place.
 #[test]
-fn infs_run_refuses_a_function_import_the_optimizer_left_in_the_artifact() {
+fn an_optimizer_output_that_adds_a_host_import_is_refused_and_leaves_the_original() {
     let Some(infc_path) = require_infc_and_wasmtime() else {
         return;
     };
@@ -9217,32 +9294,278 @@ fn infs_run_refuses_a_function_import_the_optimizer_left_in_the_artifact() {
     scaffold_project_with_manifest(
         &temp,
         "demo",
-        PROJECT_MAIN_SRC,
+        PROJECT_MAIN_HOST_SRC,
         "[build.wasm-opt]\nlevel = \"s\"\n",
     );
+    let infs = |args: &[&str]| {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+            .env("FAKE_WASM_OPT_FUNCTION_IMPORT", "1")
+            .current_dir(temp.path())
+            .args(args);
+        cmd
+    };
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", &infc_path)
-        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
-        .env("FAKE_WASM_OPT_FUNCTION_IMPORT", "1")
-        .current_dir(temp.path())
-        .arg("run");
-    let assert = cmd.assert().code(1);
-    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    infs(&["build", "--no-wasm-opt"]).assert().success();
+    let original = read_project_artifact(&temp);
 
     let expected = format!(
-        "`infs run` cannot execute this program: {} imports 1 function that its embedder \
-         must supply.\n  env.f\n",
-        joined(&["out", "main.wasm"]).display()
+        "`[build.wasm-opt]` produced an artifact importing `env.f`, which the artifact it was \
+         given did not import. The optimizer may only remove imports, never add one, so the \
+         optimized output is discarded and {} is left as the compiler wrote it; try \
+         `--no-wasm-opt`, or a different Binaryen version.",
+        temp.path()
+            .canonicalize()
+            .unwrap()
+            .join("out")
+            .join("main.wasm")
+            .display()
     );
+
+    let build = infs(&["build"]).assert().code(1);
+    let stdout = stdout_of(&build);
+    let stderr = String::from_utf8_lossy(&build.get_output().stderr).into_owned();
     assert!(
         stderr.contains(&expected),
-        "the refusal must name the import the optimizer left, reading:\n{expected}\ngot:\n{stderr}"
+        "the refusal must read exactly:\n{expected}\ngot:\n{stderr}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line.starts_with("wasm-opt")),
+        "a refused optimization must report no size and no import change, got:\n{stdout}"
+    );
+    assert_eq!(
+        read_project_artifact(&temp),
+        original,
+        "the refused output must leave the artifact infc wrote in place"
+    );
+    assert!(
+        !temp.child("out").child("main.wasm.opt").path().exists(),
+        "the temp file must be cleaned up after the refusal"
+    );
+
+    let run = infs(&["run"]).assert().code(1);
+    let stdout = stdout_of(&run);
+    let stderr = String::from_utf8_lossy(&run.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(&expected),
+        "`infs run` must be refused by its build's optimization step, reading:\n{expected}\n\
+         got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("`infs run` cannot execute this program"),
+        "`infs run` must never ask its import question of the refused bytes, got:\n{stderr}"
     );
     assert!(
         !stdout.contains("Invoking 'main'"),
         "wasmtime must never be invoked on the refused artifact, got:\n{stdout}"
+    );
+    assert_eq!(
+        read_project_artifact(&temp),
+        original,
+        "`infs run` must leave the artifact infc wrote in place too"
+    );
+}
+
+/// `src/main.inf` binding one host import, `env.clock_ms`, and never calling it:
+/// the program an optimizer leaves importing nothing.
+const PROJECT_MAIN_UNCALLED_HOST_SRC: &str = "external fn clock_ms() -> i64;\n\
+     use { clock_ms } from host::env;\n\n\
+     pub fn main() -> i32 {\n    return 0;\n}\n";
+
+/// A host import the optimizer removed is reported, and no longer stands
+/// between the program and `infs run`.
+///
+/// The fake optimizer does to the program what Binaryen does, since the one
+/// host import it binds is never called: it writes a module that imports
+/// nothing. `infc`'s inventory still names `env.clock_ms`, so the build log has
+/// to say the import went, after the inventory and beside the optimizer's size
+/// line, for its last word on the imports to describe the artifact that ships.
+///
+/// `infs run` then executes the program, because its refusal is asked of the
+/// optimized bytes. The same project run with `--no-wasm-opt` is refused naming
+/// `env.clock_ms`, which is what makes the run that succeeds a statement about
+/// the optimization rather than about the program.
+#[test]
+fn a_host_import_the_optimizer_removed_is_reported_and_no_longer_blocks_infs_run() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_UNCALLED_HOST_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let infs = |args: &[&str]| {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+            .env("FAKE_WASM_OPT_NO_IMPORTS", "1")
+            .current_dir(temp.path())
+            .args(args);
+        cmd
+    };
+    let removal = "wasm-opt removed 1 host import the program never calls: env.clock_ms; the \
+                   artifact now imports nothing";
+
+    let stdout = stdout_of(&infs(&["build"]).assert().success());
+    let position = |line: &str| {
+        stdout
+            .lines()
+            .position(|entry| entry.starts_with(line))
+            .unwrap_or_else(|| panic!("the build log must carry `{line}`, got:\n{stdout}"))
+    };
+    let inventory = position("host imports (no allowlist): env.clock_ms");
+    let size = position("wasm-opt -Oz: main.wasm ");
+    assert!(
+        inventory < size && position(removal) == size + 1,
+        "the build log must read the inventory, then the size line with the removal right \
+         after it, got:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == removal),
+        "the removal line must read exactly:\n{removal}\ngot:\n{stdout}"
+    );
+
+    let run = infs(&["run"]).assert().success();
+    let stdout = stdout_of(&run);
+    assert!(
+        stdout.contains("Invoking 'main'"),
+        "`infs run` must execute a program whose only host import was optimized away, got:\n\
+         {stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.get_output().stderr)
+    );
+    assert!(
+        stdout.lines().any(|line| line == removal),
+        "`infs run` builds before it runs, and its build log must report the removal too, \
+         got:\n{stdout}"
+    );
+
+    let refused = infs(&["run", "--no-wasm-opt"]).assert().code(1);
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    let expected = format!(
+        "`infs run` cannot execute this program: {} imports 1 function that its embedder \
+         must supply.\n  env.clock_ms\n",
+        joined(&["out", "main.wasm"]).display()
+    );
+    assert!(
+        stderr.contains(&expected),
+        "without the optimizer the same program must be refused, reading:\n{expected}\ngot:\n\
+         {stderr}"
+    );
+}
+
+/// An optimizer that leaves the import set as it found it adds nothing to the
+/// build log: `infc`'s inventory already describes the artifact, and a line
+/// restating it would be one more for a reader to diff for no difference.
+///
+/// The program binds three host imports and calls two, and the fake optimizer
+/// copies its input, so all three survive. The whole log is asserted, not the
+/// lines of one prefix: it is a `--no-wasm-opt` build's log of the same project
+/// followed by the size line and nothing else. The default target has no
+/// envelope to re-measure, and the program has no arithmetic, so no
+/// overflow-guard record is marked either.
+#[test]
+fn an_optimizer_that_keeps_every_host_import_adds_no_line_to_the_build_log() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_HOST_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let infs = |args: &[&str]| {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+            .current_dir(temp.path())
+            .args(args);
+        cmd
+    };
+
+    let unoptimized = stdout_of(&infs(&["build", "--no-wasm-opt"]).assert().success());
+    let inventory =
+        "host imports (no allowlist): env.clock_ms, fprime_core.command, fprime_core.telemetry";
+    assert!(
+        unoptimized.lines().any(|line| line == inventory),
+        "the build must ship all three imports, got:\n{unoptimized}"
+    );
+
+    let stdout = stdout_of(&infs(&["build"]).assert().success());
+    let size = read_project_artifact(&temp).len();
+    assert_eq!(
+        stdout,
+        format!("{unoptimized}wasm-opt -Oz: main.wasm {size} -> {size} bytes\n"),
+        "an unchanged import set must add nothing to the log beside the size line"
+    );
+}
+
+/// The `(module, field)` of every function `wasm` imports, spelled
+/// `module.field`, in import-section order.
+fn function_imports_of(wasm: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    for payload in inf_wasmparser::Parser::new(0).parse_all(wasm) {
+        let inf_wasmparser::Payload::ImportSection(reader) = payload.expect("the artifact parses")
+        else {
+            continue;
+        };
+        for import in reader {
+            let import = import.expect("the import reads");
+            if matches!(import.ty, inf_wasmparser::TypeRef::Func(_)) {
+                names.push(format!("{}.{}", import.module, import.name));
+            }
+        }
+    }
+    names
+}
+
+/// Real-binary end-to-end: Binaryen removes the host import the program never
+/// calls and keeps the two it does, and the build log names both halves.
+///
+/// This is the behaviour the removal line exists for, measured rather than
+/// assumed: `env.clock_ms` is bound and never called, and every level but `0`
+/// removes unused module elements. The artifact's import section is read too,
+/// so the line is held to the bytes it describes. Gated on a real Binaryen
+/// `wasm-opt`.
+#[test]
+fn wasm_opt_real_binary_removes_the_host_import_the_program_never_calls() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+    if !require_wasm_opt() {
+        return;
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_HOST_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    let stdout = stdout_of(&cmd.assert().success());
+
+    let removal = "wasm-opt removed 1 host import the program never calls: env.clock_ms; the \
+                   artifact now imports fprime_core.command, fprime_core.telemetry";
+    assert!(
+        stdout.lines().any(|line| line == removal),
+        "the build log must report the removal, reading:\n{removal}\ngot:\n{stdout}"
+    );
+    assert_eq!(
+        function_imports_of(&read_project_artifact(&temp)),
+        ["fprime_core.telemetry", "fprime_core.command"],
+        "the optimized artifact must import exactly the two functions the program calls"
     );
 }
 
@@ -9431,7 +9754,10 @@ fn a_malformed_host_imports_table_fails_every_command_that_loads_it() {
 /// host import may be named: the table is forwarded, `infc` accepts it in the
 /// spelling it was given, and the build log shows each step in order — the
 /// target, the policy `infs` applied, the imports `infc` admitted under it (with
-/// no `(no allowlist)` qualifier), and the conformance summary.
+/// no `(no allowlist)` qualifier), and the conformance summary. The manifest has
+/// no `[build.wasm-opt]`, so the inventory is the last word on the imports: the
+/// lines naming imports are the echo and the inventory, once each and in that
+/// order, and no `wasm-opt` line follows them.
 ///
 /// The second project's table omits `env`, and its build fails with `infc`'s own
 /// refusal — which is what proves the flag reached a real compiler at all, and
@@ -9474,6 +9800,22 @@ fn a_host_imports_table_reaches_the_real_compiler() {
     assert!(
         !stdout.contains("(no allowlist)"),
         "a build given a table must not be reported as unpoliced, got:\n{stdout}"
+    );
+    let import_lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.to_ascii_lowercase().contains("import"))
+        .collect();
+    assert_eq!(
+        import_lines,
+        [
+            HOST_IMPORTS_ECHO,
+            "host imports: env.clock_ms, fprime_core.command, fprime_core.telemetry",
+        ],
+        "the echo and the inventory must be the only lines naming imports, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line.starts_with("wasm-opt")),
+        "a build with no `[build.wasm-opt]` must print no optimizer line, got:\n{stdout}"
     );
     assert!(
         temp.child("out").child("main.wasm").path().is_file(),

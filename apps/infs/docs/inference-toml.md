@@ -352,7 +352,18 @@ level = "z"
 - **Project mode only, for executable artifacts.** Both `infs build` and `infs run` apply `[build.wasm-opt]` to `out/main.wasm` after a successful compile — `run` optimizes exactly the artifact it then executes, so what you run is what `build` would have shipped. Single-file mode (`infs build file.inf`) never runs the optimizer, whether or not a manifest is present.
 - **Proof-mode and `-v` builds are always skipped, silently.** A build counts as proof mode when the effective `[build] mode` is `"proof"`, `--mode proof` is passed, or `-v` is passed at all (even without `--mode`). Their WASM can carry the non-deterministic opcodes (`forall`, `exists`, `assume`, `unique`, `@` uzumaki) that `wasm-opt` cannot parse, and they are a different artifact class from an executable.
 - **`target = "stellar"` refuses the table outright, at load time.** Declaring both is an invalid manifest for every command, not a silently-skipped step: a Stellar contract's value-ABI wrappers and its `contractenvmetav0` metadata section are the layer a host is trusted to decode, and whether an external `wasm-opt` preserves them depends on which Binaryen the machine has — a version nothing in the manifest pins. Remove one of the two keys. This is a refusal about those two artifacts and not about non-default targets in general: `target = "spacewasm"` keeps the table, because its module is the `"wasm32"` one and has neither of them.
-- **A compile-mode artifact that still contains a non-deterministic opcode is a hard error**, not a silent skip. Compile-mode builds strip `spec` blocks, so a well-formed executable should never carry one of these opcodes — if it does, `infs` scans for it before invoking `wasm-opt` (which would otherwise fail with an opaque parse error) and reports the offending construct by name, with remediation: move it into a `spec` block, or turn optimization off.
+- **A compile-mode artifact that still contains a non-deterministic opcode is a hard error**, not a silent skip. Compile-mode builds strip `spec` blocks, so a well-formed executable should never carry one of these opcodes — if it does, `infs` scans for it before invoking `wasm-opt` (which would otherwise fail with an opaque parse error) and reports the offending construct by name, with remediation: move it into a `spec` block, or turn optimization off. The optimized bytes are scanned again before they replace the original, and an optimizer that introduced such an opcode is refused the same way, leaving the original in place.
+
+#### The import set
+
+`infc` emits an import for every `use { … } from host::<module>` binding, whether or not the program calls the function, and its `host imports:` line names each one. At every level but `"0"`, `wasm-opt` removes unused module elements, an imported function nothing calls among them, so the optimized artifact declares only the host imports the program calls. That is by design: the shipped artifact states the interface the program uses. When the optimizer changed the set, the build log says so right after the size line, naming what went and what is left:
+
+```text
+wasm-opt -Oz: main.wasm 163 -> 103 bytes
+wasm-opt removed 1 host import the program never calls: env.clock_ms; the artifact now imports fprime_core.command, fprime_core.telemetry
+```
+
+A build whose imports the optimizer left alone prints no such line. The [`[host-imports]`](#host-imports) allowlist still bounds what ships, by construction: the optimizer may only remove imports, and optimized bytes importing a function the artifact `infc` wrote did not import are refused, leaving that artifact in place. `infs run` asks its import question of the optimized bytes, so a program whose host imports are all uncalled runs once they are optimized away.
 
 #### Disabling optimization for one invocation
 
@@ -447,7 +458,11 @@ host-imports allowlist: empty (no host function admitted)
 The echo shows that a policy was applied; `infc`'s own `host imports: …` line
 then names the imports it admitted (a build with no table prints `host imports
 (no allowlist): …` instead). The empty policy is echoed as what it admits
-rather than as `none`, which would read as that absent state.
+rather than as `none`, which would read as that absent state. A project that
+also enables [`[build.wasm-opt]`](#buildwasm-opt) may ship fewer imports than
+that line names — the optimizer removes a host import the program never calls
+— and its build log then names each one removed and the set that ships (see
+[The import set](#the-import-set) under `[build.wasm-opt]`).
 
 The forward requires an `infc` with ABI 1.8 or newer. An older one is refused
 with remediation rather than handed the build without the flag, since it would
@@ -463,7 +478,9 @@ wasmtime CLI provides on its own. The refusal names each imported function; run
 the program from the embedder that supplies them. It is decided from the built
 artifact rather than from this table, which is an allowlist and not a
 declaration, so a program that binds no host function runs whatever the table
-lists. The book's [Running a program that binds host
+lists. In a project whose `[build.wasm-opt]` step runs, the built artifact is
+the optimized one, which at any level but `"0"` no longer imports a host
+function the program never calls. The book's [Running a program that binds host
 imports](../../../book/src/external-functions-and-wasm-linking.md#running-a-program-that-binds-host-imports)
 section shows how an embedder registers the functions a program imports.
 
