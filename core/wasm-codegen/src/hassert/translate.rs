@@ -601,7 +601,7 @@ enum CalleeError {
 enum ResultClass {
     /// A single scalar (bool, integer, or enum) — a valid `T_app` term.
     Scalar,
-    /// No result (`unit`) — only realizable as an `HA_app_ok` statement.
+    /// No result (`()`) — only realizable as an `HA_app_ok` statement.
     Void,
     /// A compound result (array or struct) — memory-backed, not a term.
     Compound,
@@ -1907,7 +1907,7 @@ impl<'a> SpecFnTranslator<'a> {
                 self.error(
                     PCode::P004,
                     self.arena[expr].location,
-                    non_scalar_term_message(&"unit"),
+                    non_scalar_term_message(&"()"),
                 );
                 zero_sentinel()
             }
@@ -3712,7 +3712,7 @@ impl<'a> SpecFnTranslator<'a> {
     /// The non-scalar-in-term-position diagnostic, rendered from the
     /// expression's recorded type.
     ///
-    /// An aggregate reaching here is a different mistake from a `unit` or a
+    /// An aggregate reaching here is a different mistake from a `()` or a
     /// function type reaching here, and gets a different message. Its type is
     /// perfectly nameable in a specification — it just is not a *term*, and the
     /// shared wording, which ends by listing the aggregates a specification
@@ -3797,7 +3797,7 @@ impl<'a> SpecFnTranslator<'a> {
     ///
     /// Only the compound arm is reachable from source; the other two are
     /// defensive and deliberately untested. A non-scalar, non-aggregate
-    /// argument type would have to be a `string`, a `unit` or a function type,
+    /// argument type would have to be a `string`, a `()` or a function type,
     /// none of which survives code generation's own value-type check to reach
     /// this pass, and an argument with no recorded type would be a type-checker
     /// gap. They stay as honest diagnostics rather than `unreachable!` so such
@@ -4230,7 +4230,7 @@ fn quantifier_article(kind: &str) -> &'static str {
 /// language does not have — the parameter site accepts `[i32; 3]` and rejects
 /// `[Point; 2]`, and the reason is the shape, not aggregation. Naming the
 /// supported shapes is also the whole remedy: there is nothing to rewrite for a
-/// `unit` or a function type, and for an over-deep aggregate the fix is to
+/// `()` or a function type, and for an over-deep aggregate the fix is to
 /// flatten it.
 fn non_scalar_term_message(ty: &impl std::fmt::Display) -> String {
     format!("type `{ty}` cannot appear in a specification term; {TERM_SURFACE}")

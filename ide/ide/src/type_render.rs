@@ -5,8 +5,8 @@ use inference_type_checker::type_info::{TypeInfo, TypeInfoKind};
 /// Renders `ty` as the source-like type spelling shown in hovers and inlays.
 ///
 /// It differs from the compiler's own `Display` in two ways chosen for a reader:
-/// - the built-in scalars use their lowercase source spellings (`unit` / `bool` /
-///   `string`), not the capitalized debug forms the checker prints;
+/// - the built-ins use their source spellings (`()` / `bool` / `string`), not
+///   the capitalized debug forms the checker prints;
 /// - a struct or enum is named by its canonical key, which is the bare type name
 ///   for a same-file type and the `::`-qualified module path for a cross-module
 ///   one (`lib::geom::Point`). The key is exactly the module-qualified bare name,
@@ -31,7 +31,7 @@ pub(crate) fn render_type(ty: &TypeInfo) -> String {
 
 fn render_kind(kind: &TypeInfoKind) -> String {
     match kind {
-        TypeInfoKind::Unit => "unit".to_string(),
+        TypeInfoKind::Unit => "()".to_string(),
         TypeInfoKind::Bool => "bool".to_string(),
         TypeInfoKind::String => "string".to_string(),
         TypeInfoKind::Number(number) => number.as_str().to_string(),
@@ -78,7 +78,7 @@ mod tests {
                 kind: TypeInfoKind::Unit,
                 type_params: vec![]
             }),
-            "unit"
+            "()"
         );
         assert_eq!(render_type(&number(NumberType::I32)), "i32");
         assert_eq!(render_type(&number(NumberType::U64)), "u64");

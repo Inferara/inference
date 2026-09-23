@@ -192,7 +192,7 @@ fn function_call(p: &mut Parser, lhs: CompletedMarker) -> CompletedMarker {
 /// (`function_call_expression` argument). The argument name is a `_name`; when
 /// present, the lower step pairs it with the following expression.
 fn call_argument(p: &mut Parser) {
-    if types::at_ident_like(p) && p.nth_at(1, SyntaxKind::Colon) {
+    if types::at_name_start(p) && p.nth_at(1, SyntaxKind::Colon) {
         types::name(p);
         p.bump(SyntaxKind::Colon);
     }
@@ -237,9 +237,10 @@ fn atom(p: &mut Parser, allow_struct: bool) -> Option<CompletedMarker> {
         SyntaxKind::At => uzumaki(p),
         SyntaxKind::CheckedKw | SyntaxKind::WrappingKw => arith_mode(p),
         SyntaxKind::LParen => paren_or_unit(p),
-        // A name atom: a plain identifier or a contextual keyword used in
-        // identifier position (`self`, `type`).
-        kind if types::IDENT_LIKE.contains(kind) => name_atom(p, allow_struct),
+        // A name atom: a plain identifier, a contextual keyword used in
+        // identifier position (`self`, `type`), or the reserved word `unit`,
+        // which the name refuses.
+        kind if types::NAME_START.contains(kind) => name_atom(p, allow_struct),
         _ => {
             p.err_and_bump("expected an expression");
             return None;
@@ -475,7 +476,7 @@ fn struct_field_init(p: &mut Parser) {
 /// `type_qualified_name` (`_name`, used as a `_simple_name` lval or a
 /// type-member base). Returns the completed name node so postfix can extend it.
 fn name_expr(p: &mut Parser) -> CompletedMarker {
-    if types::at_ident_like(p) && p.nth_at(1, SyntaxKind::ColonColon) && p.at_joint() {
+    if types::at_name_start(p) && p.nth_at(1, SyntaxKind::ColonColon) && p.at_joint() {
         let m = p.start();
         types::identifier(p);
         p.bump(SyntaxKind::ColonColon);
@@ -495,12 +496,6 @@ fn simple_name_expr(p: &mut Parser) -> CompletedMarker {
         types::type_argument_list(p);
         m.complete(p, SyntaxKind::GenericName)
     } else {
-        let m = p.start();
-        if types::at_ident_like(p) {
-            p.bump_remap(SyntaxKind::Ident);
-        } else {
-            p.error("expected an identifier");
-        }
-        m.complete(p, SyntaxKind::Identifier)
+        types::identifier(p)
     }
 }

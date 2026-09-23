@@ -142,11 +142,12 @@ pub enum SimpleTypeKind {
 }
 
 impl SimpleTypeKind {
-    /// Returns the canonical lowercase source-code representation.
+    /// Returns the canonical source-code spelling: the keyword for a primitive,
+    /// and `()` for the unit type, which has no name.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
-            SimpleTypeKind::Unit => "unit",
+            SimpleTypeKind::Unit => "()",
             SimpleTypeKind::Bool => "bool",
             SimpleTypeKind::I8 => "i8",
             SimpleTypeKind::I16 => "i16",

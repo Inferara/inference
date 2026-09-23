@@ -3,8 +3,8 @@
 //!
 //! `()` is the language's way of saying *there is nothing here*, and it is
 //! legitimate in exactly that role: a function whose return type is `()` — or
-//! `unit`, or omitted — returns nothing, and code generation implements that
-//! directly by giving the WebAssembly function an empty result list. What has
+//! omitted — returns nothing, and code generation implements that directly by
+//! giving the WebAssembly function an empty result list. What has
 //! no implementation is unit in a *carrier*. A unit value carries no
 //! information, so it occupies no bytes and has no WebAssembly type: a
 //! parameter declared `()` is given no argument slot to arrive in, a binding of
@@ -31,15 +31,11 @@
 //!   bare positional `()` alike;
 //! - a struct field.
 //!
-//! Both spellings are covered without a special case: `()` lowers to a simple
-//! unit type node and `unit` to a name the builtin table maps to the same kind,
-//! so a single test on the resolved kind sees both. Array nesting is looked
-//! through at any depth ([`walker::innermost_element`]), because an array of
-//! unit has no element size at any nesting depth and an array type is never a
-//! value position on its own.
-//!
-//! The message names `()` rather than both spellings, because that is the
-//! canonical one; the alias is pinned by a test instead of by the text.
+//! The type is spelled `()` and nothing else — `unit` is a reserved word the
+//! parser refuses — so a single test on the resolved kind sees every carrier.
+//! Array nesting is looked through at any depth ([`walker::innermost_element`]),
+//! because an array of unit has no element size at any nesting depth and an
+//! array type is never a value position on its own.
 //!
 //! ## The two exempt statement forms, and why they are load-bearing
 //!
@@ -61,9 +57,9 @@
 //!
 //! ## The return type is not covered
 //!
-//! `fn f() -> ()`, `fn f() -> unit` and an omitted return type are the one place
-//! unit means something, and it is implemented. Covering the position would
-//! reject every void function in every program.
+//! `fn f() -> ()` and an omitted return type are the one place unit means
+//! something, and it is implemented. Covering the position would reject every
+//! void function in every program.
 //!
 //! ## Why `spec` bodies are covered
 //!
@@ -83,13 +79,13 @@
 //!
 //! The linker already rejects exactly the parameter position, on the extern
 //! path alone: lowering an `external fn` signature fails when a parameter's
-//! value type comes back empty, and renders as "`unit` cannot appear as an
-//! external function parameter". This rule generalizes that judgement from
-//! `external fn` to every function and to the other carrier positions, and moves
-//! it from link time to analysis. The link-time check stays where it is as
-//! defence in depth for a caller that reaches the linker without running
-//! analysis; the two must not contradict each other, which is why "has no value
-//! representation" is the shared phrase.
+//! value type comes back empty, and renders as "the unit type `()` has no value
+//! representation and cannot appear as an external function parameter". This
+//! rule generalizes that judgement from `external fn` to every function and to
+//! the other carrier positions, and moves it from link time to analysis. The
+//! link-time check stays where it is as defence in depth for a caller that
+//! reaches the linker without running analysis; the two must not contradict
+//! each other, which is why "has no value representation" is the shared phrase.
 //!
 //! ## Reading the recorded type, not the annotation
 //!

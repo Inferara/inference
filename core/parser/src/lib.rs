@@ -145,6 +145,23 @@ pub fn parse_to_cst(src: &str) -> (SyntaxNode, Vec<ParseError>) {
     (tree, errors)
 }
 
+/// Whether `word`, written on its own, is a name the grammar accepts: a single
+/// identifier, or one of the keywords that are names wherever no rule spells
+/// them (`self`, `type`, `from`, `spec`).
+///
+/// Every other keyword is not — the reserved words `unit`, `checked` and
+/// `wrapping` among them — and neither is anything that lexes as more than one
+/// token. A tool that proposes a name for an author to write, such as the
+/// nearest sibling file of a missing import, asks this first, so that it never
+/// proposes one the parser refuses.
+#[must_use]
+pub fn is_name(word: &str) -> bool {
+    matches!(
+        tokenize(word).as_slice(),
+        [token, end] if grammar::IDENT_LIKE.contains(token.kind) && end.kind == SyntaxKind::Eof
+    )
+}
+
 /// Assigns each [`Step::Error`] a source [`Location`] by tracking the token
 /// cursor through the step stream: an error attaches to the next meaningful
 /// token it precedes, or to the end-of-input sentinel when none remains.
@@ -542,5 +559,43 @@ mod parse_into_tests {
 
         let b = parse_into(a.arena, "pub fn util_fn() {}", vec!["util".to_string()]);
         assert_newest(&b.arena, &["util"], "util_fn");
+    }
+}
+
+#[cfg(test)]
+mod is_name_tests {
+    use super::is_name;
+
+    /// An identifier is a name however it is spelled, including one that
+    /// merely begins with a reserved word, and so is each keyword the grammar
+    /// accepts where a name is written.
+    #[test]
+    fn identifiers_and_contextual_keywords_are_names() {
+        for word in [
+            "arith",
+            "_private",
+            "a1_B2",
+            "units",
+            "unit_count",
+            "constructor",
+            "self",
+            "type",
+            "from",
+            "spec",
+        ] {
+            assert!(is_name(word), "{word:?} can be written as a name");
+        }
+    }
+
+    /// A keyword no name position accepts, the reserved words included, is not
+    /// a name, and neither is a word that lexes as more than one token.
+    #[test]
+    fn keywords_and_multi_token_words_are_not_names() {
+        for word in [
+            "unit", "checked", "wrapping", "fn", "let", "i32", "bool", "true", "my-mod", "a::b",
+            "a b", " arith", "1st", "",
+        ] {
+            assert!(!is_name(word), "{word:?} cannot be written as a name");
+        }
     }
 }

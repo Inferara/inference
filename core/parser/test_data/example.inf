@@ -486,7 +486,7 @@ fn main() {
 fn main() {
   let a: bool = true;
   let b: bool = false;
-  let d: unit = ();
+  let d: () = ();
 }
 fn add(a: u32, b: u32) -> u32 {
   return a + b;

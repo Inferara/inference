@@ -374,7 +374,7 @@ mod analysis_rules_tests {
     #[test]
     fn a007_no_missing_return_for_explicit_unit_return_type() {
         let source = r#"
-            fn foo() -> unit {
+            fn foo() -> () {
                 let x: i32 = 0;
             }
         "#;
@@ -435,7 +435,7 @@ mod analysis_rules_tests {
         let source = r#"
             struct Foo {
                 x: i32;
-                fn bar(self) -> unit {
+                fn bar(self) -> () {
                     let y: i32 = self.x;
                 }
             }

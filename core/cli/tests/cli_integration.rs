@@ -1158,8 +1158,8 @@ const DEFAULT_TARGET_ARTIFACT: &[u8] =
 /// Selecting the Stellar target must change nothing about a *default* build.
 ///
 /// The rewrite is a branch in the write path, and a branch is exactly the kind of
-/// edit that can leak: the 160 golden artifacts in the `inference-tests` crate
-/// cover `codegen()` and never reach this code at all.
+/// edit that can leak: the golden artifacts in the `inference-tests` crate cover
+/// `codegen()` and never reach this code at all.
 ///
 /// The pin is the committed pre-campaign artifact. Comparing two builds of the
 /// *current* binary against each other cannot do this job: an edit that changed

@@ -7,7 +7,7 @@
 
 use crate::grammar::expr;
 use crate::grammar::items;
-use crate::grammar::types;
+use crate::grammar::types::{self, NameRole};
 use crate::parser::Parser;
 use crate::syntax_kind::SyntaxKind;
 use crate::token_set::TokenSet;
@@ -170,7 +170,7 @@ fn variable_definition_statement(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::LetKw);
     crate::grammar::params::mut_keyword(p);
-    types::identifier(p);
+    types::declared_name(p, NameRole::Binding);
     p.expect(SyntaxKind::Colon);
     types::type_(p);
     if p.eat(SyntaxKind::Eq) {

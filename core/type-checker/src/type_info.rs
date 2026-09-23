@@ -8,7 +8,7 @@
 //! The Inference language type system includes:
 //!
 //! **Primitive Types**:
-//! - `unit` - The unit type (similar to void)
+//! - `()` - The unit type (similar to void)
 //! - `bool` - Boolean type with values `true` and `false`
 //! - `string` - UTF-8 encoded strings (partial support)
 //! - Numeric types: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`
@@ -248,8 +248,12 @@ impl Display for TypeInfoKind {
 }
 
 impl TypeInfoKind {
+    /// The builtin types a source file refers to by *name*, and the names.
+    ///
+    /// The unit type is not among them: it is spelled `()`, which the parser
+    /// lowers to its own simple kind, and `unit` is a reserved word the parser
+    /// refuses before any name reaches the table.
     pub const NON_NUMERIC_BUILTINS: &'static [(&'static str, TypeInfoKind)] = &[
-        ("unit", TypeInfoKind::Unit),
         ("bool", TypeInfoKind::Bool),
         ("string", TypeInfoKind::String),
         ("String", TypeInfoKind::String),
@@ -260,10 +264,16 @@ impl TypeInfoKind {
         matches!(self, TypeInfoKind::Number(_))
     }
 
+    /// How a builtin type is spelled in source, for a message that quotes a
+    /// type back to its author: its name, or `()` for the unit type.
+    ///
+    /// [`Self::from_builtin_str`] inverts it for every builtin but the unit type,
+    /// whose spelling is punctuation the parser reads rather than a name the
+    /// symbol table resolves.
     #[must_use = "returns the builtin name without modifying self"]
     pub fn as_builtin_str(&self) -> Option<&'static str> {
         match self {
-            TypeInfoKind::Unit => Some("unit"),
+            TypeInfoKind::Unit => Some("()"),
             TypeInfoKind::Bool => Some("bool"),
             TypeInfoKind::String => Some("string"),
             TypeInfoKind::Number(nt) => Some(nt.as_str()),
@@ -545,8 +555,8 @@ impl TypeInfo {
 }
 
 /// A source-like spelling of `ty` for embedding in a function-type carrier
-/// (`fn(i32, bool) -> i32`). Built-in scalars use their lowercase source names,
-/// so the carrier reads as it was written rather than as the checker's
+/// (`fn(i32, bool) -> ()`). Built-in scalars use their source spellings, so the
+/// carrier reads as it was written rather than as the checker's
 /// capitalized [`Display`] (`Bool`/`Unit`/`String`); every other kind uses its
 /// `Display`, which already reads as source (a struct/enum by its canonical key,
 /// a generic primed, a nested function type by this same spelling).

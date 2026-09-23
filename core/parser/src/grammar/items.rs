@@ -8,7 +8,7 @@
 use crate::grammar::expr;
 use crate::grammar::params;
 use crate::grammar::stmt;
-use crate::grammar::types;
+use crate::grammar::types::{self, NameRole};
 use crate::parser::Parser;
 use crate::syntax_kind::SyntaxKind;
 
@@ -90,7 +90,7 @@ pub(crate) fn use_directive(p: &mut Parser) {
     if p.at(SyntaxKind::LBrace) {
         imported_type_list(p);
         p.expect(SyntaxKind::FromKw);
-        if p.at(SyntaxKind::Ident) {
+        if p.at_ts(types::PLAIN_NAME_START) {
             module_ref(p);
         } else {
             p.error("expected a module name");
@@ -102,7 +102,7 @@ pub(crate) fn use_directive(p: &mut Parser) {
         m.complete(p, SyntaxKind::UseDirective);
         return;
     } else {
-        types::identifier(p);
+        types::declared_name(p, NameRole::Module);
         while p.at(SyntaxKind::ColonColon) && !p.nth_at(1, SyntaxKind::LBrace) {
             p.bump(SyntaxKind::ColonColon);
             if p.at(SyntaxKind::Star) {
@@ -113,7 +113,7 @@ pub(crate) fn use_directive(p: &mut Parser) {
                 m.complete(p, SyntaxKind::UseDirective);
                 return;
             }
-            types::identifier(p);
+            types::declared_name(p, NameRole::Module);
         }
         if p.at(SyntaxKind::ColonColon) {
             p.bump(SyntaxKind::ColonColon);
@@ -144,11 +144,11 @@ fn recover_to_semicolon(p: &mut Parser) {
 /// `ident ( :: ident )*` — the logical module reference of a `from` clause.
 /// Emits one `Identifier` per path segment; segments are separated by `::`.
 fn module_ref(p: &mut Parser) {
-    types::identifier(p);
+    types::declared_name(p, NameRole::Module);
     while p.at(SyntaxKind::ColonColon) {
         p.bump(SyntaxKind::ColonColon);
-        if p.at(SyntaxKind::Ident) {
-            types::identifier(p);
+        if p.at_ts(types::PLAIN_NAME_START) {
+            types::declared_name(p, NameRole::Module);
         } else {
             p.error("expected a module path segment");
             break;
@@ -160,12 +160,12 @@ fn module_ref(p: &mut Parser) {
 fn imported_type_list(p: &mut Parser) {
     p.expect(SyntaxKind::LBrace);
     if !p.at(SyntaxKind::RBrace) {
-        types::identifier(p);
+        types::declared_name(p, NameRole::ImportedItem);
         while p.eat(SyntaxKind::Comma) {
             if p.at(SyntaxKind::RBrace) {
                 break;
             }
-            types::identifier(p);
+            types::declared_name(p, NameRole::ImportedItem);
         }
     }
     p.expect(SyntaxKind::RBrace);
@@ -181,7 +181,7 @@ pub(crate) fn spec_definition(p: &mut Parser) {
         visibility(p);
     }
     p.expect(SyntaxKind::SpecKw);
-    types::identifier(p);
+    types::declared_name(p, NameRole::Spec);
     p.expect(SyntaxKind::LBrace);
     while !p.at(SyntaxKind::RBrace) && !p.at_eof() {
         if at_definition_start(p) {
@@ -225,7 +225,7 @@ pub(crate) fn function_definition(p: &mut Parser) {
     let m = p.start();
     visibility(p);
     p.expect(SyntaxKind::FnKw);
-    types::identifier(p);
+    types::declared_name(p, NameRole::Function);
     if params::at_type_argument_list_definition(p) {
         params::type_argument_list_definition(p);
     }
@@ -255,7 +255,7 @@ pub(crate) fn external_function_definition(p: &mut Parser) {
     }
     p.expect(SyntaxKind::ExternalKw);
     p.expect(SyntaxKind::FnKw);
-    types::identifier(p);
+    types::declared_name(p, NameRole::Function);
     params::argument_list(p);
     if p.eat(SyntaxKind::Arrow) {
         types::type_(p);
@@ -270,7 +270,7 @@ pub(crate) fn struct_definition(p: &mut Parser) {
     let m = p.start();
     visibility(p);
     p.expect(SyntaxKind::StructKw);
-    types::identifier(p);
+    types::declared_name(p, NameRole::Struct);
     p.expect(SyntaxKind::LBrace);
     while !p.at(SyntaxKind::RBrace) && !p.at_eof() {
         // Defense-in-depth: capture the cursor so a member handler that consumes
@@ -278,7 +278,9 @@ pub(crate) fn struct_definition(p: &mut Parser) {
         // the loop until the advance guard panics.
         let before = p.pos();
         match p.current() {
-            SyntaxKind::Ident => {
+            // A field named `unit` is still a field: routing it here is what
+            // lets the name be refused as one instead of as a stray member.
+            kind if types::PLAIN_NAME_START.contains(kind) => {
                 struct_field(p);
                 p.expect(SyntaxKind::Semi);
             }
@@ -314,7 +316,7 @@ fn struct_field(p: &mut Parser) {
         p.error("fields inherit visibility from their struct");
         visibility(p);
     }
-    types::identifier(p);
+    types::declared_name(p, NameRole::Field);
     p.expect(SyntaxKind::Colon);
     types::type_(p);
     m.complete(p, SyntaxKind::StructField);
@@ -325,15 +327,15 @@ pub(crate) fn enum_definition(p: &mut Parser) {
     let m = p.start();
     visibility(p);
     p.expect(SyntaxKind::EnumKw);
-    types::identifier(p);
+    types::declared_name(p, NameRole::Enum);
     p.expect(SyntaxKind::LBrace);
-    if p.at(SyntaxKind::Ident) {
-        types::identifier(p);
+    if p.at_ts(types::PLAIN_NAME_START) {
+        types::declared_name(p, NameRole::Variant);
         while p.eat(SyntaxKind::Comma) {
             if p.at(SyntaxKind::RBrace) {
                 break;
             }
-            types::identifier(p);
+            types::declared_name(p, NameRole::Variant);
         }
     }
     p.expect(SyntaxKind::RBrace);
@@ -346,7 +348,7 @@ pub(crate) fn constant_definition(p: &mut Parser) {
     let m = p.start();
     visibility(p);
     p.expect(SyntaxKind::ConstKw);
-    types::identifier(p);
+    types::declared_name(p, NameRole::Constant);
     p.expect(SyntaxKind::Colon);
     types::type_(p);
     p.expect(SyntaxKind::Eq);
@@ -370,21 +372,24 @@ pub(crate) fn constant_definition(p: &mut Parser) {
 /// and `let type: i32 = 5;` both declare a binding, so `type();` and
 /// `type = 6;` are things an author has reason to write, and the statement
 /// dispatch hands both to this rule. Neither parses: the dispatch has already
-/// committed to the declaration, so they fail at `types::identifier` exactly as
-/// they did before aliases were refused. But neither declares an alias either,
-/// and reporting one would be a confident false claim about what was written.
+/// committed to the declaration, so they fail at the alias name exactly as they
+/// did before aliases were refused. But neither declares an alias either, and
+/// reporting one would be a confident false claim about what was written.
 /// Nothing in the language puts a name directly after a `type` in that
 /// identifier sense, so the two-token head tells the cases apart. A *malformed*
 /// alias still reports — `type A;` and `type A = i32` (no `;`) both keep their
-/// name — because there the author was in fact writing the declaration.
+/// name — because there the author was in fact writing the declaration. So does
+/// `type unit = i32;`, whose name is refused beside it: the reserved word counts
+/// as a name for the head, because the author wrote the declaration all the
+/// same, and that is two faults with a diagnostic each.
 pub(crate) fn type_definition_statement(p: &mut Parser) {
     let m = p.start();
     visibility(p);
-    if types::IDENT_LIKE.contains(p.nth(1)) {
+    if types::NAME_START.contains(p.nth(1)) {
         p.error(TYPE_ALIAS_MESSAGE);
     }
     p.expect(SyntaxKind::TypeKw);
-    types::identifier(p);
+    types::declared_name(p, NameRole::TypeAlias);
     p.expect(SyntaxKind::Eq);
     types::type_(p);
     p.expect(SyntaxKind::Semi);
