@@ -173,6 +173,14 @@ pub enum StellarAbiError {
     /// `contractspecv0` it meets, as `soroban_spec::read::raw_from_wasm`
     /// (`soroban-spec` 28.0.0) does, or merges every copy, and neither
     /// describes the contract this pass produced.
+    ///
+    /// For `contractspecv0` and `contractmetav0` only a caller of the library
+    /// API reaches this today. `infc` always links before it rewrites, and the
+    /// static-merge linker drops every custom section it does not name, so a
+    /// foreign `.wasm` built with the Soroban SDK arrives here stripped of its
+    /// sections. Should the linker ever carry a foreign module's custom sections
+    /// through, such a dependency would be refused here as already rewritten,
+    /// and this variant is where that would surface.
     #[error(
         "the module already carries a `{section}` section, one of the three this pass writes, \
          so it has already been rewritten into a contract; rewriting it again would wrap the \
