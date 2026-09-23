@@ -4543,10 +4543,11 @@ fn an_admitted_host_import_builds_without_the_no_allowlist_qualifier() {
 /// looking for the entry that displaced it. The message says the allowlist is
 /// present and empty, and names the manifest shape that spells the same policy.
 ///
-/// The flag fragment is asserted because this state is reachable *only* by
-/// typing `--host-imports=` on an `infc` command line: `infs` does not forward
-/// the flag and the manifest table is not implemented, so a refusal whose only
-/// remedy was a TOML edit would offer a reader nothing they could do.
+/// Both halves of the remedy are asserted because the state has two readers. A
+/// direct `infc` caller typed `--host-imports=` and has no manifest, so a
+/// refusal whose only remedy was a TOML edit would offer them nothing they
+/// could do; an `infs` reader never typed the flag, and is told the table with
+/// no keys it was filled from and the key to write under it.
 #[test]
 fn an_empty_allowlist_forbids_every_host_import() {
     let (temp, assert) = run_host_build(HOST_CLOCK_SOURCE, &["--host-imports="]);
@@ -4557,9 +4558,9 @@ fn an_empty_allowlist_forbids_every_host_import() {
         "the allowlist is present and empty, which forbids every host import",
         "The allowlist (`--host-imports`) names every host function the program may bind",
         "Add `env.clock_ms` to `--host-imports` to admit it",
-        "`infs build` will spell that same empty policy as a declared-but-empty \
-         `[host-imports]` table in Inference.toml once that table exists",
-        "today `infs` refuses to read a manifest carrying that key at all",
+        "`infs` fills the flag from the `[host-imports]` table in Inference.toml, where \
+         this empty policy is the table with no keys and the same edit is to add \
+         `env = [\"clock_ms\"]` under it.",
         "drop every `host::env` binding of `clock_ms`.",
     ] {
         assert!(
@@ -4567,20 +4568,24 @@ fn an_empty_allowlist_forbids_every_host_import() {
             "the empty-allowlist refusal must carry `{fragment}`:\n{stderr}"
         );
     }
+    assert!(
+        !stderr.contains("table exists") && !stderr.contains("today `infs`"),
+        "the table exists, so the refusal must not say it will:\n{stderr}"
+    );
     assert_no_artifacts(temp.path(), "prog");
 }
 
 /// An unadmitted host import is refused naming both the flag that carries the
-/// allowlist and the manifest table `infs build` will fill it from, and **every**
+/// allowlist and the manifest table `infs` fills it from, and **every**
 /// unadmitted import is reported by one build.
 ///
 /// One-at-a-time would make a program binding two unadmitted functions two
 /// builds to correct. The `infs` half of the sentence is asserted because
 /// `infc` has no manifest of its own: it names the flag as the mechanism and
-/// the table as where a project build will fill it from, and inverting that
+/// the table as where a project build fills it from, and inverting that
 /// would describe a file this invocation never read. The flag edit is asserted
 /// in the flag's own `module.field` syntax, since `--host-imports` refuses the
-/// TOML array spelling the same sentence hands an `infs build` reader.
+/// TOML array spelling the same sentence hands an `infs` reader.
 ///
 /// The two-import half asserts the *combined* edit, not just that both names
 /// appear. Two fields of one module share one list in either mechanism, so two
@@ -4600,10 +4605,8 @@ fn every_unadmitted_host_import_is_reported_by_one_build() {
         "The allowlist (`--host-imports`) names every host function the program may bind",
         "this build was given `fprime_core.command, fprime_core.telemetry`",
         "Add `env.clock_ms` to `--host-imports` to admit it",
-        "`infs build` will fill the flag from a `[host-imports]` table in Inference.toml \
-         once that table exists",
-        "where the same edit will be to add `env = [\"clock_ms\"]`",
-        "today `infs` refuses to read a manifest carrying that key at all",
+        "`infs` fills the flag from the `[host-imports]` table in Inference.toml, where \
+         the same edit is to add `env = [\"clock_ms\"]`.",
         "drop every `host::env` binding of `clock_ms`.",
     ] {
         assert!(
@@ -4611,6 +4614,10 @@ fn every_unadmitted_host_import_is_reported_by_one_build() {
             "the refusal must carry `{fragment}`:\n{stderr}"
         );
     }
+    assert!(
+        !stderr.contains("table exists") && !stderr.contains("today `infs`"),
+        "the table exists, so the refusal must not say it will:\n{stderr}"
+    );
     assert_no_artifacts(temp.path(), "prog");
 
     let (temp, assert) = run_host_build(HOST_TWO_SOURCE, &["--host-imports=fprime_core.command"]);
@@ -4619,7 +4626,7 @@ fn every_unadmitted_host_import_is_reported_by_one_build() {
     for fragment in [
         "host imports `env`.`clock_ms`, `env`.`sleep_ms` are not in this build's",
         "Add `env.clock_ms,env.sleep_ms` to `--host-imports` to admit them",
-        "where the same edit will be to add `env = [\"clock_ms\", \"sleep_ms\"]`",
+        "where the same edit is to add `env = [\"clock_ms\", \"sleep_ms\"]`",
         "drop every `host::env` binding of `clock_ms` and `sleep_ms`.",
     ] {
         assert!(
@@ -4927,7 +4934,7 @@ fn an_allowlist_refusal_asks_for_every_binding_of_an_import_two_files_bind() {
         "this build was given `env.sleep_ms`",
         "Add `env.clock_ms` to `--host-imports` to admit it, or drop every `host::env` \
          binding of `clock_ms`.",
-        "where the same edit will be to add `\"clock_ms\"` to the `env` entry",
+        "where the same edit is to add `\"clock_ms\"` to the `env` entry",
     ] {
         assert!(
             stderr.contains(fragment),
@@ -5309,14 +5316,14 @@ fn a_host_import_at_a_target_that_binds_no_host_is_refused_first() {
 }
 
 /// `--help` documents `--host-imports` in its reader's terms: the three states
-/// and the fact that `infs build` does not forward it yet.
+/// and where `infs build` fills the flag from.
 ///
 /// clap prints the field's doc comment as the help text, so a maintainer note
 /// left in it ships to every `infc --help`; the Rust type and the clap
 /// attribute behind the flag's shape are asserted absent for that reason. The
-/// not-forwarded sentence is pinned so that the change which retires it — the
-/// `[host-imports]` table landing in `infs` — has a test to update beside it,
-/// rather than leaving a stale clause in `--help` that nothing reads.
+/// forwarding sentence is pinned because it is the one a toolchain change moves:
+/// it said the flag was not forwarded until the `[host-imports]` table landed in
+/// `infs`, and the retired wording is asserted absent so it cannot come back.
 #[test]
 fn help_documents_the_host_import_allowlist() {
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
@@ -5328,13 +5335,19 @@ fn help_documents_the_host_import_allowlist() {
     for fragment in [
         "--host-imports=<LIST>",
         "`--host-imports=` with nothing after it is a declared, empty allowlist that admits none",
-        "Unlike `--wasm-dep`, `infs build` does not forward this flag yet",
+        "`infs build` and `infs run` forward one entry per field of each `Inference.toml \
+         [host-imports]` module, and a declared-but-empty table as `--host-imports=`; direct \
+         `infc` callers may pass the list by hand.",
     ] {
         assert!(
             flowed.contains(fragment),
             "--help must carry `{fragment}`, got:\n{stdout}"
         );
     }
+    assert!(
+        !flowed.contains("forward this flag yet"),
+        "the table exists, so --help must not say the flag goes unforwarded:\n{stdout}"
+    );
     for internal in ["Option<Vec<String>>", "require_equals"] {
         assert!(
             !flowed.contains(internal),

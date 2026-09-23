@@ -67,16 +67,17 @@
 //!
 //! ## Manifest settings honored in single-file mode
 //!
-//! Two `[build]`-adjacent settings are read from the *enclosing* project even
-//! when a source path is given, by walking up to the nearest `Inference.toml`:
-//! `[wasm-dependencies]`, and `[build] wasm-features`. Neither is an optional
-//! nicety — `infs build`, `infs build src/main.inf`, and `infs run
-//! src/main.inf` all write `out/main.wasm` for the same project, so they must
-//! not disagree about its WebAssembly instruction level, nor about which `.wasm`
-//! files its `use { … } from <module>` bindings resolve to. The feature request
-//! (with its validation and ABI gate) and the dependency resolution are
-//! identical on all three paths — which is why both are derived by the shared
-//! helpers here rather than re-derived per command (see
+//! The settings that decide what the artifact *is* are read from the
+//! *enclosing* project even when a source path is given, by walking up to the
+//! nearest `Inference.toml`: `[wasm-dependencies]`, `[build] target`, `[build]
+//! wasm-features`, `[memory]`, and `[host-imports]`. None is an optional nicety
+//! — `infs build`, `infs build src/main.inf`, and `infs run src/main.inf` all
+//! write `out/main.wasm` for the same project, so they must not disagree about
+//! its WebAssembly instruction level, about which `.wasm` files its `use { … }
+//! from <module>` bindings resolve to, nor about which host functions it may
+//! bind. Each request (with its validation and ABI gate) and the dependency
+//! resolution are identical on all three paths — which is why they are derived
+//! by the shared helpers here rather than re-derived per command (see
 //! [`crate::commands::run`] for the third path). A file outside any project
 //! takes the defaults and never errors.
 //!
@@ -95,12 +96,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::project_build::{
-    forward_memory_layout, forward_target, forward_wasm_features, mode_flag,
+    forward_host_imports, forward_memory_layout, forward_target, forward_wasm_features, mode_flag,
     probe_compiler_compatibility, run_project_build,
 };
 use crate::errors::InfsError;
 use crate::project::manifest::{
-    InferenceToml, MANIFEST_FILE_NAME, MemoryConfig, find_manifest_dir,
+    HostImports, InferenceToml, MANIFEST_FILE_NAME, MemoryConfig, find_manifest_dir,
 };
 use crate::project::{self, ProjectContext};
 use crate::toolchain::resolver::find_infc_with_source;
@@ -207,7 +208,8 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
 /// - the enclosing manifest names a `target`, requests `wasm-features`, or
-///   declares a `[memory]` table the resolved `infc` cannot honor
+///   declares a `[memory]` or `[host-imports]` table the resolved `infc` cannot
+///   honor
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     if !path.exists() {
@@ -218,6 +220,7 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     let target = manifest_target(enclosing.as_ref().map(|(_, manifest)| manifest))?;
     let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
     let memory = manifest_memory(enclosing.as_ref().map(|(_, manifest)| manifest));
+    let host_imports = manifest_host_imports(enclosing.as_ref().map(|(_, manifest)| manifest));
 
     let (infc_path, infc_source) = find_infc_with_source()?;
     let compat = probe_compiler_compatibility(&infc_path, infc_source)?;
@@ -251,6 +254,7 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     forward_target(&mut cmd, compat, target, manifest_path.as_deref())?;
     forward_wasm_features(&mut cmd, compat, &features, manifest_path.as_deref())?;
     forward_memory_layout(&mut cmd, compat, &memory, manifest_path.as_deref())?;
+    forward_host_imports(&mut cmd, compat, host_imports, manifest_path.as_deref())?;
 
     let status = cmd
         .stdin(std::process::Stdio::inherit())
@@ -352,7 +356,7 @@ pub(crate) fn enclosing_manifest(source_path: &Path) -> Result<Option<(PathBuf, 
 /// ## Errors
 ///
 /// Returns an error if any `[wasm-dependencies]` key is not a well-formed logical
-/// module name.
+/// module name, or its first segment is the reserved `host`.
 pub(crate) fn manifest_wasm_dependencies(
     enclosing: Option<&(PathBuf, InferenceToml)>,
 ) -> Result<Vec<(String, PathBuf)>> {
@@ -414,9 +418,26 @@ pub(crate) struct EnclosingSettings<'a> {
     pub(crate) features: &'a [WasmFeatureName],
     /// The `[memory]` table as declared, keys still optional.
     pub(crate) memory: &'a MemoryConfig,
+    /// The `[host-imports]` allowlist, or `None` for no policy.
+    pub(crate) host_imports: Option<&'a HostImports>,
     /// The manifest a diagnostic tells the user to edit, or `None` for a source
     /// outside any project.
     pub(crate) manifest_path: Option<&'a Path>,
+}
+
+/// Reads the `[host-imports]` allowlist of an already-loaded enclosing manifest.
+///
+/// `None` — a source outside any project, or a project that declares no table —
+/// is no policy, which is what `infc` applies when the flag is omitted.
+/// Centralizing that is why both single-file paths call this rather than reaching
+/// into `host_imports` themselves: running one file of a project must not skip a
+/// policy that building it applies, since the two write the same artifact.
+///
+/// Infallible where [`manifest_wasm_features`] is not, because nothing here
+/// resolves the table into a second vocabulary: its entries are forwarded as the
+/// strings the loader already checked.
+pub(crate) fn manifest_host_imports(manifest: Option<&InferenceToml>) -> Option<&HostImports> {
+    manifest.and_then(|m| m.host_imports.as_ref())
 }
 
 /// Reads the `[memory]` table of an already-loaded enclosing manifest.

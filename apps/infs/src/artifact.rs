@@ -4,10 +4,11 @@
 //! A finished `.wasm` is all `infs` has to go on. Whether a verification-only
 //! opcode leaked into an ordinary function, whether the module carries bulk
 //! memory, whether it records which of its functions trap on arithmetic
-//! overflow — none of that is recorded anywhere but in the bytes, so each answer
-//! costs a parse. Asking them together costs one, and it keeps the answers
-//! consistent with one another: no caller can pair a bulk-memory verdict taken
-//! from one traversal with a guard record taken from another.
+//! overflow, which functions it imports from its environment — none of that is
+//! recorded anywhere but in the bytes, so each answer costs a parse. Asking them
+//! together costs one, and it keeps the answers consistent with one another: no
+//! caller can pair a bulk-memory verdict taken from one traversal with a guard
+//! record taken from another.
 //!
 //! The questions are about the artifact, not about any one thing done to it, so
 //! the scan sits beside the commands rather than inside one. A command that
@@ -18,7 +19,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use inf_wasmparser::{Operator, Parser, Payload};
+use inf_wasmparser::{Operator, Parser, Payload, TypeRef};
 
 /// The custom section recording which functions of a module trap on arithmetic
 /// overflow.
@@ -31,28 +32,42 @@ use inf_wasmparser::{Operator, Parser, Payload};
 /// somewhere.
 pub(crate) const CHECKED_SECTION_NAME: &str = "inference.checked";
 
+/// Where a verification construct belongs, which every refusal of an
+/// [`ArtifactScan::VerificationConstruct`] artifact tells its reader: one clause,
+/// so the commands that refuse one — `infs run`, and `[build.wasm-opt]` before
+/// the optimizer — send the reader to the same place in the same words.
+pub(crate) const VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS: &str = "Verification constructs \
+     (forall/exists/assume/unique and `@`/uzumaki) belong in `spec` blocks, which compile-mode \
+     builds strip";
+
 /// What one scan of an artifact's bytes found.
 ///
 /// The two states are mutually exclusive by construction, so a caller can never
 /// read a bulk-memory verdict off an artifact the scan rejected outright.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArtifactScan {
     /// A verification-only construct leaked into an ordinary function; the
     /// payload is its source spelling (e.g. `"forall"`, `"i32.uzumaki"`).
     VerificationConstruct(&'static str),
     /// An ordinary executable artifact: whether it carries any bulk-memory
-    /// operator, and whether it records which of its functions trap on
-    /// arithmetic overflow.
+    /// operator, whether it records which of its functions trap on arithmetic
+    /// overflow, and the `(module, field)` of every function it imports, in
+    /// import-section order.
+    ///
+    /// Only function imports are listed, because a function is the only kind of
+    /// import an Inference artifact carries: code generation emits no other
+    /// kind, and the linker refuses a main module that imports any other kind.
     Executable {
         uses_bulk_memory: bool,
         records_overflow_guards: bool,
+        function_imports: Vec<(String, String)>,
     },
 }
 
-/// Scans `wasm_bytes` once for the three facts a caller needs up front:
+/// Scans `wasm_bytes` once for the four facts a caller needs up front:
 /// whether a verification-only construct leaked into the artifact, whether the
-/// artifact carries bulk memory, and whether it records which of its functions
-/// trap on arithmetic overflow.
+/// artifact carries bulk memory, whether it records which of its functions trap
+/// on arithmetic overflow, and which functions it imports.
 ///
 /// Compile-mode builds strip `spec` blocks, so a well-formed executable artifact
 /// carries no verification construct. Finding one means it leaked into an
@@ -73,6 +88,7 @@ pub(crate) enum ArtifactScan {
 pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<ArtifactScan> {
     let mut uses_bulk_memory = false;
     let mut records_overflow_guards = false;
+    let mut function_imports = Vec::new();
     for payload in Parser::new(0).parse_all(wasm_bytes) {
         let payload = payload
             .map_err(|err| anyhow::anyhow!("failed to scan {}: {err}", artifact.display()))?;
@@ -80,6 +96,29 @@ pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<Artifa
             && reader.name() == CHECKED_SECTION_NAME
         {
             records_overflow_guards = true;
+            continue;
+        }
+        if let Payload::ImportSection(reader) = payload {
+            for import in reader {
+                let import = import.map_err(|err| {
+                    anyhow::anyhow!(
+                        "failed to read an import while scanning {}: {err}",
+                        artifact.display()
+                    )
+                })?;
+                match import.ty {
+                    TypeRef::Func(_) => {
+                        function_imports.push((import.module.to_string(), import.name.to_string()));
+                    }
+                    // Code generation emits function imports only, and the
+                    // linker refuses a main module that imports any other kind,
+                    // so no Inference artifact reaches this arm.
+                    TypeRef::Table(_)
+                    | TypeRef::Memory(_)
+                    | TypeRef::Global(_)
+                    | TypeRef::Tag(_) => {}
+                }
+            }
             continue;
         }
         let Payload::CodeSectionEntry(body) = payload else {
@@ -107,6 +146,7 @@ pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<Artifa
     Ok(ArtifactScan::Executable {
         uses_bulk_memory,
         records_overflow_guards,
+        function_imports,
     })
 }
 
@@ -155,7 +195,8 @@ fn verification_construct_name(op: &Operator) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::testing::{
-        MEMORY_COPY_BODY, MEMORY_FILL_BODY, module_with_custom_section, module_with_raw_body,
+        MEMORY_COPY_BODY, MEMORY_FILL_BODY, module_with_custom_section, module_with_imports,
+        module_with_raw_body,
     };
 
     /// Scans a module built in memory. Nothing below reads the reported
@@ -211,7 +252,8 @@ mod tests {
             scan(&module),
             ArtifactScan::Executable {
                 uses_bulk_memory: false,
-                records_overflow_guards: true
+                records_overflow_guards: true,
+                function_imports: Vec::new(),
             }
         );
     }
@@ -227,7 +269,8 @@ mod tests {
             scan(&module),
             ArtifactScan::Executable {
                 uses_bulk_memory: false,
-                records_overflow_guards: false
+                records_overflow_guards: false,
+                function_imports: Vec::new(),
             }
         );
     }
@@ -241,7 +284,8 @@ mod tests {
             scan(&module),
             ArtifactScan::Executable {
                 uses_bulk_memory: false,
-                records_overflow_guards: false
+                records_overflow_guards: false,
+                function_imports: Vec::new(),
             }
         );
     }
@@ -266,7 +310,8 @@ mod tests {
                 scan(&module),
                 ArtifactScan::Executable {
                     uses_bulk_memory: true,
-                    records_overflow_guards: false
+                    records_overflow_guards: false,
+                    function_imports: Vec::new(),
                 },
                 "{name} must be reported as bulk memory"
             );
@@ -283,5 +328,68 @@ mod tests {
             scan(&module_with_raw_body(&body)),
             ArtifactScan::VerificationConstruct("i32.uzumaki")
         );
+    }
+
+    /// Every function import is listed, in import-section order and unsorted, and
+    /// no other kind of import is: the scan skips the memory import between the
+    /// two functions, and the functions on either side of it keep their order.
+    #[test]
+    fn scan_artifact_lists_function_imports_in_import_order() {
+        use wasm_encoder::{EntityType, MemoryType};
+
+        let memory = EntityType::Memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        let module = module_with_imports(&[
+            ("fprime_core", "telemetry", EntityType::Function(0)),
+            ("env", "memory", memory),
+            ("env", "clock_ms", EntityType::Function(0)),
+        ]);
+        assert_eq!(
+            scan(&module),
+            ArtifactScan::Executable {
+                uses_bulk_memory: false,
+                records_overflow_guards: false,
+                function_imports: vec![
+                    ("fprime_core".to_string(), "telemetry".to_string()),
+                    ("env".to_string(), "clock_ms".to_string()),
+                ],
+            }
+        );
+    }
+
+    /// A module that imports nothing lists nothing — including one whose import
+    /// section holds only non-function imports.
+    #[test]
+    fn scan_artifact_lists_no_function_import_where_there_is_none() {
+        use wasm_encoder::{EntityType, MemoryType};
+
+        let memory_only = module_with_imports(&[(
+            "env",
+            "memory",
+            EntityType::Memory(MemoryType {
+                minimum: 1,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            }),
+        )]);
+        for module in [module_with_raw_body(&[0x0b]), memory_only] {
+            let ArtifactScan::Executable {
+                function_imports, ..
+            } = scan(&module)
+            else {
+                panic!("an ordinary module is an executable artifact");
+            };
+            assert!(
+                function_imports.is_empty(),
+                "no function import was declared, got: {function_imports:?}"
+            );
+        }
     }
 }

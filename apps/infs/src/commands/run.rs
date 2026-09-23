@@ -14,12 +14,15 @@
 //! (so `<root>/out/main.wasm` is produced), and invokes `main` by convention.
 //!
 //! Single-file mode is not manifest-blind: it walks up to the nearest
-//! `Inference.toml` and honors both `[build] wasm-features` and
-//! `[wasm-dependencies]`, so running one file of a project cannot execute a
-//! module at a different WebAssembly instruction level than `infs build` would
-//! produce for it, and cannot fail to resolve an external that the same build
-//! links. This path overwrites the very artifact `infs build` produces, so any
-//! divergence would be observable as one command destroying the other's output.
+//! `Inference.toml` and honors `[wasm-dependencies]`, `[build] target`,
+//! `[build] wasm-features`, `[memory]` and `[host-imports]`, so running one
+//! file of a project cannot execute a module built for a different runtime, at
+//! a different WebAssembly instruction level or with a different memory layout
+//! than `infs build` would produce for it, cannot fail to resolve an external
+//! that the same build links, and cannot skip the host-import policy the same
+//! build applies. This path overwrites the very artifact `infs build` produces,
+//! so any divergence would be observable as one command destroying the other's
+//! output.
 //!
 //! ## External-module search directories
 //!
@@ -58,11 +61,13 @@
 //!   defensive, self-documenting guard should the argument layout ever change.
 //! - **Gains the `infc` compatibility handshake** for free via the shared
 //!   project-build helper. Single-file `run` keeps its prior no-handshake
-//!   behavior except when the enclosing manifest requests `wasm-features`, where
-//!   a capability probe is the only way to refuse a request the compiler cannot
-//!   honor. Neither `--wasm-dep` nor `--wasm-lib-dir` is capability-gated on
-//!   either path: both arrived with external-module support itself rather than
-//!   at a distinguishable ABI minor, so the handshake has nothing to check.
+//!   behavior except when the enclosing manifest asks for something an older
+//!   compiler could not honor — a target, `wasm-features`, a `[memory]` table,
+//!   or a `[host-imports]` table — where a capability probe is the only way to
+//!   refuse the request rather than drop it. Neither `--wasm-dep` nor
+//!   `--wasm-lib-dir` is capability-gated on either path: both arrived with
+//!   external-module support itself rather than at a distinguishable ABI minor,
+//!   so the handshake has nothing to check.
 //! - **Resolves `[wasm-dependencies]`**, also via the shared helper, and
 //!   forwards every `-L` it was passed: the project it runs is the one `infs
 //!   build` would produce, externals included. A project binding `use { … } from
@@ -81,6 +86,10 @@
 //! - **Missing-WASM guard:** if the build reports success but
 //!   `<root>/out/main.wasm` is absent, `run` errors before invoking wasmtime,
 //!   mirroring the single-file `compile_to_wasm` guard.
+//! - **Refuses an artifact that imports a function**, in both modes, after the
+//!   build and before wasmtime: a program binding `use { … } from host::…` is
+//!   left to the embedder that supplies those functions, whether or not wasmtime
+//!   could satisfy them (see `refuse_an_artifact_that_imports_a_function`).
 //!
 //! ## Prerequisites
 //!
@@ -93,13 +102,14 @@ use clap::Args;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::artifact::{ArtifactScan, VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS, scan_artifact};
 use crate::commands::build::{
-    EnclosingSettings, enclosing_manifest, format_wasm_dep_arg, manifest_memory, manifest_target,
-    manifest_wasm_dependencies, manifest_wasm_features,
+    EnclosingSettings, enclosing_manifest, format_wasm_dep_arg, manifest_host_imports,
+    manifest_memory, manifest_target, manifest_wasm_dependencies, manifest_wasm_features,
 };
 use crate::commands::project_build::{
-    forward_memory_layout, forward_target, forward_wasm_features, probe_compiler_compatibility,
-    run_project_build,
+    forward_host_imports, forward_memory_layout, forward_target, forward_wasm_features,
+    probe_compiler_compatibility, run_project_build,
 };
 use crate::errors::InfsError;
 use crate::project::manifest::MANIFEST_FILE_NAME;
@@ -212,12 +222,14 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 ///    artifact wasmtime cannot invoke
 /// 3. Checks for wasmtime availability
 /// 4. Resolves the rest of the enclosing project's settings — `[build]
-///    wasm-features`, `[memory]`, `[wasm-dependencies]` — if any
+///    wasm-features`, `[memory]`, `[host-imports]`, `[wasm-dependencies]` — if
+///    any
 /// 5. Locates the infc compiler
 /// 6. Compiles source to WASM via infc subprocess, forwarding those settings
 ///    alongside every `-L` the user passed
-/// 7. Executes WASM with wasmtime, invoking `--entry-point`
-/// 8. Propagates exit code from wasmtime
+/// 7. Refuses the artifact if it imports a function
+/// 8. Executes WASM with wasmtime, invoking `--entry-point`
+/// 9. Propagates exit code from wasmtime
 ///
 /// The enclosing manifest is honored here for the same reason `infs build
 /// <path>` honors it: one project must not emit modules at two different
@@ -230,7 +242,10 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 /// malformed manifest is reported without first probing the toolchain. The
 /// target read off it is ordered ahead of the wasmtime probe for a sharper
 /// reason: the refusal below applies to a build wasmtime could never invoke, so
-/// a user who lacks the runtime must not first be sent to install it.
+/// a user who lacks the runtime must not first be sent to install it. The
+/// import refusal cannot be ordered that way, because it reads the artifact, and
+/// deliberately stays behind the probe rather than pulling the probe behind the
+/// build — why is `refuse_an_artifact_that_imports_a_function`'s to say.
 ///
 /// ## Errors
 ///
@@ -238,13 +253,15 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 /// - The source file does not exist
 /// - the enclosing manifest names a target whose artifact wasmtime cannot invoke
 /// - wasmtime is not found in PATH
-/// - a `[wasm-dependencies]` key is not a well-formed logical module name, or a
-///   resolved dependency path is not valid UTF-8
+/// - a `[wasm-dependencies]` key is not a well-formed logical module name or its
+///   first segment is the reserved `host`, or a resolved dependency path is not
+///   valid UTF-8
 /// - infc compiler cannot be found
 /// - the enclosing manifest names a `target`, requests `wasm-features`, or
-///   declares a `[memory]` table the resolved `infc` cannot honor (which are
-///   also the only cases that run the ABI handshake here)
+///   declares a `[memory]` or `[host-imports]` table the resolved `infc` cannot
+///   honor (which are also the only cases that run the ABI handshake here)
 /// - Compilation fails
+/// - the artifact imports a function, which `run` leaves to an embedder
 /// - WASM execution fails
 fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
     if !path.exists() {
@@ -259,6 +276,7 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 
     let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
     let memory = manifest_memory(enclosing.as_ref().map(|(_, manifest)| manifest));
+    let host_imports = manifest_host_imports(enclosing.as_ref().map(|(_, manifest)| manifest));
     let deps = manifest_wasm_dependencies(enclosing.as_ref())?;
     let manifest_path = enclosing
         .as_ref()
@@ -276,10 +294,12 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
             target,
             features: &features,
             memory: &memory,
+            host_imports,
             manifest_path: manifest_path.as_deref(),
         },
     )?;
 
+    refuse_an_artifact_that_imports_a_function(&wasm_path, &wasm_path)?;
     run_wasmtime(&wasm_path, &args.entry_point, &args.args)
 }
 
@@ -300,7 +320,10 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 /// a user at its download page would cost them an install and leave them exactly
 /// where they were. wasmtime availability is then checked before any
 /// compilation, so an environment lacking the runtime fails fast without first
-/// spending a build, matching single-file mode.
+/// spending a build, matching single-file mode — and so, as there, ahead of the
+/// import refusal, which only a finished artifact can answer. Why that one
+/// refusal is left behind the probe is
+/// `refuse_an_artifact_that_imports_a_function`'s to say.
 ///
 /// ## Errors
 ///
@@ -312,6 +335,7 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 /// - The project build fails (missing entry point, ABI handshake,
 ///   external-module forwarding, infc error)
 /// - The build succeeds but `<root>/out/main.wasm` is absent
+/// - the artifact imports a function, which `run` leaves to an embedder
 /// - WASM execution fails
 fn execute_project(args: &RunArgs) -> Result<()> {
     if args.entry_point != DEFAULT_ENTRY_POINT {
@@ -364,6 +388,7 @@ fn execute_project(args: &RunArgs) -> Result<()> {
         );
     }
 
+    refuse_an_artifact_that_imports_a_function(&wasm_path, &Path::new("out").join("main.wasm"))?;
     run_wasmtime(&wasm_path, DEFAULT_ENTRY_POINT, &[])
 }
 
@@ -433,6 +458,97 @@ fn refuse_target_wasmtime_cannot_invoke(target: TargetName) -> Result<()> {
     )
 }
 
+/// Refuses an artifact that imports a function: a program with host imports runs
+/// under the embedder that supplies them, and `infs run` is not one.
+///
+/// This is a policy, not a runtime fact. `run` executes through the `wasmtime`
+/// CLI, which registers none of a program's host modules — an `env.clock_ms`
+/// import fails to instantiate there, in wasmtime's words, which name an unknown
+/// import and read as a broken build — but which does link WASI on its own, so
+/// an artifact whose only imports are WASI functions would instantiate. It is
+/// refused all the same. A host import is a promise a particular embedder
+/// keeps, and which of those promises wasmtime happens to keep is a property of
+/// the runtime `run` uses today rather than of the program; executing against a
+/// stand-in would make whether a program runs depend on which functions the
+/// stand-in provides. So `run` executes only artifacts that import no function,
+/// and says where the others do run.
+///
+/// Decided from the artifact, which is why it follows the build rather than
+/// preceding it as [`refuse_target_wasmtime_cannot_invoke`] does. Whether a
+/// program binds a host import is a property of its source, and a manifest
+/// cannot answer it: `[host-imports]` is an allowlist, not a declaration — a
+/// project may list functions it never binds, and bind them with no table at
+/// all. It is asked of the bytes that will run, too, which in project mode are
+/// the bytes `[build.wasm-opt]` left behind: the optimizer may remove an import
+/// nothing calls, and a program whose only host import is uncalled then runs
+/// where its unoptimized build would be refused.
+///
+/// Following the build also puts it behind the wasmtime probe, which both call
+/// sites run before they build, so a machine without wasmtime is told to install
+/// it before it can hear this refusal — the one install prompt the target
+/// refusal's ordering exists to avoid. The order is kept on purpose. The probe
+/// could only move behind the build, and there every run on such a machine, of
+/// any program, would spend a compile before learning the runtime is missing,
+/// to spare the programs that bind a host import one prompt.
+///
+/// The scan answers the verification-construct question first, so an artifact
+/// carrying one is refused here as well, in the words `[build.wasm-opt]` uses
+/// for the same find. It is a backstop, as the optimizer's is: A042 rejects a
+/// non-deterministic block outside a `spec` (and A006 an `@` outside such a
+/// block), and compile-mode builds strip `spec` blocks, so a well-formed build
+/// never reaches it — but an artifact that did would otherwise be handed to
+/// wasmtime to fail on an opcode it cannot decode.
+///
+/// `wasm_path` is the file read; `shown_as` is the conventional relative
+/// spelling the message names it by, as the other `run` messages do.
+///
+/// # Errors
+///
+/// Returns the refusal when the artifact imports any function, a refusal naming
+/// the construct when it carries a verification-only one, and an error when it
+/// cannot be read or parsed.
+fn refuse_an_artifact_that_imports_a_function(wasm_path: &Path, shown_as: &Path) -> Result<()> {
+    let wasm_bytes = std::fs::read(wasm_path)
+        .with_context(|| format!("Failed to read {} to check its imports", shown_as.display()))?;
+    let mut imports = match scan_artifact(&wasm_bytes, shown_as)? {
+        ArtifactScan::VerificationConstruct(construct) => bail!(
+            "`infs run` cannot execute this program: {} contains the verification-only \
+             construct `{construct}`, which wasmtime cannot decode. \
+             {VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS}; move the construct into a `spec` block.",
+            shown_as.display()
+        ),
+        ArtifactScan::Executable {
+            function_imports, ..
+        } => function_imports,
+    };
+    if imports.is_empty() {
+        return Ok(());
+    }
+    imports.sort();
+    imports.dedup();
+    let listed = imports
+        .iter()
+        .map(|(module, field)| format!("  {module}.{field}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let count = imports.len();
+    let (functions, these_functions, them) = if count == 1 {
+        ("function", "this function", "it")
+    } else {
+        ("functions", "these functions", "them")
+    };
+    bail!(
+        "`infs run` cannot execute this program: {} imports {count} {functions} that its \
+         embedder must supply.\n{listed}\n`infs run` supplies no host functions and does not \
+         stand in for an embedder, not even with the WASI functions the wasmtime CLI \
+         provides on its own, so it executes no artifact that imports a function. Run the \
+         program from your embedder, which supplies {these_functions}. See the book's \
+         External Functions and WASM Linking chapter (\"Running a program that binds host \
+         imports\") for how an embedder registers {them}.",
+        shown_as.display()
+    )
+}
+
 /// Checks if wasmtime is available in PATH.
 fn check_wasmtime_availability() -> Result<()> {
     if which::which("wasmtime").is_err() {
@@ -455,7 +571,10 @@ fn check_wasmtime_availability() -> Result<()> {
 /// executes must be built with. The wire order is
 ///
 /// ```text
-/// <source> --parse --codegen -o [--wasm-lib-dir <dir>]* [--wasm-dep <name>=<path>]* [--target <name>] [--wasm-features <list>]
+/// <source> --parse --codegen -o
+///     [--wasm-lib-dir <dir>]* [--wasm-dep <name>=<path>]*
+///     [--target <name>] [--wasm-features <list>]
+///     [--memory-pages <n>] [--stack-size <n>] [--host-imports=<list>]
 /// ```
 ///
 /// which is the relative order single-file `infs build` uses, so the two
@@ -472,10 +591,10 @@ fn check_wasmtime_availability() -> Result<()> {
 ///
 /// The compatibility handshake runs only when the manifest asks the compiler for
 /// something an older one could refuse: a non-default target, a feature request,
-/// or a `[memory]` table. Single-file `run` otherwise keeps its historical
-/// handshake-free behavior: the probe exists to refuse an unhonorable request,
-/// and paying for it on every run would add ABI warnings to invocations that ask
-/// nothing of the compiler.
+/// a `[memory]` table, or a `[host-imports]` table. Single-file `run` otherwise
+/// keeps its historical handshake-free behavior: the probe exists to refuse an
+/// unhonorable request, and paying for it on every run would add ABI warnings to
+/// invocations that ask nothing of the compiler.
 /// Neither `--wasm-lib-dir` nor `--wasm-dep` is gated: both arrived with
 /// external-module support itself rather than at a distinguishable ABI minor, so
 /// there is no capability to probe. An `infc` too old to accept them is therefore
@@ -500,6 +619,7 @@ fn compile_to_wasm(
         target,
         features,
         memory,
+        host_imports,
         manifest_path,
     } = *settings;
 
@@ -523,12 +643,20 @@ fn compile_to_wasm(
     // it a project naming a target but declaring neither a feature nor a
     // `[memory]` table would skip the whole block, and the target would be
     // dropped silently — producing an artifact for the default runtime under a
-    // manifest that named another.
-    if !features.is_empty() || !memory.is_default() || target != TargetName::DEFAULT {
+    // manifest that named another. A `[host-imports]` table is one thing more,
+    // tested for presence rather than content: a content test would skip this
+    // block for the declared-empty table, the strictest policy there is, and
+    // the build would run under no policy at all.
+    if !features.is_empty()
+        || !memory.is_default()
+        || target != TargetName::DEFAULT
+        || host_imports.is_some()
+    {
         let compat = probe_compiler_compatibility(infc_path, infc_source)?;
         forward_target(&mut cmd, compat, target, manifest_path)?;
         forward_wasm_features(&mut cmd, compat, features, manifest_path)?;
         forward_memory_layout(&mut cmd, compat, memory, manifest_path)?;
+        forward_host_imports(&mut cmd, compat, host_imports, manifest_path)?;
     }
 
     let status = cmd
@@ -734,6 +862,8 @@ mod cli_surface_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{module_with_imports, module_with_raw_body};
+    use wasm_encoder::{EntityType, MemoryType};
 
     /// The project WASM path is `<root>/out/main.wasm`, assembled with path
     /// joins so the components are platform-correct (never a literal `/`).
@@ -831,11 +961,119 @@ mod tests {
             );
         }
     }
+
+    /// Writes `module` to a fresh file and asks the import refusal about it,
+    /// naming it `out/main.wasm` the way project mode names its artifact.
+    fn import_refusal_of(module: &[u8]) -> Result<()> {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        std::fs::write(&wasm, module).unwrap();
+        refuse_an_artifact_that_imports_a_function(&wasm, &Path::new("out").join("main.wasm"))
+    }
+
+    /// An artifact that imports no function is what `run` executes: one with no
+    /// imports at all, and one whose only import is a memory, which any host can
+    /// allocate.
+    #[test]
+    fn an_artifact_importing_no_function_is_let_through() {
+        let memory_only = module_with_imports(&[(
+            "env",
+            "memory",
+            EntityType::Memory(MemoryType {
+                minimum: 1,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            }),
+        )]);
+        for module in [module_with_raw_body(&[0x0b]), memory_only] {
+            import_refusal_of(&module).expect("an artifact importing no function is executable");
+        }
+    }
+
+    /// The refusal lists each imported function once, sorted, and is stated as
+    /// a policy rather than as a runtime failure — WASI imports included, which
+    /// the wasmtime CLI would satisfy itself, so a sentence claiming the imports
+    /// cannot be satisfied would be false of them.
+    ///
+    /// Unit-tested because the end-to-end rows need both `infc` and wasmtime,
+    /// and a machine without the runtime would otherwise pin none of this text.
+    /// The WASI import is listed twice and out of order, so a refusal that kept
+    /// import-section order, or counted a repeated pair twice, reads differently.
+    #[test]
+    fn the_import_refusal_lists_every_function_and_states_a_policy() {
+        let function = EntityType::Function(0);
+        let proc_exit = ("wasi_snapshot_preview1", "proc_exit", function);
+        let clock_ms = ("env", "clock_ms", function);
+        let module = module_with_imports(&[proc_exit, clock_ms, proc_exit]);
+        let msg = import_refusal_of(&module)
+            .expect_err("an artifact importing a function is refused")
+            .to_string();
+        assert_eq!(
+            msg,
+            format!(
+                "`infs run` cannot execute this program: {} imports 2 functions that its \
+                 embedder must supply.\n  env.clock_ms\n  wasi_snapshot_preview1.proc_exit\n\
+                 `infs run` supplies no host functions and does not stand in for an embedder, \
+                 not even with the WASI functions the wasmtime CLI provides on its own, so it \
+                 executes no artifact that imports a function. Run the program from your \
+                 embedder, which supplies these functions. See the book's External Functions \
+                 and WASM Linking chapter (\"Running a program that binds host imports\") for \
+                 how an embedder registers them.",
+                Path::new("out").join("main.wasm").display()
+            )
+        );
+
+        let msg = import_refusal_of(&module_with_imports(&[proc_exit]))
+            .expect_err("a WASI import is refused like any other")
+            .to_string();
+        for fragment in [
+            "imports 1 function that its embedder must supply.\n  \
+             wasi_snapshot_preview1.proc_exit\n",
+            "which supplies this function.",
+            "for how an embedder registers it.",
+        ] {
+            assert!(
+                msg.contains(fragment),
+                "one import is named in the singular, carrying `{fragment}`, got: {msg}"
+            );
+        }
+        assert!(
+            !msg.contains("instantiation fails") && !msg.contains("unsatisfied"),
+            "wasmtime would instantiate a WASI import, so the refusal must not say it \
+             cannot, got: {msg}"
+        );
+    }
+
+    /// A verification construct in the artifact is refused before wasmtime sees
+    /// it, naming the construct, in the clause `[build.wasm-opt]` refuses the
+    /// same find with. A backstop — the analyzer keeps such constructs out of a
+    /// compile-mode build — so no end-to-end route reaches it.
+    #[test]
+    fn the_import_refusal_refuses_a_leaked_verification_construct() {
+        let uzumaki = module_with_raw_body(&[0x00, 0xfc, 0x31, 0x1a, 0x0b]);
+        let msg = import_refusal_of(&uzumaki)
+            .expect_err("a leaked construct is refused")
+            .to_string();
+        assert_eq!(
+            msg,
+            format!(
+                "`infs run` cannot execute this program: {} contains the verification-only \
+                 construct `i32.uzumaki`, which wasmtime cannot decode. Verification \
+                 constructs (forall/exists/assume/unique and `@`/uzumaki) belong in `spec` \
+                 blocks, which compile-mode builds strip; move the construct into a `spec` \
+                 block.",
+                Path::new("out").join("main.wasm").display()
+            )
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
 mod forwarding_tests {
     use super::*;
+    use crate::project::manifest::HostImports;
     use assert_fs::prelude::*;
     use std::os::unix::fs::PermissionsExt;
 
@@ -866,11 +1104,12 @@ mod forwarding_tests {
     }
 
     /// Runs the single-file compile step for a project whose only manifest
-    /// setting is `target`, and returns the argv the compiler was handed.
+    /// settings are `target` and `host_imports`, and returns the argv the
+    /// compiler was handed.
     ///
     /// The stub cannot compile, so the call returns the missing-artifact error;
     /// the log is written before that and is what the assertion reads.
-    fn compile_argv(target: TargetName) -> Vec<String> {
+    fn compile_argv(target: TargetName, host_imports: Option<&HostImports>) -> Vec<String> {
         let temp = assert_fs::TempDir::new().unwrap();
         let log = temp.child("argv.log");
         let stub = write_stub(&temp, log.path());
@@ -886,6 +1125,7 @@ mod forwarding_tests {
                 target,
                 features: &[],
                 memory: &memory,
+                host_imports,
                 manifest_path: None,
             },
         );
@@ -930,7 +1170,7 @@ mod forwarding_tests {
         );
 
         for target in forwarded {
-            let argv = compile_argv(target);
+            let argv = compile_argv(target, None);
             let position = argv
                 .iter()
                 .position(|entry| entry == "--target")
@@ -953,10 +1193,46 @@ mod forwarding_tests {
     /// target having been read, not about a flag that is always present.
     #[test]
     fn the_default_target_is_not_forwarded() {
-        let argv = compile_argv(TargetName::DEFAULT);
+        let argv = compile_argv(TargetName::DEFAULT, None);
         assert!(
             !argv.iter().any(|entry| entry == "--target"),
             "the default target must not be forwarded, got argv: {argv:?}"
         );
+        assert!(
+            !argv.iter().any(|entry| entry.starts_with("--host-imports")),
+            "no table is no policy, and forwards no flag, got argv: {argv:?}"
+        );
+    }
+
+    /// The fourth disjunct of the handshake condition, pinned the way the third
+    /// is: a project whose only setting is a `[host-imports]` table must still
+    /// have its policy forwarded.
+    ///
+    /// The declared-empty table is the row that matters most. It forbids every
+    /// host import, and a condition that tested the table's *content* rather than
+    /// its presence would skip the block for exactly that table — silently
+    /// turning the strictest policy into none.
+    #[test]
+    fn a_host_imports_table_is_forwarded_with_nothing_else_declared() {
+        let mut listed = HostImports::default();
+        listed
+            .modules
+            .insert("env".to_string(), vec!["clock_ms".to_string()]);
+
+        for (table, expected) in [
+            (HostImports::default(), "--host-imports="),
+            (listed, "--host-imports=env.clock_ms"),
+        ] {
+            let argv = compile_argv(TargetName::DEFAULT, Some(&table));
+            let forwarded: Vec<&String> = argv
+                .iter()
+                .filter(|entry| entry.starts_with("--host-imports"))
+                .collect();
+            assert_eq!(
+                forwarded,
+                [expected],
+                "the policy must be forwarded as one token, got argv: {argv:?}"
+            );
+        }
     }
 }

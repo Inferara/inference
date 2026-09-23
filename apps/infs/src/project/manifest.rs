@@ -21,6 +21,11 @@
 //! # The logical name is what source refers to via `use { f } from <name>;`.
 //! arith = { path = "libs/arith.wasm" }
 //!
+//! [host-imports]          # optional: the host functions the program may bind
+//! # Import module -> the fields of it admitted; `use { f } from host::env;`
+//! # binds `env.f`. A header with no keys admits no host function at all.
+//! env = ["clock_ms"]
+//!
 //! [build]
 //! target = "wasm32"
 //! optimize = "release"
@@ -45,9 +50,13 @@
 //!
 //! Every table whose keys are a fixed schema rejects keys it does not know, so a
 //! typo is a build error instead of a setting that silently does nothing. The
-//! `toml` parser names the offending key and the fields it expected. Only
-//! `[dependencies]` and `[wasm-dependencies]` accept arbitrary keys, because
-//! there the keys *are* the data — they name dependencies.
+//! `toml` parser names the offending key and the fields it expected. Three
+//! tables accept arbitrary keys, because there the keys *are* the data:
+//! `[dependencies]`, whose keys name packages; `[wasm-dependencies]`, whose keys
+//! are the logical module names a `use … from <module>;` clause resolves; and
+//! `[host-imports]`, whose keys are the import module strings an embedder
+//! registers host functions under. Free is not unchecked: the latter two still
+//! hold every key to the grammar a key of theirs can take.
 //!
 //! The trade-off is deliberate: an older `infs` reading a manifest that uses a
 //! newer key fails rather than ignoring it. That matches how the compiler ABI
@@ -61,11 +70,13 @@
 
 use anyhow::{Context, Result, bail};
 use inference_compiler_interface::{
-    MemoryLayout, MemoryLayoutSource, TargetName, TargetSource, WasmFeatureName, WasmFeatureSource,
-    resolve_target, resolve_wasm_features,
+    HOST_SEGMENT, MemoryLayout, MemoryLayoutSource, TargetName, TargetSource, WasmFeatureName,
+    WasmFeatureSource, resolve_target, resolve_wasm_features,
 };
+use serde::de::{DeserializeSeed, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -136,6 +147,42 @@ pub struct InferenceToml {
         skip_serializing_if = "WasmDependencies::is_empty"
     )]
     pub wasm_dependencies: WasmDependencies,
+
+    /// The `[host-imports]` allowlist: the host functions the project's `use …
+    /// from host::<module>;` clauses may bind.
+    ///
+    /// The only table here held as an `Option`, because it is the only one whose
+    /// presence is a setting no content can restate. Absent is *no policy*: every
+    /// host import the program declares is admitted, as it was before the table
+    /// existed. Present and empty — a bare `[host-imports]` header — is a declared
+    /// allowlist that admits nothing, which is how a project says it binds no host
+    /// function at all. Collapsing the two into one default would turn the
+    /// strictest policy a project can write into the most permissive one, silently,
+    /// on the next write-back — and an empty table is exactly the shape a TOML
+    /// serializer is tempted to drop — so both must survive a
+    /// [`Self::to_toml`] / [`Self::from_toml`] round trip, which a test pins.
+    ///
+    /// Every module's array names at least one field, so the table's key set is
+    /// exactly the module set of the `--host-imports` flag it is forwarded as.
+    /// That invariant is why an empty array is refused on load rather than read
+    /// as "nothing from this module": the flag has no spelling for a module with
+    /// no admitted field, so `env = []` would forward no `env` pair, and `infc` —
+    /// whose refusal asks for a new `env` key or for a name added to the
+    /// existing entry according to whether its flag carries any `env` pair —
+    /// would tell this manifest's reader to add a second `env` key, a TOML
+    /// duplicate-key error.
+    ///
+    /// Each field is a plain string today. An entry may later become an untagged
+    /// `String | { name = …, … }`, so a producer has somewhere to attach a
+    /// contract-spec name, or a name mapping for an import string that is not an
+    /// identifier; an `infs` that predates the table form refuses such an entry
+    /// loudly rather than misreading it.
+    #[serde(
+        rename = "host-imports",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub host_imports: Option<HostImports>,
 
     /// Build configuration.
     #[serde(default, skip_serializing_if = "BuildConfig::is_default")]
@@ -230,10 +277,25 @@ impl WasmDependencies {
 /// containing `=` — keeps the `infs build` → `infc --wasm-dep <name>=<path>`
 /// forwarding unambiguous, since the receiver splits on the first `=`.
 ///
+/// A well-formed key whose first segment is `host` is refused too. That segment
+/// names the embedder in a `use … from` clause, so no linked module can be named
+/// under it, and `infc` refuses the `--wasm-dep` such a key would be forwarded
+/// as. Refusing it here states the same rule in this manifest's terms, before a
+/// compiler is asked to build, and adds the remedy only a project has: the
+/// function belongs under `[host-imports]` if the project keeps an allowlist.
+/// The rest of the wording follows `infc`'s refusal, shortened, and ends on its
+/// closing clause verbatim — a module path whose first segment is `host` is
+/// reserved in this position and no longer resolves to a file — because this
+/// refusal is now the one that reaches the reader the clause is for: an author
+/// whose project built before the reservation existed, who owes a migration
+/// rather than having broken a rule.
+/// The match is on the first segment and is exact, as `infc`'s is — `hostlib`,
+/// `Host` and `a::host` are ordinary module names.
+///
 /// # Errors
 ///
 /// Returns an error naming the offending key when it is not a well-formed
-/// logical name.
+/// logical name, or when its first segment is reserved for host imports.
 pub fn validate_wasm_dependency_key(key: &str) -> Result<()> {
     if key.is_empty() {
         bail!("invalid [wasm-dependencies] key: the module name is empty");
@@ -250,6 +312,19 @@ pub fn validate_wasm_dependency_key(key: &str) -> Result<()> {
                  module-name segment (expected `::`-joined ASCII identifiers)"
             );
         }
+    }
+    if segments[0] == HOST_SEGMENT {
+        bail!(
+            "invalid [wasm-dependencies] key `{key}`: `{HOST_SEGMENT}` is reserved as the \
+             first segment of a `use … from` clause for imports the embedder supplies, so \
+             no linked module can be named under it. If this entry was written for a host \
+             import, delete it — a `use … from {HOST_SEGMENT}::<module>;` clause needs no \
+             dependency entry — and list the function under `[host-imports]` if the \
+             project keeps an allowlist. Rename the module — and the `use … from` clause \
+             that binds it — to a name outside `{HOST_SEGMENT}` only if you meant a linked \
+             `.wasm` module named `{key}`: a module path whose first segment is \
+             `{HOST_SEGMENT}` is reserved in this position and no longer resolves to a file."
+        );
     }
     Ok(())
 }
@@ -283,6 +358,241 @@ fn is_logical_name_segment(segment: &str) -> bool {
 pub struct WasmDependency {
     /// Filesystem path to the compiled `.wasm` module, relative to the manifest.
     pub path: String,
+}
+
+/// The `[host-imports]` table: the host functions a project admits, as one array
+/// of field names per import module.
+///
+/// ```toml
+/// [host-imports]
+/// fprime_core = ["telemetry", "command"]
+/// env = ["clock_ms"]
+/// ```
+///
+/// A key is the WebAssembly import module string an embedder registers — the one
+/// segment after `host::` in the `use … from host::<module>;` clause that binds
+/// the import — and its value names the fields of that module the program may
+/// bind. The keys are the data, as they are in `[wasm-dependencies]`, so the table
+/// has no fixed schema.
+///
+/// A `BTreeMap` rather than the `HashMap` the other data-keyed tables hold, so a
+/// manifest written back by [`InferenceToml::to_toml`] lists its modules in one
+/// order whatever the hash seed. The order the allowlist is forwarded in does not
+/// rest on that: [`Self::admitted_pairs`] sorts its pairs itself.
+///
+/// Deserialized by hand, and serialized as the bare map it holds. The derived
+/// `#[serde(flatten)]` form the other data-keyed tables use buffers the table
+/// before reading it, which drops every value's position: measured, an
+/// `env = "clock_ms"` written where an array belongs was reported against the
+/// `[host-imports]` header with no key named anywhere in the diagnosis. Read as
+/// a map, each value keeps its span, and the seed that reads it puts its key
+/// into the diagnosis, so a value of the wrong shape is named however it is
+/// laid out.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct HostImports {
+    /// Map of import module string to the host function names admitted under it.
+    pub modules: BTreeMap<String, Vec<String>>,
+}
+
+impl<'de> Deserialize<'de> for HostImports {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(HostImportsVisitor)
+    }
+}
+
+/// Reads `[host-imports]` as a map, one module at a time, so each value is read
+/// by a [`FieldNames`] seed that knows its key.
+struct HostImportsVisitor;
+
+impl<'de> Visitor<'de> for HostImportsVisitor {
+    type Value = HostImports;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a table mapping import module names to arrays of host function names")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<HostImports, A::Error> {
+        let mut modules = BTreeMap::new();
+        while let Some(module) = map.next_key::<String>()? {
+            let fields = map.next_value_seed(FieldNames { module: &module })?;
+            modules.insert(module, fields);
+        }
+        Ok(HostImports { modules })
+    }
+}
+
+/// One `[host-imports]` value, read as the field names admitted under `module`.
+/// The key is carried only so a value of the wrong shape is refused by name.
+struct FieldNames<'a> {
+    module: &'a str,
+}
+
+impl<'de> DeserializeSeed<'de> for FieldNames<'_> {
+    type Value = Vec<String>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Vec<String>, D::Error> {
+        let module = self.module;
+        Vec::<String>::deserialize(deserializer).map_err(|err| {
+            serde::de::Error::custom(format!(
+                "invalid [host-imports] entry `{module}`: the value must be an array of \
+                 strings, one per host function admitted under `{module}` ({})",
+                err.to_string().trim_end()
+            ))
+        })
+    }
+}
+
+impl HostImports {
+    /// Every admitted `(module, field)` pair, sorted by module and then field.
+    ///
+    /// Sorted here rather than read in the map's order, so the order a build
+    /// forwards and echoes is a property of the policy and not of the manifest
+    /// that spelled it: two manifests listing the same functions in different
+    /// orders hand `infc` one flag and put one line in a build log.
+    #[must_use]
+    pub fn admitted_pairs(&self) -> Vec<(&str, &str)> {
+        let mut pairs: Vec<(&str, &str)> = self
+            .modules
+            .iter()
+            .flat_map(|(module, fields)| {
+                fields
+                    .iter()
+                    .map(move |field| (module.as_str(), field.as_str()))
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    /// Refuses a table that cannot be forwarded as the policy it spells.
+    ///
+    /// Runs on load, from [`InferenceToml::from_toml`], where a
+    /// `[wasm-dependencies]` key is checked only on the paths that forward it. The
+    /// divergence is about what a malformed entry is. A dependency key that cannot
+    /// be forwarded fails the build that needed it; a malformed allowlist is a
+    /// defect in a security policy, and a manifest carrying one must fail every
+    /// command that loads it, not only the ones that happen to forward it.
+    ///
+    /// Checked module by module in key order, and within a module in the order
+    /// written: the key is one identifier segment, the array names at least one
+    /// field (the invariant [`InferenceToml::host_imports`] documents), each field
+    /// is an identifier, and no field is listed twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns a refusal naming the offending key, and the offending field where
+    /// there is one.
+    fn validate(&self) -> Result<()> {
+        for (module, fields) in &self.modules {
+            validate_host_import_module(module)?;
+            if fields.is_empty() {
+                bail!(
+                    "invalid [host-imports] entry `{module} = []`: an empty array admits no \
+                     host function under `{module}`, which is almost certainly a mistake. \
+                     Delete the key, or list the fields. A project that binds no host \
+                     function at all says so with the table alone: a `[host-imports]` \
+                     header with no keys under it."
+                );
+            }
+            let mut listed = BTreeSet::new();
+            for field in fields {
+                if !is_logical_name_segment(field) {
+                    let correction = field_without_its_module(module, field)
+                        .map_or_else(String::new, |bare| {
+                            format!(" Write `\"{bare}\"`: the module is already the key.")
+                        });
+                    bail!(
+                        "invalid [host-imports] entry `{module}`: `{field:?}` is not a host \
+                         function name. A field is a name the `use {{ … }} from \
+                         {HOST_SEGMENT}::{module};` clause binds, so it is an ASCII \
+                         identifier — a letter or `_`, then letters, digits or \
+                         `_`.{correction}"
+                    );
+                }
+                if !listed.insert(field.as_str()) {
+                    bail!(
+                        "invalid [host-imports] entry `{module}`: `{field:?}` is listed \
+                         twice; list each host function once."
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The bare field name in `field` when it is a whole pair spelled under `module`,
+/// the entry's own key, or `None` when it is anything else.
+///
+/// Every surface near the table spells a pair with its module attached: the
+/// echo, the `host imports:` inventory line and the `--host-imports` token as
+/// `env.clock_ms`, the clause as `host::env` and `clock_ms` together. Copying one
+/// of those into the array is the likeliest way to write a field that is not an
+/// identifier, and the one whose repair can be read off the entry — the part
+/// after the key. Both separators are accepted, and a leading `host::` too, but
+/// only under the entry's own key: a pair naming another module may belong under
+/// another key, and naming a spelling for it would be a guess.
+fn field_without_its_module<'a>(module: &str, field: &'a str) -> Option<&'a str> {
+    let after_module = |spelled: &'a str| {
+        let rest = spelled.strip_prefix(module)?;
+        let bare = rest.strip_prefix('.').or_else(|| rest.strip_prefix("::"))?;
+        is_logical_name_segment(bare).then_some(bare)
+    };
+    after_module(field).or_else(|| {
+        field
+            .strip_prefix(HOST_SEGMENT)
+            .and_then(|rest| rest.strip_prefix("::"))
+            .and_then(after_module)
+    })
+}
+
+/// Refuses a `[host-imports]` key that is not one import module name.
+///
+/// A key containing `::` gets a sentence of its own, because it is the
+/// transcription mistake the clause invites: `use { clock_ms } from host::env;`
+/// reads as a path, and both `host::env` and `env::v2` look like keys a path
+/// could have. The one right spelling is named where it can be read out of the
+/// key — a leading `host::` stripped from a single segment — and otherwise the
+/// clause-to-key mapping is shown by example rather than guessed.
+fn validate_host_import_module(module: &str) -> Result<()> {
+    if module.is_empty() {
+        bail!("invalid [host-imports] key: the module name is empty");
+    }
+    if module.contains("::") {
+        let unprefixed = module
+            .strip_prefix(HOST_SEGMENT)
+            .and_then(|rest| rest.strip_prefix("::"))
+            .filter(|rest| is_logical_name_segment(rest));
+        let correction = unprefixed.map_or_else(
+            || {
+                format!(
+                    "For example, the module of `use {{ clock_ms }} from {HOST_SEGMENT}::env;` \
+                     is listed as `env`."
+                )
+            },
+            |rest| format!("Write `{rest}`."),
+        );
+        bail!(
+            "invalid [host-imports] key `{module}`: a key is the WebAssembly import module \
+             string an embedder registers, and that string is flat — one segment, the one \
+             after `{HOST_SEGMENT}::` in the `use … from {HOST_SEGMENT}::<module>;` clause — \
+             so it never contains `::`, and the `{HOST_SEGMENT}::` prefix of the clause names \
+             the provider and is not part of it. {correction}"
+        );
+    }
+    if !is_logical_name_segment(module) {
+        bail!(
+            "invalid [host-imports] key `{module}`: a key is the one segment after \
+             `{HOST_SEGMENT}::` in the `use … from {HOST_SEGMENT}::<module>;` clause that \
+             binds the import, so it is an ASCII identifier — a letter or `_`, then letters, \
+             digits or `_`."
+        );
+    }
+    Ok(())
 }
 
 /// Build configuration section.
@@ -909,6 +1219,7 @@ impl InferenceToml {
             },
             dependencies: Dependencies::default(),
             wasm_dependencies: WasmDependencies::default(),
+            host_imports: None,
             build: BuildConfig::default(),
             memory: MemoryConfig::default(),
             verification: VerificationConfig::default(),
@@ -944,7 +1255,7 @@ impl InferenceToml {
     /// # Errors
     ///
     /// Returns an error if any `[wasm-dependencies]` key is not a well-formed
-    /// logical module name.
+    /// logical module name, or its first segment is the reserved `host`.
     pub fn resolved_wasm_dependencies(
         &self,
         base_dir: &Path,
@@ -983,20 +1294,26 @@ impl InferenceToml {
     ///
     /// Missing optional sections (`[dependencies]`, `[build]`, `[memory]`,
     /// `[verification]`) are filled in with their defaults; absent fields
-    /// within present sections likewise default. Only `[package]` (with at
-    /// least `name` and `version`) is required. A key no fixed-schema table
-    /// knows is rejected during structural parsing. After that, the `[build]`
-    /// and `[memory]` values are validated against their allowed sets.
+    /// within present sections likewise default. `[host-imports]` is the one
+    /// exception, and stays absent: see [`Self::host_imports`]. Only `[package]`
+    /// (with at least `name` and `version`) is required. A key no fixed-schema
+    /// table knows is rejected during structural parsing. After that, the
+    /// `[build]` and `[memory]` values are validated against their allowed sets,
+    /// and a `[host-imports]` table against the rules its forwarding needs.
     ///
     /// # Errors
     ///
     /// Returns an error if the input is not valid TOML, does not match the
     /// manifest schema (`[package]` is missing, or a table carries an unknown
-    /// key), or carries an invalid `[build]` or `[memory]` value.
+    /// key), or carries an invalid `[build]`, `[memory]` or `[host-imports]`
+    /// value.
     pub fn from_toml(s: &str) -> Result<Self> {
         let manifest: Self = toml::from_str(s).context("Failed to parse Inference.toml")?;
         manifest.build.validate()?;
         manifest.memory.validate()?;
+        if let Some(host_imports) = &manifest.host_imports {
+            host_imports.validate()?;
+        }
         Ok(manifest)
     }
 
@@ -3084,5 +3401,383 @@ target = "wasm32"
                    \"crypto::sha256\" = { path = \"b.wasm\" }\n";
         let manifest = InferenceToml::from_toml(src).expect("arbitrary module names must parse");
         assert_eq!(manifest.wasm_dependencies.modules.len(), 2);
+    }
+
+    // `[host-imports]` ---
+
+    fn manifest_with_host_imports(body: &str) -> String {
+        format!(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n\n\
+             [host-imports]\n{body}"
+        )
+    }
+
+    /// A manifest with no `[host-imports]` table holds no policy, and writing it
+    /// back must not invent one — not even an empty table, which would be the
+    /// strictest policy there is.
+    #[test]
+    fn an_absent_host_imports_table_stays_absent_through_a_round_trip() {
+        let manifest = InferenceToml::new("demo");
+        assert_eq!(manifest.host_imports, None, "a new project holds no policy");
+
+        let serialized = manifest.to_toml().expect("serializes");
+        assert!(
+            !serialized.contains("host-imports"),
+            "no policy must write no table:\n{serialized}"
+        );
+        let reparsed = InferenceToml::from_toml(&serialized).expect("round-trips");
+        assert_eq!(reparsed.host_imports, None);
+    }
+
+    /// A declared-empty table is the policy that admits nothing, and it must
+    /// survive a write-back rather than collapsing into no policy.
+    ///
+    /// This is the measurement the field exists for: a serializer that drops an
+    /// empty table would turn "forbid every host import" into "allow every host
+    /// import" on the first `to_toml`, with nothing in the manifest to show it.
+    /// The header is asserted as its own line, not merely as a substring, so an
+    /// inline `host-imports = {}` rendering — which would also reparse — is told
+    /// apart from the header form a reader of the manifest expects.
+    #[test]
+    fn a_declared_empty_host_imports_table_survives_a_round_trip() {
+        let parsed = InferenceToml::from_toml(&manifest_with_host_imports(""))
+            .expect("a bare `[host-imports]` header is a valid policy");
+        assert_eq!(
+            parsed.host_imports,
+            Some(HostImports::default()),
+            "a bare header is a declared, empty allowlist, not an absent one"
+        );
+
+        let serialized = parsed.to_toml().expect("serializes");
+        assert!(
+            serialized.lines().any(|line| line == "[host-imports]"),
+            "the empty table's header must be written back:\n{serialized}"
+        );
+        let reparsed = InferenceToml::from_toml(&serialized).expect("round-trips");
+        assert_eq!(
+            reparsed.host_imports,
+            Some(HostImports::default()),
+            "the empty policy must survive the round trip:\n{serialized}"
+        );
+    }
+
+    /// A populated table round-trips to an equal manifest whatever order the
+    /// modules were written in, and keeps its keys in `[host-imports]` rather than
+    /// reparenting them into a sub-table written before it.
+    ///
+    /// `[wasm-dependencies]` is the table serialized ahead of `[host-imports]`,
+    /// and a dependency is written as a sub-table of it, so the fixture declares
+    /// one. The header order is asserted before the round trip, because the
+    /// reparenting half means nothing unless that sub-table really is written
+    /// first.
+    #[test]
+    fn a_populated_host_imports_table_round_trips() {
+        let mut manifest = InferenceToml::from_toml(&manifest_with_host_imports(
+            "fprime_core = [\"telemetry\", \"command\"]\nenv = [\"clock_ms\"]\n",
+        ))
+        .expect("parses");
+        manifest.wasm_dependencies.modules.insert(
+            "arith".to_string(),
+            WasmDependency {
+                path: "libs/arith.wasm".to_string(),
+            },
+        );
+
+        let serialized = manifest.to_toml().expect("serializes");
+        let dependency_at = serialized
+            .find("[wasm-dependencies.arith]")
+            .expect("the dependency must be written as a sub-table header");
+        let host_imports_at = serialized
+            .find("[host-imports]")
+            .expect("the host-imports table must be emitted");
+        assert!(
+            dependency_at < host_imports_at,
+            "this test is only meaningful with [host-imports] written after the sub-table:\n\
+             {serialized}"
+        );
+        let reparsed = InferenceToml::from_toml(&serialized).expect("round-trips");
+        assert_eq!(
+            reparsed, manifest,
+            "the round trip must be lossless:\n{serialized}"
+        );
+
+        let reordered = InferenceToml::from_toml(&manifest_with_host_imports(
+            "env = [\"clock_ms\"]\nfprime_core = [\"telemetry\", \"command\"]\n",
+        ))
+        .expect("parses");
+        assert_eq!(
+            reordered.host_imports, manifest.host_imports,
+            "the order modules are written in is not part of the policy"
+        );
+    }
+
+    /// The pairs come out sorted by module and then by field, whatever order the
+    /// manifest listed them in — the order every forward and echo is spelled in.
+    #[test]
+    fn admitted_pairs_are_sorted_by_module_then_field() {
+        let manifest = InferenceToml::from_toml(&manifest_with_host_imports(
+            "fprime_core = [\"telemetry\", \"command\"]\nenv = [\"sleep_ms\", \"clock_ms\"]\n",
+        ))
+        .expect("parses");
+        let host_imports = manifest.host_imports.expect("the table is declared");
+        assert_eq!(
+            host_imports.admitted_pairs(),
+            [
+                ("env", "clock_ms"),
+                ("env", "sleep_ms"),
+                ("fprime_core", "command"),
+                ("fprime_core", "telemetry"),
+            ]
+        );
+        assert!(
+            HostImports::default().admitted_pairs().is_empty(),
+            "the empty policy admits no pair"
+        );
+    }
+
+    /// The keys of `[host-imports]` are the data — any import module name is a
+    /// key — while a misspelling of the table's own name at the root is still an
+    /// unknown field naming the spelling that exists.
+    #[test]
+    fn host_imports_keys_are_the_data_but_the_table_name_is_not() {
+        let manifest = InferenceToml::from_toml(&manifest_with_host_imports(
+            "anything_at_all = [\"f\"]\n_x9 = [\"g\"]\nhost = [\"h\"]\n",
+        ))
+        .expect("any identifier is an import module name, `host` included");
+        assert_eq!(
+            manifest.host_imports.expect("declared").modules.len(),
+            3,
+            "every key is a module"
+        );
+
+        for typo in ["host_imports", "host-import", "hostimports"] {
+            let msg = rejection_of(&format!(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n\
+                 [{typo}]\nenv = [\"clock_ms\"]\n"
+            ));
+            assert!(
+                msg.contains("unknown field") && msg.contains(&format!("`{typo}`")),
+                "a misspelled root table is an unknown field naming it, got: {msg}"
+            );
+            assert!(
+                msg.contains("`host-imports`"),
+                "the error must list the spelling that exists, got: {msg}"
+            );
+        }
+    }
+
+    /// A key written as a path is refused with the reason — an import module
+    /// string is flat — and with the one right spelling wherever the key holds
+    /// it, so `host::env` is told `env`, while `env::v2`, which holds no single
+    /// right answer, is shown the clause-to-key mapping by example.
+    #[test]
+    fn a_path_shaped_host_imports_key_is_refused_as_flat() {
+        let msg = rejection_of(&manifest_with_host_imports(
+            "\"host::env\" = [\"clock_ms\"]\n",
+        ));
+        for fragment in [
+            "invalid [host-imports] key `host::env`",
+            "that string is flat — one segment",
+            "so it never contains `::`, and the `host::` prefix of the clause names the \
+             provider and is not part of it.",
+            "Write `env`.",
+        ] {
+            assert!(
+                msg.contains(fragment),
+                "must carry `{fragment}`, got: {msg}"
+            );
+        }
+
+        let msg = rejection_of(&manifest_with_host_imports("\"host::host\" = [\"h\"]\n"));
+        assert!(
+            msg.contains("invalid [host-imports] key `host::host`")
+                && msg.contains("Write `host`."),
+            "`host` is a legal import module, so `host::host` is told to write it, got: {msg}"
+        );
+
+        let msg = rejection_of(&manifest_with_host_imports(
+            "\"env::v2\" = [\"clock_ms\"]\n",
+        ));
+        for fragment in [
+            "invalid [host-imports] key `env::v2`",
+            "that string is flat — one segment",
+            "is listed as `env`.",
+        ] {
+            assert!(
+                msg.contains(fragment),
+                "must carry `{fragment}`, got: {msg}"
+            );
+        }
+        assert!(
+            !msg.contains("Write `"),
+            "a key holding two names gets no guessed correction, got: {msg}"
+        );
+    }
+
+    /// A key that is not an identifier, and an empty key, are refused naming the
+    /// key.
+    #[test]
+    fn a_host_imports_key_that_is_not_an_identifier_is_refused() {
+        for key in ["9x", "a-b", "a.b"] {
+            let msg = rejection_of(&manifest_with_host_imports(&format!(
+                "\"{key}\" = [\"clock_ms\"]\n"
+            )));
+            assert!(
+                msg.contains(&format!("invalid [host-imports] key `{key}`"))
+                    && msg.contains("ASCII identifier"),
+                "`{key}` must be refused as a non-identifier key, got: {msg}"
+            );
+        }
+        let msg = rejection_of(&manifest_with_host_imports("\"\" = [\"clock_ms\"]\n"));
+        assert!(
+            msg.contains("invalid [host-imports] key: the module name is empty"),
+            "an empty key must be refused as empty, got: {msg}"
+        );
+    }
+
+    /// A value that is not an array of strings is refused naming its key, in the
+    /// diagnosis itself rather than only in the echoed source line — which, for
+    /// an array spread over several lines, need not carry the key at all.
+    ///
+    /// The inline-table row is the future entry shape: an `infs` that predates it
+    /// must refuse it by name rather than misread it.
+    #[test]
+    fn a_host_imports_value_of_the_wrong_shape_is_refused_naming_its_key() {
+        for body in [
+            "env = \"clock_ms\"\n",
+            "env = 3\n",
+            "env = { name = \"clock_ms\" }\n",
+            "env = [{ name = \"clock_ms\" }]\n",
+            "env = [\n    \"clock_ms\",\n    3,\n]\n",
+        ] {
+            let msg = rejection_of(&manifest_with_host_imports(body));
+            assert!(
+                msg.contains(
+                    "invalid [host-imports] entry `env`: the value must be an array of strings"
+                ),
+                "the diagnosis must name the key for `{body}`, got: {msg}"
+            );
+        }
+    }
+
+    /// An empty array admits nothing under its key, which the flag it is
+    /// forwarded as cannot even spell — so it is refused, with both remedies and
+    /// the spelling of the policy its author may have meant.
+    #[test]
+    fn an_empty_host_imports_array_is_refused() {
+        let msg = rejection_of(&manifest_with_host_imports("env = []\n"));
+        for fragment in [
+            "invalid [host-imports] entry `env = []`",
+            "almost certainly a mistake",
+            "Delete the key, or list the fields.",
+            "a `[host-imports]` header with no keys under it",
+        ] {
+            assert!(
+                msg.contains(fragment),
+                "must carry `{fragment}`, got: {msg}"
+            );
+        }
+    }
+
+    /// A field that is not an identifier is refused naming the key and the field,
+    /// and with the spelling to write where the field is a whole pair under the
+    /// entry's own key — the shape every nearby surface prints.
+    ///
+    /// The rows without a correction are the ones it must not guess at: a pair
+    /// naming another module may belong under another key, and a field that is
+    /// merely malformed has no spelling to read off it.
+    #[test]
+    fn a_host_imports_field_that_is_not_an_identifier_is_refused() {
+        let corrected = [
+            ("env.clock_ms", Some("clock_ms")),
+            ("host::env::clock_ms", Some("clock_ms")),
+            ("env::clock_ms", Some("clock_ms")),
+            ("fprime_core.telemetry", None),
+            ("env.clock-ms", None),
+            ("clock-ms", None),
+            ("", None),
+            ("9lives", None),
+        ];
+        for (field, bare) in corrected {
+            let msg = rejection_of(&manifest_with_host_imports(&format!(
+                "env = [\"{field}\"]\n"
+            )));
+            assert!(
+                msg.contains(&format!(
+                    "invalid [host-imports] entry `env`: `\"{field}\"` is not a host function name"
+                )),
+                "`{field}` must be refused naming the key and the field, got: {msg}"
+            );
+            match bare {
+                Some(bare) => assert!(
+                    msg.contains(&format!(
+                        "digits or `_`. Write `\"{bare}\"`: the module is already the key."
+                    )),
+                    "`{field}` carries its own module, so the spelling is named, got: {msg}"
+                ),
+                None => assert!(
+                    !msg.contains("Write `"),
+                    "`{field}` holds no spelling to read off, so none is guessed, got: {msg}"
+                ),
+            }
+        }
+    }
+
+    /// A field listed twice under one module is refused naming both.
+    #[test]
+    fn a_duplicate_host_imports_field_is_refused() {
+        let msg = rejection_of(&manifest_with_host_imports(
+            "env = [\"clock_ms\", \"sleep_ms\", \"clock_ms\"]\n",
+        ));
+        assert!(
+            msg.contains("invalid [host-imports] entry `env`: `\"clock_ms\"` is listed twice"),
+            "a duplicate must be refused naming the key and the field, got: {msg}"
+        );
+    }
+
+    /// With two malformed modules the first in key order is reported, whatever
+    /// order the file wrote them in — the same contract the `[build]` checks keep.
+    #[test]
+    fn two_malformed_host_imports_modules_report_the_first_in_key_order() {
+        let msg = rejection_of(&manifest_with_host_imports("zeta = []\nalpha = []\n"));
+        assert!(
+            msg.contains("`alpha = []`") && !msg.contains("`zeta = []`"),
+            "the first module in key order is the one reported, got: {msg}"
+        );
+    }
+
+    /// A `[wasm-dependencies]` key whose first segment is `host` is refused on the
+    /// `infs` side with the reserved-segment reason and the host-import remedy,
+    /// while a key merely containing or resembling the segment is an ordinary
+    /// module name.
+    #[test]
+    fn validate_wasm_dependency_key_refuses_the_host_segment() {
+        for key in ["host", "host::a", "host::a::b"] {
+            let err = validate_wasm_dependency_key(key)
+                .expect_err("the first segment `host` is reserved");
+            let msg = err.to_string();
+            for fragment in [
+                format!("invalid [wasm-dependencies] key `{key}`"),
+                "`host` is reserved as the first segment of a `use … from` clause".to_string(),
+                "list the function under `[host-imports]`".to_string(),
+                format!(
+                    "Rename the module — and the `use … from` clause that binds it — to a name \
+                     outside `host` only if you meant a linked `.wasm` module named `{key}`: a \
+                     module path whose first segment is `host` is reserved in this position \
+                     and no longer resolves to a file."
+                ),
+            ] {
+                assert!(
+                    msg.contains(&fragment),
+                    "must carry `{fragment}`, got: {msg}"
+                );
+            }
+        }
+        for key in ["hostlib", "Host", "a::host", "host_io"] {
+            assert!(
+                validate_wasm_dependency_key(key).is_ok(),
+                "`{key}` does not open with the reserved segment"
+            );
+        }
     }
 }

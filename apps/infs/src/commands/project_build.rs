@@ -32,18 +32,19 @@
 //! ## Which settings are parameters and which are read off the context
 //!
 //! [`run_project_build`] takes `mode`, `out_dir`, and `wasm_lib_dirs` as
-//! parameters but reads `[build] wasm-features` and `[wasm-dependencies]`
-//! straight off `ctx`. The rule: a setting a CLI flag can override, or that a
-//! caller must be able to suppress, is threaded so the caller stays the single
-//! place that resolves it — `build` and `run` each own their `-L` entries and
-//! pass them through, and `run` deliberately passes `mode = None` to force
-//! compile mode. A setting only the manifest can express, with no flag and
-//! nothing to suppress, is read from `ctx` — threading it would let two callers
-//! disagree about a property of the project itself. An instruction-set request
-//! is the latter, as is the set of external modules the project links against:
-//! `build` and `run` emitting different instruction levels — or resolving one
-//! project's `use { … } from <module>` against different `.wasm` files — is a
-//! bug, not a configuration.
+//! parameters but reads `[build] wasm-features`, `[wasm-dependencies]` and
+//! `[host-imports]` straight off `ctx`. The rule: a setting a CLI flag can
+//! override, or that a caller must be able to suppress, is threaded so the
+//! caller stays the single place that resolves it — `build` and `run` each own
+//! their `-L` entries and pass them through, and `run` deliberately passes
+//! `mode = None` to force compile mode. A setting only the manifest can express,
+//! with no flag and nothing to suppress, is read from `ctx` — threading it would
+//! let two callers disagree about a property of the project itself. An
+//! instruction-set request is the latter, as is the set of external modules the
+//! project links against, and the set of host functions it may bind: `build` and
+//! `run` emitting different instruction levels — resolving one project's
+//! `use { … } from <module>` against different `.wasm` files, or holding its
+//! host imports to different policies — is a bug, not a configuration.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -52,7 +53,7 @@ use std::process::{Command, Stdio};
 use crate::commands::build::{BuildMode, format_wasm_dep_arg};
 use crate::errors::InfsError;
 use crate::project::ProjectContext;
-use crate::project::manifest::{MANIFEST_FILE_NAME, MemoryConfig, VerificationConfig};
+use crate::project::manifest::{HostImports, MANIFEST_FILE_NAME, MemoryConfig, VerificationConfig};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
 use inference_compiler_interface::{
     COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, TargetName, WasmFeatureName, render_feature_list,
@@ -131,7 +132,10 @@ use inference_compiler_interface::{
 /// - the manifest declares a `[memory]` table the resolved `infc` cannot honor
 /// - the manifest asks to adopt external specifications on a proof-artifact
 ///   build and the resolved `infc` cannot honor the request
-/// - a `[wasm-dependencies]` key is not a well-formed logical module name
+/// - the manifest declares a `[host-imports]` table and the resolved `infc`
+///   cannot honor it
+/// - a `[wasm-dependencies]` key is not a well-formed logical module name, or its
+///   first segment is the reserved `host`
 /// - a resolved `[wasm-dependencies]` path is not valid UTF-8
 /// - lib dirs were passed and the current working directory cannot be determined
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
@@ -208,6 +212,12 @@ pub(crate) fn run_project_build(
         &ctx.manifest.verification,
         generate_v_output,
         mode,
+        Some(&manifest_path),
+    )?;
+    forward_host_imports(
+        &mut cmd,
+        compat,
+        ctx.manifest.host_imports.as_ref(),
         Some(&manifest_path),
     )?;
 
@@ -311,14 +321,30 @@ impl CompilerCompat {
     /// Whether the resolved `infc` is known to support the additive
     /// `--adopt-external-specs` flag, which landed at ABI minor 4.
     ///
-    /// The conservative reading matters most here of the four. An `infc` that
-    /// predates the flag cannot carry a library's obligations and cannot say it
-    /// did not, and the difference is which theorems the `.v` states — a missing
-    /// one looks exactly like a proof artifact that was never asked for the
-    /// obligation. Refusing to build beats writing a proof artifact whose
-    /// contents are not the ones the manifest asked for.
+    /// The conservative reading matters here because a dropped flag leaves
+    /// nothing to find afterwards. An `infc` that predates the flag cannot carry
+    /// a library's obligations and cannot say it did not, and the difference is
+    /// which theorems the `.v` states — a missing one looks exactly like a proof
+    /// artifact that was never asked for the obligation. Refusing to build beats
+    /// writing a proof artifact whose contents are not the ones the manifest
+    /// asked for.
     pub fn supports_adopt_external_specs(self) -> bool {
         self.supports_abi_minor(4)
+    }
+
+    /// Whether the resolved `infc` is known to support the additive
+    /// `--host-imports` flag, which landed at ABI minor 8.
+    ///
+    /// Like `--adopt-external-specs`, a dropped flag leaves nothing to find
+    /// afterwards; here not even the artifact differs. An `infc` that predates
+    /// the flag accepts a program's host imports without asking any policy, and
+    /// the artifact it writes is byte for byte the one a policed build would have
+    /// written — so a build whose allowlist silently never ran is
+    /// indistinguishable from one it admitted, except for a qualifier on a log
+    /// line only a program with host imports prints. That is why an unhonorable
+    /// allowlist refuses the build rather than degrading it to an unpoliced one.
+    pub fn supports_host_import_allowlist(self) -> bool {
+        self.supports_abi_minor(8)
     }
 
     /// Whether the resolved `infc` is known to have the additive feature
@@ -589,6 +615,84 @@ pub(crate) fn forward_adopt_external_specs(
     }
     println!("external-spec adoption: on");
     cmd.arg("--adopt-external-specs");
+    Ok(())
+}
+
+/// Appends `--host-imports=<list>` to `cmd` when the project declares a
+/// `[host-imports]` table, after confirming the resolved `infc` can honor it,
+/// and echoes the allowlist to stdout.
+///
+/// Every path that spawns `infc` on behalf of a project routes through here, for
+/// the reason [`forward_wasm_features`] exists once: a project's policy must be
+/// the same whether it was built, run, or built from a bare source path.
+///
+/// `None` — no table — forwards nothing and prints nothing, which is the absent
+/// policy `infc` applies to an omitted flag. A declared-empty table forwards
+/// exactly `--host-imports=`, the policy that admits no host function; it is the
+/// state a caller is most tempted to skip as "nothing to send", and skipping it
+/// would turn the strictest policy into none.
+///
+/// The flag goes on the command line as *one* argument containing the `=`, where
+/// every other value-carrying flag travels as two (`--wasm-features <list>`,
+/// `--target <name>`, …): `infc` declares it with `require_equals`, so the empty
+/// policy is spellable at all and a bare `--host-imports` cannot swallow the
+/// source path, and it refuses the flag and its value as two entries. The pairs
+/// are sorted by module and then by field and joined by `,` with no spaces, so
+/// the argument, and the echo, are a property of the policy rather than of the
+/// order the manifest listed it in.
+///
+/// The echo — `host-imports allowlist: env.clock_ms, fprime_core.command`, or
+/// `… empty (no host function admitted)` for the empty policy — is what lets a
+/// build log show that a policy was applied at all. `infc` then prints its own
+/// `host imports:` line naming which imports that policy admitted, but only for
+/// a program that binds one; the echo is printed for every build the policy
+/// governs. The empty policy's echo says what it admits rather than printing
+/// `none`, which reads as the absent state — the one `infc` reports as
+/// `host imports (no allowlist):` — so the strictest policy there is would look,
+/// in a log with no inventory line to correct it, like no policy at all.
+///
+/// `manifest_path` names the file the remediation tells the user to edit, as it
+/// does for the other forwarders.
+///
+/// # Errors
+///
+/// Returns a remediation-bearing error when a table is declared and the resolved
+/// `infc` predates the flag. The flag is never emitted blind, and never dropped.
+pub(crate) fn forward_host_imports(
+    cmd: &mut Command,
+    compat: CompilerCompat,
+    allowlist: Option<&HostImports>,
+    manifest_path: Option<&Path>,
+) -> Result<()> {
+    let Some(allowlist) = allowlist else {
+        return Ok(());
+    };
+    if !compat.supports_host_import_allowlist() {
+        let manifest = manifest_path.map_or_else(
+            || String::from(MANIFEST_FILE_NAME),
+            |path| path.display().to_string(),
+        );
+        bail!(
+            "the resolved infc does not support `--host-imports` (requires infc ABI ≥ \
+             1.8); update the toolchain. Removing `[host-imports]` from {manifest} also \
+             lets the build run, but with no host-import policy at all. The build is \
+             refused rather than run without the flag: an older infc would admit every \
+             host import the program binds, and nothing in the artifact would show that \
+             the table was never applied."
+        );
+    }
+    let pairs: Vec<String> = allowlist
+        .admitted_pairs()
+        .into_iter()
+        .map(|(module, field)| format!("{module}.{field}"))
+        .collect();
+    let echoed = if pairs.is_empty() {
+        String::from("empty (no host function admitted)")
+    } else {
+        pairs.join(", ")
+    };
+    println!("host-imports allowlist: {echoed}");
+    cmd.arg(format!("--host-imports={}", pairs.join(",")));
     Ok(())
 }
 
@@ -1445,6 +1549,165 @@ mod project_tests {
             "the value must be diagnosed, not the toolchain, got: {msg}"
         );
         assert!(args_of(&cmd).is_empty());
+    }
+
+    // Host-import allowlist forwarding ---
+
+    /// The allowlist landed at minor 8, so a minor-7 `infc` — which has every
+    /// other flag this `infs` forwards — must not be sent it.
+    #[test]
+    fn supports_host_import_allowlist_capability_matrix() {
+        assert!(
+            CompilerCompat {
+                commit_matched: true,
+                abi: None,
+            }
+            .supports_host_import_allowlist(),
+            "a same-build infc supports every flag this infs knows"
+        );
+        for minor in [8, 12] {
+            assert!(
+                CompilerCompat {
+                    commit_matched: false,
+                    abi: Some((COMPILER_ABI_MAJOR, minor)),
+                }
+                .supports_host_import_allowlist(),
+                "minor {minor} must support --host-imports"
+            );
+        }
+        let minor_seven = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 7)),
+        };
+        assert!(
+            !minor_seven.supports_host_import_allowlist(),
+            "minor 7 predates --host-imports"
+        );
+        assert!(
+            minor_seven.supports_adopt_external_specs() && minor_seven.supports_memory_layout(),
+            "minor 7 still supports the older flags; only the newer one is gated out"
+        );
+        for compat in [
+            CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR + 1, 9)),
+            },
+            CompilerCompat {
+                commit_matched: false,
+                abi: None,
+            },
+        ] {
+            assert!(
+                !compat.supports_host_import_allowlist(),
+                "a foreign major or an unknown ABI must not be sent the flag: {compat:?}"
+            );
+        }
+    }
+
+    fn host_imports(entries: &[(&str, &[&str])]) -> HostImports {
+        HostImports {
+            modules: entries
+                .iter()
+                .map(|(module, fields)| {
+                    (
+                        (*module).to_string(),
+                        fields.iter().map(|field| (*field).to_string()).collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// No table is no policy: nothing is forwarded, and an `infc` that predates
+    /// the flag is irrelevant because nothing is asked of it.
+    #[test]
+    fn forward_host_imports_appends_nothing_without_a_table() {
+        let mut cmd = Command::new("infc");
+        let predates_the_flag = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 7)),
+        };
+        forward_host_imports(&mut cmd, predates_the_flag, None, None)
+            .expect("no table asks nothing of the compiler");
+        assert!(
+            args_of(&cmd).is_empty(),
+            "no table must put no flag on the command"
+        );
+    }
+
+    /// A declared-empty table is forwarded as the flag with nothing after the
+    /// `=`, which is the policy that admits nothing — not skipped as "nothing to
+    /// send", which would be no policy at all.
+    #[test]
+    fn forward_host_imports_forwards_the_empty_policy_as_a_bare_equals() {
+        let mut cmd = Command::new("infc");
+        let minor_eight = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 8)),
+        };
+        forward_host_imports(&mut cmd, minor_eight, Some(&HostImports::default()), None)
+            .expect("a minor-8 infc supports the flag");
+        assert_eq!(args_of(&cmd), ["--host-imports="]);
+    }
+
+    /// The pairs are forwarded as one argument, sorted by module and then field,
+    /// joined by `,` with no spaces — whatever order the table listed them in.
+    #[test]
+    fn forward_host_imports_forwards_one_sorted_token() {
+        let mut cmd = Command::new("infc");
+        let same_build = CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        };
+        let table = host_imports(&[
+            ("fprime_core", &["telemetry", "command"]),
+            ("env", &["clock_ms"]),
+        ]);
+        forward_host_imports(&mut cmd, same_build, Some(&table), None)
+            .expect("a same-build infc supports the flag");
+        assert_eq!(
+            args_of(&cmd),
+            ["--host-imports=env.clock_ms,fprime_core.command,fprime_core.telemetry"]
+        );
+    }
+
+    /// The gate refuses rather than forwards — or drops — and leaves the command
+    /// untouched, for the declared-empty table as much as for a listed one: the
+    /// empty policy is the one a degraded build would lose most.
+    #[test]
+    fn forward_host_imports_refuses_an_infc_that_predates_the_flag() {
+        let minor_seven = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 7)),
+        };
+        let manifest = Path::new("/projects/demo").join(MANIFEST_FILE_NAME);
+        for table in [
+            HostImports::default(),
+            host_imports(&[("env", &["clock_ms"])]),
+        ] {
+            let mut cmd = Command::new("infc");
+            let err = forward_host_imports(&mut cmd, minor_seven, Some(&table), Some(&manifest))
+                .expect_err("ABI minor 7 predates --host-imports");
+            let msg = err.to_string();
+            assert_eq!(
+                msg,
+                format!(
+                    "the resolved infc does not support `--host-imports` (requires infc ABI \
+                     ≥ 1.8); update the toolchain. Removing `[host-imports]` from {} also \
+                     lets the build run, but with no host-import policy at all. The build is \
+                     refused rather than run without the flag: an older infc would admit \
+                     every host import the program binds, and nothing in the artifact would \
+                     show that the table was never applied.",
+                    manifest.display()
+                ),
+                "the refusal must name the flag, the ABI, the remedy, the manifest, what \
+                 removing the table costs, and what dropping the flag would cost"
+            );
+            assert!(
+                args_of(&cmd).is_empty(),
+                "a refused request must leave no flag on the command"
+            );
+        }
     }
 
     /// The entry point is resolved as `<root>/src/main.inf` using path joins,

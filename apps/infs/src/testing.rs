@@ -7,9 +7,9 @@
 //! modules are assembled byte-by-byte here. The builders are shared rather than
 //! per-module because the same few shapes are what every artifact-level test is
 //! written against — a body wrapped in a minimal module, that module with a
-//! memory so a memory operator can be validated rather than merely parsed, and
-//! that module with one custom section — and a second copy of a shape is a
-//! second thing to keep true.
+//! memory so a memory operator can be validated rather than merely parsed, that
+//! module with one custom section, and a module that only imports — and a second
+//! copy of a shape is a second thing to keep true.
 //!
 //! # The write-then-exec (`ETXTBSY`) race
 //!
@@ -134,6 +134,26 @@ pub(crate) fn module_with_custom_section(body: &[u8], name: &str, payload: &[u8]
         name: name.into(),
         data: payload.into(),
     });
+    module.finish()
+}
+
+/// A module whose import section holds `imports` in the order given, and nothing
+/// else but the one `() -> ()` function type a function import can name.
+///
+/// The import list is the whole of what the scan's import question reads, so the
+/// module carries no function of its own: a body would add a code section the
+/// question never looks at.
+pub(crate) fn module_with_imports(imports: &[(&str, &str, wasm_encoder::EntityType)]) -> Vec<u8> {
+    use wasm_encoder::{ImportSection, Module, TypeSection};
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([], []);
+    module.section(&types);
+    let mut section = ImportSection::new();
+    for &(module_name, field, ty) in imports {
+        section.import(module_name, field, ty);
+    }
+    module.section(&section);
     module.finish()
 }
 

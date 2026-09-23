@@ -81,6 +81,12 @@ mode = "compile"
 [wasm-dependencies]
 # Logical module name -> compiled .wasm, resolved relative to this file.
 arith = { path = "libs/arith.wasm" }
+
+# [host-imports]
+# The host functions the program may bind, one array per import module; a
+# header with no keys admits none. Omit the table to apply no policy.
+# fprime_core = ["telemetry", "command"]
+# env = ["clock_ms"]
 ```
 
 The fields:
@@ -98,6 +104,7 @@ The fields:
 | `wasm-features` | `[build]` | array of proposal names | `[]` | Post-MVP WebAssembly proposals the artifact may use; `[]` = pure Wasm 1.0. Supported: `"bulk-memory"` |
 | `output-dir` | `[verification]` | path string | `"proofs/"` | Proof artifact directory; proof mode only |
 | `<name>` | `[wasm-dependencies]` | `{ path = "…" }` | — | External `.wasm` module dependency |
+| `<module>` | `[host-imports]` | array of field names | table absent: no policy | The host functions of import module `<module>` the program may bind; a table with no keys admits none. See [The allowlist](external-functions-and-wasm-linking.md#the-allowlist) |
 
 `target` and `mode` are case-sensitive: `"Wasm32"`, `"SpaceWasm"` and `"Proof"`
 are all rejected, and neither key trims whitespace. The wire spelling of every
@@ -130,14 +137,16 @@ strictness applies to
 keys: every fixed-schema table rejects a key it does not recognize, naming the
 offending key and the fields the table accepts — a misspelled `wasm_features`
 fails the build rather than silently shipping a differently-configured
-artifact. Only `[dependencies]` and `[wasm-dependencies]` accept arbitrary
-keys, because their keys name the dependencies. `wasm-features` entries are
-WebAssembly *proposal* names (`"bulk-memory"`), not instruction names, and the
-setting is honored in project builds, single-file builds, and single-file
-`infs run`. `[wasm-dependencies]` entries have the same reach: project `build`,
-project `run`, single-file `build`, and single-file `run` all forward every
-declared entry to `infc`. See `apps/infs/docs/inference-toml.md` for the full
-reference.
+artifact. Three tables accept arbitrary keys, because their keys are the data:
+`[dependencies]` and `[wasm-dependencies]`, whose keys name dependencies, and
+`[host-imports]`, whose keys name the import modules an embedder registers host
+functions under. `wasm-features` entries are WebAssembly *proposal* names
+(`"bulk-memory"`), not instruction names, and the setting is honored in project
+builds, single-file builds, and single-file `infs run`. `[wasm-dependencies]`
+entries have the same reach: project `build`, project `run`, single-file
+`build`, and single-file `run` all forward every declared entry to `infc`, and
+all four forward a `[host-imports]` table too. See
+`apps/infs/docs/inference-toml.md` for the full reference.
 
 ### Reserved Project Names
 
@@ -150,6 +159,23 @@ language keywords or conventional directory names are reserved and rejected
 `ensures`, `invariant`, `const`, `enum`, `loop`, `break`, `continue`,
 `external`, `unique`; and the directory names `src`, `out`, `target`,
 `proofs`, `tests`, `self`, `super`, `crate`.
+
+### Reserved Module Segment
+
+A module name has one reservation of its own, separate from the project-name set
+above and applied in a different position: `host` as the *first* segment of a
+`use … from` clause names the embedder, not a module this build links. So
+`use { clock_ms } from host::env;` binds a host import of the module `env`, and
+a `[wasm-dependencies]` key whose first segment is `host` — `host`, or
+`host::io` — is refused on every build and run route before `infc` is asked to
+build, because no linked module can be named under it; a host import needs no
+dependency entry at all, and belongs under `[host-imports]` if the project keeps
+an allowlist. The match is exact and first-segment only: `hostlib`, `Host` and
+`a::host` are ordinary module names. Contrast the path grammar's reserved
+`root`, which names the entry file in `use root;` and shadows a literal
+`src/root.inf` — `root` is reserved among the files of this project, `host`
+among the modules outside it. See [What `host` reserves, and what it does
+not](external-functions-and-wasm-linking.md#what-host-reserves-and-what-it-does-not).
 
 ### Real Manifest Examples
 
@@ -301,6 +327,16 @@ In **project mode** (no path given):
   separate link step.
 - `out/main.wasm` is the expected artifact; if the build succeeds but the file
   is absent, `run` errors before invoking wasmtime.
+- Refuses to execute an artifact that imports a function. `run` supplies no
+  host functions and does not let wasmtime stand in for the embedder a program
+  binding `use { … } from host::…` is written for — not even for the WASI
+  functions the wasmtime CLI provides on its own. It builds the program, reads
+  the imports off the artifact — after `[build.wasm-opt]`, so the bytes it asks
+  about are the ones that would run — and names each one, pointing at the
+  embedder that must supply them. Single-file `run` refuses the same way,
+  naming `out/<stem>.wasm`. The wasmtime check above still comes first, so a
+  machine without the runtime is told to install it before it can hear this
+  refusal.
 
 In **single-file mode** (path given), `--entry-point` (default `main`) selects
 which exported function to invoke. `main` is called with `argc=0, argv=0`
@@ -389,11 +425,22 @@ infs build / infs run (project mode)
                                          `-L` flags through here)
             arg: --wasm-dep name=path   (one per [wasm-dependencies] entry; the
                                          declared path resolved against the root)
+            arg: --target <name>        (if [build] target names a non-default
+                                         target; gated on that name's own minor)
             arg: --wasm-features <list> (if [build] wasm-features requests any;
                                          requires infc ABI ≥ 1.2. Applies in both
                                          modes — a `.v` describing a different
                                          instruction set than the shipped `.wasm`
                                          would be worthless)
+            arg: --memory-pages <n>     (if [memory] declares `pages`; ABI ≥ 1.3)
+            arg: --stack-size <n>       (if [memory] declares `stack-size`; ABI ≥ 1.3)
+            arg: --adopt-external-specs (if [verification] asks for it on a
+                                         proof-artifact build; ABI ≥ 1.4; `run`
+                                         never requests it)
+            arg: --host-imports=<list>  (if a [host-imports] table is declared,
+                                         as one argument — `--host-imports=` for
+                                         a table with no keys; requires infc
+                                         ABI ≥ 1.8)
 ```
 
 Project `run` forces compile mode (`mode = None`) and never requests `--out-dir`,
@@ -409,9 +456,9 @@ phase-flag default for the rest, while `run` always requests the full
 pipeline explicitly, because it needs the finished WASM artifact in hand to
 execute it. What they do agree on: neither sets `current_dir`, so `infc`
 inherits the invocation directory; every `-L` is forwarded verbatim, with no
-anchoring step; and whichever of `--wasm-lib-dir`, `--wasm-dep`, and
-`--wasm-features` a given invocation sends, they appear in that same relative
-order.
+anchoring step; and whichever of `--wasm-lib-dir`, `--wasm-dep`, `--target`,
+`--wasm-features`, the memory flags and `--host-imports` a given invocation
+sends, they appear in that same relative order.
 
 ```text
 infs build <path> (single-file mode)
@@ -433,8 +480,14 @@ infs build <path> (single-file mode)
                                          verbatim; no anchoring step runs)
             arg: --wasm-dep name=path   (one per [wasm-dependencies] entry from
                                          the enclosing manifest, if any)
+            arg: --target <name>        (as the project route sends it)
             arg: --wasm-features <list> (if the enclosing manifest requests any;
                                          requires infc ABI ≥ 1.2)
+            arg: --memory-pages <n>     (as the project route sends them)
+            arg: --stack-size <n>
+            arg: --host-imports=<list>  (if the enclosing manifest declares a
+                                         [host-imports] table; one argument;
+                                         requires infc ABI ≥ 1.8)
 ```
 
 `build` never adds `--parse`, `--codegen`, or `-o`: with no phase flag at all,
@@ -447,10 +500,12 @@ infs run <path> (single-file mode)
     +-- enclosing_manifest(path)   # walk up from the source file; optional
     |
     +-- compatibility handshake     # conditional — runs only when the
-    |       infc --commit-hash      # enclosing manifest requests wasm-features,
-    |       infc --abi-version      # the only thing here needing a capability
-    |                               # check; skipped entirely otherwise, unlike
-    |                               # `build`
+    |       infc --commit-hash      # enclosing manifest asks for something an
+    |       infc --abi-version      # older infc could not honor: a target,
+    |                               # wasm-features, a [memory] table, or a
+    |                               # [host-imports] table (present, even
+    |                               # empty); skipped entirely otherwise,
+    |                               # unlike `build`
     |
     +-- spawn infc
             CWD = inherited from the invoking shell
@@ -462,13 +517,22 @@ infs run <path> (single-file mode)
                                          verbatim; no anchoring step runs)
             arg: --wasm-dep name=path   (one per [wasm-dependencies] entry from
                                          the enclosing manifest, if any)
+            arg: --target <name>        (as the project route sends it)
             arg: --wasm-features <list> (if the enclosing manifest requests any;
                                          requires infc ABI ≥ 1.2)
+            arg: --memory-pages <n>     (as the project route sends them)
+            arg: --stack-size <n>
+            arg: --host-imports=<list>  (if the enclosing manifest declares a
+                                         [host-imports] table; one argument;
+                                         requires infc ABI ≥ 1.8)
 ```
 
 `run` always requests `--parse --codegen -o` explicitly rather than relying on
 `infc`'s default, and neither `-v` nor `--mode` is ever part of its argv: the
-`RunArgs` struct (`apps/infs/src/commands/run.rs`) carries no such flags.
+`RunArgs` struct (`apps/infs/src/commands/run.rs`) carries no such flags. Once
+`infc` exits, both `run` routes read the imports off the artifact they are about
+to execute and refuse one that imports any function, before wasmtime is
+invoked — see [`infs run`](#infs-run).
 
 **`infc` flags** confirmed against `core/cli/src/parser.rs`:
 
@@ -518,20 +582,22 @@ it was introduced at, independently: `--out-dir` landed at minor 1,
 `--host-imports` at minor 8. `infs` forwards each only to an `infc` that
 reports an ABI minor at or above the flag's own (or matches by commit hash) —
 an `infc` that reports minor 1, for instance, supports `--out-dir` but not
-`--wasm-features`. `infs` does not forward `--host-imports` yet — the
-`[host-imports]` manifest table it will read is not implemented — so nothing in
-a project build is gated on minor 8 today; a direct `infc` caller passes the
-flag by hand. `--target` is gated on the *name* rather than on the flag:
-each target became requestable at its own minor (`wasm32` at 5, `stellar` at
-6, `spacewasm` at 7), and an `infc` that parses the flag but predates a name
-would accept it and build for the default runtime — a wrong artifact rather
-than a refusal. That is true even where the two builds are the same bytes:
-dropping `spacewasm` produces the module a `wasm32` build produces and drops
-the target's acceptance envelope with it, so what the name was written for
-never runs. The default target is never forwarded at all, so a project that
-names none puts no floor under its compiler. Pairing a manifest with a
-non-default `[verification] output-dir` against an older `infc` is a hard
-error:
+`--wasm-features`. `--host-imports` is forwarded from the `[host-imports]`
+table, and only from a declared one, so a project without the table puts no
+minor-8 floor under its compiler; a project with one is refused against an
+older `infc` rather than built without the flag, because that compiler would
+admit every host import the program binds and write an artifact identical to
+the one the table exists to police. `--target` is gated on the *name* rather
+than on the flag: each target became requestable at its own minor (`wasm32` at
+5, `stellar` at 6, `spacewasm` at 7), and an `infc` that parses the flag but
+predates a name would accept it and build for the default runtime — a wrong
+artifact rather than a refusal. That is true even where the two builds are the
+same bytes: dropping `spacewasm` produces the module a `wasm32` build produces
+and drops the target's acceptance envelope with it, so what the name was
+written for never runs. The default target is never forwarded at all, so a
+project that names none puts no floor under its compiler. Pairing a manifest
+with a non-default `[verification] output-dir` against an older `infc` is a
+hard error:
 
 ```text
 error: the resolved infc does not support `--out-dir` (requires infc ABI ≥ 1.1);
