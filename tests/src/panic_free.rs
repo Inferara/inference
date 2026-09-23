@@ -244,10 +244,9 @@ mod gate {
             why: "a parameter declared unit is given no argument slot",
         },
         Shape {
-            stem: "unit_return_type_spelled_unit",
+            stem: "unit_return_type_spelled_parens",
             declared: Module,
-            why: "`unit` is a builtin type name where `()` is a simple type kind, and both \
-                  declare the empty result list",
+            why: "`-> ()` declares the empty result list an omitted return type declares",
         },
         Shape {
             stem: "unit_struct_field",

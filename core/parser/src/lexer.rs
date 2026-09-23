@@ -73,6 +73,9 @@ pub fn tokenize(src: &str) -> Vec<Token> {
 ///
 /// `TypeKw`, `FromKw` and `SpecKw` are contextual keywords the grammar also
 /// accepts in identifier positions, so an expression can end with them too.
+/// So can `UnitKw`: the grammar reads the reserved word as the name it was
+/// written as in order to refuse it, and `unit-1` has to stay a subtraction or
+/// the one refusal is followed by a cascade over a stray literal.
 const EXPR_END: TokenSet = TokenSet::new(&[
     SyntaxKind::Number,
     SyntaxKind::String,
@@ -83,6 +86,7 @@ const EXPR_END: TokenSet = TokenSet::new(&[
     SyntaxKind::TypeKw,
     SyntaxKind::FromKw,
     SyntaxKind::SpecKw,
+    SyntaxKind::UnitKw,
     SyntaxKind::RParen,
     SyntaxKind::RBracket,
     SyntaxKind::At,
@@ -560,6 +564,26 @@ mod tests {
         );
     }
 
+    /// `unit` is reserved as a whole word only: a longer identifier that starts
+    /// with it is one `Ident` token, so `units`, `unit_x` and `unitary` stay
+    /// ordinary names.
+    #[test]
+    fn unit_is_a_keyword_only_as_a_whole_word() {
+        assert_eq!(
+            kinds("unit units unit_x unitary"),
+            [
+                SyntaxKind::UnitKw,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Ident,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Ident,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Ident,
+                SyntaxKind::Eof,
+            ]
+        );
+    }
+
     #[test]
     fn true_false_self_are_keywords() {
         assert_eq!(
@@ -700,6 +724,7 @@ mod tests {
             ("type-1", SyntaxKind::TypeKw),
             ("from-1", SyntaxKind::FromKw),
             ("spec-1", SyntaxKind::SpecKw),
+            ("unit-1", SyntaxKind::UnitKw),
             (")-1", SyntaxKind::RParen),
             ("]-1", SyntaxKind::RBracket),
             ("@-1", SyntaxKind::At),

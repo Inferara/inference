@@ -89,7 +89,7 @@ u8, u16, u32, u64     // Unsigned integers
 
 // Other primitives
 bool                   // Boolean
-unit                   // Unit type (like void)
+()                     // Unit type (like void); `unit` is a reserved word, not a type
 ```
 
 **Internal Representation**: The AST's `SimpleTypeKind` enum provides an efficient, value-based representation that the type checker converts to `TypeInfoKind` for semantic analysis. This design eliminates unnecessary allocations for the most common types in Inference programs.
@@ -356,7 +356,7 @@ Test organization:
 
 **Type System Features**:
 - Full support for primitive types using efficient `SimpleTypeKind` enum representation
-- Primitive types (bool, unit, i8-i64, u8-u64) without heap allocation
+- Primitive types (bool, the unit type `()`, i8-i64, u8-u64) without heap allocation
 - Array types with fixed sizes and element type checking
 - Struct types with field visibility and member access validation
 - Enum types with variant access validation

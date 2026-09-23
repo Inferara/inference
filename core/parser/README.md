@@ -44,7 +44,7 @@ AstArena        inference_ast::arena::AstArena (unchanged public type)
 |--------|------|
 | `lib.rs` | Public API: `parse`, `parse_to_cst`, `Parse`; re-exports |
 | `errors.rs` | `ParserError` enum (thiserror) + `ParseError { span: Location, message }` |
-| `syntax_kind.rs` | Single `SyntaxKind` enum: token kinds first, then node kinds from the computed `FIRST_NODE` boundary; keyword table; `is_trivia`, `from_keyword`, `is_token`. Contextual keywords (`self`/`type`/`from`/`spec`) are handled in `grammar/types.rs` via the `IDENT_LIKE` token set, not here |
+| `syntax_kind.rs` | Single `SyntaxKind` enum: token kinds first, then node kinds from the computed `FIRST_NODE` boundary; keyword table; `is_trivia`, `from_keyword`, `is_token`. Contextual keywords (`self`/`type`/`from`/`spec`) are handled in `grammar/types.rs` via the `IDENT_LIKE` token set, not here; `unit` is its own `UnitKw`, a keyword no position accepts, which `grammar/types.rs` refuses in type and name positions alike (the unit type is spelled `()`) |
 | `lexer.rs` | `tokenize(&str) -> Vec<Token>`; handles trivia, joint bits, prefix-position `-N`, unterminated strings |
 | `token_set.rs` | `TokenSet(u128)` bitset over `SyntaxKind` discriminants for O(1) recovery sets |
 | `input.rs` | Trivia-free token view the parser cursor operates on; carries the source so a rule can read a token's spelling |
@@ -215,7 +215,7 @@ Assignment (`=`) is a statement (`assign_statement`), not an expression operator
 
 ## Testing
 
-The crate contains **324 unit tests** distributed across the lexer, engine, grammar, and
+The crate contains **348 unit tests** distributed across the lexer, engine, grammar, and
 syntax tree modules. Test coverage includes per-token-class lexer round-trips, joint-bit
 edge cases (`-42` vs `- 42`, `Vec i32'`, `a::b`), grammar CST-shape assertions for every
 construct, precedence-climb fixtures, struct-vs-block disambiguation, and resilience tests

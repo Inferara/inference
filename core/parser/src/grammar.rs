@@ -19,6 +19,8 @@ mod params;
 mod stmt;
 mod types;
 
+pub(crate) use types::IDENT_LIKE;
+
 use crate::parser::Parser;
 use crate::syntax_kind::SyntaxKind;
 use crate::token_set::TokenSet;
@@ -1003,6 +1005,404 @@ mod tests {
         assert_eq!(msgs.first().map(String::as_str), Some(TYPE_ALIAS_MESSAGE));
         let (_root, msgs) = parse_messages("type A = i32");
         assert_eq!(msgs.first().map(String::as_str), Some(TYPE_ALIAS_MESSAGE));
+    }
+
+    // -- `unit` is a reserved word: one diagnostic per misuse, no cascade
+
+    /// The verbatim type-position refusal, kept in sync with
+    /// `types::UNIT_IS_NOT_A_TYPE_MESSAGE`. Duplicated for the same reason as
+    /// [`GLOB_MESSAGE`]: the user-facing wording is pinned here.
+    const UNIT_NOT_A_TYPE: &str =
+        "`unit` is a reserved word, not a type: the unit type is spelled `()`";
+
+    /// The verbatim name-position refusal for `what`, kept in sync with
+    /// `types::reserved_unit_name_message`.
+    fn unit_cannot_name(what: &str) -> String {
+        format!("`unit` is a reserved word and cannot name {what}")
+    }
+
+    /// The verbatim refusal for a name whose position does not say what it
+    /// names, kept in sync with `types::UNIT_IS_NOT_A_NAME_MESSAGE`.
+    const UNIT_NOT_A_NAME: &str = "`unit` is a reserved word and cannot be used as a name";
+
+    /// One source whose only fault is a single `unit`, what the whole
+    /// parse-and-lower pipeline must say about it, and what it said before the
+    /// word had a recovery of its own.
+    struct UnitRow {
+        src: &'static str,
+        message: String,
+        /// The diagnostics this source reports with `unit` lexed as a keyword
+        /// but refused nowhere: measured with the recovery neutralized, which is
+        /// what every keyword in a position that does not expect it still does.
+        cascade_without_recovery: usize,
+    }
+
+    fn unit_row(src: &'static str, message: String, cascade_without_recovery: usize) -> UnitRow {
+        UnitRow {
+            src,
+            message,
+            cascade_without_recovery,
+        }
+    }
+
+    /// Checks one row: exactly the row's message through parsing *and*
+    /// lowering, with its span on the `unit` token and nowhere else. Returns
+    /// the failure rather than panicking, so a table reports every row that
+    /// misses instead of the first.
+    fn check_unit_row(row: &UnitRow) -> Result<(), String> {
+        let src = row.src;
+        let at = src
+            .find("unit")
+            .unwrap_or_else(|| panic!("row {src:?} has no `unit` to refuse"));
+        let parsed = crate::parse(src);
+        let messages: Vec<&str> = parsed.errors.iter().map(|e| e.message.as_str()).collect();
+        if messages != [row.message.as_str()] {
+            return Err(format!(
+                "{src:?}: expected exactly [{:?}], got {messages:?} (without the recovery it \
+                 reports {} diagnostics)",
+                row.message, row.cascade_without_recovery
+            ));
+        }
+        let span = parsed.errors[0].span;
+        let spanned = (span.offset_start as usize, span.offset_end as usize);
+        let located = (span.start_line, span.start_column);
+        if spanned != (at, at + 4) || located != (1, u32::try_from(at + 1).unwrap()) {
+            return Err(format!(
+                "{src:?}: the diagnostic must sit on the `unit` token at byte {at}, but spans \
+                 {spanned:?} at line/column {located:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn assert_unit_rows(rows: &[UnitRow]) {
+        let failures: Vec<String> = rows
+            .iter()
+            .filter_map(|row| check_unit_row(row).err())
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "{} of {} rows missed:\n  {}",
+            failures.len(),
+            rows.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// `unit` wherever a type is written reports that the unit type is spelled
+    /// `()`, once, on the word — and nothing else, through lowering too.
+    ///
+    /// Each row's count is what the same source reported with the word lexed as
+    /// a keyword and no recovery for it: the position's own "expected …" chain,
+    /// and the stray tokens after it read as items or statements that are not
+    /// there, each of which lowering then reports again.
+    #[test]
+    fn unit_in_a_type_position_is_one_diagnostic() {
+        assert_unit_rows(&[
+            unit_row("fn v() -> unit { return; }", UNIT_NOT_A_TYPE.into(), 13),
+            unit_row("fn f(x: unit) { }", UNIT_NOT_A_TYPE.into(), 12),
+            unit_row("fn f() { let d: unit = (); }", UNIT_NOT_A_TYPE.into(), 6),
+            unit_row("fn f() { let a: [unit; 2] = [(), ()]; }", UNIT_NOT_A_TYPE.into(), 13),
+            unit_row("struct S { f: unit; }", UNIT_NOT_A_TYPE.into(), 4),
+            unit_row("const C: unit = ();", UNIT_NOT_A_TYPE.into(), 13),
+            unit_row("external fn ping() -> unit;", UNIT_NOT_A_TYPE.into(), 6),
+            unit_row("external fn ping(x: unit);", UNIT_NOT_A_TYPE.into(), 9),
+            unit_row("external fn ping(unit);", UNIT_NOT_A_TYPE.into(), 9),
+            unit_row("fn f(g: fn() -> unit) { }", UNIT_NOT_A_TYPE.into(), 12),
+            unit_row("fn f(x: Array unit') { }", UNIT_NOT_A_TYPE.into(), 13),
+            unit_row("fn v() -> (unit) { return; }", UNIT_NOT_A_TYPE.into(), 16),
+            unit_row("fn f() { let d: (unit) = (); }", UNIT_NOT_A_TYPE.into(), 9),
+            unit_row("struct S { f: (unit); }", UNIT_NOT_A_TYPE.into(), 6),
+        ]);
+    }
+
+    /// The refused type lowers as `()` would have: the unit type, located on
+    /// the word, and never a type *named* `unit`. That is what leaves later
+    /// phases — which an editor runs over a file with syntax errors — nothing
+    /// further to say about the position than they would say about `()`.
+    ///
+    /// The generic-argument row is not here: a type argument lowers to an
+    /// identifier carrying its source text whatever it is spelled with, which
+    /// is the lowering of every type argument, not a property of this word.
+    #[test]
+    fn unit_in_a_type_position_lowers_as_the_unit_type() {
+        use inference_ast::nodes::{SimpleTypeKind, TypeNode};
+        for src in [
+            "fn v() -> unit { return; }",
+            "fn f(x: unit) { }",
+            "fn f() { let d: unit = (); }",
+            "fn f() { let a: [unit; 2] = [(), ()]; }",
+            "struct S { f: unit; }",
+            "const C: unit = ();",
+            "external fn ping() -> unit;",
+            "external fn ping(unit);",
+            "fn f(g: fn() -> unit) { }",
+            "fn v() -> (unit) { return; }",
+            "fn f() { let d: (unit) = (); }",
+            "struct S { f: (unit); }",
+        ] {
+            let at = src.find("unit").expect("the row spells the word");
+            let arena = crate::parse(src).arena;
+            let lowered_here: Vec<&TypeNode> = arena
+                .types
+                .values()
+                .filter(|ty| ty.location.offset_start as usize == at)
+                .map(|ty| &ty.kind)
+                .collect();
+            assert_eq!(
+                lowered_here,
+                vec![&TypeNode::Simple(SimpleTypeKind::Unit)],
+                "{src:?}: the word must lower to the unit type and to nothing else"
+            );
+            assert!(
+                arena.idents.values().all(|ident| ident.name != "unit"),
+                "{src:?}: no name `unit` may reach the arena from a type position"
+            );
+        }
+    }
+
+    /// The rows spelling `unit` where a name is written and the position says
+    /// what the name names: every declaration, and the segments of a `use` path
+    /// or of a type's path.
+    ///
+    /// Each row's count is measured as in the type-position table. The keyword
+    /// the position does not expect leaves the declaration's own head
+    /// unfinished, and the remainder is read as items that are not there.
+    fn unit_name_rows() -> Vec<UnitRow> {
+        vec![
+            unit_row("fn f() { let unit: i32 = 1; }", unit_cannot_name("a binding"), 10),
+            unit_row("fn f(unit: i32) { }", unit_cannot_name("a parameter"), 16),
+            unit_row("fn f(mut unit: i32) { }", unit_cannot_name("a parameter"), 17),
+            unit_row("struct S { unit: i32; }", unit_cannot_name("a field"), 4),
+            unit_row("fn unit() { }", unit_cannot_name("a function"), 16),
+            unit_row(
+                "struct S { x: i32; fn unit(self) { } }",
+                unit_cannot_name("a function"),
+                13,
+            ),
+            unit_row("external fn unit();", unit_cannot_name("a function"), 13),
+            unit_row("struct unit { x: i32; }", unit_cannot_name("a struct"), 4),
+            unit_row("enum unit { A }", unit_cannot_name("an enum"), 11),
+            unit_row("enum E { unit }", unit_cannot_name("an enum variant"), 5),
+            unit_row("enum E { A, unit }", unit_cannot_name("an enum variant"), 6),
+            unit_row("const unit: i32 = 1;", unit_cannot_name("a constant"), 16),
+            unit_row("spec unit { }", unit_cannot_name("a spec"), 6),
+            unit_row("fn f unit'(x: i32) { }", unit_cannot_name("a type parameter"), 23),
+            unit_row("fn f T' unit'(x: i32) { }", unit_cannot_name("a type parameter"), 23),
+            unit_row("use unit::x;", unit_cannot_name("a module"), 10),
+            unit_row("use lib::unit;", unit_cannot_name("a module"), 6),
+            unit_row("use { f } from unit;", unit_cannot_name("a module"), 6),
+            unit_row("use { f } from lib::unit;", unit_cannot_name("a module"), 6),
+            unit_row("use { unit } from lib;", unit_cannot_name("an imported item"), 15),
+            unit_row("use { a, unit } from lib;", unit_cannot_name("an imported item"), 15),
+            unit_row("fn f(x: unit::Point) { }", unit_cannot_name("a module"), 16),
+            unit_row("fn f(x: lib::unit::Point) { }", unit_cannot_name("a module"), 17),
+            unit_row("fn f(x: lib::unit) { }", unit_cannot_name("a type"), 13),
+        ]
+    }
+
+    /// The rows spelling `unit` where a name is referred to and the position
+    /// does not say what it names.
+    ///
+    /// These positions do not all tell: `unit::k()` may reach into a module or
+    /// call an associated function of a type, and `unit()` may call a function
+    /// or a parameter. The last two rows are types that name something the same
+    /// way: a generic type's base, and an array size. Each row's count is
+    /// measured as in the type-position table.
+    fn unit_reference_rows() -> Vec<UnitRow> {
+        let refused = || UNIT_NOT_A_NAME.to_string();
+        vec![
+            unit_row("fn f() -> i32 { return unit; }", refused(), 5),
+            unit_row("fn f() -> i32 { return unit-1; }", refused(), 3),
+            unit_row("fn f() { unit(); }", refused(), 2),
+            unit_row("fn f() { unit = 1; }", refused(), 4),
+            unit_row("fn f() { if unit { } }", refused(), 2),
+            unit_row("fn f() -> i32 { return g(1, unit); }", refused(), 2),
+            unit_row("fn f() -> i32 { return unit::k(); }", refused(), 5),
+            unit_row("fn f() -> i32 { return lib::unit::k(); }", refused(), 7),
+            unit_row("fn f() -> P { return unit::P { x: 1 }; }", refused(), 5),
+            unit_row("fn f() -> E { return E::unit; }", refused(), 7),
+            unit_row("fn f(s: S) -> i32 { return s.unit; }", refused(), 7),
+            unit_row("fn f(s: S) -> i32 { return s.unit(); }", refused(), 5),
+            unit_row("fn f() -> S { return S { unit: 1 }; }", refused(), 13),
+            unit_row("fn f() -> S { return S { x: 1, unit: 2 }; }", refused(), 13),
+            unit_row("fn f() -> i32 { return g(unit: 1); }", refused(), 11),
+            unit_row("fn f(x: unit i32') { }", refused(), 16),
+            unit_row("fn f() { let a: [i32; unit] = [1]; }", refused(), 9),
+        ]
+    }
+
+    /// `unit` wherever a name is written and the position says what it names
+    /// reports what it tried to name, once, on the word.
+    #[test]
+    fn unit_in_a_name_position_is_one_diagnostic_naming_what_it_named() {
+        assert_unit_rows(&unit_name_rows());
+    }
+
+    /// `unit` wherever a name is referred to without saying what it names
+    /// reports that the word cannot be used as a name, once, on the word.
+    #[test]
+    fn unit_where_a_name_is_referred_to_is_one_diagnostic() {
+        assert_unit_rows(&unit_reference_rows());
+    }
+
+    /// The refusal is the only difference the word makes to a name: every name
+    /// and reference row parses to the tree the same source has with an
+    /// ordinary identifier in the word's place, and that source parses clean.
+    /// The one leaf differs only by its lexed kind, which the tree keeps as it
+    /// keeps `TypeKw` for a `type` written as a name.
+    ///
+    /// So the word is consumed exactly where a name would be, no token after it
+    /// is read differently, and a reference keeps the shape name resolution
+    /// reads: `unit::k()` is the qualified name `lib::k()` is, not a member
+    /// access on a value named `unit`.
+    #[test]
+    fn a_refused_name_parses_as_an_ordinary_name_would() {
+        let mismatched: Vec<String> = unit_name_rows()
+            .into_iter()
+            .chain(unit_reference_rows())
+            .filter_map(|row| {
+                let at = row.src.find("unit").expect("the row spells the word");
+                let ordinary = row.src.replace("unit", "abcd");
+                let ordinary_errors = crate::parse(&ordinary).errors;
+                if !ordinary_errors.is_empty() {
+                    return Some(format!("{ordinary:?} is not clean: {ordinary_errors:?}"));
+                }
+                let leaf = |kind: &str, text: &str| format!("{kind}@{at}..{} {text:?}", at + 4);
+                let expected = tree(&ordinary).replace(
+                    &leaf("Ident", "abcd"),
+                    &leaf("UnitKw", "unit"),
+                );
+                let actual = tree(row.src);
+                (actual != expected).then(|| {
+                    format!(
+                        "{:?}:\n{actual}\ndiffers from its ordinary spelling:\n{expected}",
+                        row.src
+                    )
+                })
+            })
+            .collect();
+        assert!(mismatched.is_empty(), "{}", mismatched.join("\n"));
+    }
+
+    /// `unit` as the last segment of a type path, with type arguments after it,
+    /// is the base of a generic name, as an ordinary name there is: the source
+    /// parses to the ordinary spelling's tree, and reports what that spelling
+    /// reports with the word's one refusal, on the word, in front of it.
+    ///
+    /// The source is not a row of the reference table because its ordinary
+    /// spelling is not clean — a qualified type takes no type arguments, which
+    /// lowering reports — and every row there is a single fault. Refused as the
+    /// path's type name instead, the word leaves the arguments to be read as
+    /// whatever the enclosing rules expect next: eight further diagnostics.
+    #[test]
+    fn unit_as_a_generic_path_leaf_adds_only_its_own_refusal() {
+        let src = "fn f() { let x: lib::unit i32' = 1; }";
+        let at = src.find("unit").expect("the source spells the word");
+        let ordinary = src.replace("unit", "abcd");
+        let messages = |src: &str| -> Vec<String> {
+            crate::parse(src)
+                .errors
+                .into_iter()
+                .map(|e| e.message)
+                .collect()
+        };
+        assert_eq!(
+            messages(&ordinary),
+            ["generic type arguments are not supported in a qualified type"]
+        );
+        let expected: Vec<String> = std::iter::once(UNIT_NOT_A_NAME.to_string())
+            .chain(messages(&ordinary))
+            .collect();
+        assert_eq!(messages(src), expected);
+        let span = crate::parse(src).errors[0].span;
+        assert_eq!(
+            (span.offset_start as usize, span.offset_end as usize),
+            (at, at + 4),
+            "the refusal must sit on the word"
+        );
+        let leaf = |kind: &str, text: &str| format!("{kind}@{at}..{} {text:?}", at + 4);
+        assert_eq!(
+            tree(src),
+            tree(&ordinary).replace(&leaf("Ident", "abcd"), &leaf("UnitKw", "unit"))
+        );
+    }
+
+    /// A refused reference lowers to the name the source wrote, as the refused
+    /// declaration of that name does, so the analysis an editor runs over a
+    /// file with syntax errors resolves the one to the other instead of meeting
+    /// a hole where the expression was.
+    #[test]
+    fn a_refused_reference_lowers_to_the_name_it_spells() {
+        let src = "struct S { unit: i32; } fn f(s: S) -> i32 { return s.unit + 1; }";
+        let parsed = crate::parse(src);
+        let messages: Vec<String> = parsed.errors.into_iter().map(|e| e.message).collect();
+        assert_eq!(
+            messages,
+            vec![unit_cannot_name("a field"), UNIT_NOT_A_NAME.to_string()]
+        );
+        let named_unit = parsed
+            .arena
+            .idents
+            .values()
+            .filter(|ident| ident.name == "unit")
+            .count();
+        assert_eq!(named_unit, 2, "the field and the member access must both lower to `unit`");
+    }
+
+    /// `type unit = i32;` is two faults, and each is reported once: the author
+    /// wrote an alias, which the language refuses whatever it is named, and
+    /// named it with the reserved word. The word still counts as the name that
+    /// gates the alias refusal, because the declaration is no less an alias for
+    /// it.
+    #[test]
+    fn a_type_alias_named_unit_reports_the_alias_and_the_name() {
+        let src = "type unit = i32;";
+        let messages: Vec<String> = crate::parse(src)
+            .errors
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                TYPE_ALIAS_MESSAGE.to_string(),
+                unit_cannot_name("a type alias")
+            ]
+        );
+    }
+
+    /// A refused name is still the declaration's name: the word is consumed as
+    /// the identifier, so what follows it lowers as the source wrote it rather
+    /// than being dropped with the fault.
+    #[test]
+    fn a_refused_name_keeps_the_declaration_around_it() {
+        let (root, msgs) = parse_messages("fn f() { let unit: i32 = 1; } fn after() { }");
+        assert_eq!(msgs, vec![unit_cannot_name("a binding")]);
+        let stmt = find(&root, SyntaxKind::VariableDefinitionStatement)
+            .expect("the binding is still a variable definition");
+        assert!(stmt.child(SyntaxKind::TypeI32).is_some(), "its type still parses");
+        assert!(stmt.child(SyntaxKind::NumberLiteral).is_some(), "its value still parses");
+        assert_eq!(count_kind(&root, SyntaxKind::FunctionDefinition), 2);
+    }
+
+    /// The word is reserved whole: a longer identifier that starts with it is an
+    /// ordinary name in every position this file refuses the word in.
+    #[test]
+    fn identifiers_that_begin_with_unit_stay_ordinary_names() {
+        assert_clean(
+            "struct units { unit_x: i32; } fn unitary(unit_count: units) -> units { \
+             let unit_y: i32 = 1; return unit_count; }",
+        );
+    }
+
+    /// The unit type is spelled `()`, in both positions a program may write it:
+    /// as a return type, and as the annotation of a binding. Neither the
+    /// keyword nor its recovery disturbs that spelling.
+    #[test]
+    fn the_unit_type_spelled_parens_still_parses_clean() {
+        assert_clean("fn v() -> () { let d: () = (); return; }");
+        assert_clean("external fn ping() -> ();");
     }
 
     // -- pub field rejection: exact message, AST integrity, mixed members
@@ -1995,6 +2395,28 @@ mod tests {
         let src = "external fn n(mut Point);";
         let (_root, msgs) = parse_messages(src);
         assert_eq!(msgs, vec![MUT_MISSING_TYPE_MESSAGE.to_string()]);
+    }
+
+    /// `mut unit` is the named form missing its type, as `mut a` is, since
+    /// `mut unit: i32` is the named form with it. So the `mut` earns the
+    /// missing-type message rather than the general one, and the word, read as
+    /// the bare type the argument then has to be, is refused once as a type.
+    /// No declaration is manufactured from it, as none is for `mut a`.
+    #[test]
+    fn mut_before_unit_without_a_type_names_the_missing_type() {
+        for src in ["fn j(mut unit) -> i32 { return 1; }", "external fn j(mut unit);"] {
+            let (root, msgs) = parse_messages(src);
+            assert_eq!(
+                msgs,
+                vec![MUT_MISSING_TYPE_MESSAGE.to_string(), UNIT_NOT_A_TYPE.to_string()],
+                "for {src:?}"
+            );
+            assert_eq!(
+                count_kind(&root, SyntaxKind::ArgumentDeclaration),
+                0,
+                "for {src:?}"
+            );
+        }
     }
 
     #[test]

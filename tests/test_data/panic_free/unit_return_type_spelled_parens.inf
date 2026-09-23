@@ -1,0 +1,9 @@
+// `()` as a return type: the unit type written out, which declares the same empty result list an omitted return type does.
+fn helper() -> () {
+    return;
+}
+
+pub fn main() -> i32 {
+    helper();
+    return 1;
+}

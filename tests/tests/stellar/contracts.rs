@@ -89,7 +89,8 @@ impl Answer {
     /// # Panics
     ///
     /// Panics if the result list does not have the shape the declared return
-    /// type calls for — no results for `unit`, one `i32` otherwise.
+    /// type calls for — no results for a `()` (or omitted) return type, one
+    /// `i32` otherwise.
     fn read_from(self, results: &[wasmtime::Val]) -> Self {
         if matches!(self, Self::Void) {
             assert!(results.is_empty(), "a unit method returned {results:?}");

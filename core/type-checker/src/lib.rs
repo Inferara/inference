@@ -6,7 +6,8 @@
 //! ## Core Features
 //!
 //! **Type System Support**:
-//! - Primitive types: `bool`, `unit`, `i8`-`i64`, `u8`-`u64` (using efficient `SimpleTypeKind` enum)
+//! - Primitive types: `bool`, the unit type `()`, `i8`-`i64`, `u8`-`u64` (using
+//!   efficient `SimpleTypeKind` enum)
 //! - Compound types: arrays with fixed sizes, structs with fields, enums with variants
 //! - Generic types: type parameter inference and substitution for generic functions
 //! - Visibility control: `pub` modifiers with private-by-default semantics

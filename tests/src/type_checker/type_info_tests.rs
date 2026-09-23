@@ -646,15 +646,18 @@ mod number_type_methods {
 mod type_info_kind_builtin_methods {
     use super::*;
 
+    /// The unit type is not among the named builtins: it is spelled `()`, and
+    /// `unit` is a reserved word the parser refuses, so the table registering
+    /// the word would name a type no source can reach by it.
     #[test]
     fn test_non_numeric_builtins_contains_all() {
-        assert_eq!(TypeInfoKind::NON_NUMERIC_BUILTINS.len(), 4);
+        assert_eq!(TypeInfoKind::NON_NUMERIC_BUILTINS.len(), 3);
 
         let names: Vec<&str> = TypeInfoKind::NON_NUMERIC_BUILTINS
             .iter()
             .map(|(name, _)| *name)
             .collect();
-        assert!(names.contains(&"unit"));
+        assert!(!names.contains(&"unit"));
         assert!(names.contains(&"bool"));
         assert!(names.contains(&"string"));
         assert!(names.contains(&"String"));
@@ -662,7 +665,7 @@ mod type_info_kind_builtin_methods {
 
     #[test]
     fn test_as_builtin_str_for_unit() {
-        assert_eq!(TypeInfoKind::Unit.as_builtin_str(), Some("unit"));
+        assert_eq!(TypeInfoKind::Unit.as_builtin_str(), Some("()"));
     }
 
     #[test]
@@ -714,10 +717,6 @@ mod type_info_kind_builtin_methods {
     #[test]
     fn test_from_builtin_str_non_numeric() {
         assert_eq!(
-            TypeInfoKind::from_builtin_str("unit"),
-            Some(TypeInfoKind::Unit)
-        );
-        assert_eq!(
             TypeInfoKind::from_builtin_str("bool"),
             Some(TypeInfoKind::Bool)
         );
@@ -751,10 +750,21 @@ mod type_info_kind_builtin_methods {
         assert_eq!(TypeInfoKind::from_builtin_str(""), None);
     }
 
+    /// Neither spelling of the unit type resolves as a name: `()` is
+    /// punctuation the parser lowers to the unit kind directly, and `unit` is a
+    /// reserved word. A table that answered either would be a second route to
+    /// the type that no source can take.
+    #[test]
+    fn test_from_builtin_str_resolves_no_unit_spelling() {
+        assert_eq!(TypeInfoKind::from_builtin_str("unit"), None);
+        assert_eq!(TypeInfoKind::from_builtin_str("()"), None);
+    }
+
+    /// Every *named* builtin reads back as itself. The unit type is left out
+    /// because its spelling is not a name; the test above is what pins that.
     #[test]
     fn test_as_builtin_str_roundtrip() {
         let builtins = [
-            TypeInfoKind::Unit,
             TypeInfoKind::Bool,
             TypeInfoKind::String,
             TypeInfoKind::Number(NumberType::I32),
@@ -785,7 +795,7 @@ mod type_info_from_ast {
 
     fn alloc_simple_type(arena: &mut AstArena, name: &str) -> inference_ast::ids::TypeId {
         let kind = match name.to_lowercase().as_str() {
-            "unit" => SimpleTypeKind::Unit,
+            "()" => SimpleTypeKind::Unit,
             "bool" => SimpleTypeKind::Bool,
             "i8" => SimpleTypeKind::I8,
             "i16" => SimpleTypeKind::I16,
@@ -847,7 +857,7 @@ mod type_info_from_ast {
     #[test]
     fn test_new_from_simple_builtin_unit() {
         let mut arena = AstArena::default();
-        let ty_id = alloc_simple_type(&mut arena, "unit");
+        let ty_id = alloc_simple_type(&mut arena, "()");
         let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::Unit);
     }
@@ -1025,8 +1035,9 @@ mod type_info_from_ast {
         let ti = TypeInfo::from_type_id(&arena, ty_id);
 
         if let TypeInfoKind::Function(sig) = &ti.kind {
-            // A source-like spelling: no params, unit return in its lowercase form.
-            assert_eq!(sig, "fn() -> unit");
+            // A source-like spelling: no params, and the unit return spelled
+            // `()`, the only way source can write it.
+            assert_eq!(sig, "fn() -> ()");
         } else {
             panic!("Expected function type");
         }
@@ -1242,7 +1253,7 @@ mod type_info_with_type_params {
 
     fn alloc_simple_type(arena: &mut AstArena, name: &str) -> inference_ast::ids::TypeId {
         let kind = match name.to_lowercase().as_str() {
-            "unit" => SimpleTypeKind::Unit,
+            "()" => SimpleTypeKind::Unit,
             "bool" => SimpleTypeKind::Bool,
             "i8" => SimpleTypeKind::I8,
             "i16" => SimpleTypeKind::I16,
