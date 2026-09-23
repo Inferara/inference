@@ -30,10 +30,18 @@
 //!   with a larger const generic, so the build succeeds and owes a warning
 //!   rather than a refusal.
 //! - `FAKE_WASM_OPT_FUNCTION_IMPORT=1`: write a module whose only content is
-//!   one function import, `env.f`. The compiler's module for a program that
-//!   binds no host import imports nothing, so this is the role that shows
-//!   whether `infs run` asks its import question of the optimized bytes or of
-//!   the compiler's.
+//!   one function import, `env.f`. For any program that does not bind `env.f`
+//!   itself, this is the role that reaches the refusal of optimized bytes
+//!   importing a function the compiler's module did not.
+//! - `FAKE_WASM_OPT_NO_IMPORTS=1`: write a module that imports nothing and
+//!   exports a `main` returning 0 — what Binaryen makes of a program whose only
+//!   host import is never called. It is the role that shows the build log
+//!   reporting the removal, and `infs run` executing a program the compiler's
+//!   module would have been refused for.
+//! - `FAKE_WASM_OPT_VERIFICATION_CONSTRUCT=1`: write a valid module whose one
+//!   function carries `i32.uzumaki`. The validator the optimized bytes are
+//!   re-checked with decodes the verification opcodes, so this is the role that
+//!   reaches the scan of the bytes about to land.
 //! - otherwise: copy the positional input file to the `-o` target byte-for-byte
 //!   and exit 0 (the success path).
 //!
@@ -93,6 +101,18 @@ fn main() {
     if std::env::var("FAKE_WASM_OPT_FUNCTION_IMPORT").as_deref() == Ok("1") {
         std::fs::write(&output, function_import_module())
             .expect("fake wasm-opt: failed to write the function-import module");
+        return;
+    }
+
+    if std::env::var("FAKE_WASM_OPT_NO_IMPORTS").as_deref() == Ok("1") {
+        std::fs::write(&output, import_free_main_module())
+            .expect("fake wasm-opt: failed to write the import-free module");
+        return;
+    }
+
+    if std::env::var("FAKE_WASM_OPT_VERIFICATION_CONSTRUCT").as_deref() == Ok("1") {
+        std::fs::write(&output, verification_construct_module())
+            .expect("fake wasm-opt: failed to write the verification-construct module");
         return;
     }
 
@@ -207,8 +227,8 @@ fn deeply_nested_module() -> Vec<u8> {
 /// A module whose only content is one function import, `env.f`, of type
 /// `[] -> []`.
 ///
-/// Valid WebAssembly 1.0, so it passes the re-validation step and lands in
-/// `out/main.wasm` as the artifact `infs run` is about to execute.
+/// Valid WebAssembly 1.0, so it passes the re-validation step and reaches the
+/// comparison of its imports with those of the module it replaces.
 ///
 /// Assembled by hand for the same reason: this fixture takes no dependencies.
 fn function_import_module() -> Vec<u8> {
@@ -220,6 +240,45 @@ fn function_import_module() -> Vec<u8> {
         0x02,
         &[0x01, 0x03, b'e', b'n', b'v', 0x01, b'f', 0x00, 0x00],
     );
+    module
+}
+
+/// A module that imports nothing and exports `main`, of type `[] -> [i32]`,
+/// returning 0.
+///
+/// Valid WebAssembly 1.0 that wasmtime can invoke, so it passes the
+/// re-validation step and `infs run` executes it.
+///
+/// Assembled by hand for the same reason: this fixture takes no dependencies.
+fn import_free_main_module() -> Vec<u8> {
+    let mut module = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+    section(&mut module, 0x01, &[0x01, 0x60, 0x00, 0x01, 0x7F]);
+    section(&mut module, 0x03, &[0x01, 0x00]);
+    // One export: `main`, the function of index 0.
+    section(
+        &mut module,
+        0x07,
+        &[0x01, 0x04, b'm', b'a', b'i', b'n', 0x00, 0x00],
+    );
+    // One body: no locals, `i32.const 0`, `end`.
+    section(&mut module, 0x0A, &[0x01, 0x04, 0x00, 0x41, 0x00, 0x0B]);
+    module
+}
+
+/// A module whose single function, of type `[] -> []`, evaluates
+/// `i32.uzumaki` and drops it.
+///
+/// The workspace validator decodes the verification opcodes as ordinary
+/// operators, so this passes the re-validation step, and only the scan for a
+/// verification construct tells it apart from an executable module.
+///
+/// Assembled by hand for the same reason: this fixture takes no dependencies.
+fn verification_construct_module() -> Vec<u8> {
+    let mut module = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+    section(&mut module, 0x01, &[0x01, 0x60, 0x00, 0x00]);
+    section(&mut module, 0x03, &[0x01, 0x00]);
+    // One body: no locals, `i32.uzumaki`, `drop`, `end`.
+    section(&mut module, 0x0A, &[0x01, 0x05, 0x00, 0xFC, 0x31, 0x1A, 0x0B]);
     module
 }
 

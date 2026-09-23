@@ -40,10 +40,31 @@
 //! that has quietly gone stale. `--no-wasm-opt`, and `enabled = false` under
 //! `[build.wasm-opt]`, are the way to keep an exact record.
 //!
+//! ## The import set
+//!
+//! `infc` emits an import for every host binding, called or not, because the
+//! binding is where a program declares what its environment must supply. The
+//! optimizer keeps only the imported functions the program reaches: at every
+//! level but `0` it removes unused module elements, and an import nothing calls
+//! is one. So the artifact this step ships declares the interface the program
+//! uses — which is what an optimized artifact should declare — while `infc`'s
+//! `host imports:` line, printed before the step ran, can still name a function
+//! the shipped module no longer asks its embedder for.
+//!
+//! The step therefore compares the import set it was given with the one it
+//! lands, and when the two differ prints a line naming what went and what is
+//! left, so the last word on the imports in a build log is true of the artifact
+//! that ships. The allowlist `infc` enforced still bounds that set, by
+//! construction: the optimizer may only remove imports, so optimized bytes
+//! importing a function the input did not are refused before they land, and the
+//! artifact `infc` wrote stays in place. An import no policy was asked about
+//! never ships.
+//!
 //! It lives under `commands/` for the same reason as
 //! [`crate::commands::project_build`]: spawning an external tool and propagating
 //! its outcome is command-execution logic, not manifest/filesystem logic.
 
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -182,9 +203,10 @@ pub(crate) fn post_build_optimize(
     // afterwards would answer the same question about bytes whose functions
     // have already moved. `wasm_path` is absolute; the scan is given the
     // conventional relative spelling the refusal below uses, so the two
-    // failures name one file. The import list is not this step's question:
-    // `infs run` asks it of the bytes this step leaves behind.
-    let (uses_bulk_memory, records_overflow_guards) =
+    // failures name one file. The import list is read from the input too, as
+    // the set `infc`'s inventory line described and its allowlist admitted, for
+    // the one that lands to be held to and compared against.
+    let (uses_bulk_memory, records_overflow_guards, compiled_imports) =
         match scan_artifact(&wasm_bytes, Path::new("out/main.wasm"))? {
             ArtifactScan::VerificationConstruct(construct) => bail!(
                 "`[build.wasm-opt]` is enabled but `out/main.wasm` contains the \
@@ -196,8 +218,8 @@ pub(crate) fn post_build_optimize(
             ArtifactScan::Executable {
                 uses_bulk_memory,
                 records_overflow_guards,
-                function_imports: _,
-            } => (uses_bulk_memory, records_overflow_guards),
+                function_imports,
+            } => (uses_bulk_memory, records_overflow_guards, function_imports),
         };
 
     let wasm_opt = match resolve_wasm_opt_with_source()? {
@@ -208,12 +230,13 @@ pub(crate) fn post_build_optimize(
     check_wasm_opt_version(&wasm_opt)?;
 
     let before = wasm_bytes.len() as u64;
-    let conformance = optimize_in_place(
+    let landed = optimize_in_place(
         &wasm_opt,
         &config.level,
         &wasm_path,
         uses_bulk_memory,
         records_overflow_guards,
+        &compiled_imports,
         ctx.manifest.build.resolved_target()?,
     )?;
     let after = std::fs::metadata(&wasm_path)
@@ -224,11 +247,14 @@ pub(crate) fn post_build_optimize(
         "wasm-opt -O{}: main.wasm {before} -> {after} bytes",
         config.level
     );
+    if let Some(line) = import_change_line(&compiled_imports, &landed.function_imports) {
+        println!("{line}");
+    }
     // The compiler printed these numbers about the module it wrote, and the
     // optimizer has since reshaped control flow and coalesced locals — both of
     // them quantities that line reports. The artifact on disk is this one, so
     // the last budget in the log has to be this one's.
-    if let Some(report) = conformance {
+    if let Some(report) = landed.conformance {
         println!("{}", report.summary_line());
         for warning in report.budget_warnings() {
             eprintln!("warning: {warning}");
@@ -582,22 +608,26 @@ fn wasm_opt_args(
 /// checked the artifact it wrote, and these are different bytes — the optimizer
 /// reshapes control flow and coalesces locals, both of them quantities the
 /// answer measures. The measurement it carries is returned rather than dropped,
-/// because it is the one that describes the artifact the build leaves behind;
-/// `None` is a target with no envelope to measure.
+/// because it is the one that describes the artifact the build leaves behind,
+/// and so is the import set, which the optimizer may have narrowed.
+/// `compiled_imports` is the input's import set, which the landed one may
+/// narrow and may not grow.
 ///
 /// # Errors
 ///
 /// Errors if `wasm-opt` cannot be spawned, exits nonzero, produces output that
-/// cannot be read, fails re-validation or fails the target's conformance check,
-/// or if the final rename fails.
+/// cannot be read, fails re-validation, carries a verification-only construct,
+/// imports a function the input did not, or fails the target's conformance
+/// check, or if the final rename fails.
 fn optimize_in_place(
     wasm_opt: &Path,
     level: &str,
     wasm_path: &Path,
     uses_bulk_memory: bool,
     records_overflow_guards: bool,
+    compiled_imports: &[(String, String)],
     target: TargetName,
-) -> Result<Option<inference_target_conformance::spacewasm::Report>> {
+) -> Result<Landed> {
     let tmp_path = optimized_tmp_path(wasm_path);
     let args = wasm_opt_args(level, wasm_path, &tmp_path, uses_bulk_memory);
 
@@ -667,6 +697,17 @@ fn optimize_in_place(
         optimized
     };
 
+    // What the bytes about to land import is the set this build ships, so it is
+    // read from them rather than from the optimizer's output.
+    let function_imports =
+        match landed_function_imports(&landing, &tmp_path, wasm_path, compiled_imports) {
+            Ok(function_imports) => function_imports,
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(err);
+            }
+        };
+
     // The target's own envelope, asked of the bytes that are about to land
     // rather than of the optimizer's output: the guard record above is rewritten
     // after re-validation, so a check placed beside that one would be a
@@ -702,7 +743,142 @@ fn optimize_in_place(
         ))
     })?;
 
-    Ok(conformance)
+    Ok(Landed {
+        conformance,
+        function_imports,
+    })
+}
+
+/// The `(module, field)` of every function `landing` imports, in import-section
+/// order, read by the scan that also asks whether it carries a verification
+/// construct, and held to the input's set, `compiled`.
+///
+/// The optimizer's input was scanned for a construct and refused if it carried
+/// one, so a construct found here is one the optimizer introduced.
+/// Re-validation cannot see it — the workspace validator decodes those opcodes
+/// as ordinary operators — so this is where it is refused. An import `compiled`
+/// lacks is refused here too, by [`ensure_no_import_added`]. `landing` was
+/// written to `tmp_path`, which a parse failure names; `wasm_path` is the
+/// original the refusals say is unchanged.
+///
+/// # Errors
+///
+/// Errors if `landing` cannot be parsed, carries a verification-only construct,
+/// or imports a function `compiled` does not.
+fn landed_function_imports(
+    landing: &[u8],
+    tmp_path: &Path,
+    wasm_path: &Path,
+    compiled: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    let function_imports = match scan_artifact(landing, tmp_path)? {
+        ArtifactScan::Executable {
+            function_imports, ..
+        } => function_imports,
+        ArtifactScan::VerificationConstruct(construct) => bail!(
+            "wasm-opt produced an artifact carrying the verification-only construct \
+             `{construct}`, which the artifact it was given did not carry. The original {} is \
+             unchanged; try `--no-wasm-opt`, or a different Binaryen version.",
+            wasm_path.display()
+        ),
+    };
+    ensure_no_import_added(compiled, &function_imports, wasm_path)?;
+    Ok(function_imports)
+}
+
+/// Refuses `landed` if it imports a function `compiled` does not.
+///
+/// The allowlist `infc` enforced was asked of the imports it emitted, which are
+/// `compiled`, so an import the optimizer added is one no policy admitted. The
+/// optimizer may only remove imports, and an output that adds one is discarded
+/// rather than reported, which is what keeps the allowlist a bound on what
+/// ships. The refusal names each addition `module.field`, sorted by module and
+/// then field; `wasm_path` is the original it says is left in place.
+///
+/// # Errors
+///
+/// Errors if `landed` holds a `(module, field)` that `compiled` does not.
+fn ensure_no_import_added(
+    compiled: &[(String, String)],
+    landed: &[(String, String)],
+    wasm_path: &Path,
+) -> Result<()> {
+    let compiled: BTreeSet<&(String, String)> = compiled.iter().collect();
+    let landed: BTreeSet<&(String, String)> = landed.iter().collect();
+    let added: Vec<String> = landed
+        .difference(&compiled)
+        .map(|(module, field)| format!("`{module}.{field}`"))
+        .collect();
+    if added.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "`[build.wasm-opt]` produced an artifact importing {}, which the artifact it was \
+         given did not import. The optimizer may only remove imports, never add one, so the \
+         optimized output is discarded and {} is left as the compiler wrote it; try \
+         `--no-wasm-opt`, or a different Binaryen version.",
+        added.join(", "),
+        wasm_path.display()
+    )
+}
+
+/// What [`optimize_in_place`] learned about the artifact it put in place.
+#[derive(Debug)]
+struct Landed {
+    /// The target's measurement of the landed bytes, or `None` for a target
+    /// with no envelope of its own to measure.
+    conformance: Option<inference_target_conformance::spacewasm::Report>,
+    /// The `(module, field)` of every function the landed bytes import, in
+    /// import-section order.
+    function_imports: Vec<(String, String)>,
+}
+
+/// The build-log line naming the host imports the optimizer removed and the
+/// set left, or `None` when it removed none.
+///
+/// `compiled` is what the artifact `infc` wrote imports and `landed` what the
+/// optimized one does, each in import-section order, compared as sets.
+/// `landed` holds nothing `compiled` lacks: [`ensure_no_import_added`] refused
+/// any other before it landed, so a difference is a removal, and a removal is
+/// what Binaryen's are, a function nothing calls. Names are spelled
+/// `module.field` and sorted by module and then field, as `infc`'s
+/// `host imports:` line spells and sorts them, so the two lines can be read
+/// against each other. The reason the line exists is in the module
+/// documentation.
+fn import_change_line(
+    compiled: &[(String, String)],
+    landed: &[(String, String)],
+) -> Option<String> {
+    let compiled: BTreeSet<&(String, String)> = compiled.iter().collect();
+    let landed: BTreeSet<&(String, String)> = landed.iter().collect();
+    let removed = import_names(compiled.difference(&landed).copied());
+    if removed.is_empty() {
+        return None;
+    }
+    let remaining = if landed.is_empty() {
+        String::from("nothing")
+    } else {
+        import_names(landed.iter().copied()).join(", ")
+    };
+    let imports = if removed.len() == 1 {
+        "import"
+    } else {
+        "imports"
+    };
+    Some(format!(
+        "wasm-opt removed {} host {imports} the program never calls: {}; the artifact now \
+         imports {remaining}",
+        removed.len(),
+        removed.join(", ")
+    ))
+}
+
+/// Each `(module, field)` of `imports` spelled `module.field`, in the order
+/// given.
+fn import_names<'a>(imports: impl Iterator<Item = &'a (String, String)>) -> Vec<String> {
+    imports
+        .map(|(module, field)| format!("{module}.{field}"))
+        .collect()
 }
 
 /// The sibling temp path `wasm-opt` writes to: the artifact path with `.opt`
@@ -1281,6 +1457,166 @@ mod tests {
         assert!(validate_optimized(&module, false).is_ok());
     }
 
+    /// `(module, field)` pairs from their `module.field` spellings, in the order
+    /// given.
+    fn imports(names: &[&str]) -> Vec<(String, String)> {
+        names
+            .iter()
+            .map(|name| {
+                let (module, field) = name.split_once('.').expect("a `module.field` pair");
+                (module.to_string(), field.to_string())
+            })
+            .collect()
+    }
+
+    /// The set is what is compared. The scan lists imports in section order, and
+    /// an order or a repetition that differs is not an import that went or came,
+    /// so it adds nothing to the build log.
+    #[test]
+    fn an_unchanged_import_set_prints_no_line() {
+        assert_eq!(import_change_line(&[], &[]), None);
+        assert_eq!(
+            import_change_line(
+                &imports(&["fprime_core.telemetry", "env.clock_ms"]),
+                &imports(&["env.clock_ms", "fprime_core.telemetry", "env.clock_ms"]),
+            ),
+            None
+        );
+    }
+
+    /// A removal names what went and what is left, each sorted by module and
+    /// then field and spelled as `infc`'s inventory spells it, with the count in
+    /// agreement and `nothing` for an artifact left importing none.
+    #[test]
+    fn a_removal_names_what_went_and_what_is_left() {
+        let rows: [(&[&str], &[&str], &str); 4] = [
+            (
+                &["fprime_core.telemetry", "fprime_core.command", "env.clock_ms"],
+                &["fprime_core.telemetry", "fprime_core.command"],
+                "wasm-opt removed 1 host import the program never calls: env.clock_ms; the \
+                 artifact now imports fprime_core.command, fprime_core.telemetry",
+            ),
+            (
+                &["env.clock_ms"],
+                &[],
+                "wasm-opt removed 1 host import the program never calls: env.clock_ms; the \
+                 artifact now imports nothing",
+            ),
+            (
+                &["env.sleep_ms", "fprime_core.command", "env.clock_ms"],
+                &["fprime_core.command"],
+                "wasm-opt removed 2 host imports the program never calls: env.clock_ms, \
+                 env.sleep_ms; the artifact now imports fprime_core.command",
+            ),
+            (
+                &["env.sleep_ms", "env.clock_ms"],
+                &[],
+                "wasm-opt removed 2 host imports the program never calls: env.clock_ms, \
+                 env.sleep_ms; the artifact now imports nothing",
+            ),
+        ];
+        for (compiled, landed, expected) in rows {
+            assert_eq!(
+                import_change_line(&imports(compiled), &imports(landed)).as_deref(),
+                Some(expected),
+                "from {compiled:?} to {landed:?}"
+            );
+        }
+    }
+
+    /// The refusal [`ensure_no_import_added`] raises for a `landed` set holding
+    /// an import `compiled` lacks, with the original named `out/main.wasm`.
+    fn added_import_refusal(compiled: &[&str], landed: &[&str]) -> String {
+        ensure_no_import_added(
+            &imports(compiled),
+            &imports(landed),
+            &Path::new("out").join("main.wasm"),
+        )
+        .expect_err("a set that gained an import must be refused")
+        .to_string()
+    }
+
+    /// A set that gained an import is refused, naming each addition sorted by
+    /// module and then field: the allowlist was asked about the imports the
+    /// compiler emitted, so an import the optimizer added is one no policy
+    /// admitted.
+    #[test]
+    fn an_added_import_is_refused_naming_it() {
+        let original = Path::new("out").join("main.wasm");
+        assert_eq!(
+            added_import_refusal(&[], &["env.f"]),
+            format!(
+                "`[build.wasm-opt]` produced an artifact importing `env.f`, which the artifact \
+                 it was given did not import. The optimizer may only remove imports, never add \
+                 one, so the optimized output is discarded and {} is left as the compiler wrote \
+                 it; try `--no-wasm-opt`, or a different Binaryen version.",
+                original.display()
+            )
+        );
+        assert_eq!(
+            added_import_refusal(
+                &["fprime_core.command"],
+                &["fprime_core.command", "env.g", "env.f", "env.g"],
+            ),
+            format!(
+                "`[build.wasm-opt]` produced an artifact importing `env.f`, `env.g`, which the \
+                 artifact it was given did not import. The optimizer may only remove imports, \
+                 never add one, so the optimized output is discarded and {} is left as the \
+                 compiler wrote it; try `--no-wasm-opt`, or a different Binaryen version.",
+                original.display()
+            )
+        );
+    }
+
+    /// A set that lost one import and gained another is refused for the gain
+    /// alone: the removal is one an optimizer may make, and naming it beside the
+    /// addition would read as a second fault.
+    #[test]
+    fn a_set_that_lost_one_import_and_gained_another_is_refused_for_the_gain() {
+        assert_eq!(
+            added_import_refusal(
+                &["fprime_core.command", "env.clock_ms"],
+                &["env.f", "fprime_core.command"],
+            ),
+            format!(
+                "`[build.wasm-opt]` produced an artifact importing `env.f`, which the artifact \
+                 it was given did not import. The optimizer may only remove imports, never add \
+                 one, so the optimized output is discarded and {} is left as the compiler wrote \
+                 it; try `--no-wasm-opt`, or a different Binaryen version.",
+                Path::new("out").join("main.wasm").display()
+            )
+        );
+    }
+
+    /// A set the optimizer only narrowed, or left as it was in another order or
+    /// with a repetition, lands.
+    #[test]
+    fn a_set_with_nothing_added_lands() {
+        let rows: [(&[&str], &[&str]); 4] = [
+            (&[], &[]),
+            (
+                &["fprime_core.telemetry", "env.clock_ms"],
+                &["env.clock_ms", "fprime_core.telemetry", "env.clock_ms"],
+            ),
+            (
+                &["fprime_core.telemetry", "fprime_core.command", "env.clock_ms"],
+                &["fprime_core.command"],
+            ),
+            (&["env.clock_ms"], &[]),
+        ];
+        for (compiled, landed) in rows {
+            let outcome = ensure_no_import_added(
+                &imports(compiled),
+                &imports(landed),
+                &Path::new("out").join("main.wasm"),
+            );
+            assert!(
+                outcome.is_ok(),
+                "from {compiled:?} to {landed:?} nothing was added, got: {outcome:?}"
+            );
+        }
+    }
+
     // Spawns a real executable stub, so it is gated to unix (mirroring the
     // stub-based tests in `project_build.rs`); executing a script through
     // `Command` is not portable to Windows.
@@ -1296,7 +1632,7 @@ mod tests {
 
         let fake = write_failing_wasm_opt(&dir);
         let err = crate::testing::retry_while_exec_busy(|| {
-            optimize_in_place(&fake, "z", &wasm_path, false, false, TargetName::DEFAULT)
+            optimize_in_place(&fake, "z", &wasm_path, false, false, &[], TargetName::DEFAULT)
         })
         .unwrap_err();
         assert!(

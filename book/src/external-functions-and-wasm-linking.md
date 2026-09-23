@@ -222,30 +222,78 @@ the build derives a write set to check the declaration against; as it is, a
 proof build refuses any program that binds a host import (see [No contract
 travels with a host import](#no-contract-travels-with-a-host-import)).
 
-### A bound host import ships whether or not it is called
+### A bound host import is emitted whether or not it is called
 
 The import is emitted for the binding, not for a call. An `external fn` bound to
 `host::…` and never called still appears in the import section of the artifact
 `infc` writes, and the module still fails to instantiate until an embedder
-offers a matching function. That is deliberate: a host import is part of the
-module's interface — what the artifact requires of its environment — and an
-interface that appeared and disappeared with the call graph would change what a
-deployment must provide every time a caller was edited out.
+offers a matching function. That is deliberate: the binding is where a program
+declares what its environment must supply, so the artifact `infc` writes
+carries every import the program declares, and what it requires of an embedder
+can be read off the source.
 
-That guarantee belongs to the compiler and its link step, and one optional
-`infs` step ends it. A project whose `Inference.toml` declares
-`[build.wasm-opt]` has Binaryen rewrite `out/main.wasm` in place after `infc`
-exits, and at any `level` other than `"0"`, `wasm-opt` removes unused module
-elements — an imported function the program never calls among them (`-O0` runs
-no passes and keeps it). Nothing diagnoses the narrowing: `infs build` does not
-re-read the import set, and `infs run` re-reads it only to refuse an artifact
-that still imports a function. The direction is safe: `wasm-opt` can
-only drop imports and never invent one, so nothing escapes the allowlist that
-way. But a deployment sized against an uncalled host import is sized against
-the module `infc` wrote, not the one that shipped, so until the step is taught
-to preserve imports such a project should keep it from running — leave
-`[build.wasm-opt]` out of its manifest, set `enabled = false` or `level = "0"`
-in it, or pass `--no-wasm-opt`.
+An optimized build narrows that interface to the imports the program uses,
+also by design. A project whose `Inference.toml` declares `[build.wasm-opt]`
+has Binaryen rewrite `out/main.wasm` in place after `infc` exits, and at any
+`level` other than `"0"`, `wasm-opt` removes unused module elements — an
+imported function the program never calls among them (`-O0` runs no passes and
+keeps it). The artifact that ships then declares only the host imports the
+program calls, and the build log says so right after the optimizer's size line,
+naming what went and what is left. This program calls `command` and
+`telemetry` and binds `clock_ms` without calling it:
+
+```inference
+external fn telemetry(channel: i32, value: i32) -> i32;
+external fn command(opcode: i32) -> i32;
+use { telemetry, command } from host::fprime_core;
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+
+pub fn main() -> i32 {
+    let ack: i32 = command(1);
+    return telemetry(1, ack);
+}
+```
+
+Its manifest admits all three and turns the optimizer on:
+
+```toml
+[package]
+name = "flight"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[host-imports]
+fprime_core = ["telemetry", "command"]
+env = ["clock_ms"]
+
+[build.wasm-opt]
+level = "z"
+```
+
+and `infs build`, with Binaryen 130, prints:
+
+```text
+host-imports allowlist: env.clock_ms, fprime_core.command, fprime_core.telemetry
+Parsed: src/main.inf
+Analyzed: src/main.inf
+Codegen complete
+host imports: env.clock_ms, fprime_core.command, fprime_core.telemetry
+WASM generated at: out/main.wasm
+wasm-opt -Oz: main.wasm 163 -> 103 bytes
+wasm-opt removed 1 host import the program never calls: env.clock_ms; the artifact now imports fprime_core.command, fprime_core.telemetry
+```
+
+So in an optimized build, editing a caller out can change what a deployment
+must provide, and never silently: the last word on the imports in the log
+describes the artifact that ships, and a build whose imports the optimizer left
+alone prints no such line. The allowlist still bounds what ships, by
+construction: the optimizer may only remove imports, and optimized bytes
+importing a function the artifact `infc` wrote did not import are refused,
+leaving that artifact in place, so every import that ships is one `infc`
+admitted. `infs run` judges the final bytes, so a program whose host imports
+are all uncalled runs under it once they are optimized away (see [Running a
+program that binds host imports](#running-a-program-that-binds-host-imports)).
 
 ### What is refused, and by which layer
 
@@ -379,8 +427,8 @@ already there.
 
 ### The inventory line
 
-A build that ships host imports prints one line naming every pair, sorted by
-module and then field:
+`infc` prints one line naming every pair it emits, sorted by module and then
+field:
 
 ```text
 host imports: fprime_core.clock_ms, fprime_core.telemetry
@@ -389,9 +437,15 @@ host imports (no allowlist): fprime_core.clock_ms, fprime_core.telemetry
 
 The parenthetical is not decoration. It separates an import admitted by a
 reviewed policy from one admitted by the absence of a policy, which two
-otherwise identical build logs cannot be told apart by. The line is also the
-only compile-time surface that reports the silent reinterpretation described
-next, so it is worth reading even on a build that succeeds.
+otherwise identical build logs cannot be told apart by.
+
+In a project whose `[build.wasm-opt]` step runs above level `"0"`, the set that
+ships can be smaller, and a `wasm-opt removed …` line printed after this one
+then names it (see [A bound host import is emitted whether or not it is
+called](#a-bound-host-import-is-emitted-whether-or-not-it-is-called)). The
+inventory line is also the only compile-time surface that reports the silent
+reinterpretation described next, so it is worth reading even on a build that
+succeeds.
 
 ### The breaking change
 
@@ -445,8 +499,8 @@ a `[host-imports]` table is an allowlist and not a declaration: a project can
 list functions it never binds, or bind them with no table at all. It is asked of
 the bytes that would run, too — in a project build, the bytes `[build.wasm-opt]`
 leaves behind, which may have lost an import nothing calls (see [A bound host
-import ships whether or not it is
-called](#a-bound-host-import-ships-whether-or-not-it-is-called)).
+import is emitted whether or not it is
+called](#a-bound-host-import-is-emitted-whether-or-not-it-is-called)).
 
 An embedder registers each function under the two names its import carries,
 before it instantiates the module. For a program declaring
@@ -655,9 +709,6 @@ restrictions of its own:
 - An import module or field name has to be an Inference identifier, and nothing
   maps a declaration onto any other import string: `wasi_snapshot_preview1` can
   be bound, while field names such as Soroban's `_` and `0` cannot be spelled.
-- A project's `[build.wasm-opt]` step at any level but `"0"` may remove a host
-  import nothing calls; see [A bound host import ships whether or not it is
-  called](#a-bound-host-import-ships-whether-or-not-it-is-called).
 - [No contract travels with a host
   import](#no-contract-travels-with-a-host-import): nothing in the build
   describes what the function does, and its declaration holds an embedder to
@@ -665,6 +716,10 @@ restrictions of its own:
 - `infs run` refuses every artifact that still imports a function once the build
   has finished, including a project's `[build.wasm-opt]` step; see [Running a
   program that binds host imports](#running-a-program-that-binds-host-imports).
+  A `[build.wasm-opt]` step that runs at any level but `"0"` leaves out a host
+  import the program never calls, so an optimized program whose host imports
+  are all uncalled runs; see [A bound host import is emitted whether or not it
+  is called](#a-bound-host-import-is-emitted-whether-or-not-it-is-called).
 
 ## Example: Two Libraries, One Module
 
