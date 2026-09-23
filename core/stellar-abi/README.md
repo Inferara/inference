@@ -16,7 +16,8 @@ This crate is the layer between the two. Given the linked module and the
 per-export source-type descriptor code generation recorded
 (`inference_wasm_codegen::ExportSignature`), it returns the same module with one
 `Val` wrapper appended per exported function, the export section retargeted onto
-the wrappers, and the metadata section on the end.
+the wrappers, and three custom sections on the end: the contract spec, the
+contract metadata, and the environment metadata last.
 
 ```rust,ignore
 let contract = inference_stellar_abi::rewrite(
@@ -41,7 +42,9 @@ access, and no control flow beyond one guard per argument.
 1. Validate the input at the WebAssembly 1.0 feature set and parse it,
    recording every section's byte range
 2. Match each exported function against the descriptor BY NAME
-3. Check admissibility; the first refusal ends the pass and nothing is written
+3. Check admissibility in one order (name, arity, parameter types, return,
+   parameter names), the source-level gate's order too; the first refusal
+   ends the pass and nothing is written
 4. Synthesize one wrapper per exported function: a deduplicated
    (i64 x n) -> i64 type entry, a function entry, and a code body
 5. Rebuild: every untouched section copied through by byte range; the type,
@@ -49,7 +52,8 @@ access, and no control flow beyond one guard per argument.
    export section moves only the targets of wrapped methods
 6. Append the wrappers AFTER every existing function, so no index moves
 7. Extend the name section, when there is one, with one entry per wrapper
-8. Append the contractenvmetav0 custom section
+8. Append the contractspecv0 and contractmetav0 custom sections, then the
+   contractenvmetav0 custom section LAST
 9. Validate the result at WebAssembly 1.0 and fail closed
 ```
 
@@ -70,6 +74,51 @@ section's function names. Appending leaves the first byte-identical and lets the
 second be extended. It is also the truthful arrangement: a wrapper holds no
 guardable arithmetic, so its absence from the guard record is accurate rather
 than merely convenient.
+
+## The custom sections
+
+Each of the three sections a contract carries has a different reader.
+
+| Section | Read by | What it carries |
+|---|---|---|
+| `contractenvmetav0` | the host, at upload | the declared environment protocol; a contract without it is refused |
+| `contractspecv0` | tooling, at invoke and bindings time | every method: its name, each parameter's name and type, and its return |
+| `contractmetav0` | tooling; `stellar contract info meta` displays it | one entry, `infver`, the crate version the workspace declares (`CONTRACT_META_TOOLCHAIN_VERSION`) |
+
+The environment metadata goes last, so every contract ends with the same 32
+measured bytes it ended with before the other two sections existed. The host
+imposes no order on custom sections, and it needs neither of the other two: a
+contract without them uploads and invokes.
+
+The meta section is not inert to tooling. `soroban-spec` 28.0.0
+(`src/shaking.rs`) looks there for the Rust SDK's spec-shaking key,
+`rssdk_spec_shaking`; a value of `"2"` says the data section marks every
+user-defined type and event entry the contract uses, and lets tooling such as
+the `stellar` CLI strip each such entry without a mark. Function entries are
+always kept (`soroban_spec::shaking::filter`), so the key would strip nothing
+this crate writes today. It is never written all the same. The marks are the
+Rust SDK's own mechanism, which that file says is not part of the SEP-48
+contract interface specification, and this crate writes none: the claim would
+be false, and the day the spec describes a struct or an enum, those entries
+would be stripped without a word.
+
+`contractspecv0` is what lets `stellar contract invoke … -- add --a 2 --b 40`
+turn plain command-line arguments into typed `Val` words. Its body is one
+`SCSpecEntry` per exported method, in export order, each the `FunctionV0` arm
+with an empty doc string. A method that returns nothing is described with an
+empty outputs vector, not with `SC_SPEC_TYPE_VOID`: that is what `soroban-sdk`
+writes and what the CLI expects. Parameter names are written exactly as the
+source spells them, a leading underscore included.
+
+Both tooling sections are XDR, hand-encoded in `src/spec.rs` the way
+`src/meta.rs` encodes the environment metadata. Every type code there records
+its source: `Stellar-contract-spec.x` or `Stellar-contract-meta.x` in the
+stellar-xdr repository at revision `9c9c145953e80990d6ff1ae3a6a973a0ce6d0694`,
+the revision the `stellar-xdr` 28.0.0 crate vendors and `soroban-env-host`
+28.0.2 pins. The section names are not XDR; each records where the Soroban
+tooling spells it (`soroban-spec` 28.0.0, `soroban-sdk` 27.0.6). The
+`add(a: u32, b: u32) -> u32` entry is pinned as the 60 bytes derived by hand
+from those definitions.
 
 ## The Val ABI
 
@@ -102,8 +151,10 @@ Two of those measurements are load-bearing and easy to lose:
 ## What it refuses
 
 The admissible set is M1: `u32`, `i32` and `bool` parameters; those three or
-nothing as a return. Every refusal is a `StellarAbiError` variant naming the
-export and the offending element:
+nothing as a return. Every parameter is named, in at most 30 bytes, because a
+caller reaches it by that name: `stellar contract invoke` passes each argument
+as `--<name>`. Every refusal is a `StellarAbiError` variant naming the export
+and the offending element:
 
 | Refusal | Variant |
 |---|---|
@@ -119,9 +170,11 @@ export and the offending element:
 | `i64`, `u64`, a narrow integer, a struct, an array or an enum parameter | `UnsupportedParameter` |
 | the same as a return | `UnsupportedReturn` |
 | a struct or array return, passed through a hidden pointer | `CompoundReturn` |
+| a parameter written `_`, which the spec cannot record | `UnnamedParameter` |
+| a parameter name over 30 bytes, the width of the spec's input-name field | `ParameterNameTooLong` |
 | a surviving import | `ImportsUnsupported` |
 | a start section | `StartSectionPresent` |
-| a module that is already a contract | `AlreadyAContract` |
+| a module already carrying `contractspecv0`, `contractmetav0` or `contractenvmetav0` | `AlreadyAContract` |
 | more than one `name` custom section | `MultipleNameSections` |
 | a declared protocol older than the one Soroban arrived in | `ProtocolPredatesSoroban` |
 | bytes outside WebAssembly 1.0, before or after the rewrite | `InputNotWasm1`, `RewrittenNotWasm1` |

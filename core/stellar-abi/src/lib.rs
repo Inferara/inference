@@ -10,8 +10,9 @@
 //! This crate is the layer between the two. It takes the linked module and the
 //! per-export source-type descriptor code generation recorded, and gives back
 //! the same module with one `Val` wrapper appended per exported function, the
-//! export section retargeted onto the wrappers, and the metadata section on the
-//! end.
+//! export section retargeted onto the wrappers, and three custom sections on
+//! the end: the contract spec, the contract metadata, and the environment
+//! metadata last.
 //!
 //! # Why a rewriter and not an emitter
 //!
@@ -33,7 +34,11 @@
 //!    generation is stale here; the name is what survives. The match is total in
 //!    both directions and fails closed on either mismatch.
 //! 3. Each export is checked for admissibility, and the first refusal ends the
-//!    pass. Nothing is written.
+//!    pass. Nothing is written. The rules run in one order — the method name,
+//!    the parameter count, every parameter's type, the return, every
+//!    parameter's name — the order the source-level gate in code generation
+//!    uses too, so a program breaking two rules earns the same refusal from
+//!    both.
 //! 4. One wrapper is synthesized per exported function: a deduplicated
 //!    `(i64 × n) -> i64` type entry, a function entry, and a body that unwraps
 //!    each argument, calls the function that holds the real code, and wraps the
@@ -48,8 +53,39 @@
 //!    no remap. It is also true: a wrapper holds no guardable arithmetic, so its
 //!    absence from that list is the accurate statement.
 //! 7. The name section, when there is one, gains one function-name entry per
-//!    wrapper, and the metadata section is appended last.
+//!    wrapper. Then three custom sections are appended: `contractspecv0`,
+//!    `contractmetav0`, and the environment metadata section
+//!    `contractenvmetav0` last.
 //! 8. The result is validated at WebAssembly 1.0 again and returned, or refused.
+//!
+//! # The custom sections
+//!
+//! Each of the three has a different reader:
+//!
+//! - `contractenvmetav0` is read by the **host**, at upload: it declares the
+//!   environment protocol, and a contract without it is refused. It is the one
+//!   section a contract cannot do without, and it goes last, so every contract
+//!   ends with the same measured bytes it ended with before the other two
+//!   existed.
+//! - `contractspecv0` is read by **tooling**, at invoke and at bindings time.
+//!   It describes every method — its name, each parameter's name and type, and
+//!   what it returns — so `stellar contract invoke` can turn `--a 2 --b 40`
+//!   into typed arguments. The host does not need it: a contract without one
+//!   uploads and invokes. A method returning nothing is described with no
+//!   outputs at all, which is what the Soroban SDK writes.
+//! - `contractmetav0` is read by **tooling** too; the host does not need it. It
+//!   carries one entry, `infver`, whose value is the crate version the
+//!   workspace declares ([`CONTRACT_META_TOOLCHAIN_VERSION`]), and
+//!   `stellar contract info meta` displays it. Tooling also looks there for the
+//!   Rust SDK's spec-shaking key, `rssdk_spec_shaking`, whose second version
+//!   lets it strip every user-defined type and event entry the data section
+//!   does not mark; function entries are always kept. This pass writes no such
+//!   marks, so it never writes that key.
+//!
+//! Both of the tooling sections are XDR, hand-encoded against type codes
+//! published in the stellar-xdr repository at the revision the `stellar-xdr`
+//! 28.0.0 crate vendors; each type code records where it came from, and each
+//! section name where the Soroban tooling spells it.
 //!
 //! # What it refuses
 //!
@@ -58,6 +94,13 @@
 //! export and the offending element rather than a guess — a 64-bit integer, a
 //! narrow integer, a struct, an array, an enum, a compound return, an
 //! unreachable method name, a surviving import, a start function.
+//!
+//! A parameter must also have a name the contract spec can record, because the
+//! name is how a caller reaches it: `stellar contract invoke` passes each
+//! argument as `--<name>`. A parameter written `_` is refused, and so is a name
+//! longer than [`MAX_INPUT_NAME_BYTES`], the width of the spec's input-name
+//! field. So is a module already carrying any of the three sections this pass
+//! writes: rewriting it would wrap the wrappers and ship the section twice.
 //!
 //! Two refusals are of things nothing downstream would reject. A module
 //! carrying two `name` custom sections is legal WebAssembly, but this pass
@@ -121,8 +164,13 @@
 mod error;
 mod meta;
 mod rewrite;
+mod spec;
 mod val;
 
 pub use error::StellarAbiError;
-pub use meta::{STELLAR_ENV_PRE_RELEASE, STELLAR_ENV_PROTOCOL};
+pub use meta::{ENV_META_SECTION_NAME, STELLAR_ENV_PRE_RELEASE, STELLAR_ENV_PROTOCOL};
 pub use rewrite::{MAX_EXPORT_NAME_BYTES, MAX_VAL_PARAMETERS, rewrite};
+pub use spec::{
+    CONTRACT_META_SECTION_NAME, CONTRACT_META_TOOLCHAIN_VERSION, MAX_INPUT_NAME_BYTES,
+    SPEC_SECTION_NAME,
+};
