@@ -55,6 +55,26 @@ wasm-encoder.workspace = true
 # snapshot files into the crate directory.
 soroban-env-host = { version = "=28.0.2", features = ["testutils"] }
 
+# The contract-spec reader, used only by the `stellar` integration binary to
+# decode the `contractspecv0` section a compiled contract carries. It is chosen
+# because the `stellar` CLI runs it: `stellar contract bindings rust --wasm
+# <file>` decodes the file's spec with `soroban_spec::read::from_wasm`, as the
+# Soroban SDK's `contractimport!` does, and the CLI 28.0.0 locks 28.0.0-rc.1,
+# whose reader is byte-identical, so a spec it decodes is one the CLI decodes.
+# `stellar contract invoke` reads through `soroban-spec-tools`' `Spec::new`
+# instead, which the binary mirrors with `stellar-xdr`'s own readers rather
+# than taking as a second dependency.
+#
+# The `=`-pin follows from the host's: this crate pins `stellar-xdr =28.0.0`,
+# the same crate and version the host pins, and the two pins have to move
+# together — two exact pins within one major version do not resolve, and
+# across two majors `soroban_spec` would hand back a different crate's types
+# from the ones the host and this tier are built on.
+#
+# The `serde` feature it requires of `stellar-xdr` brings `serde_with` and its
+# macro crates into the build.
+soroban-spec = "=28.0.0"
+
 # The SpaceWasm flight interpreter, used only by the `spacewasm` integration
 # binary to decode, instantiate and execute compiler output in-process. It is
 # chosen because it *is* the runtime the target names: a `no_std` WebAssembly

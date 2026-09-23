@@ -10,8 +10,8 @@
 //! Nothing here re-implements a pipeline. Each compile function is one call into
 //! the same `utils` helper the in-library tests use, so a fixture compiled
 //! through this module and the same fixture compiled inside `src/` cannot
-//! diverge. [`compile_for_stellar`] is the one addition: the steps `infc` runs
-//! *after* code generation, which no in-library test needed before.
+//! diverge. The Stellar helpers are the one addition: the link and the Val-ABI
+//! rewrite that follow code generation, which no in-library test needed before.
 //!
 //! The corpus walkers below are here for the same reason the compile helpers
 //! are: more than one test module needs them, and one of them had already been
@@ -96,14 +96,7 @@ pub fn codegen_for_target_no_analysis(
 /// Returns whichever step refused: the source-level admissibility gate inside
 /// code generation, the linker, or the rewriter.
 pub fn try_compile_for_stellar(source: &str) -> anyhow::Result<Vec<u8>> {
-    let output = codegen_for_target(source, Target::Stellar)?;
-    let linked = inference::link(output.wasm(), &[], None)?;
-    let contract = inference_stellar_abi::rewrite(
-        &linked,
-        output.export_signatures(),
-        inference_stellar_abi::STELLAR_ENV_PROTOCOL,
-    )?;
-    Ok(contract)
+    try_compile_for_stellar_with_descriptor(source).map(|(contract, _)| contract)
 }
 
 /// [`try_compile_for_stellar`] for a fixture that is expected to compile.
@@ -116,6 +109,56 @@ pub fn try_compile_for_stellar(source: &str) -> anyhow::Result<Vec<u8>> {
 pub fn compile_for_stellar(source: &str) -> Vec<u8> {
     try_compile_for_stellar(source)
         .unwrap_or_else(|e| panic!("this fixture must compile for the Stellar target: {e}"))
+}
+
+/// [`try_compile_for_stellar`], keeping the output of its one code generation
+/// run beside the contract: the export descriptor that output carries is the
+/// one the rewrite consumed.
+///
+/// A caller holding a contract against its descriptor needs this rather than a
+/// second code generation run of the same source, which would hand it an
+/// equal-looking copy instead of the descriptor the contract was written from.
+///
+/// # Errors
+///
+/// Returns whichever step refused, as [`try_compile_for_stellar`] does.
+pub fn try_compile_for_stellar_with_descriptor(
+    source: &str,
+) -> anyhow::Result<(Vec<u8>, CodegenOutput)> {
+    let output = codegen_for_target(source, Target::Stellar)?;
+    let linked = inference::link(output.wasm(), &[], None)?;
+    let contract = inference_stellar_abi::rewrite(
+        &linked,
+        output.export_signatures(),
+        inference_stellar_abi::STELLAR_ENV_PROTOCOL,
+    )?;
+    Ok((contract, output))
+}
+
+/// Puts the default build of `source` in front of the Val-ABI rewriter: code
+/// generation at [`Target::Wasm32`], the link step, then the rewrite with that
+/// build's own descriptor.
+///
+/// This is how a test reaches the rewriter's admissibility checks with a
+/// program the source-level gate would refuse first: code generation at the
+/// default target runs no Stellar gate, so the rewriter is the only one to
+/// judge the program.
+///
+/// # Errors
+///
+/// The outer error is the default build's or the linker's. The inner result is
+/// the rewriter's own verdict, the contract or its refusal, so a caller can
+/// assert on the refusal.
+pub fn rewrite_default_build_for_stellar(
+    source: &str,
+) -> anyhow::Result<Result<Vec<u8>, inference_stellar_abi::StellarAbiError>> {
+    let built = codegen_for_target(source, Target::Wasm32)?;
+    let linked = inference::link(built.wasm(), &[], None)?;
+    Ok(inference_stellar_abi::rewrite(
+        &linked,
+        built.export_signatures(),
+        inference_stellar_abi::STELLAR_ENV_PROTOCOL,
+    ))
 }
 
 /// Root of the opt-in golden family: modules the compiler produced with a

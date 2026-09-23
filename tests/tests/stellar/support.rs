@@ -2,11 +2,12 @@
 //! Soroban contract host, in process.
 //!
 //! Everything here is deliberately written without reference to the compiler:
-//! modules are assembled byte by byte with `wasm-encoder`, and the `Val`
-//! encoders and decoders re-derive the bit layout from the published ABI rather
-//! than calling the toolchain code they exist to check. A harness that shares an
-//! implementation with its subject can only prove the two agree, not that either
-//! is right.
+//! modules are assembled byte by byte with `wasm-encoder`, the `Val` encoders
+//! and decoders re-derive the bit layout from the published ABI, and the
+//! contract spec and meta entries are built from `stellar-xdr`'s own types and
+//! written by its own encoder, rather than calling the toolchain code they exist
+//! to check. A harness that shares an implementation with its subject can only
+//! prove the two agree, not that either is right.
 //!
 //! The host is `soroban-env-host` with `testutils`, the same wasmi
 //! configuration, budget and upload validation a validator runs. Nothing here
@@ -20,7 +21,10 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use soroban_env_host::xdr::{AccountId, PublicKey, Uint256};
+use soroban_env_host::xdr::{
+    AccountId, Limits, PublicKey, ScMetaEntry, ScMetaV0, ScSpecEntry, ScSpecFunctionInputV0,
+    ScSpecFunctionV0, ScSpecTypeDef, ScSymbol, StringM, Uint256, WriteXdr,
+};
 use soroban_env_host::{AddressObject, Env, EnvBase, Host, HostError, Symbol, TryFromVal, Val};
 use wasm_encoder::{
     CodeSection, ConstExpr, CustomSection, DataSection, ExportKind, ExportSection, Function,
@@ -141,6 +145,13 @@ pub fn describe(err: &HostError) -> String {
     format!("{err:?}")
 }
 
+/// Renders bytes the way `MEASURED_ABI.md` records them: two lowercase hex
+/// digits each, separated by spaces.
+#[must_use]
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}
+
 // ---------------------------------------------------------------------------
 // Val codec — an independent re-derivation of the published bit layout.
 //
@@ -240,6 +251,25 @@ pub fn decode(val: Val) -> Decoded {
 /// failure, not an invocation failure: the upload builds a throwaway VM.
 pub const ENV_META_SECTION: &str = "contractenvmetav0";
 
+/// The custom section the tooling reads a contract's method descriptions from:
+/// the name `soroban_spec::read::raw_from_wasm` looks for.
+pub const SPEC_SECTION: &str = "contractspecv0";
+
+/// The custom section a contract's own key-value metadata lives in: the name
+/// `soroban-sdk`'s `contractmeta!` writes into and the `stellar` CLI reads.
+pub const CONTRACT_META_SECTION: &str = "contractmetav0";
+
+/// The key of the one [`CONTRACT_META_SECTION`] entry the toolchain writes.
+pub const TOOLCHAIN_KEY: &str = "infver";
+
+/// The last thirty-two bytes of a contract declaring protocol 20 with a zero
+/// pre-release: its whole [`ENV_META_SECTION`] — section id, size, name and
+/// payload — exactly as `MEASURED_ABI.md` records it.
+pub const MEASURED_ENV_META_TAIL: [u8; 32] = [
+    0x00, 0x1e, 0x11, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x61, 0x63, 0x74, 0x65, 0x6e, 0x76, 0x6d, 0x65,
+    0x74, 0x61, 0x76, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00,
+];
+
 /// The XDR `SCEnvMetaEntry` payload declaring an environment interface version:
 /// a 4-byte big-endian discriminant of zero (`SC_ENV_META_KIND_INTERFACE_VERSION`)
 /// followed by the protocol and pre-release numbers, each 4 bytes big-endian.
@@ -294,12 +324,16 @@ struct MemoryDef {
 ///
 /// Section order follows the binary format (type, global, export, code, then
 /// custom); the host imposes no placement rule on custom sections and real
-/// artifacts put them last.
+/// artifacts put them last. The custom sections go in the order the rewriter
+/// writes them: the contract spec, the contract metadata, and the environment
+/// metadata last.
 pub struct ContractModule {
     funcs: Vec<FuncDef>,
     globals: Vec<(String, i64, bool)>,
     memory: Option<MemoryDef>,
-    meta: Option<Vec<u8>>,
+    spec: Option<Vec<u8>>,
+    contract_meta: Option<Vec<u8>>,
+    env_meta: Option<Vec<u8>>,
 }
 
 impl ContractModule {
@@ -308,29 +342,26 @@ impl ContractModule {
     /// them.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            funcs: Vec::new(),
-            globals: Vec::new(),
-            memory: None,
-            meta: Some(env_meta_payload(20, 0)),
-        }
+        Self::with_protocol(20, 0)
     }
 
     /// A module declaring a chosen interface version.
     #[must_use]
     pub fn with_protocol(protocol: u32, pre_release: u32) -> Self {
-        Self {
-            funcs: Vec::new(),
-            globals: Vec::new(),
-            memory: None,
-            meta: Some(env_meta_payload(protocol, pre_release)),
-        }
+        Self { env_meta: Some(env_meta_payload(protocol, pre_release)), ..Self::without_meta() }
     }
 
     /// A module carrying no `contractenvmetav0` section at all.
     #[must_use]
     pub fn without_meta() -> Self {
-        Self { funcs: Vec::new(), globals: Vec::new(), memory: None, meta: None }
+        Self {
+            funcs: Vec::new(),
+            globals: Vec::new(),
+            memory: None,
+            spec: None,
+            contract_meta: None,
+            env_meta: None,
+        }
     }
 
     #[must_use]
@@ -363,6 +394,26 @@ impl ContractModule {
     #[must_use]
     pub fn exported_global_i64(mut self, name: &str, init: i64, mutable: bool) -> Self {
         self.globals.push((name.to_owned(), init, mutable));
+        self
+    }
+
+    /// Carries a `contractspecv0` section whose body is `body`, taken as given:
+    /// it need not be anything a reader of the section accepts.
+    #[must_use]
+    pub fn spec(mut self, body: &[u8]) -> Self {
+        self.spec = Some(body.to_vec());
+        self
+    }
+
+    /// Carries a `contractmetav0` section whose body is `body`, taken as given
+    /// in the same way.
+    ///
+    /// Not `meta`: [`Self::without_meta`] already means a module without the
+    /// *environment* metadata, which is a different section with a different
+    /// reader.
+    #[must_use]
+    pub fn contract_meta(mut self, body: &[u8]) -> Self {
+        self.contract_meta = Some(body.to_vec());
         self
     }
 
@@ -439,11 +490,14 @@ impl ContractModule {
             module.section(&section);
         }
 
-        if let Some(meta) = &self.meta {
-            module.section(&CustomSection {
-                name: ENV_META_SECTION.into(),
-                data: meta.as_slice().into(),
-            });
+        for (name, body) in [
+            (SPEC_SECTION, self.spec.as_deref()),
+            (CONTRACT_META_SECTION, self.contract_meta.as_deref()),
+            (ENV_META_SECTION, self.env_meta.as_deref()),
+        ] {
+            if let Some(body) = body {
+                module.section(&CustomSection { name: name.into(), data: body.into() });
+            }
         }
 
         module.finish()
@@ -454,4 +508,110 @@ impl Default for ContractModule {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Module reading
+// ---------------------------------------------------------------------------
+
+/// Every custom section `wasm` carries, in module order: its name and its body.
+///
+/// # Panics
+///
+/// Panics if `wasm` is not a readable WebAssembly module.
+#[must_use]
+pub fn custom_sections(wasm: &[u8]) -> Vec<(String, Vec<u8>)> {
+    wasmparser::Parser::new(0)
+        .parse_all(wasm)
+        .filter_map(|payload| match payload.expect("the module parses") {
+            wasmparser::Payload::CustomSection(section) => {
+                Some((section.name().to_owned(), section.data().to_vec()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The bodies of every custom section named `name`, concatenated in module
+/// order: how the `stellar` CLI's `Spec::new` gathers a section that appears
+/// more than once. Empty when there is none.
+///
+/// # Panics
+///
+/// Panics if `wasm` is not a readable WebAssembly module.
+#[must_use]
+pub fn gathered(wasm: &[u8], name: &str) -> Vec<u8> {
+    custom_sections(wasm)
+        .into_iter()
+        .filter(|(carried, _)| carried == name)
+        .flat_map(|(_, body)| body)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Contract spec and meta entries, built by `stellar-xdr` itself
+//
+// The reference encoder for the two sections the tooling reads. These are the
+// `stellar-xdr` 28.0.0 types the host is built on, written out by that crate's
+// own XDR writer, so the bytes they produce are the XDR definitions' answer
+// reached without the hand encoder in `core/stellar-abi` they are compared
+// against.
+// ---------------------------------------------------------------------------
+
+/// The `FunctionV0` spec entry describing one method: empty doc strings, the
+/// method's name, one input per `(name, type)` pair in order, and `output` as
+/// the outputs — none at all for a method that returns nothing.
+///
+/// # Panics
+///
+/// Panics if a name is longer than the XDR field that holds it: 32 bytes for
+/// the method, 30 for an input.
+#[must_use]
+pub fn function_spec_entry(
+    name: &str,
+    inputs: &[(&str, ScSpecTypeDef)],
+    output: Option<ScSpecTypeDef>,
+) -> ScSpecEntry {
+    let inputs: Vec<ScSpecFunctionInputV0> = inputs
+        .iter()
+        .map(|(input, type_)| ScSpecFunctionInputV0 {
+            doc: StringM::default(),
+            name: StringM::try_from(*input)
+                .unwrap_or_else(|e| panic!("the input name `{input}` fits `string<30>`: {e}")),
+            type_: type_.clone(),
+        })
+        .collect();
+    ScSpecEntry::FunctionV0(ScSpecFunctionV0 {
+        doc: StringM::default(),
+        name: ScSymbol(
+            StringM::try_from(name)
+                .unwrap_or_else(|e| panic!("the method name `{name}` fits `SCSymbol`: {e}")),
+        ),
+        inputs: inputs.try_into().expect("an input vector is unbounded"),
+        outputs: output.into_iter().collect::<Vec<_>>().try_into().expect("at most one output"),
+    })
+}
+
+/// The `SCMetaV0` entry pairing `key` with `val`.
+///
+/// # Panics
+///
+/// Panics if either string is over the XDR string bound, which no string here
+/// comes near.
+#[must_use]
+pub fn contract_meta_entry(key: &str, val: &str) -> ScMetaEntry {
+    ScMetaEntry::ScMetaV0(ScMetaV0 {
+        key: StringM::try_from(key).expect("a short key"),
+        val: StringM::try_from(val).expect("a short value"),
+    })
+}
+
+/// `value` as `stellar-xdr` writes it, with no limit imposed on the writer.
+///
+/// # Panics
+///
+/// Panics if the writer refuses the value.
+#[must_use]
+pub fn xdr(value: &impl WriteXdr) -> Vec<u8> {
+    value.to_xdr(Limits::none()).expect("stellar-xdr writes the value")
 }

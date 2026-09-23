@@ -2,14 +2,18 @@
 
 Every sequence below was assembled with `wasm-encoder`, uploaded to
 `soroban-env-host` 28.0.2 with `testutils`, and invoked. Nothing here is derived
-from reading the host's source: each line is what a passing test in
-`wrappers.rs`, `envelope.rs` and `contracts.rs` executed. The byte columns are
-pinned by
-`wrappers::measured_sequences_encode_to_the_recorded_bytes`, so this file cannot
-go stale without a test going red.
+from reading the host's source: each byte column and each measured verdict is
+what a passing test in `wrappers.rs`, `envelope.rs`, `contracts.rs` and
+`spec.rs` executed, and the passages that cite the tooling's source instead say
+so where they do. The byte columns are pinned by
+`wrappers::measured_sequences_encode_to_the_recorded_bytes`, and the two
+contract-spec runs by
+`spec::the_add_and_tick_entries_are_the_runs_the_measured_record_annotates`,
+so neither can go stale without a test going red.
 
 Measured on 2026-09-12, macOS aarch64, `soroban-env-host = "=28.0.2"`,
-`wasm-encoder = "0.254.0"`, host ledger protocol 28.
+`wasm-encoder = "0.254.0"`, host ledger protocol 28. The contract spec and meta
+sections were measured on 2026-09-24, with `soroban-spec = "=28.0.0"` added.
 
 **Headline: every sequence derived from the written ABI description is correct as
 written.** All seven shapes round-trip through the real host, both trap forms behave
@@ -257,6 +261,225 @@ The section is last in the module and 32 bytes long in total. A length pin
 alone admits two compensating errors — a name byte and a payload byte moving in
 opposite directions — which is why the whole run is compared.
 
+## The contract spec section
+
+`contractspecv0` is the machine-readable description of a contract's methods:
+each method's name, each parameter's name and type, and what it returns. It is
+what lets `stellar contract invoke … -- add --a 2 --b 40` turn command-line
+flags into typed `Val`s. The host never reads it — measured below — and the
+tooling does.
+
+**What reads it.** The `stellar` CLI 28.0.0 reads a spec through two readers.
+This paragraph and its table are read from source, not executed: the CLI's
+source at tag `v28.0.0` (commit `300aaf69ab100536678bdb641428b06f06b318ea`, the
+commit the installed CLI reports), and the published crates it locks:
+
+| Command | Reader | What it decodes |
+|---|---|---|
+| `stellar contract invoke` against the deployed contract: the spec the call's arguments are built from (`get_spec.rs`, `get_remote_contract_spec`) | `Spec::new` (`soroban-spec-tools` 28.0.0, `cmd/crates/soroban-spec-tools/src/contract.rs`) | all three sections — `contractenvmetav0`, `contractmetav0` and `contractspecv0` — each gathered, repeats concatenated, and decoded as a run of whole entries at a depth of at most 500; any one that does not decode fails the command |
+| `stellar contract info interface --wasm <file>` | the same `Spec::new` | the same |
+| `stellar contract bindings rust --wasm <file>` (`commands/contract/bindings/rust.rs`), and the Soroban SDK's `contractimport!` | `soroban_spec::read::from_wasm` (`soroban-spec`, `src/read.rs`), through `soroban_spec_rust::generate_from_file` and `generate_from_wasm_with_options` respectively (`soroban-spec-rust` 28.0.0-rc.1; `soroban-sdk-macros` 27.0.6, the SDK release read from this machine's registry — the CLI itself locks 28.0.0-rc.1) | the first `contractspecv0` section |
+
+`stellar contract invoke` has no `--wasm` option in 28.0.0. The `wasm` field
+of its command (`cmd/soroban-cli/src/commands/contract/invoke.rs`) is
+`#[arg(skip)]`, commented "For testing only", and `stellar contract invoke
+--help` on the installed CLI lists no such flag. So `invoke` reads a spec
+through `Spec::new` alone. `from_wasm` is asserted here because #466's
+acceptance criterion names it and because it is the reader client code is
+generated from, not because `invoke` runs it.
+
+Both readers decode with the `stellar-xdr` 28.0.0 readers the host is built
+on. The CLI 28.0.0 locks `soroban-spec` 28.0.0-rc.1 rather than 28.0.0, and the
+two releases' `src/read.rs` and `src/shaking.rs` are byte-identical (compared
+on 2026-09-24), so the reader this tier depends on is the one the CLI runs.
+This tier runs `from_wasm` itself — `soroban-spec` is its dev-dependency — and
+mirrors `Spec::new` with the same readers and the same depth limit rather than
+taking `soroban-spec-tools` as a second dependency.
+
+**What is asserted, for every compiled fixture** (`spec.rs`; the fixtures are
+the thirteen of [Compiled contracts](#compiled-contracts), read off the same
+case table):
+
+| Test | Asserts |
+|---|---|
+| `spec::every_fixture_spec_decodes_with_the_cli_reader_into_its_descriptor` | `soroban_spec::read::from_wasm` returns the entries — #466's acceptance criterion, asserted by the call it names. Every entry is `FunctionV0`, and the names in export order, each input's name and type, the outputs and the empty doc strings equal the export descriptor the rewrite consumed, kept from the one code generation run the contract was written from rather than recomputed beside it. The source-type-to-spec-type map is the test's own match, not the crate's table |
+| `spec::the_default_build_of_every_fixture_carries_no_spec_and_no_meta_section` | the control: the default build, and the Stellar target's code generation output before the link and the rewrite, are each `FromWasmError::NotFound` and carry no spec or metadata section |
+| `spec::every_fixture_spec_section_is_stellar_xdrs_own_encoding_of_its_descriptor` | the oracle: the section is byte for byte what `stellar-xdr`'s own writer produces for the descriptor's methods, one entry after another in export order |
+| `spec::every_contract_decodes_the_way_the_cli_reads_a_deployed_contract` | the `Spec::new` mirror: all three sections decode; the environment metadata is one interface-version entry for protocol 20 with a zero pre-release, both spelled as literals rather than read from the crate, the contract metadata one entry, the spec the descriptor's methods |
+| `spec::the_widest_method_lists_every_input_and_a_unit_method_lists_no_output` | `max_arity::widest` lists 32 inputs, `p0` to `p31` in order; `zero_parameter::tick` and `params_only::record` list no output |
+| `spec::the_add_and_tick_entries_are_the_runs_the_measured_record_annotates` | the two runs below |
+| `spec::every_contract_ends_with_the_spec_then_the_meta_then_the_environment_metadata` | the section order below, and that every contract's last thirty-two bytes are the ones [the metadata section](#the-metadata-section--exact-bytes) pins |
+
+The oracle is what makes the hand encoder in `core/stellar-abi` a measured
+thing: the expected bytes are built from the descriptor with the real
+`ScSpecEntry` types and written by `stellar-xdr`, a derivation that shares
+nothing with the encoder it checks.
+
+**The two name bounds.** Both gates refuse a method name over 32 bytes and a
+parameter name over 30, the widths of `SCSymbol` and of `string name<30>` on
+`SCSpecFunctionInputV0`. Every other statement of those widths — the
+constants in `core/stellar-abi` and `core/wasm-codegen`, the
+`stellar_abi_parity` rows, the gates' unit tests — is a hand-typed copy of the
+XDR. The parity rows pin both gates to their own spelled-out numbers — a
+parameter name of 30 bytes admitted and one of 31 refused, a method name of 32
+admitted and one of 33 refused — but nothing there ties those numbers to the
+XDR field widths. No fixture comes near either width: the longest names there
+are `passthrough` and `index`. Three tests hold the copies against the
+original, with an inline contract rather than a fixture, so the counts of
+[Compiled contracts](#compiled-contracts), thirteen fixtures and twenty-three
+invocations, stay as they are:
+
+| Test | Asserts |
+|---|---|
+| `spec::the_name_bounds_the_gates_refuse_against_are_the_widths_of_the_spec_fields` | `MAX_INPUT_NAME_BYTES` bytes of name fit an `ScSpecFunctionInputV0`'s `name` field and one byte more is `LengthExceedsMax`; likewise `MAX_EXPORT_NAME_BYTES` and `ScSymbol`. No width is typed: the field's own type decides |
+| `spec::a_contract_whose_names_are_at_both_bounds_decodes_into_the_methods_it_declares` | a contract declaring `add` and a method whose name and whose parameter's name are each at the bound compiles, `from_wasm` decodes it into exactly the two methods declared, and its section is `stellar-xdr`'s own encoding of them |
+| `spec::one_byte_over_either_bound_is_refused_by_both_gates_and_by_the_reader` | one byte over either bound, the source gate and the rewriter both refuse, each for that rule; and that contract's section, with one name respelled a byte longer, is refused whole by the reader (`LengthExceedsMax`), the `add` entry before it included. Respelled a byte shorter, it decodes: the control |
+
+Together they fix every gate's bound to the reader's: the at-bound contract
+shows neither gate refuses under the width, the over-bound refusals show
+neither admits over it, and the field-width probe ties the constants they are
+written against to the XDR. The failure they exist for is quiet: a name one
+byte too wide uploads and invokes, because the host never parses the section,
+and then every reader of the section refuses it whole.
+
+### `add(a: u32, b: u32) -> u32` — sixty bytes
+
+`u32_methods`' `add`, the reference contract's method. Its section describes
+`identity` first, in forty-eight bytes, and `add` follows at offset 48:
+
+```
+00 00 00 00                       ;; SCSpecEntryKind = SC_SPEC_ENTRY_FUNCTION_V0
+00 00 00 00                       ;; doc = "" (length 0, no bytes)
+00 00 00 03 61 64 64 00           ;; name = "add", one byte of padding
+00 00 00 02                       ;; inputs: 2
+00 00 00 00                       ;;   doc = ""
+00 00 00 01 61 00 00 00           ;;   name = "a", three bytes of padding
+00 00 00 04                       ;;   type = SC_SPEC_TYPE_U32
+00 00 00 00                       ;;   doc = ""
+00 00 00 01 62 00 00 00           ;;   name = "b"
+00 00 00 04                       ;;   type = SC_SPEC_TYPE_U32
+00 00 00 01                       ;; outputs: 1
+00 00 00 04                       ;;   SC_SPEC_TYPE_U32
+```
+
+As one run:
+
+```
+00 00 00 00 00 00 00 00 00 00 00 03 61 64 64 00 00 00 00 02 00 00 00 00 00 00 00 01 61 00 00 00 00 00 00 04 00 00 00 00 00 00 00 01 62 00 00 00 00 00 00 04 00 00 00 01 00 00 00 04
+```
+
+### `tick()` — twenty-four bytes
+
+`zero_parameter`'s one method, and so its whole section:
+
+```
+00 00 00 00                       ;; SC_SPEC_ENTRY_FUNCTION_V0
+00 00 00 00                       ;; doc = ""
+00 00 00 04 74 69 63 6b           ;; name = "tick", no padding
+00 00 00 00                       ;; inputs: 0
+00 00 00 00                       ;; outputs: 0
+```
+
+```
+00 00 00 00 00 00 00 00 00 00 00 04 74 69 63 6b 00 00 00 00 00 00 00 00
+```
+
+Each run is measured three ways by the one test: it is what `stellar-xdr`
+writes for the method, it is what the compiled contract carries at that
+method's place in its section, and `soroban_spec::read::parse_raw` decodes it
+back into that one method. The same two runs are pinned inside the crate too
+(`core/stellar-abi/src/spec.rs`), against its own encoder; the pin here is the
+independent one.
+
+**A unit return is no outputs, not `Void` — a correction to the text of #466.**
+That text asks for four type codes, `Void` among them. A method that returns
+nothing is described by an *empty* outputs vector — the final zero count of the
+`tick` run — and `SC_SPEC_TYPE_VOID` (`2`) is emitted by nothing. That is what
+the Soroban SDK writes: its `derive_spec_fn.rs` has
+`ReturnType::Default => vec![]` (read from source, not executed, in
+`soroban-sdk-macros` 27.0.6 — the SDK release in this machine's registry; the
+CLI itself locks 28.0.0-rc.1). And it is what `soroban-spec` decodes back
+from `zero_parameter` and `params_only` here. Three codes are emitted:
+`SC_SPEC_TYPE_BOOL = 1`, `SC_SPEC_TYPE_U32 = 4`, `SC_SPEC_TYPE_I32 = 5`.
+
+**Provenance.** Read from source, not executed: the entry kind, the type codes
+and the two name bounds (`SCSymbol<32>` for a method, `string name<30>` for an
+input) are published in `Stellar-contract-spec.x` in the stellar-xdr
+repository at revision `9c9c145953e80990d6ff1ae3a6a973a0ce6d0694` — the
+revision the `stellar-xdr` 28.0.0 crate vendors (its `xdr-version` file) and
+the one `stellar --version` prints for the installed CLI 28.0.0. The oracle
+writes with that crate, so a code that disagreed with the revision would fail
+the byte comparison rather than be copied into it.
+
+**Section order.** The rewrite appends `contractspecv0`, then `contractmetav0`,
+then `contractenvmetav0` last.
+`spec::every_contract_ends_with_the_spec_then_the_meta_then_the_environment_metadata`
+asserts that these are the last three custom sections of every compiled
+contract, each exactly once, in that order, and that every contract ends with
+the thirty-two bytes [the metadata section](#the-metadata-section--exact-bytes)
+pins. The host imposes no order on custom sections, so the order is a choice,
+and the environment metadata stays last so that every contract still ends with
+those bytes — the tail every pin and every sentence about how a contract ends
+was written against.
+
+**The host ignores both tooling sections.** Measured in `envelope.rs`, on the
+reference `add` contract with the sections attached before the environment
+metadata, in the rewrite's order:
+
+| `contractspecv0` body | `contractmetav0` body | The tooling's reader | Upload and `add(7, 9)` |
+|---|---|---|---|
+| the sixty-byte `add` run | the `infver` entry | one method, `add` | uploads, answers `16` |
+| seven `0xff` bytes | the `infver` entry | `from_wasm` refuses: `FromWasmError::Parse` | uploads, answers `16` |
+| the sixty-byte `add` run | an entry of kind 1 (only `SC_META_V0 = 0` exists) | the entry does not decode | uploads, answers `16` |
+| seven `0xff` bytes | an entry of kind 1 | neither decodes | uploads, answers `16` |
+
+Each malformed body is first shown to be refused by the tooling's reader, so a
+row cannot pass by carrying a body that happens to decode. The control is the
+reference contract carrying neither section, which uploads and invokes in
+`envelope::the_smallest_real_contract_uploads_and_invokes`. The tests are
+`envelope::a_contract_carrying_well_formed_spec_and_meta_sections_uploads_and_invokes`
+and
+`envelope::a_contract_whose_tooling_sections_no_reader_accepts_still_uploads_and_invokes`.
+
+So the host never parses either section, and nothing at upload would notice a
+wrong one. Their correctness is the toolchain's alone to check, and the checks
+are the tests above.
+
+## The contract meta section
+
+`contractmetav0` carries a contract's own key-value metadata. This toolchain
+writes exactly one entry: `SCMetaV0 { key: "infver", val }`, where `val` is
+`inference_stellar_abi::CONTRACT_META_TOOLCHAIN_VERSION`, the workspace version
+(`0.0.1` today). For that version the section body is twenty-eight bytes:
+
+```
+00 00 00 00                       ;; SCMetaKind = SC_META_V0
+00 00 00 06 69 6e 66 76 65 72 00 00   ;; key = "infver", two bytes of padding
+00 00 00 05 30 2e 30 2e 31 00 00 00   ;; val = "0.0.1", three bytes of padding
+```
+
+The value half moves with the workspace version, so this tier derives it rather
+than pinning it: `spec::every_fixture_meta_section_is_one_toolchain_version_entry`
+decodes every compiled fixture's section, requires exactly one entry with the
+key `infver` and the crate's published constant as its value — never a
+spelled-out version — and byte equality with `stellar-xdr`'s own encoding of
+that entry. It also requires the constant to equal this test crate's own
+version, which is the same workspace version. The layout for `0.0.1` itself is
+pinned in the crate, `core/stellar-abi/src/spec.rs`
+(`the_meta_entry_is_kind_key_and_value`). Provenance: `enum SCMetaKind` and
+`struct SCMetaV0` in `Stellar-contract-meta.x`, at the revision above.
+
+The host does not read it: the malformed-meta rows above upload and invoke.
+Tooling does, and the next two sentences are read from source, not executed.
+The CLI's `Spec::new` decodes every entry of it, so a meta section it could not
+decode would fail `stellar contract invoke` and
+`stellar contract info interface` for the whole contract — which is what
+`spec::every_contract_decodes_the_way_the_cli_reads_a_deployed_contract` guards.
+And `soroban-spec` 28.0.0 (`src/shaking.rs`, `spec_shaking_version_for_meta`)
+looks in those entries for the key `rssdk_spec_shaking`, an absent key meaning
+spec-shaking version 1, so this toolchain's single `infver` entry changes
+nothing for it.
+
 ## Export identity
 
 Every rule here is a *call-time* rule. The only export check the host runs at
@@ -406,6 +629,13 @@ the first cannot see a method added to a fixture that already has a case.
 Measured: appending one exported method to `u32_methods.inf` and no case for it
 leaves every other test in this binary green and turns exactly that one red.
 
+**Every fixture's spec decodes and matches.** The same thirteen contracts are
+read back the way the tooling reads them, in `spec.rs`: each one's
+`contractspecv0` section decodes with `soroban-spec` into exactly the methods
+the export descriptor lists — the names in order, every parameter's name and
+type, the outputs — and is byte for byte `stellar-xdr`'s own encoding of those
+methods. See [The contract spec section](#the-contract-spec-section).
+
 **Transparency.** Each fixture is answered twice — once by the *default* build
 under the in-process `wasmtime` tier the rest of this repository executes with,
 once by the *Stellar* build under the Soroban host — and the two answers are
@@ -530,6 +760,9 @@ fail for different reasons, which is why both exist.
 | One-page memory exported as `memory`, data segment at 0 | accepted, invokes | — |
 | The same memory exported as `mem` | accepted, invokes | — |
 | Data segment past the declared initial memory | `(WasmVm, IndexBounds)` | `Memory(OutOfBoundsAccess)` |
+| Well-formed spec + meta sections | accepted, invokes | — |
+| Arbitrary-bytes spec section | accepted, invokes | — |
+| Malformed `contractmetav0` entry | accepted, invokes | — |
 
 The tag-mismatch trap is exactly what `soroban-sdk` produces, and the host
 reports it identically whether the offending tag is `Void`, `U32Val` where an
@@ -569,3 +802,48 @@ differs in exactly the one property being measured, and both are asserted:
 The bool-normalization pair carries its own control of a different kind: each
 fixture asserts how this harness's decoder classifies the word it produces, so a
 fixture that stopped exercising its mechanism fails before it reaches the host.
+
+The spec and meta tests were neutralized on 2026-09-24, when this binary held
+50 tests; each change was reverted immediately, and `core` was shown
+byte-identical to its commit afterwards:
+
+- Dropping the string padding from the crate's XDR encoder: **6 of 50 fail** —
+  every `spec` test that reads a section's bytes. `soroban_spec::read::from_wasm`
+  refuses twelve of the thirteen specs outright; `zero_parameter`'s `tick`
+  needs no padding and still decodes. The section-order test reads only names
+  and stays green, as it should.
+- Flipping the crate's `SC_SPEC_TYPE_U32` from 4 to 5: **5 of 50 fail**, and the
+  decoding test names exactly the nine fixtures that carry a `u32`. The meta
+  and order tests stay green.
+- Mapping `u32` to `I32` in the test's own type map instead: **4 of 50 fail**,
+  naming the same nine fixtures — so the expectation is read from the
+  descriptor, not from the section it is compared with.
+- Renaming the `contractspecv0` section the harness's builder writes, or the
+  `contractmetav0` one: **2 of 50 fail** each — both tooling-section envelope
+  tests, at the check that the tooling reads the section the contract was
+  given, before any host call.
+
+The three name-bound tests were added later the same day, when the binary held
+53 tests, and neutralized the same way, each change reverted and `core` again
+shown byte-identical:
+
+- Moving every parameter-name bound from 30 to 32 — the constant in
+  `core/stellar-abi` and the one in `core/wasm-codegen` together, the slip
+  those tests exist for: **3 of 53 fail**, all three. The at-bound contract
+  compiles through both gates and `from_wasm` then refuses its spec with
+  `LengthExceedsMax`, which is the failure a user would meet. One
+  `stellar_abi_parity` test fails too, but only because its rows spell 30 and
+  31; had they moved with the constants, these three would be the only red.
+- Moving every method-name bound from 32 to 33 the same way: **3 of 53 fail**,
+  the same three, with the same one `stellar_abi_parity` test for the same
+  reason.
+- Loosening the source gate's parameter-name bound alone, to 31: **1 of 53
+  fails**, the over-bound test, whose source gate admits the 31-byte name (and
+  two of `stellar_abi_parity`'s three).
+- Loosening the rewriter's parameter-name check alone by one byte, its constant
+  untouched: **1 of 53 fails**, the over-bound test (and one of
+  `stellar_abi_parity`'s). In this debug build the crate's own `debug_assert!`
+  in its entry builder panics first, meeting a name wider than the constant.
+- Dropping the string padding again: **8 of 53 fail** — the six above and the
+  two name-bound tests that read a section. The field-width test reads none and
+  stays green.
