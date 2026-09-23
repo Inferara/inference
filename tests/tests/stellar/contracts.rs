@@ -340,7 +340,8 @@ impl Shape {
 }
 
 /// The fixture source behind a case.
-fn fixture_source(stem: &str) -> String {
+#[must_use]
+pub(crate) fn fixture_source(stem: &str) -> String {
     let path = test_data_path().join("stellar").join(format!("{stem}.inf"));
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read the fixture at {}: {e}", path.display()))
@@ -358,6 +359,13 @@ fn by_fixture() -> Vec<(&'static str, Vec<&'static Case>)> {
         }
     }
     groups
+}
+
+/// Every fixture [`CASES`] invokes, once each, in table order: the fixture
+/// list another module of this binary sweeps, read off the one table.
+#[must_use]
+pub(crate) fn fixture_names() -> Vec<&'static str> {
+    by_fixture().into_iter().map(|(fixture, _)| fixture).collect()
 }
 
 /// Compiles `source` for Stellar, uploads it, and answers each case through

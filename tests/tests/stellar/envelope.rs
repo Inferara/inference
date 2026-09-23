@@ -3,13 +3,19 @@
 //! These are the constraints an emitter has to satisfy before any question of
 //! marshalling arises: the mandatory metadata section, the declared protocol,
 //! the wasmi feature set, and the well-formedness check the host runs over
-//! whatever word an export returns.
+//! whatever word an export returns. The two sections a contract carries for
+//! its tooling rather than for the host are measured here too, and the host
+//! reads neither.
 
+use inference_stellar_abi::CONTRACT_META_TOOLCHAIN_VERSION;
+use soroban_env_host::xdr::{Limits, ReadXdr, ScMetaEntry, ScSpecEntry, ScSpecTypeDef};
+use soroban_spec::read::{FromWasmError, from_wasm};
 use wasm_encoder::{Function, Instruction, ValType};
 
 use crate::support::{
-    ContractModule, Decoded, ENV_META_SECTION, FuncDef, call, decode, describe, host, session,
-    symbol_for, u32_val, upload,
+    CONTRACT_META_SECTION, ContractModule, Decoded, ENV_META_SECTION, FuncDef,
+    MEASURED_ENV_META_TAIL, SPEC_SECTION, TOOLCHAIN_KEY, call, contract_meta_entry, decode,
+    describe, function_spec_entry, gathered, host, session, symbol_for, u32_val, upload, xdr,
 };
 
 /// The protocol the Stellar target declares: the oldest protocol any Soroban
@@ -22,6 +28,11 @@ const DECLARED_PROTOCOL: u32 = 20;
 /// and a real use of the ABI, and its size is the floor an emitted contract can
 /// be measured against.
 fn add_contract(protocol: u32) -> Vec<u8> {
+    add_module(protocol).finish()
+}
+
+/// [`add_contract`] before it is finished, so a test can attach more sections.
+fn add_module(protocol: u32) -> ContractModule {
     let mut body = Function::new([]);
     for index in 0..2 {
         for instruction in [
@@ -53,14 +64,12 @@ fn add_contract(protocol: u32) -> Vec<u8> {
         body.instruction(&instruction);
     }
 
-    ContractModule::with_protocol(protocol, 0)
-        .func(FuncDef::exported(
-            "add",
-            vec![ValType::I64, ValType::I64],
-            vec![ValType::I64],
-            body,
-        ))
-        .finish()
+    ContractModule::with_protocol(protocol, 0).func(FuncDef::exported(
+        "add",
+        vec![ValType::I64, ValType::I64],
+        vec![ValType::I64],
+        body,
+    ))
 }
 
 /// A module whose sole export returns a fixed 64-bit word.
@@ -500,19 +509,135 @@ fn a_data_segment_past_the_declared_initial_memory_is_refused() {
 #[test]
 fn the_reference_contract_ends_with_the_exact_metadata_section() {
     let wasm = add_contract(DECLARED_PROTOCOL);
-    let expected: [u8; 32] = [
-        0x00, 0x1e, 0x11, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x61, 0x63, 0x74, 0x65, 0x6e, 0x76, 0x6d,
-        0x65, 0x74, 0x61, 0x76, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
-        0x00, 0x00,
-    ];
     assert_eq!(
         &wasm[wasm.len() - 32..],
-        &expected,
+        &MEASURED_ENV_META_TAIL,
         "the contractenvmetav0 section moved; MEASURED_ABI.md records these 32 bytes"
     );
     assert_eq!(
-        std::str::from_utf8(&expected[3..20]),
+        std::str::from_utf8(&MEASURED_ENV_META_TAIL[3..20]),
         Ok(ENV_META_SECTION),
         "the pinned bytes must spell the section name the host looks for"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The tooling sections
+//
+// `contractspecv0` describes the methods to the tooling that calls them, and
+// `contractmetav0` carries the contract's own metadata. The host needs neither
+// and, as measured here, reads neither: it does not even parse them. The
+// `stellar` CLI parses both, and refuses a contract whose sections do not
+// decode. So nothing at upload would notice a wrong section, and getting them
+// right is the toolchain's alone to check — which `spec` does against the
+// tooling's own readers.
+// ---------------------------------------------------------------------------
+
+/// The reference contract's one method as the tooling describes it:
+/// `add(a: u32, b: u32) -> u32`, written by `stellar-xdr`.
+fn well_formed_spec() -> Vec<u8> {
+    xdr(&function_spec_entry(
+        "add",
+        &[("a", ScSpecTypeDef::U32), ("b", ScSpecTypeDef::U32)],
+        Some(ScSpecTypeDef::U32),
+    ))
+}
+
+/// The one entry this toolchain's contracts carry.
+fn toolchain_meta_entry() -> ScMetaEntry {
+    contract_meta_entry(TOOLCHAIN_KEY, CONTRACT_META_TOOLCHAIN_VERSION)
+}
+
+/// [`toolchain_meta_entry`], written by `stellar-xdr`.
+fn well_formed_meta() -> Vec<u8> {
+    xdr(&toolchain_meta_entry())
+}
+
+/// A spec body no reader accepts: seven bytes of `0xff`, which open an entry
+/// with a kind that does not exist and then run out.
+const ARBITRARY_SPEC: [u8; 7] = [0xff; 7];
+
+/// A meta body no reader accepts: an entry of kind 1, where `SC_META_V0 = 0`
+/// is the only kind there is.
+const MALFORMED_META: [u8; 12] = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// Uploads `wasm` to a fresh host and asks its `add` for `7 + 9`.
+fn upload_and_add(wasm: &[u8]) -> Decoded {
+    let _guard = session();
+    let host = host();
+    let contract =
+        upload(&host, wasm).unwrap_or_else(|e| panic!("upload refused: {}", describe(&e)));
+    let result = call(&host, contract, "add", &[u32_val(7), u32_val(9)])
+        .unwrap_or_else(|e| panic!("invocation refused: {}", describe(&e)));
+    decode(result)
+}
+
+/// A contract carrying both tooling sections, well formed, uploads and invokes
+/// exactly as the reference contract does. The reference contract carries
+/// neither and is the control: it uploads and invokes in
+/// [`the_smallest_real_contract_uploads_and_invokes`].
+///
+/// The tooling reads the spec back as the one method the contract has and the
+/// meta section as its one entry, so the fixture is a real pair of sections
+/// rather than ones the host could be ignoring for some other reason, and the
+/// environment metadata is still the module's last thirty-two bytes, as the
+/// rewrite writes it.
+#[test]
+fn a_contract_carrying_well_formed_spec_and_meta_sections_uploads_and_invokes() {
+    let spec = well_formed_spec();
+    assert_eq!(spec.len(), 60, "the add entry MEASURED_ABI.md records is sixty bytes");
+    let wasm =
+        add_module(DECLARED_PROTOCOL).spec(&spec).contract_meta(&well_formed_meta()).finish();
+    let reference = add_contract(DECLARED_PROTOCOL);
+
+    let entries = from_wasm(&wasm).expect("the tooling reads the spec");
+    let described: Vec<String> = entries
+        .iter()
+        .map(|entry| match entry {
+            ScSpecEntry::FunctionV0(function) => function.name.0.to_utf8_string_lossy(),
+            other => panic!("expected a method entry, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(described, ["add"]);
+    let meta = ScMetaEntry::from_xdr(gathered(&wasm, CONTRACT_META_SECTION), Limits::none());
+    assert_eq!(meta.ok(), Some(toolchain_meta_entry()));
+    assert_eq!(wasm[wasm.len() - 32..], reference[reference.len() - 32..]);
+
+    assert_eq!(upload_and_add(&wasm), Decoded::U32(16));
+}
+
+/// The host never parses either tooling section. Each row carries the
+/// sections as given, and at least one body the tooling's own reader refuses;
+/// which of the two it refuses is asserted first, so a row cannot pass by
+/// carrying a body that happens to decode. Each contract uploads and invokes
+/// anyway.
+#[test]
+fn a_contract_whose_tooling_sections_no_reader_accepts_still_uploads_and_invokes() {
+    let rows: [(&str, &[u8], &[u8]); 3] = [
+        ("an arbitrary-bytes spec", &ARBITRARY_SPEC, &well_formed_meta()),
+        ("a malformed meta entry", &well_formed_spec(), &MALFORMED_META),
+        ("both at once", &ARBITRARY_SPEC, &MALFORMED_META),
+    ];
+    for (label, spec, meta) in rows {
+        let wasm = add_module(DECLARED_PROTOCOL).spec(spec).contract_meta(meta).finish();
+        assert_eq!(gathered(&wasm, SPEC_SECTION), spec, "{label}: the spec section as given");
+        assert_eq!(gathered(&wasm, CONTRACT_META_SECTION), meta, "{label}: the meta as given");
+
+        let spec_read = from_wasm(&wasm);
+        let meta_read =
+            ScMetaEntry::from_xdr(gathered(&wasm, CONTRACT_META_SECTION), Limits::none());
+        let spec_refused = matches!(spec_read, Err(FromWasmError::Parse(_)));
+        assert_eq!(
+            spec_refused,
+            spec == ARBITRARY_SPEC,
+            "{label}: the tooling's reading of the spec was {spec_read:?}"
+        );
+        assert_eq!(
+            meta_read.is_err(),
+            meta == MALFORMED_META,
+            "{label}: the reading of the meta entry was {meta_read:?}"
+        );
+
+        assert_eq!(upload_and_add(&wasm), Decoded::U32(16), "{label}");
+    }
 }

@@ -9,7 +9,7 @@ use wasm_encoder::{BlockType, Encode, Function, Instruction, ValType};
 
 use crate::support::{
     ContractModule, Decoded, FuncDef, TAG_I32VAL, TAG_U32VAL, bool_val, call, decode, describe,
-    host, i32_val, session, u32_val, upload, void_val,
+    hex, host, i32_val, session, u32_val, upload, void_val,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,10 +119,6 @@ fn encoded(seq: &[Instruction<'static>]) -> Vec<u8> {
         instruction.encode(&mut bytes);
     }
     bytes
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
 }
 
 fn body(seq: &[Instruction<'static>]) -> Function {
