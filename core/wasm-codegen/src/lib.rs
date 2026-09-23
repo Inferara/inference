@@ -49,7 +49,7 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
-use inference_ast::nodes::{ArgKind, Def};
+use inference_ast::nodes::Def;
 use inference_fn_key::FnKey;
 use inference_type_checker::typed_context::TypedContext;
 use inference_type_checker::{ExternKind, ExternOrigin};
@@ -248,7 +248,7 @@ pub fn codegen(
     let emitted = emit(typed_context, module_name, mode, features, layout)?;
 
     if target == Target::Stellar {
-        check_stellar_exports(&emitted.export_signatures, typed_context)?;
+        check_stellar_exports(&emitted.export_signatures)?;
     }
 
     Ok(CodegenOutput::new(
@@ -439,8 +439,8 @@ struct Emitted {
 ///
 /// A target-specific acceptance check therefore runs in [`codegen`], on what
 /// this function returns rather than on a half-built module: see
-/// [`check_stellar_exports`], which reads the export descriptor and the typed
-/// context and emits nothing. Which program it refuses does not depend on
+/// [`check_stellar_exports`], which reads the export descriptor alone, before
+/// linking, and emits nothing. Which program it refuses does not depend on
 /// where it sits: it still runs after the two refusals that follow a
 /// traversal — the spec name cap and the `inference.hspecs` payload check,
 /// both inside this function — and the steps between those and it, reading the
@@ -614,47 +614,9 @@ fn render_abi_type(ty: &AbiType) -> String {
     }
 }
 
-/// The name the source gave to parameter `index` of the entry-file top-level
-/// function `function`, or `None` when there is none to find.
-///
-/// Purely how a refusal names the parameter the author wrote: the verdict comes
-/// from the export descriptor alone, and this is walked only once a refusal is
-/// certain. Finding nothing degrades the message to the position by itself
-/// rather than changing any outcome — which is what happens for `_: u32`, for a
-/// caller driving code generation with no source files, and for anything else
-/// this walk does not model.
-///
-/// The search is restricted to the entry file because that is where every
-/// exported function is declared, so a same-named function in an imported file
-/// cannot lend its parameter names to an export that is not it.
-fn entry_file_parameter_name(
-    typed_context: &TypedContext,
-    function: &str,
-    index: usize,
-) -> Option<String> {
-    let arena = typed_context.arena();
-    for source_file in typed_context
-        .source_files()
-        .filter(|file| file.module_path.is_empty())
-    {
-        for &def_id in &source_file.defs {
-            let Def::Function { name, args, .. } = &arena[def_id].kind else {
-                continue;
-            };
-            if arena[*name].name != function {
-                continue;
-            }
-            return match args.get(index).map(|arg| &arg.kind) {
-                Some(ArgKind::Named { name, .. }) => Some(arena[*name].name.clone()),
-                _ => None,
-            };
-        }
-    }
-    None
-}
-
 /// How a refusal points at one parameter: its one-based position, and the name
-/// the author gave it when there is one.
+/// the author gave it when there is one — the name its descriptor entry
+/// carries, which is `None` for a parameter written `_`.
 fn stellar_parameter_label(name: Option<&str>, index: usize) -> String {
     let position = index + 1;
     match name {
@@ -674,21 +636,20 @@ fn stellar_parameter_label(name: Option<&str>, index: usize) -> String {
 /// # The overlap with the Val-ABI rewriter is deliberate
 ///
 /// `inference-stellar-abi` refuses the same shapes again, after linking. That is
-/// not a redundant check but a different one at a different vantage. This gate
-/// sees the program the author wrote, so it can name the function, the parameter
-/// and the declared type, offer the repair, and refuse before any file is
-/// produced. The rewriter sees only a linked module and a descriptor, so its
-/// messages are about exports rather than declarations — but it is the net, and
-/// it is positioned where things this gate cannot see arrive: an export
-/// introduced by linking, a descriptor that does not match the module it is
-/// paired with, a caller that reaches the rewriter without passing through here
-/// at all. Neither replaces the other, and the two must agree on the rules: a
-/// change to what is admissible has to be made in both places, or a build is
-/// accepted here and refused there with a message about bytes.
-fn check_stellar_exports(
-    exports: &[ExportSignature],
-    typed_context: &TypedContext,
-) -> anyhow::Result<()> {
+/// not a redundant check but a different one at a different vantage. Both read
+/// the same descriptor, parameter names included; what differs is when and
+/// against what. This gate runs on the descriptor of the program the author
+/// wrote, before linking and before any file is produced, so it can phrase a
+/// refusal as a declaration — the function, the parameter and the declared
+/// type — and offer the repair. The rewriter runs on the linked module beside
+/// that same descriptor, so it is the net, positioned where things this gate
+/// cannot see arrive: an export introduced by linking, a descriptor that does
+/// not match the module it is paired with, a caller that reaches the rewriter
+/// without passing through here at all. Neither replaces the other, and the two
+/// must agree on the rules: a change to what is admissible has to be made in
+/// both places, or a build is accepted here and refused there with a message
+/// about bytes.
+fn check_stellar_exports(exports: &[ExportSignature]) -> anyhow::Result<()> {
     if exports.is_empty() {
         cov_mark::hit!(wasm_codegen_stellar_gate_no_exports);
         return Err(anyhow::anyhow!(
@@ -701,7 +662,7 @@ fn check_stellar_exports(
     for signature in exports {
         check_stellar_export_name(&signature.name)?;
         check_stellar_export_arity(signature)?;
-        check_stellar_export_types(signature, typed_context)?;
+        check_stellar_export_types(signature)?;
     }
     Ok(())
 }
@@ -764,16 +725,12 @@ fn check_stellar_export_arity(signature: &ExportSignature) -> anyhow::Result<()>
 
 /// Refuses an exported parameter or return outside the scalar set this target
 /// carries.
-fn check_stellar_export_types(
-    signature: &ExportSignature,
-    typed_context: &TypedContext,
-) -> anyhow::Result<()> {
+fn check_stellar_export_types(signature: &ExportSignature) -> anyhow::Result<()> {
     let name = &signature.name;
     for (index, param) in signature.params.iter().enumerate() {
         if let Some(next_step) = stellar_refusal_reason(&param.ty) {
             cov_mark::hit!(wasm_codegen_stellar_gate_param_type);
-            let declared_as = entry_file_parameter_name(typed_context, name, index);
-            let parameter = stellar_parameter_label(declared_as.as_deref(), index);
+            let parameter = stellar_parameter_label(param.name.as_deref(), index);
             let declared = render_abi_type(&param.ty);
             return Err(anyhow::anyhow!(
                 "Stellar target: exported function '{name}' cannot be a contract method \
@@ -1700,7 +1657,6 @@ mod stellar_gate_tests {
         STELLAR_MAX_EXPORT_NAME_BYTES, STELLAR_MAX_EXPORT_PARAMS, check_stellar_exports,
         render_abi_type, stellar_parameter_label,
     };
-    use inference_type_checker::typed_context::TypedContext;
 
     fn signature(name: &str, params: Vec<AbiParam>, ret: AbiReturn) -> ExportSignature {
         ExportSignature {
@@ -1734,12 +1690,11 @@ mod stellar_gate_tests {
         )
     }
 
-    /// The gate against a descriptor alone. An empty context is what a caller
-    /// with no entry-file source looks like, so these exercise the
-    /// position-only form of a parameter label; the named form needs real
-    /// source and is covered where the compiler is driven end to end.
+    /// The gate against a hand-built descriptor, which is everything it reads —
+    /// a refused parameter's label included — so a shape no source can spell is
+    /// as reachable here as one it can.
     fn gate(exports: &[ExportSignature]) -> anyhow::Result<()> {
-        check_stellar_exports(exports, &TypedContext::default())
+        check_stellar_exports(exports)
     }
 
     fn refusal(exports: &[ExportSignature]) -> String {
@@ -1860,8 +1815,8 @@ mod stellar_gate_tests {
                 AbiReturn::Unit
             )]),
             "Stellar target: exported function 'transfer' cannot be a contract method \
-             because parameter 2 is declared 'u64'. This target currently carries only the \
-             scalar set: an exported parameter is 'u32', 'i32' or 'bool', and an exported \
+             because parameter 2 'amount' is declared 'u64'. This target currently carries only \
+             the scalar set: an exported parameter is 'u32', 'i32' or 'bool', and an exported \
              return is one of those or unit. A 64-bit integer needs the same machinery: the \
              host's word is 64 bits wide and spends part of it on a tag, so no 64-bit value \
              fits in one, and it travels as a host object built through host functions this \
@@ -2022,6 +1977,41 @@ mod stellar_gate_tests {
             signature("wide", named_params([AbiType::I64]), AbiReturn::Unit),
         ]);
         assert!(message.contains("exported function 'wide'"), "{message}");
+    }
+
+    /// The label of a refused parameter comes from its own descriptor entry: its
+    /// name when the source gave one, its position alone when the source wrote
+    /// `_`. A neighbour's name must never stand in for it, whichever of the two
+    /// is the unnamed one.
+    #[test]
+    fn a_refused_parameter_is_labelled_by_the_name_its_descriptor_carries() {
+        let cases = [
+            (
+                vec![
+                    AbiParam::named("to", AbiType::U32),
+                    AbiParam::named("amount", AbiType::U64),
+                ],
+                "because parameter 2 'amount' is declared 'u64'.",
+            ),
+            (
+                vec![
+                    AbiParam::unnamed(AbiType::U32),
+                    AbiParam::named("amount", AbiType::U64),
+                ],
+                "because parameter 2 'amount' is declared 'u64'.",
+            ),
+            (
+                vec![
+                    AbiParam::named("to", AbiType::U32),
+                    AbiParam::unnamed(AbiType::U64),
+                ],
+                "because parameter 2 is declared 'u64'.",
+            ),
+        ];
+        for (params, label) in cases {
+            let message = refusal(&[signature("transfer", params, AbiReturn::Unit)]);
+            assert!(message.contains(label), "expected `{label}` in: {message}");
+        }
     }
 
     #[test]
