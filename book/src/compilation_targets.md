@@ -138,7 +138,7 @@ the scalars the convention encodes without a host object:
 | Parameter | `u32`, `i32`, `bool` — at most 32 of them |
 | Return | `u32`, `i32`, `bool`, or nothing |
 | Name | 1–32 bytes of `[A-Za-z0-9_]`, not `__`-prefixed |
-| Parameter name | any name but `_`, at most 30 bytes; a leading underscore is kept (`_x` is the flag `--_x`, and the CLI accepts `--x` too) |
+| Parameter name | any name but a lone `_`, at most 30 bytes, and no name that another parameter's kebab-case CLI flag alias spells (`x` beside `_x`, `X` or `x_`); a leading underscore is kept (`_x` is the flag `--_x`, and the CLI accepts its alias `--x` too, which is why `x` beside `_x` is refused at build time) |
 
 Everything else is refused at code generation, before any byte exists, naming the
 function and the offending element. The refusals differ because the reasons do:
@@ -176,19 +176,46 @@ function and the offending element. The refusals differ because the reasons do:
   section records each name whole in a field that wide, and a longer one would
   leave the section unreadable to `stellar contract invoke` and every other tool
   that reads it. Shorten the name. …"*
+- **A parameter name that is another parameter's CLI flag alias**: *"…because
+  parameter 1 'x' and parameter 2 '_x' claim one `stellar` CLI flag: `--x` is
+  the flag of 'x' and also the one the CLI derives for '_x'. The `stellar` CLI
+  gives every parameter a second flag in kebab case and resolves a flag to
+  whichever parameter claims it first, in an order that changes from run to
+  run, so a call may reach the wrong parameter or be refused. Rename one of
+  them. …"*
 
-Both are quoted for the second parameter of an exported `transfer`: each message
-opens by naming the function — *"Stellar target: exported function 'transfer'
-cannot be a contract method"* — labels the parameter by its one-based position
-and, where it has one, by its name (the second also gives the name's length in
-bytes), and closes, as the type refusals do, with the advice to remove `pub`
-from a function not meant to be a contract method.
+The first two are quoted for the second parameter of an exported `transfer`, the
+third for an exported `f(x: u32, _x: u32)`: each message opens by naming the
+function — *"Stellar target: exported function 'transfer' cannot be a contract
+method"* — labels the parameter by its one-based position and, where it has
+one, by its name (the second also gives the name's length in bytes, and the
+third labels both parameters of the pair, the earlier first), and closes, as
+the type refusals do, with the advice to remove `pub` from a function not meant
+to be a contract method.
 
-Within one exported function, both name rules run after its type and return
-rules, so a type or return refusal on that function is reported before a name
-refusal on it, and each name rule runs over every parameter before the next
-begins. Functions are checked one at a time in export order, and the first
-refusal ends the build.
+Within one exported function, the three name rules run after its type and
+return rules, in the order listed — `_`, then length, then the pair — so a type
+or return refusal on that function is reported before a name refusal on it, and
+each name rule runs over every parameter before the next begins. Functions are
+checked one at a time in export order, and the first refusal ends the build.
+
+The pair rule is the CLI's own. `stellar contract invoke` gives each parameter
+the flag `--<name>`, the one its `--help` lists, and an alias, the name in
+`heck` 0.5.0's kebab case: split into words at every character that is not a
+letter or a digit, between a lowercase letter, or a digit following one, and a
+capital, and before the last capital of a run followed by a lowercase letter;
+each word lowercased, and the words joined with `-`. So `toAddr` is `to-addr`,
+and `Amount`, one word, is `amount`. The CLI then resolves a flag to whichever
+parameter claims it first, in an order that changes from run to run. A name
+that is another parameter's alias makes the flag listed for it ambiguous, so
+`x` beside `_x`, `X`, `x_` or `__x` is refused. Two aliases that merely agree
+leave each parameter a listed flag of its own, so `_x` beside `__x`, and
+`to_addr` beside `_to_addr` or `toAddr`, build: measured with
+`stellar` CLI 28.0.0 against a deployed contract, every call to them through
+the flags `--help` lists succeeded, while `x` beside `X` failed six calls of
+eight and `x` beside `x_` five. Both gates compute the alias with one
+function, `stellar_cli_flag_alias` in `core/wasm-codegen`, and
+`tests/tests/stellar/MEASURED_ABI.md` records the measurement.
 
 `main` is a contract method like any other: it is exported under its own name and
 held to the same rules. There is no entry point to a contract, so nothing

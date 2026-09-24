@@ -4,10 +4,12 @@
 //! is narrower than an Inference function's: every parameter and every return
 //! has to fit in the host's tagged word without a host object behind it, and
 //! every parameter has to carry a name the contract spec can record, since a
-//! caller passes each argument as `--<name>`. The gate in `codegen()` is where
-//! a program that does not fit is refused, against the source the author wrote
-//! rather than against bytes. A second gate, over the same source, refuses a
-//! program that binds a host import; it has its own heading below.
+//! caller passes each argument as `--<name>` — a name that is not another
+//! parameter's, nor the second flag the CLI derives for another, its name in
+//! kebab case. The gate in `codegen()` is where a program that does not fit is
+//! refused, against the source the author wrote rather than against bytes. A
+//! second gate, over the same source, refuses a program that binds a host
+//! import; it has its own heading below.
 //!
 //! The rules themselves are unit-tested where they live, against hand-built
 //! descriptors that can express shapes no source can — an empty export name, a
@@ -169,6 +171,90 @@ mod stellar_gate_tests {
             message.ends_with("only an entry-file top-level 'pub fn' is exported."),
             "{message}"
         );
+    }
+
+    /// A parameter named what another parameter's second `stellar contract
+    /// invoke` flag spells — its name in kebab case — claims that flag with it,
+    /// so the export is refused, naming both by position and spelling, saying
+    /// whose flag it is and what to do. Whichever of the two comes first, and
+    /// whether the second flag drops leading underscores, trailing ones or
+    /// capitals, the pair is refused. The type checker treats every such pair
+    /// as two names, so each program reaches the gate.
+    #[test]
+    fn a_parameter_named_as_another_parameters_flag_alias_is_refused() {
+        cov_mark::check!(wasm_codegen_stellar_gate_param_name_collision);
+        let message = refused("pub fn f(x: u32, _x: u32) -> u32 { return x; }");
+        assert!(message.contains("exported function 'f'"), "{message}");
+        assert!(
+            message.contains(
+                "because parameter 1 'x' and parameter 2 '_x' claim one `stellar` CLI flag: \
+                 `--x` is the flag of 'x' and also the one the CLI derives for '_x'."
+            ),
+            "{message}"
+        );
+        assert!(message.contains("Rename one of them."), "{message}");
+        assert!(
+            message.ends_with("only an entry-file top-level 'pub fn' is exported."),
+            "{message}"
+        );
+
+        for (source, pair, claim) in [
+            (
+                "pub fn f(_x: u32, x: u32) -> u32 { return x; }",
+                "parameter 1 '_x' and parameter 2 'x'",
+                "`--x` is the flag of 'x' and also the one the CLI derives for '_x'",
+            ),
+            (
+                "pub fn f(x: u32, X: u32) -> u32 { return x; }",
+                "parameter 1 'x' and parameter 2 'X'",
+                "`--x` is the flag of 'x' and also the one the CLI derives for 'X'",
+            ),
+            (
+                "pub fn f(x: u32, x_: u32) -> u32 { return x; }",
+                "parameter 1 'x' and parameter 2 'x_'",
+                "`--x` is the flag of 'x' and also the one the CLI derives for 'x_'",
+            ),
+            (
+                "pub fn f(x: u32, __x: u32) -> u32 { return x; }",
+                "parameter 1 'x' and parameter 2 '__x'",
+                "`--x` is the flag of 'x' and also the one the CLI derives for '__x'",
+            ),
+            (
+                "pub fn f(a: u32, amount: u32, Amount: u32) -> u32 { return a; }",
+                "parameter 2 'amount' and parameter 3 'Amount'",
+                "`--amount` is the flag of 'amount' and also the one the CLI derives for \
+                 'Amount'",
+            ),
+        ] {
+            let message = refused(source);
+            assert!(
+                message.contains(&format!("because {pair} claim one `stellar` CLI flag: {claim}.")),
+                "{source}: {message}"
+            );
+        }
+    }
+
+    /// Names whose second flags merely agree keep a flag each, so each of these
+    /// builds: `_x` beside `__x`, which share the alias `--x` but neither is
+    /// named `x`; `to_addr` beside `_to_addr` or `toAddr`, whose shared alias,
+    /// `to-addr`, is no identifier; a lone `_x`, whose alias is then its own;
+    /// `__` beside `___`, whose aliases are empty; `amount` beside `amountX`,
+    /// whose alias is `amount-x`; an underscore inside a name; and two plain
+    /// names, each its own alias.
+    #[test]
+    fn names_whose_flag_aliases_are_no_other_parameters_name_are_admitted() {
+        for source in [
+            "pub fn f(x: u32, y: u32) -> u32 { return x; }",
+            "pub fn f(_x: u32, __x: u32) -> u32 { return _x; }",
+            "pub fn f(to_addr: u32, _to_addr: u32) -> u32 { return to_addr; }",
+            "pub fn f(to_addr: u32, toAddr: u32) -> u32 { return to_addr; }",
+            "pub fn f(_x: u32, y: u32) -> u32 { return y; }",
+            "pub fn f(__: u32, ___: u32) -> u32 { return __; }",
+            "pub fn f(amount: u32, amountX: u32) -> u32 { return amount; }",
+            "pub fn f(a_b: u32, ab: u32) -> u32 { return ab; }",
+        ] {
+            assert!(!accepted(source).is_empty(), "{source}");
+        }
     }
 
     /// An imported file's parameter name reaches neither kind of slot in the
@@ -387,6 +473,8 @@ mod stellar_gate_tests {
             "pub fn __hidden() -> i32 { return 1; }",
             "pub fn f(_: u32) -> u32 { return 1; }",
             &format!("pub fn f({too_long}: u32) -> u32 {{ return {too_long}; }}"),
+            "pub fn f(x: u32, _x: u32) -> u32 { return x; }",
+            "pub fn f(x: u32, X: u32) -> u32 { return x; }",
         ] {
             assert!(
                 codegen_with_target_mode_no_analysis(

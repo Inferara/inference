@@ -75,6 +75,18 @@ soroban-env-host = { version = "=28.0.2", features = ["testutils"] }
 # macro crates into the build.
 soroban-spec = "=28.0.0"
 
+# The case-conversion crate `stellar contract invoke` derives each parameter's
+# second flag with (`heck` 0.5.0, the version stellar-cli 28.0.0 locks), used
+# only by the `stellar` integration binary. It is taken so the compiler's
+# transcription, `inference_wasm_codegen::stellar_cli_flag_alias`, is pinned
+# against the real algorithm rather than against a second reading of it. It
+# has no dependencies of its own.
+# The `=`-pin holds the transcription to the version the CLI locks rather than
+# to whatever 0.5.x resolves. It has the cost the `spacewasm` entry below
+# records of its own pin: an exact pin stops resolving if another dependency
+# later needs a newer 0.5.x, and that is the moment to re-read the CLI's lock.
+heck = "=0.5.0"
+
 # The SpaceWasm flight interpreter, used only by the `spacewasm` integration
 # binary to decode, instantiate and execute compiler output in-process. It is
 # chosen because it *is* the runtime the target names: a `no_std` WebAssembly

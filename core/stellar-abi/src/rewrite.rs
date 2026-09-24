@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use inference_target_conformance::check_wasm1;
-use inference_wasm_codegen::{AbiParam, AbiReturn, ExportSignature};
+use inference_wasm_codegen::{AbiParam, AbiReturn, ExportSignature, stellar_flag_collision};
 use wasm_encoder::{Encode, ExportKind, ExportSection, Instruction, Module, RawSection};
 use wasmparser::{
     CompositeInnerType, ExternalKind, ImportSectionReader, Parser, Payload, SubType, TypeRef,
@@ -578,22 +578,30 @@ fn plan_wrappers(
     Ok(wrappers)
 }
 
-/// Checks that every parameter has a name the contract spec can record, and
-/// returns the names in declaration order.
+/// Checks that every parameter has a name the contract spec can record and a
+/// caller can pass the argument by, and returns the names in declaration
+/// order.
 ///
-/// Two rules, each over every parameter before the next: a parameter written
-/// `_` has no name to record, and a name wider than the spec's input-name field
-/// cannot be recorded whole. Truncating it would not do either, because the
-/// name is also the `--<name>` flag `stellar contract invoke` passes the
-/// argument by, and a caller writes the name the author did.
+/// Three rules, each over every parameter before the next: a parameter written
+/// `_` has no name to record; a name wider than the spec's input-name field
+/// cannot be recorded whole; and a name that is another parameter's second
+/// `stellar` CLI flag, or equal to another name, claims one flag with it.
+/// Truncating an over-wide name would not do either, because the name is also
+/// the `--<name>` flag `stellar contract invoke` passes the argument by, and a
+/// caller writes the name the author did. The same CLI gives each parameter a
+/// second flag, its name in kebab case
+/// ([`inference_wasm_codegen::stellar_cli_flag_alias`]), so `x` and `_x`
+/// compete for `--x` — see [`StellarAbiError::ParameterNamesCollide`]. The pair
+/// is found by [`stellar_flag_collision`], the search the source-level gate
+/// runs too, so the two gates name the same one.
 ///
 /// An empty name counts as none. No identifier is empty, so only a hand-built
 /// descriptor carries one, and this pass is the net for exactly that caller:
 /// written out, it would be a zero-length input name, from which the CLI
-/// derives the flag `--`. Two parameters sharing a name are admitted:
-/// uniqueness is a producer invariant the type checker enforces with
-/// `DuplicateParameterName`, so a duplicate reaches this pass only from a
-/// hand-built descriptor, and this pass does not yet net it.
+/// derives the flag `--`. An exact duplicate is refused by the third rule; the
+/// type checker's `DuplicateParameterName` keeps one out of every descriptor
+/// built from source, so only a hand-built descriptor reaches this pass
+/// carrying one.
 fn check_parameter_names(
     export: &str,
     params: &[AbiParam],
@@ -623,6 +631,17 @@ fn check_parameter_names(
             position: index + 1,
             name: (*name).to_string(),
             len: name.len(),
+        });
+    }
+
+    if let Some((first, second, flag)) = stellar_flag_collision(&names) {
+        return Err(StellarAbiError::ParameterNamesCollide {
+            export: export.to_string(),
+            first: first + 1,
+            second: second + 1,
+            first_name: names[first].to_string(),
+            second_name: names[second].to_string(),
+            flag: flag.to_string(),
         });
     }
     Ok(names.into_iter().map(str::to_string).collect())
@@ -1894,6 +1913,176 @@ mod tests {
         );
     }
 
+    /// Named parameters of `u32`, in declaration order.
+    fn u32_params(names: &[&str]) -> Vec<AbiParam> {
+        names
+            .iter()
+            .map(|name| AbiParam::named(*name, AbiType::U32))
+            .collect()
+    }
+
+    /// The collision refusal of `f` for the two one-based positions named,
+    /// both claiming `flag`.
+    fn collision(names: &[&str], first: usize, second: usize, flag: &str) -> StellarAbiError {
+        StellarAbiError::ParameterNamesCollide {
+            export: "f".to_string(),
+            first,
+            second,
+            first_name: names[first - 1].to_string(),
+            second_name: names[second - 1].to_string(),
+            flag: flag.to_string(),
+        }
+    }
+
+    /// A name equal to the second `stellar` CLI flag of another parameter is
+    /// refused, naming both parameters by position and spelling, the earlier
+    /// first, and the flag they both claim — whichever of the two comes first,
+    /// and whether the second flag drops leading underscores, trailing ones or
+    /// capitals. `__x`'s second flag is `x`, so `x` beside it is refused
+    /// although `_x` beside it is not.
+    #[test]
+    fn a_name_that_is_another_parameters_flag_alias_is_refused() {
+        for (names, flag) in [
+            (["x", "_x"], "x"),
+            (["_x", "x"], "x"),
+            (["x", "X"], "x"),
+            (["X", "x"], "x"),
+            (["x", "x_"], "x"),
+            (["amount", "Amount"], "amount"),
+            (["x", "__x"], "x"),
+            (["http", "HTTP"], "http"),
+            (["a1", "A1_"], "a1"),
+        ] {
+            assert_eq!(
+                rewrite_one("f", u32_params(&names), AbiReturn::Scalar(AbiType::U32)),
+                Err(collision(&names, 1, 2, flag)),
+                "{names:?}"
+            );
+        }
+    }
+
+    /// The whole message, for both of its clauses: which of the two names the
+    /// contested flag belongs to, whichever comes first, and two identical
+    /// names.
+    #[test]
+    fn the_collision_refusal_says_whose_flag_is_contested() {
+        const TAIL: &str = "the `stellar` CLI gives every parameter a second flag in kebab \
+             case and resolves a flag to whichever parameter claims it first, in an order that \
+             changes from run to run, so a call may reach the wrong parameter or be refused, so \
+             rename one of them";
+        for (names, second, flag, claim) in [
+            (
+                ["x", "_x"],
+                2,
+                "x",
+                "`--x` is the flag of `x` and also the one the CLI derives for `_x`",
+            ),
+            (
+                ["X", "x"],
+                2,
+                "x",
+                "`--x` is the flag of `x` and also the one the CLI derives for `X`",
+            ),
+            (
+                ["to", "to"],
+                2,
+                "to",
+                "the two names are identical, so `--to` is the flag of both",
+            ),
+        ] {
+            let [first_name, second_name] = names;
+            assert_eq!(
+                collision(&names, 1, second, flag).to_string(),
+                format!(
+                    "the export `f` names parameter 1 `{first_name}` and parameter 2 \
+                     `{second_name}`, which claim one `stellar` CLI flag: {claim}; {TAIL}"
+                )
+            );
+        }
+    }
+
+    /// The pair reported is the first in declaration order: the earliest
+    /// parameter that collides with any later one, beside the earliest later
+    /// one it collides with. The search both gates share,
+    /// `inference_wasm_codegen::stellar_flag_collision`, is unit-tested on
+    /// these rows; this test holds the rewriter's refusal to the pair it finds.
+    #[test]
+    fn the_collision_reported_is_the_first_pair_in_declaration_order() {
+        let cases: [(&[&str], usize, usize, &str); 6] = [
+            (&["a", "b", "_b"], 2, 3, "b"),
+            (&["a", "b", "_b", "_a"], 1, 4, "a"),
+            (&["x", "_x", "__x"], 1, 2, "x"),
+            (&["_a", "b", "a"], 1, 3, "a"),
+            (&["_x", "__x", "x"], 1, 3, "x"),
+            (&["y", "_x", "__x", "X", "x"], 2, 5, "x"),
+        ];
+        for (names, first, second, flag) in cases {
+            assert_eq!(
+                rewrite_one("f", u32_params(names), AbiReturn::Scalar(AbiType::U32)),
+                Err(collision(names, first, second, flag)),
+                "{names:?}"
+            );
+        }
+    }
+
+    /// Two identical names claim one flag as surely as a name and its alias,
+    /// and are refused by the same rule. Only a hand-built descriptor carries
+    /// them: the type checker's `DuplicateParameterName` keeps them out of
+    /// every descriptor built from source.
+    #[test]
+    fn a_duplicate_parameter_name_is_refused_as_a_collision() {
+        for (names, first, second, flag) in [
+            (&["to", "amount", "to"][..], 1, 3, "to"),
+            (&["_x", "_x"], 1, 2, "_x"),
+            (&["X", "X"], 1, 2, "X"),
+            (&["__", "__"], 1, 2, "__"),
+        ] {
+            assert_eq!(
+                rewrite_one("f", u32_params(names), AbiReturn::Scalar(AbiType::U32)),
+                Err(collision(names, first, second, flag)),
+                "{names:?}"
+            );
+        }
+    }
+
+    /// Names whose second flags merely agree keep a flag each, so they are
+    /// admitted — `_x` beside `__x`, `X` beside `_x` and `x_` beside `_x`,
+    /// none of them named `x`, and `to_addr`, `_to_addr` and `toAddr`, whose
+    /// second flag, `to-addr`, is no identifier at all — as are a lone `_x`,
+    /// `__` beside `___`, whose second flags are empty, and `amount` beside
+    /// `amountX`, whose second flag is `amount-x`. The spec records each name
+    /// as written.
+    #[test]
+    fn names_whose_second_flags_are_no_other_parameters_name_are_admitted() {
+        for names in [
+            &["_x", "__x"][..],
+            &["X", "_x"],
+            &["x_", "_x"],
+            &["to_addr", "_to_addr"],
+            &["to_addr", "toAddr"],
+            &["to_addr", "_to_addr", "toAddr"],
+            &["x", "y"],
+            &["_x"],
+            &["_x", "y"],
+            &["__", "___"],
+            &["amount", "amountX"],
+            &["a_b", "ab"],
+            &["x1", "x_1"],
+        ] {
+            let output = rewrite_one("f", u32_params(names), AbiReturn::Scalar(AbiType::U32))
+                .unwrap_or_else(|e| panic!("{names:?} must be admitted: {e}"));
+            let spec = section_body(&output, CUSTOM_SECTION_ID, "contractspecv0");
+            for name in names {
+                let mut recorded = u32::try_from(name.len()).unwrap().to_be_bytes().to_vec();
+                recorded.extend_from_slice(name.as_bytes());
+                assert!(
+                    spec.windows(recorded.len()).any(|window| window == recorded),
+                    "{names:?}: `{name}` is recorded as written"
+                );
+            }
+        }
+    }
+
     /// A one-method descriptor that breaks two rules, and the refusal for the
     /// earlier of them.
     type TwoRuleCase = (&'static str, Vec<AbiParam>, AbiReturn, StellarAbiError);
@@ -1909,9 +2098,10 @@ mod tests {
 
     /// The four rules that run before any parameter's name — the method name,
     /// the parameter count, every parameter's type, the return — each row
-    /// breaking two that are adjacent in that order. With the rows of the test
-    /// below, every two rules adjacent in the whole order share a row, so a
-    /// check moved earlier or later changes which of the two some row reports.
+    /// breaking two that are adjacent in that order. With the rows of the two
+    /// tests below, every two rules adjacent in the whole order share a row,
+    /// so a check moved earlier or later changes which of the two some row
+    /// reports.
     #[test]
     fn the_method_name_arity_types_and_return_are_checked_in_that_order() {
         let mut last_is_u64 = vec![AbiType::U32; 33];
@@ -1950,10 +2140,10 @@ mod tests {
     /// Descriptors that break two rules at once, each refused for the earlier
     /// rule: the method name, the parameter count, every parameter's type, the
     /// return, every parameter's name — `_` before length — and the module
-    /// signature last. Each row here pairs a parameter-name rule with one of
-    /// the rules around it, the signature with each of the two, so neither name
-    /// rule can move past it; the test above pairs the four that run before
-    /// them.
+    /// signature last. Each row here pairs one of those two name rules with one
+    /// of the rules around it, the signature with each of the two, so neither
+    /// can move past it; the test above pairs the four that run before them,
+    /// and the test below places the third name rule.
     #[test]
     fn the_refusal_order_is_name_arity_types_return_parameter_names_then_signature() {
         let too_wide = "n".repeat(31);
@@ -2039,6 +2229,65 @@ mod tests {
                     position: 1,
                     name: too_wide,
                     len: 31,
+                },
+            ),
+        ]);
+    }
+
+    /// The third name rule, two names that claim one `stellar` CLI flag, runs
+    /// after the other two and before the module signature: a descriptor
+    /// breaking it and `_`, or it and length, is refused for the other name
+    /// rule, and one breaking it and the signature is refused for the
+    /// collision. The colliding pair comes first in the first two rows, so the
+    /// order they pin is rule by rule, not parameter by parameter.
+    #[test]
+    fn the_collision_rule_runs_after_the_other_name_rules_and_before_the_signature() {
+        let too_wide = "n".repeat(31);
+        let colliding_then_unnamed = vec![
+            AbiParam::named("x", AbiType::U32),
+            AbiParam::named("_x", AbiType::U32),
+            AbiParam::unnamed(AbiType::U32),
+        ];
+        let colliding_then_too_wide = vec![
+            AbiParam::named("x", AbiType::U32),
+            AbiParam::named("_x", AbiType::U32),
+            AbiParam::named(too_wide.clone(), AbiType::U32),
+        ];
+        assert_each_is_refused_for_the_earlier_rule(vec![
+            (
+                "f",
+                colliding_then_unnamed,
+                AbiReturn::Scalar(AbiType::U32),
+                StellarAbiError::UnnamedParameter {
+                    export: "f".to_string(),
+                    position: 3,
+                },
+            ),
+            (
+                "f",
+                colliding_then_too_wide,
+                AbiReturn::Scalar(AbiType::U32),
+                StellarAbiError::ParameterNameTooLong {
+                    export: "f".to_string(),
+                    position: 3,
+                    name: too_wide,
+                    len: 31,
+                },
+            ),
+            (
+                "f",
+                vec![
+                    AbiParam::named("x", AbiType::U32),
+                    AbiParam::named("_x", AbiType::U32),
+                ],
+                AbiReturn::Unit,
+                StellarAbiError::ParameterNamesCollide {
+                    export: "f".to_string(),
+                    first: 1,
+                    second: 2,
+                    first_name: "x".to_string(),
+                    second_name: "_x".to_string(),
+                    flag: "x".to_string(),
                 },
             ),
         ]);
@@ -3063,6 +3312,14 @@ mod tests {
                 name: "n".repeat(31),
                 len: 31,
             },
+            StellarAbiError::ParameterNamesCollide {
+                export: EXPORT.to_string(),
+                first: 1,
+                second: 2,
+                first_name: "x".to_string(),
+                second_name: "_x".to_string(),
+                flag: "x".to_string(),
+            },
         ];
         for refusal in refusals {
             let message = refusal.to_string();
@@ -3070,7 +3327,7 @@ mod tests {
         }
     }
 
-    /// Five messages in full. A `#[error]` literal split across source lines
+    /// Six messages in full. A `#[error]` literal split across source lines
     /// keeps its indentation unless every break carries a continuation, and a
     /// substring assertion cannot see the runs of spaces that leaves behind —
     /// so the rendered text is compared whole.
@@ -3120,6 +3377,23 @@ mod tests {
                  `contractspecv0` section's input-name field, so shorten it",
                 "n".repeat(31)
             )
+        );
+        assert_eq!(
+            StellarAbiError::ParameterNamesCollide {
+                export: "transfer".to_string(),
+                first: 1,
+                second: 3,
+                first_name: "amount".to_string(),
+                second_name: "Amount".to_string(),
+                flag: "amount".to_string(),
+            }
+            .to_string(),
+            "the export `transfer` names parameter 1 `amount` and parameter 3 `Amount`, which \
+             claim one `stellar` CLI flag: `--amount` is the flag of `amount` and also the one \
+             the CLI derives for `Amount`; the `stellar` CLI gives every parameter a second flag \
+             in kebab case and resolves a flag to whichever parameter claims it first, in an \
+             order that changes from run to run, so a call may reach the wrong parameter or be \
+             refused, so rename one of them"
         );
         assert_eq!(
             StellarAbiError::AlreadyAContract {
