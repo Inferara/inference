@@ -111,7 +111,9 @@ const MEASURED: [(&str, usize, usize); 6] = [
     ("f5", 3, 8),
 ];
 
-/// The measured record, as committed beside this module.
+/// The measured record, as committed beside this module. A Windows checkout
+/// carries CRLF line endings, so the quoting test normalizes them before
+/// matching the fixtures.
 const RECORD: &str = include_str!("MEASURED_ABI.md");
 
 /// The two fixtures and every count in [`MEASURED`] are the ones
@@ -121,9 +123,10 @@ const RECORD: &str = include_str!("MEASURED_ABI.md");
 /// the transcript, each call answered with an error.
 #[test]
 fn the_measured_calls_are_the_ones_the_record_quotes() {
-    assert!(RECORD.contains(ALIAS_FIXTURE), "the record quotes the alias fixture verbatim");
-    assert!(RECORD.contains(BOTH_FIXTURE), "the record quotes the `both` fixture verbatim");
-    let lines: Vec<&str> = RECORD.lines().collect();
+    let record = RECORD.replace("\r\n", "\n");
+    assert!(record.contains(ALIAS_FIXTURE), "the record quotes the alias fixture verbatim");
+    assert!(record.contains(BOTH_FIXTURE), "the record quotes the `both` fixture verbatim");
+    let lines: Vec<&str> = record.lines().collect();
     for (method, succeeded, calls) in MEASURED {
         if method == "both" {
             let answers: Vec<&str> = lines
