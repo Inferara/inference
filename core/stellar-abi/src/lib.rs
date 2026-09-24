@@ -39,9 +39,10 @@
 //! 3. Each export is checked for admissibility, and the first refusal ends the
 //!    pass. Nothing is written. The rules run in one order — the method name,
 //!    the parameter count, every parameter's type, the return, every
-//!    parameter's name — the order the source-level gate in code generation
-//!    uses too, so a program breaking two rules earns the same refusal from
-//!    both.
+//!    parameter's name (written `_`, then over the width, then two names that
+//!    claim one `stellar` CLI flag) — the order the source-level gate in code
+//!    generation uses too, so a program breaking two rules earns the same
+//!    refusal from both.
 //! 4. One wrapper is synthesized per exported function: a deduplicated
 //!    `(i64 × n) -> i64` type entry, a function entry, and a body that unwraps
 //!    each argument, calls the function that holds the real code, and wraps the
@@ -108,9 +109,14 @@
 //! argument as a `--<name>` flag. A parameter with no name — written `_`, or
 //! given the empty string by a hand-built descriptor — is refused, and so is a
 //! name longer than [`MAX_INPUT_NAME_BYTES`], the width of the spec's
-//! input-name field. So is a module already carrying any of the three sections
-//! this pass writes: rewriting it would wrap the wrappers and ship the section
-//! twice.
+//! input-name field. So are two parameters one of whose names is the other's
+//! second flag, such as `x` beside `_x`, `X` or `x_`, and two with identical
+//! names: the CLI also takes each parameter by a second flag, its name in kebab
+//! case, and resolves a flag to whichever parameter claims it first, so a call
+//! may not reach both; names whose second flags merely agree, such as `_x`
+//! beside `__x`, keep a flag each and pass. A module already carrying any of
+//! the three sections this pass writes is refused too: rewriting it would wrap
+//! the wrappers and ship the section twice.
 //!
 //! Two refusals are of things nothing downstream would reject. A module
 //! carrying two `name` custom sections is legal WebAssembly, but this pass

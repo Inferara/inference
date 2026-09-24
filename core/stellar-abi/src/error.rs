@@ -128,6 +128,48 @@ pub enum StellarAbiError {
         len: usize,
     },
 
+    /// Two parameters the `stellar` CLI cannot tell apart: one whose name is
+    /// the second flag the CLI derives for the other, such as `x` beside `_x`,
+    /// `X` or `x_`, or two whose names are identical.
+    ///
+    /// The contract spec records both as written and describes the method
+    /// correctly; what fails is reaching the two apart. `stellar contract
+    /// invoke` gives every parameter the flag `--<name>` and a second one, the
+    /// name in kebab case (`build_custom_cmd`, `stellar-cli` 28.0.0;
+    /// [`inference_wasm_codegen::stellar_cli_flag_alias`]), and resolves a flag
+    /// to whichever parameter claims it first, in an order that changes from
+    /// run to run; `tests/tests/stellar/MEASURED_ABI.md` records how often such
+    /// calls failed, with the CLI itself and with a replica of its argument
+    /// table. Names whose second flags merely agree, such as `_x` and `__x`,
+    /// keep a flag each and are admitted. An exact duplicate is refused here
+    /// too; only a hand-built descriptor carries one, since the type checker's
+    /// `DuplicateParameterName` keeps it out of every descriptor built from
+    /// source.
+    #[error(
+        "the export `{export}` names parameter {first} `{first_name}` and parameter {second} \
+         `{second_name}`, which claim one `stellar` CLI flag: {claim}; the `stellar` CLI gives \
+         every parameter a second flag in kebab case and resolves a flag to whichever \
+         parameter claims it first, in an order that changes from run to run, so a call may \
+         reach the wrong parameter or be refused, so rename one of them",
+        claim = flag_claim(.first_name, .second_name, .flag)
+    )]
+    ParameterNamesCollide {
+        export: String,
+        /// One-based position of the earlier parameter of the two, as
+        /// [`StellarAbiError::UnsupportedParameter`] counts: the earliest
+        /// parameter that collides with a later one.
+        first: usize,
+        /// One-based position of the later one: the earliest parameter after
+        /// `first` that collides with it.
+        second: usize,
+        first_name: String,
+        second_name: String,
+        /// The flag both claim, without its `--`: the name of one of the two
+        /// and the second flag the CLI derives for the other, or the name of
+        /// both when they are identical.
+        flag: String,
+    },
+
     /// A struct or array return, which is passed through a hidden pointer into
     /// linear memory and has no `Val` counterpart.
     #[error(
@@ -223,4 +265,14 @@ pub enum StellarAbiError {
     /// this is a defect in this pass, reported rather than shipped.
     #[error("the Val ABI rewrite produced a module that does not validate: {reason}")]
     RewrittenNotWasm1 { reason: String },
+}
+
+/// Which of two colliding parameter names the contested flag belongs to, in
+/// the words of [`StellarAbiError::ParameterNamesCollide`].
+fn flag_claim(first_name: &str, second_name: &str, flag: &str) -> String {
+    if first_name == second_name {
+        return format!("the two names are identical, so `--{flag}` is the flag of both");
+    }
+    let aliased = if first_name == flag { second_name } else { first_name };
+    format!("`--{flag}` is the flag of `{flag}` and also the one the CLI derives for `{aliased}`")
 }

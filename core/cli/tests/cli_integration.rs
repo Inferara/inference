@@ -843,6 +843,27 @@ fn every_inadmissible_contract_shape_is_refused_with_no_artifact() {
             "pub fn f(amount_in_the_smallest_currency: u32) -> u32 { return 1; }\n",
             &["'f'", "parameter 1", "'amount_in_the_smallest_currency'", "31 bytes", "30"],
         ),
+        (
+            "a parameter name that is another parameter's CLI flag alias",
+            "pub fn f(x: u32, _x: u32) -> u32 { return x; }\n",
+            &[
+                "'f'",
+                "parameter 1 'x'",
+                "parameter 2 '_x'",
+                "claim one `stellar` CLI flag",
+                "`--x` is the flag of 'x'",
+            ],
+        ),
+        (
+            "a parameter name that is another parameter's name capitalized",
+            "pub fn f(x: u32, X: u32) -> u32 { return x; }\n",
+            &[
+                "'f'",
+                "parameter 1 'x'",
+                "parameter 2 'X'",
+                "also the one the CLI derives for 'X'",
+            ],
+        ),
     ];
 
     for (label, source, fragments) in cases {

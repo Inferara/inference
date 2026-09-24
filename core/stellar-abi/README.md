@@ -47,8 +47,9 @@ argument.
    recording every section's byte range
 2. Match each exported function against the descriptor BY NAME
 3. Check admissibility in one order (name, arity, parameter types, return,
-   parameter names), the source-level gate's order too; the first refusal
-   ends the pass and nothing is written
+   parameter names: written `_`, over 30 bytes, then a name that repeats
+   another or is another parameter's CLI flag alias), the source-level gate's
+   order too; the first refusal ends the pass and nothing is written
 4. Synthesize one wrapper per exported function: a deduplicated
    (i64 x n) -> i64 type entry, a function entry, and a code body
 5. Rebuild: every untouched section copied through by byte range; the type,
@@ -165,8 +166,19 @@ The admissible set is the scalar set the Val ABI encodes without a host
 object: `u32`, `i32` and `bool` parameters, those three or nothing as a
 return. Every parameter is named, in at most 30 bytes, because a
 caller reaches it by that name: `stellar contract invoke` takes each argument
-as a `--<name>` flag. Every refusal is a `StellarAbiError` variant naming the
-export and the offending element:
+as a `--<name>` flag. The CLI also gives each parameter an alias, the name
+in kebab case (`inference_wasm_codegen::stellar_cli_flag_alias`, a
+transcription of the `heck` 0.5.0 conversion `stellar` CLI 28.0.0 runs), and
+resolves a flag to whichever parameter claims it first, in an order that
+changes from run to run. So no parameter's name may be another parameter's
+alias, and no two names may be identical: `x` beside `_x`, `X` or `x_` is
+refused, because `--x` is the flag of `x` and the alias of the other, and
+measured against a deployed contract most calls passing `--x` and `--X`
+failed. Names whose aliases merely agree keep a flag each and
+are admitted: `_x` beside `__x`, and `to_addr` beside `_to_addr` or
+`toAddr`, succeeded in every call made through the flags `--help` lists.
+`tests/tests/stellar/MEASURED_ABI.md` records the measurement. Every refusal
+is a `StellarAbiError` variant naming the export and the offending element:
 
 | Refusal | Variant |
 |---|---|
@@ -184,6 +196,7 @@ export and the offending element:
 | a struct or array return, passed through a hidden pointer | `CompoundReturn` |
 | a parameter with no name — written `_`, or empty in a hand-built descriptor — which `contractspecv0` cannot record | `UnnamedParameter` |
 | a parameter name over 30 bytes, the width of the `contractspecv0` section's input-name field | `ParameterNameTooLong` |
+| a parameter name that is another parameter's CLI flag alias, such as `x` beside `_x`, `X` or `x_`, or a name repeated in a hand-built descriptor — two parameters claiming one flag | `ParameterNamesCollide` |
 | a surviving import | `ImportsUnsupported` |
 | a start section | `StartSectionPresent` |
 | a module already carrying `contractspecv0`, `contractmetav0` or `contractenvmetav0` | `AlreadyAContract` |

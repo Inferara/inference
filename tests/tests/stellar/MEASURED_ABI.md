@@ -876,8 +876,25 @@ The spec records the name as written, and the CLI takes `--x` as well as `--_x`:
 `--help` does not list. For a method with one such name, keeping the author's spelling costs a
 caller nothing.
 
-A method declaring both spellings is another matter. Measured at 19:43 UTC on 2026-09-23 with the
-same CLI on a fresh container, on this fixture compiled by the `infc` built from this repository at
+### Parameter names and the CLI's flag aliases
+
+`--x` reaching `_x` is not a rule about underscores. Read from the CLI's source at v28.0.0
+(`build_custom_cmd` in `cmd/soroban-cli/src/commands/contract/arg_parsing.rs`), every input of a
+method gets two flags: `--<name>`, the one `--help` lists, and an alias `--help` does not list, the
+name converted by `heck` 0.5.0's `to_kebab_case`. That conversion splits a name into words at every
+character that is not a letter or a digit, between a lowercase letter, or a digit following one,
+and a capital (`toAddr` is `to` and `Addr`), and before the last capital of a run followed by a
+lowercase letter (`HTTPServer` is `HTTP` and `Server`), so `Amount` stays one word; it lowercases
+each word and joins the words with `-`: `_x`, `__x`, `x_` and `X` all have the alias `--x`,
+`Amount` has `--amount`, and `to_addr`, `_to_addr` and `toAddr` all have the alias `--to-addr`.
+The inputs are added to the command in the iteration order of a `HashMap`, which changes from one
+run to the next, and `clap_builder` 4.6.0, which that source locks, resolves a flag to the first
+argument declaring it. So when one input's name is another input's alias, the flag `--help` lists
+for the first may reach the second instead, and which of the two it reaches changes from call to
+call.
+
+A method declaring both `x` and `_x` shows it. Measured at 19:43 UTC on 2026-09-23 with the same
+CLI on a fresh container, on this fixture compiled by the `infc` built from this repository at
 `2db9810` plus the uncommitted closing fixes; code generation and the rewrite are unchanged since
 `103f521`:
 
@@ -937,9 +954,114 @@ Suggestions:
 - Check the contract specification for required arguments
 ```
 
-The CLI treats `--x` as an alias of `--_x`, so a method declaring both `x` and `_x` is described
-correctly by the spec and cannot be invoked from `stellar` CLI 28.0.0 at all; this toolchain
-records the names as written and does not refuse the pair.
+In the first two calls `--x` reached `_x`, so `--_x` repeated it, and in the third it reached `x`,
+leaving `_x` missing (the CLI reports the first missing input in spec order). The spec describes
+the method correctly, and none of the three calls invoked it.
+
+Which pairs of names break a method, and which do not, was measured on five more methods, each
+declaring two names that share an alias. Measured at 23:28 UTC on 2026-09-23 with the same CLI on
+a fresh container, on a fixture compiled by the `infc` built from this repository at `ab8beb7`,
+which refused none of these names, and deployed. The recording script's log is quoted from its
+first line to its last invocation, with the container, funding and deployment lines between the
+fixture and the first method elided and trailing spaces dropped. The script wrote `...` for
+`stellar contract invoke --id $ID --source alice --network local` and kept only the option lines
+of each method's `--help`; it then called each method eight times through the flags each
+invocation line names, and summed the eight calls in that one line, quoting one failure's error:
+
+```text
+# CLI alias measurement, stellar-cli 28.0.0, 2026-09-23T23:28:06Z; fixture alias.inf compiled by the pre-rule infc built at ab8beb7
+pub fn f1(_x: u32, __x: u32) -> u32 { return _x * 10 + __x; }
+pub fn f2(x: u32, X: u32) -> u32 { return x * 10 + X; }
+pub fn f3(to_addr: u32, _to_addr: u32) -> u32 { return to_addr * 10 + _to_addr; }
+pub fn f4(to_addr: u32, toAddr: u32) -> u32 { return to_addr * 10 + toAddr; }
+pub fn f5(x: u32, x_: u32) -> u32 { return x * 10 + x_; }
+
+…
+
+### f1
+$ ... -- f1 --help (options only)
+      --__x <u32>
+      --_x <u32>
+
+### f2
+$ ... -- f2 --help (options only)
+      --X <u32>
+      --x <u32>
+
+### f3
+$ ... -- f3 --help (options only)
+      --to_addr <u32>
+      --_to_addr <u32>
+
+### f4
+$ ... -- f4 --help (options only)
+      --to_addr <u32>
+      --toAddr <u32>
+
+### f5
+$ ... -- f5 --help (options only)
+      --x_ <u32>
+      --x <u32>
+
+### invocations (8 trials each)
+  f1 long flags: f1 --_x 1 --__x 2 -> succeeded 8/8
+  f1 alias+long: f1 --x 1 --__x 2 -> succeeded 4/8 ; a failure: error: the argument '--__x <u32>' cannot be used multiple times
+  f2 long flags (x, X): f2 --x 1 --X 2 -> succeeded 2/8 ; a failure: error: the argument '--X <u32>' cannot be used multiple times
+  f3 long flags: f3 --to_addr 1 --_to_addr 2 -> succeeded 8/8
+  f3 alias+long: f3 --to-addr 1 --_to_addr 2 -> succeeded 4/8 ; a failure: error: the argument '--_to_addr <u32>' cannot be used multiple times
+  f4 long flags: f4 --to_addr 1 --toAddr 2 -> succeeded 8/8
+  f5 long flags (x, x_): f5 --x 1 --x_ 2 -> succeeded 3/8 ; a failure: error: the argument '--x_ <u32>' cannot be used multiple times
+```
+
+Called through the flags `--help` lists, each name as written, three of the five methods succeeded
+in every call and two failed some of the calls. `f2` (`x` beside `X`) failed six calls of eight and
+`f5` (`x` beside `x_`) five, the failure each line quotes a repeated option, as `both`'s were: in
+each, one name is the other's alias exactly — `x` is the alias of `X` and of `x_` — so the flag
+`--x`, listed for `x`, is claimed by both inputs. In `f1` (`_x` beside `__x`), `f3` (`to_addr`
+beside `_to_addr`) and `f4` (`to_addr` beside `toAddr`) the two aliases agree, `--x` or
+`--to-addr`, but neither name is the other's alias, so each input keeps a listed flag no other
+input claims. Their shared alias, which `--help` does not list, is claimed by both inputs and is
+no more reliable than `--x` beside `--X`: `f1` called as `--x 1 --__x 2`, and `f3` as
+`--to-addr 1 --_to_addr 2`, each succeeded in four calls of eight.
+
+The same was measured of the argument parser alone on 2026-09-24, with a replica of the arguments
+`build_custom_cmd` declares for each input — the flag `--<name>` with the alias `--<name in kebab
+case>`, beside its hidden `--<name>-file-path` companion, the inputs added in `HashMap` order —
+compiled in release mode against the `clap` 4.6.1, `clap_builder` 4.6.0 and `heck` 0.5.0 the CLI's
+lock file pins, and each call parsed 400 times. This measures `clap`, not the CLI, and involves no
+contract. With `u32` inputs, `x` beside `_x`, `X`, `x_` or `_X_`, and `ab` beside `Ab`, failed
+alike: the two flags together were refused as a repeated option in 178 to 189 of the 400 runs,
+about half, and the flag that is also the other name's alias (`--x 1`, `--ab 1`) alone reached the
+other parameter in 168 to 203 of them. That "about half" is the replica's figure; the CLI itself,
+driven against a deployed contract above, refused both of the two calls that passed `--x` and
+`--_x` together, and failed six calls of eight for `x` beside `X` and five of eight for `x` beside
+`x_`. With `bool` inputs, whose flag takes no value and defaults to `false`, `--x` alone reached
+the other parameter in 151 to 169 runs of 400 for `x` beside `_x`, `X` or `x_`, and parsing
+succeeded with the other parameter `true` and `x` at its default, `false`. `_x` beside `__x` or
+`x_`, `a_b` beside `aB`, and `x1` beside `x_1` took every flag to its own parameter in all 400
+runs.
+
+Both gates therefore refuse a method in which one parameter's name is another parameter's alias,
+or two parameters' names are identical, and admit one whose aliases merely agree; a lone `_x`,
+whose alias is then its own, is admitted too. The rule covers the flags `--help` lists; this
+chapter measures nothing of an input's hidden `--<name>-file-path` companion or of `clap`'s
+built-in `--help`, so a parameter named `help`, or `x` beside `x_file_path`, whose alias,
+`--x-file-path`, is the long flag of `x`'s companion, is outside what it records. Both gates
+compute the alias with one function, `inference_wasm_codegen::stellar_cli_flag_alias`, a
+transcription of `heck`'s conversion, and find the pair with one more,
+`inference_wasm_codegen::stellar_flag_collision`. The rule is pinned by
+`a_name_that_is_another_parameters_flag_alias_is_refused`,
+`names_whose_second_flags_are_no_other_parameters_name_are_admitted` and
+`a_duplicate_parameter_name_is_refused_as_a_collision` in `core/stellar-abi/src/rewrite.rs`;
+`every_name_that_is_another_parameters_flag_alias_is_refused` and the two tests of the same names
+as the rewriter's last two in `core/wasm-codegen/src/lib.rs`;
+`the_flag_alias_is_the_name_in_kebab_case` in `core/wasm-codegen/src/stellar_cli.rs`; and the rows
+of `tests/tests/stellar_abi_parity.rs` that hold the two gates to one answer. `cli_flags.rs` in
+this directory holds the transcription equal to `heck` 0.5.0 itself over a table of names and
+every fixture's parameter names (`the_flag_alias_is_hecks_kebab_case_of_every_name`), and holds
+both gates' verdict on each of the six methods above equal to what the CLI did with it
+(`each_measured_method_is_refused_exactly_when_the_cli_failed_to_call_it`): the three whose calls
+all succeeded are admitted, and `both`, `f2` and `f5` are refused.
 
 ### What the two sections cost
 
@@ -1135,3 +1257,18 @@ shown byte-identical:
 - Dropping the string padding again: **8 of 53 fail** — the six above and the
   two name-bound tests that read a section. The field-width test reads none and
   stays green.
+
+The `cli_flags` tests were neutralized on 2026-09-24, when this binary held 58 tests. Each change
+was one line, reverted by restoring that line, and the tree was shown byte-identical to its state
+before:
+
+- Making `stellar_cli_flag_alias` return the name unchanged, so that only identical names claim one
+  flag: **3 of 58 fail** — the `heck` comparison, which lists every name it disagrees on, and both
+  verdict tests, which find `both`, `f2` and `f5` admitted. The test of what the record quotes
+  reads no alias and stays green. Outside this binary the same change turns red eight unit tests of
+  the two gates, the source-level refusal test in `tests/src/codegen/wasm/stellar_gate.rs`, two of
+  `stellar_abi_parity`'s four tests and the `infc` matrix of inadmissible contract shapes, while
+  each gate's identical-name test and every admitted row stay green.
+- Skipping the source gate's collision rule, or the rewriter's alone: **2 of 58 fail** either way,
+  the two verdict tests. Each also turns `stellar_abi_parity`'s agreement test red, which is what
+  holds the two gates to one rule.

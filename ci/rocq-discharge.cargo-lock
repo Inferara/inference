@@ -2514,6 +2514,7 @@ dependencies = [
  "anyhow",
  "cov-mark",
  "getrandom 0.4.3",
+ "heck",
  "inf-wasmparser",
  "inference",
  "inference-analysis",

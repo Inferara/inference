@@ -2,8 +2,9 @@
 //!
 //! The policy — how many parameters a contract method may take, how long its
 //! name may be, which prefix is reserved, which types may cross the boundary,
-//! whether each parameter is named and how long that name may be — is stated
-//! twice. `inference-wasm-codegen` states it over the program the author wrote,
+//! whether each parameter is named, how long that name may be, and whether one
+//! of its names is another's second `stellar` CLI flag — is stated twice.
+//! `inference-wasm-codegen` states it over the program the author wrote,
 //! before any file is produced. `inference-stellar-abi` states it again over
 //! the linked module and its export descriptor, where things the first gate
 //! cannot see arrive. The duplication is structural and stays:
@@ -65,6 +66,14 @@
 //! `an_empty_parameter_name_is_refused_as_unnamed` tests, one in
 //! `inference-wasm-codegen`'s `stellar_gate_tests` and one in
 //! `inference-stellar-abi`'s `rewrite` module.
+//!
+//! The rule against two names that claim one `stellar` CLI flag is reachable,
+//! and has rows below; one case of it is not. Two identical names claim one
+//! flag, and both gates refuse them under that rule, but the type checker
+//! refuses a repeated parameter name before code generation runs, so no
+//! program here can carry one. The two
+//! `a_duplicate_parameter_name_is_refused_as_a_collision` tests, one in each
+//! crate, cover it.
 //!
 //! # Why its own integration target
 //!
@@ -241,6 +250,70 @@ fn rows() -> Vec<Row> {
             "pub fn f(_amount: u32) -> u32 { return _amount; }",
             true,
         ),
+        // The type checker treats every two spellings below as two names, so
+        // each program type-checks and reaches both gates. A name equal to
+        // another parameter's second `stellar` CLI flag, its kebab case, is
+        // refused; names whose second flags merely agree are not.
+        row(
+            "a name beside itself with a leading underscore",
+            "pub fn f(x: u32, _x: u32) -> u32 { return x; }",
+            false,
+        ),
+        row(
+            "a name beside itself with two leading underscores",
+            "pub fn f(x: u32, __x: u32) -> u32 { return x; }",
+            false,
+        ),
+        row(
+            "a name beside itself capitalized",
+            "pub fn f(x: u32, X: u32) -> u32 { return x; }",
+            false,
+        ),
+        row(
+            "a name beside itself with a trailing underscore",
+            "pub fn f(x: u32, x_: u32) -> u32 { return x; }",
+            false,
+        ),
+        row(
+            "a longer name beside itself capitalized",
+            "pub fn f(amount: u32, Amount: u32) -> u32 { return amount; }",
+            false,
+        ),
+        row(
+            "two names that differ by how many leading underscores they carry",
+            "pub fn f(_x: u32, __x: u32) -> u32 { return _x; }",
+            true,
+        ),
+        row(
+            "a capitalized name beside its lowercase spelling with a leading underscore",
+            "pub fn f(X: u32, _x: u32) -> u32 { return X; }",
+            true,
+        ),
+        row(
+            "two names made only of underscores",
+            "pub fn f(__: u32, ___: u32) -> u32 { return __; }",
+            true,
+        ),
+        row(
+            "a snake-case name beside itself with a leading underscore",
+            "pub fn f(to_addr: u32, _to_addr: u32) -> u32 { return to_addr; }",
+            true,
+        ),
+        row(
+            "a snake-case name beside its camel-case spelling",
+            "pub fn f(to_addr: u32, toAddr: u32) -> u32 { return to_addr; }",
+            true,
+        ),
+        row(
+            "a name beside itself with a capitalized suffix",
+            "pub fn f(amount: u32, amountX: u32) -> u32 { return amount; }",
+            true,
+        ),
+        row(
+            "a lone leading-underscore name",
+            "pub fn f(_x: u32, y: u32) -> u32 { return y; }",
+            true,
+        ),
         // Two name rules both gates state have no row here and never will: an
         // empty name and a name outside `[A-Za-z0-9_]`. An export name is an
         // Inference identifier, and the identifier grammar spells neither. See
@@ -297,6 +370,7 @@ fn is_admissibility_refusal(refusal: &StellarAbiError) -> bool {
             | StellarAbiError::UnsupportedParameter { .. }
             | StellarAbiError::UnnamedParameter { .. }
             | StellarAbiError::ParameterNameTooLong { .. }
+            | StellarAbiError::ParameterNamesCollide { .. }
             | StellarAbiError::UnsupportedReturn { .. }
             | StellarAbiError::CompoundReturn { .. }
             | StellarAbiError::ImportsUnsupported { .. }
@@ -403,6 +477,60 @@ fn every_row_lands_where_the_stated_policy_puts_it() {
     }
 }
 
+/// Both gates name the same pair when a method's names claim more than one
+/// flag between them, and the same flag for it: the first pair in declaration
+/// order, the earliest parameter that collides with any later one beside the
+/// earliest later one it collides with. The verdict rows above agree whichever
+/// pair each gate picks, so without this test the two could name different
+/// parameters for one program.
+#[test]
+fn both_gates_name_the_same_colliding_pair() {
+    let cases = [
+        (
+            "pub fn f(a: u32, b: u32, _b: u32, _a: u32) -> u32 { return a; }",
+            (1, "a"),
+            (4, "_a"),
+            "a",
+        ),
+        (
+            "pub fn f(_x: u32, __x: u32, x: u32) -> u32 { return x; }",
+            (1, "_x"),
+            (3, "x"),
+            "x",
+        ),
+        (
+            "pub fn f(y: u32, X: u32, x_: u32, x: u32) -> u32 { return y; }",
+            (2, "X"),
+            (4, "x"),
+            "x",
+        ),
+    ];
+    for (source, (first, first_name), (second, second_name), flag) in cases {
+        let gate = source_gate(source);
+        let pair = format!(
+            "because parameter {first} '{first_name}' and parameter {second} '{second_name}' \
+             claim one `stellar` CLI flag:"
+        );
+        assert!(
+            matches!(&gate, Verdict::Refused(message) if message.contains(&pair)),
+            "`{source}`: the source gate must name `{pair}`, but it {gate}"
+        );
+        let rewriter = rewriter_outcome(&row("a method with two colliding pairs", source, false));
+        assert_eq!(
+            rewriter,
+            Err(StellarAbiError::ParameterNamesCollide {
+                export: "f".to_string(),
+                first,
+                second,
+                first_name: first_name.to_string(),
+                second_name: second_name.to_string(),
+                flag: flag.to_string(),
+            }),
+            "`{source}`: the rewriter must name the pair the source gate named"
+        );
+    }
+}
+
 /// Whether a refusal of the rewriter's is the rule a row expects.
 type RuleMatcher = fn(&StellarAbiError) -> bool;
 
@@ -416,8 +544,11 @@ type RuleMatcher = fn(&StellarAbiError) -> bool;
 /// earlier one — the rewriter by its variant, the source gate in the words its
 /// message spells that rule with. Every two rules adjacent in the order both
 /// gates state — the method name, the parameter count, every parameter's type,
-/// the return, every parameter's name, `_` before length — share a row, so
-/// moving any one check of either gate makes some row disagree.
+/// the return, every parameter's name: `_`, then length, then two names that
+/// claim one `stellar` CLI flag — share a row, so moving any one check
+/// of either gate makes some row disagree. The colliding pair comes first in
+/// its rows, so they pin the order rule by rule rather than parameter by
+/// parameter.
 #[test]
 fn a_program_breaking_two_rules_is_refused_for_the_same_one_by_both_gates() {
     let too_long = "p".repeat(31);
@@ -425,6 +556,7 @@ fn a_program_breaking_two_rules_is_refused_for_the_same_one_by_both_gates() {
     let every_named: Vec<String> = (0..33).map(|index| format!("p{index}: u32")).collect();
     let mut last_is_u64 = every_named.clone();
     last_is_u64[32] = "p32: u64".to_string();
+    let too_long_third = format!("parameter 3 '{too_long}' has a name of 31 bytes");
     let cases: Vec<(&'static str, String, RuleMatcher, &str)> = vec![
         (
             "a reserved name, and 33 parameters",
@@ -473,6 +605,20 @@ fn a_program_breaking_two_rules_is_refused_for_the_same_one_by_both_gates() {
             format!("pub fn f({too_long}: u32, _: u32) -> u32 {{ return {too_long}; }}"),
             |refusal| matches!(refusal, StellarAbiError::UnnamedParameter { position: 2, .. }),
             "parameter 2 is written '_'",
+        ),
+        (
+            "a name beside itself with a leading underscore, then an unnamed one",
+            "pub fn f(x: u32, _x: u32, _: u32) -> u32 { return x; }".to_string(),
+            |refusal| matches!(refusal, StellarAbiError::UnnamedParameter { position: 3, .. }),
+            "parameter 3 is written '_'",
+        ),
+        (
+            "a name beside itself with a leading underscore, then an over-long one",
+            format!("pub fn f(x: u32, _x: u32, {too_long}: u32) -> u32 {{ return x; }}"),
+            |refusal| {
+                matches!(refusal, StellarAbiError::ParameterNameTooLong { position: 3, .. })
+            },
+            &too_long_third,
         ),
     ];
     for (label, source, is_the_earlier_rule, fragment) in cases {

@@ -223,7 +223,8 @@ The `[build]` section configures compilation settings.
     a project may contain — no `mode = "proof"`, no `wasm-features`, no
     `[build.wasm-opt]` (below), and an exported function's parameters and
     return confined to the scalar set the convention encodes, every parameter
-    named in at most 30 bytes.
+    named in at most 30 bytes, and no parameter named as another parameter's
+    kebab-case CLI flag alias (`x` beside `_x`).
     The first three are refused by the manifest itself, at load time, in a
     message naming both keys, so they are invalid for every command rather than
     skipped by some; the last is enforced by the compiler, where the exports
