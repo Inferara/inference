@@ -6,3 +6,9 @@
 # The vendored Rocq stub is compiled by coqc in the rocq gate; keep it LF for
 # byte-stable behavior across platforms.
 /core/wasm-to-v/rocq-stub/**/*.v text eol=lf
+
+# Third-party notices are byte-for-byte copies of upstream files whose checksums
+# licenses/README.md records, and every release archive packs them from the
+# checkout; exempt them from line-ending conversion so the Windows archive
+# carries the same bytes.
+/licenses/** -text

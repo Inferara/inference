@@ -4,11 +4,12 @@
 //! use. It decodes, validates and compiles a module to its own sixteen-bit IR
 //! in one pass, then runs that IR against an instruction budget. Decoding *is*
 //! validation *is* IR compilation — there is no validate-only entry point — so
-//! [`load`] returning `Ok` is the whole statement "this artifact loads on the
-//! target runtime", and a refusal carries the byte offset and the reason a
-//! flight computer would have given. The library brings no command line and no
-//! allocator: an embedder supplies both, and this crate is the embedder every
-//! program in this workspace that runs a `SpaceWasm` artifact goes through.
+//! [`load`] returning `Ok` is the whole statement "the interpreter accepts this
+//! artifact, at the configuration it was loaded with", and a refusal carries
+//! the byte offset and the interpreter's own reason. The library brings no
+//! command line and no allocator: an embedder supplies both, and this crate is
+//! the embedder every program in this workspace that runs a `SpaceWasm`
+//! artifact goes through.
 //!
 //! # The allocator singleton
 //!

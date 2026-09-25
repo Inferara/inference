@@ -106,8 +106,9 @@ fn wat(text: &str) -> Vec<u8> {
     wat::parse_str(text).unwrap_or_else(|e| panic!("the fixture is not valid WAT: {e}\n{text}"))
 }
 
-/// Whether the real decoder loads `wasm` under the reference embedder
-/// configuration with `hosts` registered.
+/// Whether the real decoder loads `wasm` at the reference embedder's verifier
+/// bounds and IR page budget, with the tier's 65,536-word stack and `hosts`
+/// registered.
 fn decodes(session: &mut SpaceWasmSession, wasm: &[u8], hosts: spacewasm::Vec<HostModule>) -> bool {
     decode_with::<EMBEDDER_MAX_CONTROL_FRAMES, EMBEDDER_MAX_STACK_DEPTH>(session, wasm, hosts)
         .is_ok()

@@ -297,8 +297,8 @@ fn downlink() -> Call {
     )
 }
 
-/// The fixture decoded under the reference embedder configuration against
-/// `hosts`.
+/// The fixture decoded at the reference embedder's verifier bounds and IR page
+/// budget, with the tier's 65,536-word stack, against `hosts`.
 fn decoded(
     session: &mut SpaceWasmSession,
     hosts: spacewasm::Vec<HostModule>,

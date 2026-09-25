@@ -109,10 +109,14 @@ Prebuilt binaries are available for each release. Two CLI tools are distributed:
 
 ```
 <distribution-folder>/
-└── infs (or infc)          # The CLI binary
+├── infs (or infc)          # The CLI binary
+├── inference-lsp           # The language server (infc archive only)
+└── licenses/               # Third-party license texts
 ```
 
 The CLI binaries are self-contained and require no external dependencies.
+
+`licenses/` holds the license texts of the SpaceWasm interpreter, which `infs` compiles in to run `spacewasm` builds, and of the one crate the interpreter depends on, with the interpreter's `NOTICE` file. Every archive carries it, the `infc` archive included; [`licenses/README.md`](licenses/README.md) says where each file comes from.
 
 ## Building from Source
 

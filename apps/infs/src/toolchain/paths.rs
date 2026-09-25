@@ -11,6 +11,8 @@
 //!   toolchains/               # Installed toolchain versions
 //!     0.1.0/                  # Version-specific installation
 //!       infc                  # Compiler binary
+//!       inference-lsp         # Language server binary (newer toolchains)
+//!       licenses/             # Third-party notices (newer toolchains)
 //!       .metadata.json        # Installation metadata (date, etc.)
 //!     0.2.0/
 //!       ...

@@ -9168,6 +9168,262 @@ fn infs_run_executes_an_fprime_program_against_the_reference_hosts() {
     }
 }
 
+/// The `Running a SpaceWasm build` section of the book's Compilation Targets
+/// chapter, from its heading to the next heading of the same level.
+fn running_a_spacewasm_build_section() -> String {
+    let chapter = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("book")
+            .join("src")
+            .join("compilation_targets.md"),
+    )
+    .expect("the book chapter must be readable");
+    let mut lines = chapter
+        .lines()
+        .skip_while(|line| *line != "#### Running a SpaceWasm build");
+    assert!(
+        lines.next().is_some(),
+        "the chapter must carry `#### Running a SpaceWasm build`"
+    );
+    lines
+        .take_while(|line| !line.starts_with("#### "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The fenced code blocks of `section` whose opening fence names `language`,
+/// in order, each line with its fence's indentation removed: a block inside a
+/// list item is indented with the item.
+fn fenced_blocks(section: &str, language: &str) -> Vec<Vec<String>> {
+    let opening = format!("```{language}");
+    let mut blocks = Vec::new();
+    let mut lines = section.lines();
+    while let Some(line) = lines.next() {
+        if line.trim_start() != opening {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        blocks.push(
+            lines
+                .by_ref()
+                .take_while(|line| line.trim_start() != "```")
+                .map(|line| line.get(indent..).unwrap_or_default().to_string())
+                .collect(),
+        );
+    }
+    blocks
+}
+
+/// A transcript block as the book prints it: each `$ ` command and the lines
+/// printed under it.
+fn transcript(block: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut commands: Vec<(String, Vec<String>)> = Vec::new();
+    for line in block {
+        if let Some(command) = line.strip_prefix("$ ") {
+            commands.push((command.to_string(), Vec::new()));
+        } else {
+            commands
+                .last_mut()
+                .expect("a transcript opens with a command")
+                .1
+                .push(line.clone());
+        }
+    }
+    commands
+}
+
+/// `line` as the book spells it: `infc` prints a path with the platform's
+/// separator, and the book's transcripts are written with `/`.
+fn book_spelling(line: &str) -> String {
+    if cfg!(windows) {
+        line.replace('\\', "/")
+    } else {
+        line.to_string()
+    }
+}
+
+/// Sets the book's project up as its `Running a SpaceWasm build` tells a
+/// reader to: `infs new` with the name its bash block gives — without git,
+/// which the run does not need — and the manifest's commented-out `target`
+/// line under `[build]` replaced with `target = "spacewasm"`. Returns the
+/// directory holding the project, which owns it, and the project.
+fn scaffold_the_books_project(
+    section: &str,
+    prose: &str,
+) -> (assert_fs::TempDir, std::path::PathBuf) {
+    let [setup]: [Vec<String>; 1] = fenced_blocks(section, "bash")
+        .try_into()
+        .expect("the section sets its project up in one bash block");
+    let name = setup[0]
+        .strip_prefix("infs new ")
+        .expect("the setup creates the project with `infs new`");
+    assert_eq!(setup[1..], [format!("cd {name}")]);
+    let temp = assert_fs::TempDir::new().unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .current_dir(temp.path())
+        .args(["new", name, "--no-git"])
+        .assert()
+        .success();
+    let project = temp.path().join(name);
+
+    let commented = "# target = \"wasm32\"";
+    assert!(prose.contains(
+        "by replacing the commented-out `# target = \"wasm32\"` line under `[build]` in its \
+         `Inference.toml` with `target = \"spacewasm\"`"
+    ));
+    let manifest_path = project.join("Inference.toml");
+    let manifest = std::fs::read_to_string(&manifest_path).expect("infs new writes a manifest");
+    assert_eq!(
+        manifest.lines().filter(|line| *line == commented).count(),
+        1,
+        "the template must carry the line the book tells a reader to replace, once"
+    );
+    assert_eq!(
+        manifest
+            .lines()
+            .take_while(|line| *line != commented)
+            .filter(|line| line.starts_with('['))
+            .last(),
+        Some("[build]"),
+        "the line must sit under `[build]`"
+    );
+    std::fs::write(
+        &manifest_path,
+        manifest.replace(commented, "target = \"spacewasm\""),
+    )
+    .unwrap();
+    (temp, project)
+}
+
+/// Runs each command of a book transcript in `project` and requires it to
+/// print the lines the book shows under it: stdout for a run whose stderr goes
+/// to `host.log`, which a later `cat host.log` shows, and stderr for a run
+/// whose stdout goes to `/dev/null`. A run showing an `Error:` line must exit
+/// with status 1, and any other with status 0.
+fn replay_transcript(
+    infc_path: &std::path::Path,
+    project: &std::path::Path,
+    commands: &[(String, Vec<String>)],
+) {
+    let mut logged: Option<Vec<String>> = None;
+    for (command, shown) in commands {
+        if command == "cat host.log" {
+            assert_eq!(
+                logged.take().as_ref(),
+                Some(shown),
+                "`cat host.log` shows the standard error of the run before it"
+            );
+            continue;
+        }
+        let (run, stdout_shown) = if let Some(run) = command.strip_suffix(" 2> host.log") {
+            (run, true)
+        } else if let Some(run) = command.strip_suffix(" > /dev/null") {
+            (run, false)
+        } else {
+            panic!("the book runs `{command}`, which this row does not replay");
+        };
+        let args: Vec<&str> = run
+            .strip_prefix("infs ")
+            .expect("every transcript command is `infs`")
+            .split(' ')
+            .collect();
+        let output = infs_without_wasmtime(infc_path, project, &args);
+        let stdout: Vec<String> = lines_of(&output.stdout)
+            .iter()
+            .map(|line| book_spelling(line))
+            .collect();
+        let stderr = lines_of(&output.stderr);
+        let printed = if stdout_shown { &stdout } else { &stderr };
+        assert_eq!(
+            printed, shown,
+            "`{command}` must print what the book shows\nstdout: {stdout:?}\nstderr: {stderr:?}"
+        );
+        let failed = shown.iter().any(|line| line.starts_with("Error: "));
+        assert_eq!(output.status.code(), Some(i32::from(failed)), "`{command}`");
+        if stdout_shown {
+            logged = Some(stderr);
+        }
+    }
+    assert_eq!(logged, None, "every `2> host.log` is shown with `cat host.log`");
+}
+
+/// The first run of the book's `Running a SpaceWasm build` is replayed as the
+/// book prints it. The setup, the program and every transcript are read out of
+/// the chapter, and each command's output must be the lines printed under it:
+/// the build log with its conformance figures, the `Invoking 'main' …` line
+/// and `0` on stdout and the host lines on stderr, the `--fuel` run stopping
+/// where the book says it stops, and the refusal of a `time_len` of 8.
+///
+/// Every figure is compared, the ones the code generator decides included —
+/// the nesting and stack figures, and the budget that stops the program
+/// between `command` and `telemetry` — so a change that moves one fails here,
+/// and the transcript is re-run and pasted rather than left to drift from
+/// what the toolchain prints. A run printing an `Error:` line must exit with
+/// status 1, and any other with status 0, as the section says.
+///
+/// Fails if the template stops carrying the commented-out `target` line the
+/// book tells a reader to replace, if the program stops compiling, or if any
+/// line of any transcript differs from what `infs` prints.
+#[test]
+fn the_books_first_spacewasm_run_prints_what_the_book_shows() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+    let section = running_a_spacewasm_build_section();
+    let prose = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (_temp, project) = scaffold_the_books_project(&section, &prose);
+
+    let [program]: [Vec<String>; 1] = fenced_blocks(&section, "inference")
+        .try_into()
+        .expect("the section's program is its one inference block");
+    let program = program.join("\n") + "\n";
+    let entry = project.join("src").join("main.inf");
+    std::fs::write(&entry, &program).unwrap();
+
+    let texts = fenced_blocks(&section, "text");
+    let transcripts: Vec<_> = texts
+        .iter()
+        .filter(|block| block.first().is_some_and(|line| line.starts_with("$ ")))
+        .map(|block| transcript(block))
+        .collect();
+    assert_eq!(transcripts.len(), 2, "the run, and the run under `--fuel`");
+    assert!(
+        transcripts
+            .iter()
+            .flatten()
+            .any(|(command, _)| command.contains("--fuel")),
+        "one transcript stops a run with `--fuel`"
+    );
+    for commands in &transcripts {
+        replay_transcript(&infc_path, &project, commands);
+    }
+
+    let [refusal]: [Vec<String>; 1] = texts
+        .iter()
+        .filter(|block| block.first().is_some_and(|line| !line.starts_with("$ ")))
+        .cloned()
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("one block shows a refusal without its command");
+    assert!(prose.contains("Passing 8 instead of 11 ends the run with:"));
+    let downlink = "telemetry(3, time, 11, reading, 4)";
+    assert_eq!(program.matches(downlink).count(), 1);
+    std::fs::write(
+        &entry,
+        program.replace(downlink, "telemetry(3, time, 8, reading, 4)"),
+    )
+    .unwrap();
+    let output = infs_without_wasmtime(&infc_path, &project, &["run"]);
+    let stderr = lines_of(&output.stderr);
+    assert!(
+        stderr.ends_with(&refusal),
+        "a `time_len` of 8 must end the run with the book's lines {refusal:?}, got: {stderr:?}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
 /// A module of exports for the argument rows: an `i32` pair, an `i32` and an
 /// `i64` echoed back, a function returning nothing, and two whose arithmetic
 /// traps on the arguments a row passes.

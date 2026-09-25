@@ -5,8 +5,9 @@
 //! compiles a WebAssembly 1.0 module to its own 16-bit IR, then runs that IR
 //! against a fuel budget. Decoding *is* validation *is* IR compilation — there
 //! is no validate-only entry point — so [`decode`] returning `Ok` is the whole
-//! statement "this artifact loads on the target runtime", and a [`ParseError`]
-//! carries both the offset and the reason a flight computer would have given.
+//! statement "the interpreter accepts this artifact, at the configuration it
+//! was decoded with", and a [`ParseError`] carries both the offset and the
+//! interpreter's own reason.
 //!
 //! The runner is the embedder. It loads a module, runs its start function,
 //! calls its exports and measures the IR it compiled to, and it returns every
@@ -223,8 +224,8 @@ pub enum Outcome {
     OutOfFuel,
 }
 
-/// Decodes `wasm` under the reference embedder configuration with no host
-/// module registered.
+/// Decodes `wasm` at the reference embedder's verifier bounds and IR page
+/// budget, with the tier's 65,536-word stack, and no host module registered.
 ///
 /// The `allow` is the counterpart of the one on [`run`]. Three binaries compile
 /// this file, and the two that run a command line load through the runner
