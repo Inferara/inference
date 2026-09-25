@@ -277,12 +277,21 @@ mod extern_import_tests {
         );
     }
 
-    /// Two host modules in one program, in the F-prime vocabulary an embedder
-    /// registers: `command` and `telemetry` from `fprime_core`, `clock_ms` from
-    /// `env`. Each directive is classified on its own, so the two modules stay
-    /// distinct and the fields land under the module their own clause named.
+    /// Two host modules in one program, in the F´ (F Prime) vocabulary an
+    /// embedder registers: the five reference hosts under `fprime_core` and
+    /// `clock_ms` under `env`. Each directive is classified on its own, so the
+    /// two modules stay distinct and the fields land under the module their own
+    /// clause named.
+    ///
+    /// Each import is also held to the signature the reference embedder
+    /// registers it at, which is what lets an F´ embedder bind the artifact at
+    /// all: an array argument lowers to one `i32` address, so `message`'s text
+    /// and `telemetry`'s two buffers each occupy one parameter. `panic` and
+    /// `rsleep` are bound and never called, and ship all the same.
     #[test]
     fn host_import_fprime_test() {
+        use ValType::{I32, I64};
+
         let test_name = "host_import_fprime";
         let actual = compile(test_name);
         assert_matches_golden(test_name, &actual);
@@ -291,26 +300,52 @@ mod extern_import_tests {
         assert_eq!(
             shape.imports,
             vec![
-                ("fprime_core".to_string(), "telemetry".to_string(), 0),
-                ("fprime_core".to_string(), "command".to_string(), 1),
-                ("env".to_string(), "clock_ms".to_string(), 2),
+                ("fprime_core".to_string(), "panic".to_string(), 0),
+                ("fprime_core".to_string(), "rsleep".to_string(), 1),
+                ("fprime_core".to_string(), "command".to_string(), 2),
+                ("fprime_core".to_string(), "message".to_string(), 3),
+                ("fprime_core".to_string(), "telemetry".to_string(), 4),
+                ("env".to_string(), "clock_ms".to_string(), 5),
             ],
-            "both fprime_core fields and the env one keep their own host module"
+            "the five fprime_core fields and the env one keep their own host module"
         );
+
+        let func_types = read_func_types(&actual);
+        let signatures: Vec<(&str, &[ValType], &[ValType])> = shape
+            .imports
+            .iter()
+            .map(|(_, field, type_idx)| {
+                let (params, results) = &func_types[*type_idx as usize];
+                (field.as_str(), params.as_slice(), results.as_slice())
+            })
+            .collect();
+        assert_eq!(
+            signatures,
+            vec![
+                ("panic", &[I32, I32, I32][..], &[][..]),
+                ("rsleep", &[I64][..], &[][..]),
+                ("command", &[I32, I32][..], &[I32][..]),
+                ("message", &[I32, I32][..], &[][..]),
+                ("telemetry", &[I32, I32, I32, I32, I32][..], &[I32][..]),
+                ("clock_ms", &[][..], &[I64][..]),
+            ],
+            "every import carries the reference embedder's signature for its host"
+        );
+
         assert_eq!(
             shape.defined_func_types.len(),
             1,
-            "one local function beside the three imports"
+            "one local function beside the six imports"
         );
         assert_eq!(
             shape.func_exports,
-            vec![("report".to_string(), 3)],
-            "local report is shifted past all three imports"
+            vec![("report".to_string(), 6)],
+            "local report is shifted past all six imports"
         );
         assert_eq!(
             shape.calls_per_defined_func,
-            vec![vec![1, 0, 2]],
-            "report calls command (1), telemetry (0) and clock_ms (2)"
+            vec![vec![3, 2, 4, 5]],
+            "report calls message (3), command (2), telemetry (4) and clock_ms (5)"
         );
     }
 

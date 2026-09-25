@@ -223,40 +223,86 @@ const SPIN: &str = r"pub fn spin() -> i32 {
     return i;
 }";
 
-/// The committed F´ fixture: `report(channel)` calls `command(channel)`, then
-/// `telemetry(channel, ack)`, and asks `clock_ms()` only if telemetry answered
-/// non-zero. Read rather than copied, so this row and the codegen golden are
-/// about one program.
+/// The committed F´ fixture: `report(channel)` announces itself through
+/// `message`, sends `command(1, channel)`, downlinks a value through
+/// `telemetry` under the id `command` answered with, and asks `clock_ms()` only
+/// if telemetry answered zero. It binds all six hosts of the F´ reference set
+/// and calls four of them. Read rather than copied, so this row and the codegen
+/// golden are about one program.
 const FPRIME: &str = include_str!(
     "../test_data/codegen/wasm/extern_import/host_import_fprime/host_import_fprime.inf"
 );
 
-/// The F´ program's three host functions, each called whatever the call before
-/// it answered: `go` passes `command`'s answer to `telemetry` as the committed
-/// program does, then asks the clock and returns what it said.
-const FPRIME_EVERY_CALL: &str = r"external fn telemetry(channel: i32, value: i32) -> i32;
-external fn command(opcode: i32) -> i32;
-use { telemetry, command } from host::fprime_core;
+/// Every host of the F´ reference set, each called whatever the call before it
+/// answered: `go` calls the three hosts the committed program calls before the
+/// clock (`message`, `command`, `telemetry`, passing `command`'s answer to
+/// `telemetry` as its id), then the two that program never calls, `rsleep` and
+/// `panic`, then asks the clock and returns what it said. It sleeps for more
+/// than `u32::MAX` ticks, so an `i64` argument logged from its low word alone
+/// would read as another number.
+const FPRIME_EVERY_CALL: &str = r"external fn panic(text: [u8; 4], len: i32, line: i32);
+external fn rsleep(ticks: i64);
+external fn command(opcode: i32, arg: i32) -> i32;
+external fn message(text: [u8; 2], len: i32);
+external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; 4], value_len: i32) -> i32;
+use { panic, rsleep, command, message, telemetry } from host::fprime_core;
 
 external fn clock_ms() -> i64;
 use { clock_ms } from host::env;
 
 pub fn go() -> i64 {
-    let ack: i32 = command(1);
-    let sent: i32 = telemetry(1, ack);
-    let now: i64 = clock_ms();
-    return now;
+    let hi: [u8; 2] = [104, 105];
+    message(hi, 2);
+    let id: i32 = command(42, 7);
+    let mut time: [u8; 11] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let value: [u8; 4] = [21, 0, 0, 0];
+    let status: i32 = telemetry(id, time, 11, value, 4);
+    rsleep(5000000000);
+    let boom: [u8; 4] = [98, 111, 111, 109];
+    panic(boom, 4, 17);
+    return clock_ms();
 }";
 
-/// The three stubs the F´ program imports, as the command line spells them.
-const FPRIME_STUBS: [&str; 6] = [
+/// A stub for each host of the F´ reference set, as the command line spells
+/// them: every one at the signature the reference embedder registers it with.
+const FPRIME_STUBS: [&str; 12] = [
     "--host",
-    "fprime_core.telemetry=ii:i",
+    "fprime_core.panic=iii",
     "--host",
-    "fprime_core.command=i:i",
+    "fprime_core.rsleep=I",
+    "--host",
+    "fprime_core.command=ii:i",
+    "--host",
+    "fprime_core.message=ii",
+    "--host",
+    "fprime_core.telemetry=iiiii:i",
     "--host",
     "env.clock_ms=:I",
 ];
+
+/// A guest address in an expected `host call:` log, standing for whatever
+/// decimal the compiler's frame layout put there. An array argument reaches a
+/// host as the address of the caller's buffer, and a row pins that a call
+/// carried an address in that position, not where the buffer was laid out.
+const ADDRESS: &str = "<address>";
+
+/// Whether `log` reads as `expected`, each [`ADDRESS`] in `expected` standing
+/// for one unsigned decimal.
+fn reads_as(log: &str, expected: &str) -> bool {
+    let mut pieces = expected.split(ADDRESS);
+    let head = pieces.next().unwrap_or_default();
+    let Some(mut rest) = log.strip_prefix(head) else {
+        return false;
+    };
+    for piece in pieces {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        match rest[digits..].strip_prefix(piece) {
+            Some(tail) if digits > 0 => rest = tail,
+            _ => return false,
+        }
+    }
+    rest.is_empty()
+}
 
 /// One import and one export that calls it, the smallest module a host stub
 /// makes loadable.
@@ -555,49 +601,82 @@ fn a_bare_run_reports_what_it_loaded() {
 // Host stubs
 // ---------------------------------------------------------------------------
 
-/// The F´ program, compiled from source, runs against three stubs and the log
-/// is the calls it made.
+/// An [`ADDRESS`] in an expected log stands for one decimal and for nothing
+/// else.
 ///
-/// Every stub answers zero, so `telemetry` reads as refused, `report` returns
-/// zero and never asks the clock — which is why the host-imports tier, where
-/// the answers are chosen per row, is where values are shown crossing the
-/// boundary, and why this row pins the absence of a `clock_ms` line as firmly
-/// as the two lines before it. Fails if a call is logged under the wrong name,
-/// with its arguments reordered or rendered some other way, twice or not at
-/// all; if a stub's zero stops reaching the program; or if a program built by
-/// this compiler stops running under the harness.
+/// Fails if [`reads_as`] accepts a log whose address is missing or not a
+/// number, or whose text around the address differs from the expected text —
+/// any of which would let the F´ rows below pass over a log they do not
+/// describe.
+#[test]
+fn an_address_in_an_expected_log_stands_for_one_decimal_only() {
+    let expected = "host call: m.f(<address>, 6)\n";
+    for log in ["host call: m.f(65504, 6)\n", "host call: m.f(0, 6)\n"] {
+        assert!(reads_as(log, expected), "{log:?} must read as {expected:?}");
+    }
+    for log in [
+        "host call: m.f(, 6)\n",
+        "host call: m.f(x, 6)\n",
+        "host call: m.f(65504x, 6)\n",
+        "host call: m.f(65504, 7)\n",
+        "host call: m.g(65504, 6)\n",
+        "host call: m.f(65504, 6)\nhost call: m.f(65504, 6)\n",
+        "host call: m.f(65504, 6)",
+        "",
+    ] {
+        assert!(!reads_as(log, expected), "{log:?} must not read as {expected:?}");
+    }
+}
+
+/// The F´ program, compiled from source, loads against a stub for each host of
+/// the reference set it binds, and the log is the calls it made.
+///
+/// Every stub answers zero, so `telemetry` reads as accepted and `report` goes
+/// on to ask the clock, returning the clock's zero. No answer here can be told
+/// from another, which is why the host-imports tier, where the answers are
+/// chosen per row, is where values are shown crossing the boundary. Each array
+/// argument is logged as an address; the row pins that one is there, not its
+/// value. Fails if a call is logged under the wrong name, with its arguments
+/// reordered or rendered some other way, twice or not at all; if a stub's zero
+/// stops reaching the program; or if a program built by this compiler stops
+/// running under the harness.
 #[test]
 fn the_fprime_program_runs_against_stubs_that_answer_zero() {
     let artifact = Artifact::compiled(FPRIME);
     let path = artifact.arg();
     let mut argv = vec![path.as_str()];
     argv.extend(FPRIME_STUBS);
-    argv.extend(["--invoke", "report", "1"]);
+    argv.extend(["--invoke", "report", "3"]);
 
     let run = Run::of(&argv);
     assert_eq!(run.code, support::exit::OK, "{}", run.transcript());
     assert_eq!(run.out, "report = 0\n", "{}", run.transcript());
-    assert_eq!(
-        run.err,
-        "host call: fprime_core.command(1)\nhost call: fprime_core.telemetry(1, 0)\n",
+    assert!(
+        reads_as(
+            &run.err,
+            "host call: fprime_core.message(<address>, 6)\n\
+             host call: fprime_core.command(1, 3)\n\
+             host call: fprime_core.telemetry(0, <address>, 11, <address>, 4)\n\
+             host call: env.clock_ms()\n"
+        ),
         "{}",
         run.transcript()
     );
 }
 
-/// Every host function the F´ program imports is logged when a compiled
-/// program calls all three, in the order it called them.
+/// Every host of the F´ reference set is logged when a compiled program calls
+/// all six, in the order it called them.
 ///
-/// The committed program never reaches the clock under stubs that answer zero,
-/// so the row above sees two of its three imports. This program makes every
-/// call whatever the answers, so the third — the second host module, and the
-/// one `i64` result — is observed from the command line too, after the two
-/// `fprime_core` calls it follows. Fails if any of the three is logged under
-/// the wrong name, out of order, with its arguments rendered some other way,
-/// twice or not at all; if `command`'s zero stops reaching `telemetry`; or if
-/// `go` stops returning the clock's zero.
+/// The committed program binds `rsleep` and `panic` and never calls them, so
+/// the row above sees four of its six imports. This program makes every call
+/// whatever the answers, so the other two — `rsleep`'s `i64` argument and
+/// `panic`'s three — are observed from the command line too. A stub never
+/// traps, so `panic` returns and the clock is asked after it. Fails if any of
+/// the six is logged under the wrong name, out of order, with its arguments
+/// rendered some other way, twice or not at all; if `command`'s zero stops
+/// reaching `telemetry`; or if `go` stops returning the clock's zero.
 #[test]
-fn a_program_calling_every_fprime_import_logs_all_three_in_call_order() {
+fn a_program_calling_every_fprime_import_logs_all_six_in_call_order() {
     let artifact = Artifact::compiled(FPRIME_EVERY_CALL);
     let path = artifact.arg();
     let mut argv = vec![path.as_str()];
@@ -607,10 +686,16 @@ fn a_program_calling_every_fprime_import_logs_all_three_in_call_order() {
     let run = Run::of(&argv);
     assert_eq!(run.code, support::exit::OK, "{}", run.transcript());
     assert_eq!(run.out, "go = 0\n", "{}", run.transcript());
-    assert_eq!(
-        run.err,
-        "host call: fprime_core.command(1)\nhost call: fprime_core.telemetry(1, 0)\n\
-         host call: env.clock_ms()\n",
+    assert!(
+        reads_as(
+            &run.err,
+            "host call: fprime_core.message(<address>, 2)\n\
+             host call: fprime_core.command(42, 7)\n\
+             host call: fprime_core.telemetry(0, <address>, 11, <address>, 4)\n\
+             host call: fprime_core.rsleep(5000000000)\n\
+             host call: fprime_core.panic(<address>, 4, 17)\n\
+             host call: env.clock_ms()\n"
+        ),
         "{}",
         run.transcript()
     );
@@ -1740,7 +1825,7 @@ fn an_equals_sign_in_either_name_is_the_reason_no_spec_names_it() {
 ///
 /// The typo registers a stub under names nothing imports, so the import it was
 /// meant for is still unsupplied and is listed with the spec it needs, beside
-/// the two stubs that did bind; the misspelt spec follows. Fails if a spec
+/// the five stubs that did bind; the misspelt spec follows. Fails if a spec
 /// matching no import is left out, if a matching one is listed as an orphan,
 /// or if the heading goes back to claiming a stub sits beside every import.
 #[test]
@@ -1749,20 +1834,28 @@ fn a_spec_naming_no_import_is_listed_after_the_imports() {
     let run = Run::of(&[
         &artifact.arg(),
         "--host",
-        "fprime_core.telemetry=ii:i",
+        "fprime_core.panic=iii",
         "--host",
-        "fprime_core.command=i:i",
+        "fprime_core.rsleep=I",
+        "--host",
+        "fprime_core.command=ii:i",
+        "--host",
+        "fprime_core.message=ii",
+        "--host",
+        "fprime_core.telemetry=iiiii:i",
         "--host",
         "env.clok_ms=:I",
         "--invoke",
         "report",
-        "1",
+        "3",
     ]);
     assert_eq!(run.code, support::exit::DECODE, "{}", run.transcript());
     assert!(
         run.err.contains(
             "  it imports these; beside each, what `--host` registered under its two names:\n    \
-             fprime_core.telemetry: stub registered\n    fprime_core.command: stub registered\n    \
+             fprime_core.panic: stub registered\n    fprime_core.rsleep: stub registered\n    \
+             fprime_core.command: stub registered\n    fprime_core.message: stub registered\n    \
+             fprime_core.telemetry: stub registered\n    \
              env.clock_ms: no stub; it needs `--host env.clock_ms=:I`\n    `--host \
              env.clok_ms=:I` names no import of this module\n"
         ),

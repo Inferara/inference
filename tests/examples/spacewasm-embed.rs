@@ -12,13 +12,15 @@
 //! ```
 //!
 //! A module binding host imports loads once each import has a stub. For an F´
-//! program importing `telemetry` and `command` from `fprime_core` and
-//! `clock_ms` from `env`:
+//! program importing the reference host set — `panic`, `rsleep`, `command`,
+//! `message` and `telemetry` from `fprime_core` and `clock_ms` from `env`:
 //!
 //! ```text
 //! cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm \
-//!     --host fprime_core.telemetry=ii:i --host fprime_core.command=i:i \
-//!     --host env.clock_ms=:I --invoke report 1
+//!     --host fprime_core.panic=iii --host fprime_core.rsleep=I \
+//!     --host fprime_core.command=ii:i --host fprime_core.message=ii \
+//!     --host fprime_core.telemetry=iiiii:i --host env.clock_ms=:I \
+//!     --invoke report 3
 //! ```
 //!
 //! Each stub answers zero and prints the calls it receives; what a stub is and

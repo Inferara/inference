@@ -161,15 +161,21 @@ A `use … from` clause whose first segment is `host` binds its names to functio
 the **embedder** supplies at instantiation, not to functions this build links:
 
 ```inference
-external fn telemetry(code: i32, value: i32);
+external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; 4], value_len: i32) -> i32;
+use { telemetry } from host::fprime_core;
 external fn clock_ms() -> i64;
-use { telemetry, clock_ms } from host::fprime_core;
+use { clock_ms } from host::env;
 ```
 
-`host::fprime_core` imports from the WASM module `fprime_core`; the `host`
-segment names the provider, not a path component. The emitted entry is
-`(import "fprime_core" "telemetry" …)` — the same two-level name an embedder
-registers a host function under — and `host` appears nowhere in the artifact.
+`host::fprime_core` imports from the WASM module `fprime_core`, and
+`host::env` from `env`; the `host` segment names the provider, not a path
+component. The emitted entry is `(import "fprime_core" "telemetry" …)` — the
+same two-level name an embedder registers a host function under — and `host`
+appears nowhere in the artifact. Both belong to the F´ (F Prime) host set that
+`spacewasm_std`, the reference embedder in the SpaceWasm repository, registers,
+and are declared at its signatures: an array argument is passed as its
+address, so `time` and `value` each arrive as one `i32`, and the length after
+each says how many bytes the buffer holds.
 
 ### What `host` reserves, and what it does not
 
@@ -243,15 +249,17 @@ naming what went and what is left. This program calls `command` and
 `telemetry` and binds `clock_ms` without calling it:
 
 ```inference
-external fn telemetry(channel: i32, value: i32) -> i32;
-external fn command(opcode: i32) -> i32;
+external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; 4], value_len: i32) -> i32;
+external fn command(opcode: i32, arg: i32) -> i32;
 use { telemetry, command } from host::fprime_core;
 external fn clock_ms() -> i64;
 use { clock_ms } from host::env;
 
 pub fn main() -> i32 {
-    let ack: i32 = command(1);
-    return telemetry(1, ack);
+    let id: i32 = command(1, 0);
+    let mut time: [u8; 11] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let value: [u8; 4] = [21, 0, 0, 0];
+    return telemetry(id, time, 11, value, 4);
 }
 ```
 
@@ -280,7 +288,7 @@ Analyzed: src/main.inf
 Codegen complete
 host imports: env.clock_ms, fprime_core.command, fprime_core.telemetry
 WASM generated at: out/main.wasm
-wasm-opt -Oz: main.wasm 163 -> 103 bytes
+wasm-opt -Oz: main.wasm 300 -> 202 bytes
 wasm-opt removed 1 host import the program never calls: env.clock_ms; the artifact now imports fprime_core.command, fprime_core.telemetry
 ```
 
@@ -337,7 +345,7 @@ rename the caps then ask for leaves that entry matching nothing.
 comma-separated `module.field` pairs:
 
 ```bash
-infc prog.inf --host-imports=fprime_core.telemetry,fprime_core.clock_ms
+infc prog.inf --host-imports=fprime_core.telemetry,env.clock_ms
 ```
 
 The flag has three states, and the `=` is required so that the empty one is
@@ -431,8 +439,8 @@ already there.
 field:
 
 ```text
-host imports: fprime_core.clock_ms, fprime_core.telemetry
-host imports (no allowlist): fprime_core.clock_ms, fprime_core.telemetry
+host imports: env.clock_ms, fprime_core.telemetry
+host imports (no allowlist): env.clock_ms, fprime_core.telemetry
 ```
 
 The parenthetical is not decoration. It separates an import admitted by a
@@ -506,19 +514,34 @@ An embedder registers each function under the two names its import carries,
 before it instantiates the module. For a program declaring
 
 ```inference
-external fn telemetry(code: i32, value: i32);
+external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; 4], value_len: i32) -> i32;
 use { telemetry } from host::fprime_core;
 external fn clock_ms() -> i64;
 use { clock_ms } from host::env;
 ```
 
-an embedder using wasmtime's Rust API registers:
+an embedder using wasmtime's Rust API registers the following. The two arrays
+arrive as addresses into the calling module's linear memory, which every
+module this compiler emits with a linear memory exports as `memory`, so the
+host reaches them through the caller:
 
 ```rust,ignore
 let mut linker = wasmtime::Linker::new(&engine);
-linker.func_wrap("fprime_core", "telemetry", |code: i32, value: i32| {
-    /* forward to the flight software's telemetry channel */
-})?;
+linker.func_wrap(
+    "fprime_core",
+    "telemetry",
+    |mut caller: wasmtime::Caller<'_, ()>,
+     id: i32,
+     time_ptr: i32,
+     time_len: i32,
+     value_ptr: i32,
+     value_len: i32|
+     -> i32 {
+        /* write the time and read the value through `memory`, then forward
+           them to the flight software's telemetry channel */
+        0
+    },
+)?;
 linker.func_wrap("env", "clock_ms", || -> i64 { /* read the mission clock */ 0 })?;
 let instance = linker.instantiate(&mut store, &module)?;
 ```
@@ -552,9 +575,10 @@ let engine = Engine::new(stack_words, max_modules, hosts)?;
 ```
 
 Either way, the signature registered must be the one the `external fn`
-declared, since the artifact's import carries that type and the runtime checks
-it when it binds the import: wasmtime at instantiation, SpaceWasm while it
-decodes the module.
+declared, in WebAssembly's types — each array a single `i32` address, as
+`telemetry` shows — since the artifact's import carries that type and the
+runtime checks it when it binds the import: wasmtime at instantiation,
+SpaceWasm while it decodes the module.
 
 Without an embedder of your own, the repository's SpaceWasm harness is the
 ready-made way to try this: each `--host MODULE.FIELD=PARAMS[:RESULT]` builds a
