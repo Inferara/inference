@@ -277,14 +277,13 @@ interpreter's: `Eof`, `MalformedInteger`, `MalformedMagic`, `MalformedVersion`,
 `StackUnderflow`, `TypeMismatch`, `BlockResultTypeMismatch`,
 `BrTableResultTypeMismatch`, `FunctionResultTypeMismatch`, `MemAlignTooLarge`,
 `AlignmentLargerThanType`, `InvalidMemIndex`, `InvalidMemOffsetType`,
-`InvalidNegativeMemOffset`, `InvalidMemOffset`, `MemoryNotDefined`,
-`InvalidTableIndex`, `TableNotDefined`, `InvalidElementCount`,
-`InvalidElementOffset`, `InvalidElementOutOfBounds`, `InvalidLabelIndex`,
-`InvalidElseBlock`, `InvalidEndBlock`, `MultipleMemories`, `MultipleTables`,
-`InstructionOutsideOfFunction`, `LocalIdxOutOfRange`, `FunctionIdxOutOfRange`,
-`TypeIdxOutOfRange`, `GlobalIdxOutOfRange`, `GlobalTypeMismatch`,
-`GlobalNotMutable`, `InvalidConstInstruction`, `InvalidConstantExpr`,
-`InvalidStartFunctionSignature`.
+`InvalidMemOffset`, `MemoryNotDefined`, `InvalidTableIndex`, `TableNotDefined`,
+`InvalidElementCount`, `InvalidElementOffset`, `InvalidElementOutOfBounds`,
+`InvalidLabelIndex`, `InvalidElseBlock`, `InvalidEndBlock`, `MultipleMemories`,
+`MultipleTables`, `InstructionOutsideOfFunction`, `LocalIdxOutOfRange`,
+`FunctionIdxOutOfRange`, `TypeIdxOutOfRange`, `GlobalIdxOutOfRange`,
+`GlobalTypeMismatch`, `GlobalNotMutable`, `InvalidConstInstruction`,
+`InvalidConstantExpr`, `InvalidStartFunctionSignature`.
 
 **Not a property of the bytes: the host set decides them.** An import is bound
 against the modules an embedder registered, and this crate is handed bytes and
@@ -305,14 +304,27 @@ verifier's two stacks are const generics, and overflowing either is a
 `AllocError` — `ControlFlowTooDeep` is in the enum and is constructed nowhere in
 0.7.1. There is no fixed number to refuse against, so `Report` measures both
 axes and the build prints them. `IllegalMemoryGrow` (`src/compiler.rs:443`) is a
-`CompilerOptions` choice in the same way; `GuestMemoryAllocationFailure` and
-`MemoryError` are the embedder's own allocation at load. So is the code-page
-budget `CompilerOptions::max_code_pages` sets, and it is worth naming because it
-bites *before* one of the modelled limits: a `br_table` of 65,535 targets is
-inside `MAX_IR_INDEX` and costs 131,070 IR words, which the reference
-configuration cannot hold — so the accepting side of that particular boundary is
-out of reach of any plausible embedder, and the oracle says so rather than
-pretending otherwise.
+`CompilerOptions` choice in the same way; `GuestMemoryAllocationFailure` is the
+embedder's own allocation at load. So is the code-page budget
+`CompilerOptions::max_code_pages` sets, and it is worth naming because it bites
+*before* one of the modelled limits: a `br_table` of 65,535 targets is inside
+`MAX_IR_INDEX` and costs 131,070 IR words, which the reference configuration
+cannot hold — so the accepting side of that particular boundary is out of reach
+of any plausible embedder, and the oracle says so rather than pretending
+otherwise.
+
+**A data segment the interpreter cannot write, which this crate does not
+refuse.** Standard WebAssembly writes a data segment into memory when a module
+is instantiated, so validation holds its offset only to being a constant `i32`
+and never compares the segment with the memory. The interpreter writes each
+segment while it decodes (`src/module.rs:956-999`) and refuses there the two
+that cannot be written: `InvalidNegativeMemOffset` (`src/module.rs:974`) is a
+segment at a negative offset, and `MemoryError` — only `OutOfBounds`, the one
+error the decoder's writes can return (`src/memory.rs:146-152,163-165`) — is a
+segment whose bytes run past the end of memory, an empty one starting past it
+included. Both are properties of the bytes, and neither is modelled, so `check`
+accepts a module the interpreter refuses for either. That is a gap in the
+check, not an exemption, and an embedder that meets it reports it as one.
 
 **Properties of the interpreter's compiled IR that a description cannot
 reproduce.** Two IR properties *are* modelled above, because both are decided by

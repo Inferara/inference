@@ -143,14 +143,15 @@
 
 use std::cell::RefCell;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 
 use inference_spacewasm_runner::{
-    self as runner, EngineConfig, ExportedFunction, HostSetError, InvokeError, IrStats, LoadError,
-    REFERENCE_MAX_CODE_PAGES, REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH,
+    self as runner, EngineConfig, ExportedFunction, Fuel, HostSetError, InvokeError, IrStats,
+    LoadError, REFERENCE_MAX_CODE_PAGES, REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH,
     ReexportedImport, coerce_arguments, render, type_name,
 };
 pub use inference_spacewasm_runner::{Session as SpaceWasmSession, host_module, host_set};
@@ -195,6 +196,9 @@ const ENGINE: EngineConfig =
 /// finite so a lowering bug that produces an unterminated loop fails the suite
 /// instead of hanging it.
 pub const FUEL: usize = 100_000_000;
+
+/// [`FUEL`] as the budget every load runs a module's start function under.
+const START_FUEL: Fuel = Fuel::Limited(NonZeroUsize::new(FUEL).expect("the budget is not zero"));
 
 // ---------------------------------------------------------------------------
 // The tier's loaders
@@ -306,7 +310,9 @@ pub fn decode_with_pages<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usi
     max_code_pages: usize,
 ) -> Result<LoadedModule<'s>, ParseError> {
     let config = EngineConfig { max_code_pages, ..ENGINE };
-    match runner::load_with::<CONTROL_FRAMES, STACK_DEPTH>(session, wasm, hosts, FUEL, config) {
+    let loaded =
+        runner::load_with::<CONTROL_FRAMES, STACK_DEPTH>(session, wasm, hosts, START_FUEL, config);
+    match loaded {
         Ok(module) => Ok(LoadedModule(module)),
         Err(LoadError::Decode(verdict)) => Err(verdict),
         Err(fault) => panic!("{fault}"),
@@ -344,7 +350,7 @@ impl LoadedModule<'_> {
         match self.0.invoke(export, args, fuel) {
             Ok(runner::Outcome::Returned(value)) => Outcome::Value(value),
             Ok(runner::Outcome::Trapped(reason)) => Outcome::Trap(reason),
-            Ok(runner::Outcome::OutOfFuel) => Outcome::OutOfFuel,
+            Ok(runner::Outcome::OutOfFuel { .. }) => Outcome::OutOfFuel,
             Err(fault) => panic!("{fault}"),
         }
     }
@@ -707,7 +713,7 @@ fn execute(command: &Command, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         &mut session,
         &wasm,
         hosts,
-        FUEL,
+        START_FUEL,
         ENGINE,
     );
     // A start function runs inside the load, and the calls it made are printed
@@ -948,7 +954,9 @@ fn host_stubs(
                     HostSetError::Name { error, .. } => {
                         name_refusal(first, "module", &first.module, HOST_MODULE_NAME_CAP, error)
                     }
-                    HostSetError::Allocation(_) => panic!("{refusal}"),
+                    HostSetError::Allocation(_) | HostSetError::Function { .. } => {
+                        panic!("{refusal}")
+                    }
                 }
             })
         })

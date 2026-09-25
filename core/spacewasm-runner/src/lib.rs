@@ -44,12 +44,13 @@
 //! non-re-entrant and puts the synchronization on the embedder: reaching them
 //! from two threads at once is undefined behaviour by that contract. A
 //! [`Session`] is that synchronization — a process-wide lock — and it is the
-//! only door: [`load`] and [`load_with`] take it mutably, [`host_module`] and
-//! [`host_set`] take it shared, and a [`LoadedModule`] borrows the session it
-//! was loaded under, so a module cannot outlive the lock its memory is freed
-//! through. A session is neither `Send` nor `Sync`: it is released on the
-//! thread that acquired it, and a `&Session`, the proof of the lock the host
-//! builders take, cannot reach another thread while this one holds the lock.
+//! only door: [`load`], [`load_with`] and [`fprime::load`] take it mutably,
+//! [`host_module`] and [`host_set`] take it shared, and a [`LoadedModule`]
+//! borrows the session it was loaded under, so a module cannot outlive the
+//! lock its memory is freed through. A session is neither `Send` nor `Sync`:
+//! it is released on the thread that acquired it, and a `&Session`, the proof
+//! of the lock the host builders take, cannot reach another thread while this
+//! one holds the lock.
 //!
 //! A host module or a host set must be moved into a load, or dropped, while
 //! the session it was built under is still held, since dropping it frees
@@ -65,10 +66,11 @@
 //! # No panics on the embedder's path
 //!
 //! Every way a load or a call can fail is a value: a [`LoadError`] from
-//! [`load`], an [`InvokeError`] from [`LoadedModule::invoke`], a
-//! [`HostSetError`] from the host builders and an [`ArgumentError`] from
-//! [`coerce_arguments`]. A trap and an exhausted instruction budget are not
-//! errors at all but the two ways a call can end besides returning, so they
+//! [`load`] and [`fprime::load`], an [`InvokeError`] from
+//! [`LoadedModule::invoke`], a [`HostSetError`] from the host builders, an
+//! [`ArgumentError`] from [`coerce_arguments`] and [`UnsupportedImports`] from
+//! [`fprime::check_imports`]. A trap and an exhausted instruction budget are
+//! not errors at all but the two ways a call can end besides returning, so they
 //! are [`Outcome`]s — including a call the engine refuses for lack of stack,
 //! which wasmtime reports as a trap too.
 //!
@@ -85,31 +87,64 @@
 //! embedder's values, re-exported here from `inference-target-conformance`
 //! rather than restated, and [`load_with`] takes them as parameters. The rest
 //! of the configuration — the words of value stack and the IR pages the code
-//! builder may fill — is an [`EngineConfig`] the caller passes on each load.
-//! Every load builds its own engine holding exactly one module, compiled
-//! without `memory.grow` and registered under the empty name.
+//! builder may fill — is an [`EngineConfig`] the caller passes on each load;
+//! [`EngineConfig::REFERENCE`] is the reference embedder's. Every load builds
+//! its own engine holding exactly one module, compiled without `memory.grow`
+//! and registered under the empty name.
+//!
+//! A load takes a [`Fuel`] as well: the instruction budget of the whole run,
+//! [`Fuel::Unbounded`] or [`Fuel::Limited`]. The start function runs under it,
+//! and [`LoadedModule::invoke_within_budget`] spends exactly what the start
+//! function left; [`LoadedModule::invoke`] instead gives one call a budget of
+//! its own, which is what a caller wanting to bound each call separately uses.
+//!
+//! # The F´ reference hosts
+//!
+//! [`fprime`] holds the six host functions of `spacewasm_std`, the reference
+//! embedder, in one table, and [`fprime::load`] is the way to run a module
+//! against them: it checks every import against the table before a byte is
+//! decoded, registers the hosts, logs their calls to a [`HostLog`], and
+//! returns a module whose traps can be reported with the reason a host
+//! recorded. The module documentation lists what each host does and the five
+//! ways it differs from the reference embedder.
+//!
+//! # Reports
+//!
+//! The runner states what it knows in words and leaves the rest to its caller:
+//! a [`TrapReport`] gives a trap's first line and its explanation, the
+//! [`trap_phrase`] and [`trap_group`] behind them are public, [`out_of_fuel`]
+//! is the core of the sentence an exhausted budget is reported in, and the
+//! over-limit and import refusals carry their facts as fields beside their
+//! texts. None of these names the program embedding the runner: where a
+//! sentence has to, the caller passes its name.
 
 #![warn(clippy::pedantic)]
 
 mod args;
 mod errors;
+pub mod fprime;
 mod hosts;
 mod module;
+mod report;
 mod session;
 
 pub use args::{coerce_arguments, render, type_name};
-pub use errors::{ArgumentError, HostSetError, InvokeError, LoadError};
-pub use hosts::{HostSet, host_module, host_set};
+pub use errors::{
+    ArgumentError, ExportKind, HostSetError, ImportProblem, InvokeError, Limit, LoadError,
+    OverLimit, UnsupportedImport, UnsupportedImports,
+};
+pub use hosts::{HostLog, HostSet, host_module, host_set};
 pub use inference_target_conformance::spacewasm::{
     LIMITS_FROM, REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH,
 };
 pub use module::{
-    EngineConfig, ExportedFunction, IrStats, LoadedModule, Outcome, REFERENCE_MAX_CODE_PAGES,
-    ReexportedImport, ir_stats, load, load_with,
+    EngineConfig, ExportedFunction, Fuel, IrStats, LoadedModule, Outcome, REFERENCE_MAX_CODE_PAGES,
+    REFERENCE_STACK_WORDS, ReexportedImport, ir_stats, load, load_with,
 };
+pub use report::{HostTrap, TrapGroup, TrapReport, out_of_fuel, trap_group, trap_phrase};
 pub use session::Session;
 // Exactly the upstream types this crate's public signatures and error fields name.
 pub use spacewasm::{
-    AllocError, HostFunction, HostGlobal, HostModule, HostNameError, MemoryError, ParseError,
-    TrapReason, ValType, Value,
+    AllocError, HostFunction, HostFunctionError, HostGlobal, HostModule, HostNameError,
+    MemoryError, ParseError, TrapReason, ValType, Value,
 };

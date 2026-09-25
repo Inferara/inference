@@ -20,6 +20,11 @@ spacewasm = { workspace = true, features = ["strict-assertions"] }
 # release the limits describe, which this crate re-exports rather than
 # restating.
 inference-target-conformance.workspace = true
+# STOCK wasmparser, the one the conformance check reads with: the F´ import
+# check reads a module's import section before the interpreter decodes a byte
+# of it, and answers about any WebAssembly, not only what the interpreter
+# accepts.
+wasmparser.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

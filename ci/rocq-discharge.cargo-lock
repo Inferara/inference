@@ -2495,6 +2495,7 @@ dependencies = [
  "inference-target-conformance",
  "spacewasm",
  "thiserror 2.0.20",
+ "wasmparser 0.254.0",
  "wat",
 ]
 

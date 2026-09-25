@@ -2352,24 +2352,27 @@ fn fuel_needs_a_decimal_budget() {
     assert!(malformed.err.contains("not `plenty`"), "{}", malformed.transcript());
 }
 
-/// The wrong number of arguments names both counts.
+/// The wrong number of arguments names the parameters and what was given.
 ///
 /// Fails if the arity check goes away and the shared `invoke` panics instead,
-/// which turns a mistyped command line into a backtrace.
+/// which turns a mistyped command line into a backtrace, or if the refusal
+/// drops the parameter types or the arguments as written.
 #[test]
 fn the_wrong_argument_count_is_a_usage_error_naming_both() {
     let artifact = Artifact::compiled(CHECKED_ADD);
     let run = Run::of(&[&artifact.arg(), "--invoke", "i32_add", "1"]);
     assert_eq!(run.code, support::exit::USAGE, "{}", run.transcript());
     assert!(
-        run.err.contains("takes 2 arguments; 1 argument given"),
+        run.err.starts_with(
+            "error: `i32_add` takes 2 arguments (i32, i32), and 1 was given: 1\nusage: "
+        ),
         "{}",
         run.transcript()
     );
 }
 
-/// An argument that is not a decimal integer of the declared type is refused
-/// with the position and the type.
+/// An argument that is not a decimal integer is refused with its position,
+/// what was written and the parameter types.
 ///
 /// Fails if a malformed argument starts defaulting to zero, which would run the
 /// program on operands nobody asked for and report the answer as though it were
@@ -2379,7 +2382,55 @@ fn a_malformed_integer_argument_names_its_position_and_type() {
     let artifact = Artifact::compiled(CHECKED_ADD);
     let run = Run::of(&[&artifact.arg(), "--invoke", "i32_add", "1", "two"]);
     assert_eq!(run.code, support::exit::USAGE, "{}", run.transcript());
-    assert!(run.err.contains("argument 2 of `i32_add` is `i32`"), "{}", run.transcript());
+    assert!(
+        run.err.starts_with(
+            "error: argument 2 for `i32_add` is `two`, which is not a decimal integer; \
+             `i32_add` takes (i32, i32)\nusage: "
+        ),
+        "{}",
+        run.transcript()
+    );
+}
+
+/// An integer argument above the signed maximum and within the unsigned one
+/// is taken as its bit pattern, at both widths.
+///
+/// Fails if the unsigned half of either range is refused again, or reaches the
+/// function as another number than the bit pattern it spells.
+#[test]
+fn an_argument_in_the_unsigned_range_is_passed_as_its_bit_pattern() {
+    for (source, export, argument, printed) in [
+        (ECHO_I32, "echo32", "4294967295", "echo32 = -1\n"),
+        (ECHO_I32, "echo32", "2147483648", "echo32 = -2147483648\n"),
+        (ECHO_I64, "echo64", "18446744073709551615", "echo64 = -1\n"),
+        (ECHO_I64, "echo64", "9223372036854775808", "echo64 = -9223372036854775808\n"),
+    ] {
+        let artifact = Artifact::compiled(source);
+        let run = Run::of(&[&artifact.arg(), "--invoke", export, argument]);
+        assert_eq!(run.code, support::exit::OK, "{}", run.transcript());
+        assert_eq!(run.out, printed, "{}", run.transcript());
+    }
+}
+
+/// An integer argument past both ranges of its width is refused naming the
+/// range it would have had to fit.
+///
+/// Fails if a number one past the unsigned maximum wraps into the range, or if
+/// the refusal stops naming the range and how its upper half is read.
+#[test]
+fn an_argument_past_both_ranges_is_refused_naming_the_range() {
+    let artifact = Artifact::compiled(ECHO_I32);
+    let run = Run::of(&[&artifact.arg(), "--invoke", "echo32", "4294967296"]);
+    assert_eq!(run.code, support::exit::USAGE, "{}", run.transcript());
+    assert!(
+        run.err.starts_with(
+            "error: argument 1 for `echo32` is 4294967296, which does not fit an i32 \
+             (-2147483648 to 4294967295; a value above 2147483647 is taken as its unsigned bit \
+             pattern)\nusage: "
+        ),
+        "{}",
+        run.transcript()
+    );
 }
 
 /// A floating-point result is printed rather than refused, at both widths.
@@ -2428,8 +2479,12 @@ fn a_floating_point_parameter_is_refused_rather_than_guessed_at() {
     );
     let run = Run::of(&[&artifact.arg(), "--invoke", "half", "0.5"]);
     assert_eq!(run.code, support::exit::USAGE, "{}", run.transcript());
-    assert!(run.err.contains("is `f32`"), "{}", run.transcript());
-    assert!(run.err.contains("decimal integers only"), "{}", run.transcript());
+    assert!(
+        run.err
+            .starts_with("error: `half` takes an f32 argument, which the runner cannot pass\n"),
+        "{}",
+        run.transcript()
+    );
 }
 
 /// The module path comes first, and an option in its place is refused rather
@@ -2476,19 +2531,23 @@ fn invoke_needs_exactly_one_export_name() {
     );
 }
 
-/// A 64-bit parameter refuses a malformed argument in its own words.
+/// A malformed argument to a 64-bit parameter is refused quoting the text as
+/// written and the signature read from the module, `(i64)`.
 ///
-/// The `i32` arm has a row of its own; this one exists because the two are
-/// separate branches over the declared type, and a copy-paste that left the
-/// wider one reading `i32` would still refuse `two` — and would also refuse
-/// every value above `i32::MAX`, silently, as though it were malformed. Fails
-/// if the arm loses its own message.
+/// Fails if the refusal drops the text or the signature.
 #[test]
 fn a_malformed_wide_argument_names_the_wide_type() {
     let artifact = Artifact::compiled(ECHO_I64);
     let run = Run::of(&[&artifact.arg(), "--invoke", "echo64", "two"]);
     assert_eq!(run.code, support::exit::USAGE, "{}", run.transcript());
-    assert!(run.err.contains("argument 1 of `echo64` is `i64`"), "{}", run.transcript());
+    assert!(
+        run.err.starts_with(
+            "error: argument 1 for `echo64` is `two`, which is not a decimal integer; `echo64` \
+             takes (i64)\n"
+        ),
+        "{}",
+        run.transcript()
+    );
 }
 
 /// A module that exports no function says so rather than printing an empty

@@ -6,13 +6,14 @@
 //! compiler never emits. What the compiler's own output does under the runner
 //! is the SpaceWasm tier's to pin.
 
+use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 
 use inference_spacewasm_runner::{
-    EngineConfig, ExportedFunction, HostSet, HostSetError, InvokeError, LoadError, LoadedModule,
-    Outcome, REFERENCE_MAX_CODE_PAGES, REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH,
-    ReexportedImport, Session, TrapReason, ValType, Value, host_module, host_set, ir_stats, load,
-    load_with,
+    EngineConfig, ExportKind, ExportedFunction, Fuel, HostSet, HostSetError, InvokeError,
+    LoadError, LoadedModule, Outcome, REFERENCE_MAX_CODE_PAGES, REFERENCE_MAX_CONTROL_FRAMES,
+    REFERENCE_MAX_STACK_DEPTH, ReexportedImport, Session, TrapReason, ValType, Value, host_module,
+    host_set, ir_stats, load, load_with,
 };
 use spacewasm::{
     HostFunction, HostFunctionBreak, HostName, HostNameError, HostValList, MemoryError,
@@ -25,6 +26,9 @@ const ENGINE: EngineConfig =
 
 /// A budget no row that is meant to finish comes near.
 const FUEL: usize = 1_000_000;
+
+/// [`FUEL`] as the budget a load runs its start function under.
+const BUDGET: Fuel = Fuel::Limited(NonZeroUsize::new(FUEL).expect("the budget is not zero"));
 
 /// The reference control-frame bound, as the const generic `load_with` takes.
 const FRAMES: usize = REFERENCE_MAX_CONTROL_FRAMES as usize;
@@ -41,13 +45,13 @@ fn wat(text: &str) -> Vec<u8> {
 
 /// `wasm` loaded with no hosts, in the roomy engine, or a panic naming why not.
 fn loaded<'s>(session: &'s mut Session, wasm: &[u8]) -> LoadedModule<'s> {
-    load(session, wasm, FUEL, ENGINE).unwrap_or_else(|e| panic!("the fixture loads: {e}"))
+    load(session, wasm, BUDGET, ENGINE).unwrap_or_else(|e| panic!("the fixture loads: {e}"))
 }
 
 /// Why `wasm` did not load with no hosts, in `config`.
 fn load_error(wasm: &[u8], config: EngineConfig) -> LoadError {
     let mut session = Session::acquire();
-    match load(&mut session, wasm, FUEL, config) {
+    match load(&mut session, wasm, BUDGET, config) {
         Ok(_) => panic!("the fixture must not load"),
         Err(error) => error,
     }
@@ -161,7 +165,7 @@ fn an_exhausted_budget_is_an_outcome_and_leaves_the_engine_idle() {
     let wasm = wat(ARITHMETIC);
     let mut session = Session::acquire();
     let mut module = loaded(&mut session, &wasm);
-    assert_eq!(module.invoke("spin", &[], 1_000), Ok(Outcome::OutOfFuel));
+    assert_eq!(module.invoke("spin", &[], 1_000), Ok(Outcome::OutOfFuel { budget: 1_000 }));
     assert_eq!(
         module.invoke("add", &[Value::I32(20), Value::I32(22)], FUEL),
         Ok(Outcome::Returned(Some(Value::I32(42))))
@@ -177,7 +181,7 @@ fn an_exhausted_budget_is_an_outcome_and_leaves_the_engine_idle() {
 fn a_frame_that_does_not_fit_the_stack_is_a_stack_overflow_trap() {
     let wasm = wat(ARITHMETIC);
     let mut session = Session::acquire();
-    let mut module = load(&mut session, &wasm, FUEL, EngineConfig { stack_words: 1, ..ENGINE })
+    let mut module = load(&mut session, &wasm, BUDGET, EngineConfig { stack_words: 1, ..ENGINE })
         .expect("the module loads; only calling it needs stack");
     assert_eq!(
         module.invoke("add", &[Value::I32(1), Value::I32(2)], FUEL),
@@ -212,8 +216,10 @@ fn a_call_that_cannot_be_made_is_an_error_naming_why() {
     );
 
     let memory = module.invoke("mem", &[], FUEL).expect_err("`mem` is a memory");
-    assert_eq!(memory, InvokeError::NotAFunction { export: "mem".to_string() });
-    assert_eq!(memory.to_string(), "`mem` is exported, but not as a function");
+    assert_eq!(
+        memory,
+        InvokeError::NotAFunction { export: "mem".to_string(), kind: ExportKind::Memory }
+    );
 
     let arity = module.invoke("add", &[Value::I32(1)], FUEL).expect_err("one argument short");
     assert_eq!(arity, InvokeError::Arity { export: "add".to_string(), expected: 2, given: 1 });
@@ -251,6 +257,43 @@ fn a_module_exporting_no_function_says_so() {
     );
 }
 
+/// A name exported as something other than a function is refused naming what
+/// it is: the module's linear memory, its table or one of its globals.
+///
+/// Fails if a kind is dropped from the refusal or reported as another.
+#[test]
+fn a_name_exported_as_no_function_is_refused_naming_what_it_is() {
+    let wasm = wat(
+        r#"(module
+             (memory (export "mem") 1)
+             (table (export "tbl") 1 funcref)
+             (global (export "g") i32 (i32.const 7)))"#,
+    );
+    let mut session = Session::acquire();
+    let mut module = loaded(&mut session, &wasm);
+    for (export, kind, text) in [
+        (
+            "mem",
+            ExportKind::Memory,
+            "`mem` is exported, but it is the module's linear memory, not a function",
+        ),
+        (
+            "tbl",
+            ExportKind::Table,
+            "`tbl` is exported, but it is the module's table, not a function",
+        ),
+        (
+            "g",
+            ExportKind::Global,
+            "`g` is exported, but it is one of the module's globals, not a function",
+        ),
+    ] {
+        let error = module.invoke(export, &[], FUEL).expect_err("not a function");
+        assert_eq!(error, InvokeError::NotAFunction { export: export.to_string(), kind });
+        assert_eq!(error.to_string(), text);
+    }
+}
+
 /// A host import the module exports again is listed apart and refused by
 /// name, with the import behind it.
 ///
@@ -266,7 +309,7 @@ fn a_reexported_host_import_is_refused_naming_the_import() {
     );
     let mut session = Session::acquire();
     let hosts = env_f(&session, HostFunctionBreak::Trap);
-    let mut module = load_with::<FRAMES, DEPTH>(&mut session, &wasm, hosts, FUEL, ENGINE)
+    let mut module = load_with::<FRAMES, DEPTH>(&mut session, &wasm, hosts, BUDGET, ENGINE)
         .expect("the import is supplied");
     assert_eq!(
         module.exported_host_imports(),
@@ -307,7 +350,7 @@ fn a_paused_call_is_an_error_and_leaves_the_engine_idle() {
     );
     let mut session = Session::acquire();
     let hosts = env_f(&session, HostFunctionBreak::Pause);
-    let mut module = load_with::<FRAMES, DEPTH>(&mut session, &wasm, hosts, FUEL, ENGINE)
+    let mut module = load_with::<FRAMES, DEPTH>(&mut session, &wasm, hosts, BUDGET, ENGINE)
         .expect("the import is supplied");
     assert_eq!(
         module.invoke("call", &[], FUEL),
@@ -339,7 +382,7 @@ fn an_unsupplied_import_is_a_decode_error() {
     );
 }
 
-/// The code builder refuses `memory.grow`, which the target does not allow.
+/// The code builder refuses `memory.grow`, as `spacewasm_std`'s does.
 ///
 /// Fails if a load starts compiling with `allow_memory_grow` on.
 #[test]
@@ -369,7 +412,7 @@ fn load_uses_the_reference_bounds_and_load_with_its_own() {
     let at_the_bound = nested(FRAMES - 1);
     let past_the_bound = nested(FRAMES);
     let mut session = Session::acquire();
-    load(&mut session, &at_the_bound, FUEL, ENGINE)
+    load(&mut session, &at_the_bound, BUDGET, ENGINE)
         .expect("the reference bound's own number of frames fits it");
     drop(session);
     assert_eq!(
@@ -381,7 +424,7 @@ fn load_uses_the_reference_bounds_and_load_with_its_own() {
         &mut session,
         &past_the_bound,
         spacewasm::Vec::zero(),
-        FUEL,
+        BUDGET,
         ENGINE,
     )
     .expect("one frame past the reference bound fits a bound one frame larger");
@@ -405,7 +448,7 @@ fn load_uses_the_reference_operand_stack_bound_and_load_with_its_own() {
     let at_the_bound = operand_peak(DEPTH);
     let past_the_bound = operand_peak(DEPTH + 1);
     let mut session = Session::acquire();
-    let mut module = load(&mut session, &at_the_bound, FUEL, ENGINE)
+    let mut module = load(&mut session, &at_the_bound, BUDGET, ENGINE)
         .expect("a peak of the reference bound's own height fits it");
     assert_eq!(module.invoke("f", &[], FUEL), Ok(Outcome::Returned(None)));
     drop(module);
@@ -419,7 +462,7 @@ fn load_uses_the_reference_operand_stack_bound_and_load_with_its_own() {
         &mut session,
         &past_the_bound,
         spacewasm::Vec::zero(),
-        FUEL,
+        BUDGET,
         ENGINE,
     )
     .expect("one value past the reference bound fits a bound one value taller");
@@ -483,7 +526,8 @@ fn a_start_function_that_does_not_return_is_a_load_error() {
 
     let spinning = wat("(module (func $s (loop br 0)) (start $s))");
     let mut session = Session::acquire();
-    let error = load(&mut session, &spinning, 1_000, ENGINE).err().expect("it never returns");
+    let error =
+        load(&mut session, &spinning, limited(1_000), ENGINE).err().expect("it never returns");
     assert!(matches!(error, LoadError::StartOutOfFuel { budget: 1_000 }), "{error:?}");
     assert_eq!(
         error.to_string(),
@@ -492,7 +536,7 @@ fn a_start_function_that_does_not_return_is_a_load_error() {
 
     let hosts = env_f(&session, HostFunctionBreak::Pause);
     let pausing = wat(r#"(module (import "env" "f" (func $f)) (func $s call $f) (start $s))"#);
-    let error = load_with::<FRAMES, DEPTH>(&mut session, &pausing, hosts, FUEL, ENGINE)
+    let error = load_with::<FRAMES, DEPTH>(&mut session, &pausing, hosts, BUDGET, ENGINE)
         .err()
         .expect("the host pauses it");
     assert!(matches!(error, LoadError::StartPaused), "{error:?}");
@@ -572,4 +616,140 @@ fn the_refusals_only_an_interpreter_defect_reaches_are_worded() {
         InvokeError::NoResult { export: "get".to_string() }.to_string(),
         "`get` declares a result, and the SpaceWasm interpreter finished the call without one"
     );
+}
+
+/// Each body, and the instructions the interpreter counts for a call to a
+/// function made of it: its closing return included, a `nop` compiled to
+/// nothing. Measured against the interpreter release this workspace pins.
+const BODIES: [(&str, usize); 5] = [
+    ("", 1),
+    ("nop", 1),
+    ("i32.const 1 drop", 3),
+    ("i32.const 1 i32.const 2 i32.add drop", 5),
+    ("(block (br 0))", 2),
+];
+
+/// `count` as a limited budget.
+fn limited(count: usize) -> Fuel {
+    Fuel::Limited(NonZeroUsize::new(count).expect("a budget of at least one instruction"))
+}
+
+/// A budget of exactly the instructions a call takes finishes it, and one
+/// fewer runs out — for a call and for a start function alike.
+///
+/// The interpreter reports a call's return from inside the instruction that
+/// executes it, so the budget needs no instruction to spare. The start
+/// function is run one instruction at a time and the call in one run, and the
+/// two must agree on every count. Fails if either route needs an instruction
+/// more or fewer than the call takes, or if an exhausted budget reports
+/// another number.
+#[test]
+fn a_budget_of_exactly_a_calls_instructions_finishes_it() {
+    for (body, count) in BODIES {
+        let callable = wat(&format!(r#"(module (func (export "f") {body}))"#));
+        let mut session = Session::acquire();
+        let mut module = load(&mut session, &callable, Fuel::Unbounded, ENGINE)
+            .expect("a module without a start function loads");
+        assert_eq!(module.invoke("f", &[], count), Ok(Outcome::Returned(None)), "{body:?}");
+        assert_eq!(
+            module.invoke("f", &[], count - 1),
+            Ok(Outcome::OutOfFuel { budget: count - 1 }),
+            "{body:?}"
+        );
+        drop(module);
+
+        let started = wat(&format!("(module (func $s {body}) (start $s))"));
+        load(&mut session, &started, limited(count), ENGINE)
+            .unwrap_or_else(|e| panic!("{body:?} runs in {count}: {e}"));
+        if count > 1 {
+            let error = load(&mut session, &started, limited(count - 1), ENGINE)
+                .err()
+                .expect("one instruction short");
+            assert!(
+                matches!(error, LoadError::StartOutOfFuel { budget } if budget == count - 1),
+                "{body:?}: {error:?}"
+            );
+        }
+    }
+}
+
+/// The start function and the call made within the load's budget share it:
+/// the call is given exactly what the start function left, and running out
+/// reports the whole budget.
+///
+/// The start function takes three instructions and `f` five. Fails if the
+/// call is given the whole budget again, or less than the start function
+/// left, or if an exhausted budget reports only the call's share.
+#[test]
+fn the_start_function_and_the_call_share_one_budget() {
+    let wasm = wat(
+        r#"(module
+             (func $s i32.const 1 drop)
+             (start $s)
+             (func (export "f") i32.const 1 i32.const 2 i32.add drop))"#,
+    );
+    let mut session = Session::acquire();
+    for (budget, ended) in [
+        (8, Outcome::Returned(None)),
+        (9, Outcome::Returned(None)),
+        (7, Outcome::OutOfFuel { budget: 7 }),
+        (3, Outcome::OutOfFuel { budget: 3 }),
+    ] {
+        let mut module = load(&mut session, &wasm, limited(budget), ENGINE)
+            .unwrap_or_else(|e| panic!("the start function fits {budget}: {e}"));
+        assert_eq!(module.invoke_within_budget("f", &[]), Ok(ended), "a budget of {budget}");
+    }
+    let error = load(&mut session, &wasm, limited(2), ENGINE).err().expect("the start needs 3");
+    assert!(matches!(error, LoadError::StartOutOfFuel { budget: 2 }), "{error:?}");
+
+    let mut module = load(&mut session, &wasm, limited(3), ENGINE).expect("the start fits");
+    assert_eq!(
+        module.invoke("f", &[], 5),
+        Ok(Outcome::Returned(None)),
+        "a call given its own budget spends nothing of the load's"
+    );
+    let mut module = load(&mut session, &wasm, Fuel::Unbounded, ENGINE).expect("no budget");
+    assert_eq!(module.invoke_within_budget("f", &[]), Ok(Outcome::Returned(None)));
+}
+
+/// A loop counting to a million, which takes several million instructions.
+const COUNT_TO_A_MILLION: &str = r#"(module
+  (global $counted (mut i32) (i32.const 0))
+  (func $count (result i32) (local $i i32)
+    (loop $again
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $again (i32.lt_u (local.get $i) (i32.const 1000000))))
+    (local.get $i))
+  (func $start (global.set $counted (call $count)))
+  (func (export "count") (result i32) (call $count))
+  (func (export "counted") (result i32) (global.get $counted))
+  (start $start))"#;
+
+/// Without a budget, a start function and a call both run as long as they
+/// take; with one, the same call runs out.
+///
+/// On a 64-bit host one run of the interpreter already allows more
+/// instructions than any call takes, so what this pins is that no budget is
+/// imposed where none was asked for. Fails if an unbounded run is cut short
+/// anywhere, or if the limited control stops running out.
+#[test]
+fn an_unbounded_run_goes_on_until_the_call_returns() {
+    let wasm = wat(COUNT_TO_A_MILLION);
+    let mut session = Session::acquire();
+    let mut module = load(&mut session, &wasm, Fuel::Unbounded, ENGINE)
+        .expect("the start function counts to a million");
+    assert_eq!(
+        module.invoke_within_budget("counted", &[]),
+        Ok(Outcome::Returned(Some(Value::I32(1_000_000))))
+    );
+    assert_eq!(
+        module.invoke_within_budget("count", &[]),
+        Ok(Outcome::Returned(Some(Value::I32(1_000_000))))
+    );
+    drop(module);
+
+    let error = load(&mut session, &wasm, limited(1_000_000), ENGINE)
+        .err()
+        .expect("a million instructions do not count to a million");
+    assert!(matches!(error, LoadError::StartOutOfFuel { budget: 1_000_000 }), "{error:?}");
 }
