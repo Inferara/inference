@@ -240,21 +240,22 @@ The `[build]` section configures compilation settings.
     naming both keys. `[build.wasm-opt]` stays available, unlike at
     `"stellar"`: what that refusal protects is a contract's value-ABI wrappers
     and its `contractenvmetav0` section, and this target's module has
-    neither. `infs run` is available too, for the same reason — the artifact is
-    plain WebAssembly and `main` keeps the shape a runtime invokes, so `infs run`
-    builds the module and executes it locally under `wasmtime`. That runtime is
-    not the flight interpreter, and running the module here exercises the module
-    rather than the environment it was built for: what a local `wasmtime` run
-    does not exercise is the interpreter's *environment* — its allocator, its
-    registered hosts, and the two const generics an embedder fixes. The
-    interpreter's decode-time maxima (parameter and local word counts, name
-    lengths, host arity) are not among them: `infc` checks every `spacewasm`
-    build against them after linking and before writing the artifact, and
-    prints the control-frame and operand-stack budget the module needs. With
-    `[build.wasm-opt]` enabled, `infs build` asks the same question again of
-    the optimized bytes and reprints the budget, because the artifact that
-    ships is that one. See the book's Compilation Targets chapter for the full
-    rule set.
+    neither. `infs run` is available too, and executes the module in process
+    under the SpaceWasm interpreter itself, embedded in `infs`, with no
+    `wasmtime` needed: it loads the artifact at the configuration of the
+    reference embedder, `spacewasm_std` — 64 control frames, 256 operand-stack
+    values, 256 IR code pages and 1,024 words of value stack — against the six
+    F´ (F Prime) reference host functions that embedder registers, refusing any
+    other import before a byte is decoded. A run still exercises this machine's
+    environment rather than a vehicle's: the allocator is the host's, and the
+    reference hosts are stubs. The interpreter's decode-time maxima (parameter
+    and local word counts, name lengths, host arity) are checked before a run
+    too: `infc` checks every `spacewasm` build against them after linking and
+    before writing the artifact, and prints the control-frame and operand-stack
+    budget the module needs. With `[build.wasm-opt]` enabled, `infs build` asks
+    the same question again of the optimized bytes and reprints the budget,
+    because the artifact that ships is that one. See the book's Compilation
+    Targets chapter for the full rule set.
   - `"soroban"` is the former name of `"stellar"` and is not accepted; it earns a
     message saying so rather than the generic unknown-target one.
   - Matching is exact and case-sensitive, and whitespace is not trimmed:
@@ -475,12 +476,18 @@ one the table had policed.
 
 #### Running a program that binds host imports
 
-`infs run` builds a program that binds host imports and then refuses to execute
-it. It supplies no host functions and does not let wasmtime stand in for the
-embedder the program is written for — not even for the WASI functions the
-wasmtime CLI provides on its own. The refusal names each imported function; run
-the program from the embedder that supplies them. It is decided from the built
-artifact rather than from this table, which is an allowlist and not a
+`infs run` executes a program that binds host imports only when it is a
+`spacewasm` build whose every import is one of the six F´ (F Prime) reference
+host functions, at the signature the reference embedder registers it with: it
+runs under the SpaceWasm interpreter with those hosts, and any other import is
+refused before a byte is decoded. At `wasm32` it builds the program and then
+refuses to execute it: it registers no host function under wasmtime and does
+not let wasmtime stand in for the embedder the program is written for — not
+even for the WASI functions the wasmtime CLI provides on its own. That refusal
+names each imported function, and the `spacewasm` target when every one is an
+F´ reference host at its reference signature; otherwise, run the program from
+the embedder that supplies them. Either way the question is decided from the
+built artifact rather than from this table, which is an allowlist and not a
 declaration, so a program that binds no host function runs whatever the table
 lists. In a project whose `[build.wasm-opt]` step runs, the built artifact is
 the optimized one, which at any level but `"0"` no longer imports a host

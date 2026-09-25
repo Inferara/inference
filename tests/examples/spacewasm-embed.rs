@@ -1,11 +1,13 @@
 //! A minimal embedder for this compiler's SpaceWasm artifacts.
 //!
 //! `spacewasm` is a `no_std` flight interpreter with no command-line front end
-//! of its own beyond upstream's demonstration binary, so a developer asking
-//! "does the module I just built load, and what does it do when I call it?" has
-//! nowhere to ask. This is that place: it loads an artifact, calls an export,
-//! reports a trap or an exhausted fuel budget as its own exit code, and
-//! measures the IR the module compiled to.
+//! of its own beyond upstream's demonstration binary. "Does the module I just
+//! built load, and what does it do when I call it?" is answered by `infs run`
+//! for a `spacewasm` build it compiles from source, with the F´ reference hosts,
+//! and by this harness for any artifact on disk: it loads the artifact, stands a
+//! `--host` stub in for any import, calls an export, reports a trap or an
+//! exhausted fuel budget as its own exit code, and measures the IR the module
+//! compiled to.
 //!
 //! ```text
 //! cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm --invoke main

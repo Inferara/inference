@@ -401,11 +401,13 @@ before it emitted them — the same CLI panics on `info interface` and offers
   load-time manifest error. Whether an external Binaryen preserves the
   wrappers and `contractenvmetav0` depends on which version is installed, and
   nothing in the manifest pins one.
-- **`infs run`.** Refused. `run` executes the artifact through the `wasmtime` CLI,
-  which passes each argument as a decimal — so `5` arrives as a word whose low
-  byte is read as tag 5 and whose payload is empty, decoding to a zero-valued
-  integer rather than to five. That is a wrong answer reported as a success. A
-  contract is invoked by a Soroban host and by nothing else.
+- **`infs run`.** Refused, before anything is built. The runtimes `infs run`
+  executes a build under — `wasmtime` for `wasm32`, the SpaceWasm interpreter
+  for `spacewasm` — invoke an export by name and pass each argument as a
+  decimal, so `5` would arrive as a word whose low byte is read as tag 5 and
+  whose payload is empty, decoding to a zero-valued integer rather than to
+  five. That is a wrong answer reported as a success. A contract is invoked by
+  a Soroban host and by nothing else.
 
 #### Proving the `wasm32` build and deploying the Stellar one
 
@@ -652,8 +654,10 @@ Such a program has no proof path: `infc` refuses every build that writes a `.v`
 for a program that binds a host import, at every target, so the procedure in
 [Proving the `wasm32` build and deploying the SpaceWasm
 one](#proving-the-wasm32-build-and-deploying-the-spacewasm-one) does not apply to
-it. To run one, the embedder harness can register a stub per import — see the
-`--host` transcript in
+it. `infs run` runs one whose imports are all F´ (F Prime) reference hosts at
+their reference signatures — see [Running a SpaceWasm
+build](#running-a-spacewasm-build) — and for any other import the embedder
+harness can register a stub per import — see the `--host` transcript in
 [Running a module under the embedder harness](#running-a-module-under-the-embedder-harness).
 
 #### Conformance
@@ -748,11 +752,64 @@ re-validation next to it. A re-check that passes reprints the summary, so the
 last budget in the log is the one describing the artifact on disk rather than the
 one the compiler wrote before the optimizer saw it.
 
+#### Running a SpaceWasm build
+
+`infs run` executes a `spacewasm` build in process, under the SpaceWasm
+interpreter itself — `spacewasm` 0.7.1, embedded through the
+`inference-spacewasm-runner` crate — and never looks for `wasmtime`. It loads
+the artifact at the configuration of `spacewasm_std`, the reference embedder in
+the SpaceWasm repository: verifier bounds of 64 control frames and 256
+operand-stack values, 256 IR code pages, and 1,024 words of value stack. A
+conformant module over either verifier bound is refused on load, naming the
+function and the const generic an embedder would have to raise, and a call
+chain whose frames need more than 1,024 words ends in a `StackOverflow` trap.
+
+A program may bind the six F´ (F Prime) reference host functions
+`spacewasm_std` registers, at the signatures it registers them with, and no
+others. An array argument is passed as its address, so every buffer travels as
+one `i32` with its length beside it:
+
+| Host | Signature | Inference declaration |
+|---|---|---|
+| `fprime_core.panic` | `(addr: i32, len: i32, line: i32)` | `external fn panic(text: [u8; N], len: i32, line: i32);` |
+| `fprime_core.rsleep` | `(ticks: i64)` | `external fn rsleep(ticks: i64);` |
+| `fprime_core.command` | `(opcode: i32, arg: i32) -> i32` | `external fn command(opcode: i32, arg: i32) -> i32;` |
+| `fprime_core.message` | `(ptr: i32, len: i32)` | `external fn message(text: [u8; N], len: i32);` |
+| `fprime_core.telemetry` | `(id: i32, time_ptr: i32, time_len: i32, value_ptr: i32, value_len: i32) -> i32` | `external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; N], value_len: i32) -> i32;` |
+| `env.clock_ms` | `() -> i64` | `external fn clock_ms() -> i64;` |
+
+Every import is checked against this table before a byte of the module is
+decoded, and a program importing anything else, or a reference host at another
+signature, is refused with nothing executed, naming each such import and the
+declaration that would match. The hosts are stubs: `command` and `telemetry`
+answer 0, the time `telemetry` writes into the caller's buffer is zero,
+`clock_ms` reads this machine's clock, and `panic` always stops the program.
+Each but `clock_ms` logs its calls to stderr as it is made, in the style of the
+reference embedder's lines — `MESSAGE hello`, `COMMAND 42 7`, `TELEMETRY 3` —
+and `core/spacewasm-runner/README.md` lists the five ways they differ from the
+reference embedder's.
+
+The value the entry point returns is the last line on stdout, after
+`Invoking 'main' with the SpaceWasm interpreter (spacewasm 0.7.1)...`, and a
+function returning nothing prints nothing after it. The exit status is 0
+whenever the call returns, whatever it returned; a refused load, a refused
+argument, a trap and an exhausted budget exit with status 1, and a trap is
+reported with the interpreter's reason and what it means in Inference code.
+`--fuel N` stops the run after N of the interpreter's own instructions, and
+without it a run has no budget. In single-file mode the arguments after the
+source path are read as the invoked function's parameters — an `i32` or an
+`i64`, in its signed or its unsigned range — and their count is checked; in
+project mode `main` is given none, and a `main` that takes any is refused with
+the single-file command that passes them.
+
 #### Running a module under the embedder harness
 
-SpaceWasm is a library, not a program: it has no command line of its own, and a
-finished artifact answers "does it load?" only once something embeds it. This
-repository ships the smallest thing that does, as an example of the test crate.
+The SpaceWasm interpreter runs a module only inside an embedder, which decides
+the hosts it registers, the limits it loads under and what a run reports.
+`infs run` is one embedder — see [Running a SpaceWasm
+build](#running-a-spacewasm-build) — and this repository also ships a developer
+tool that exposes more of the interpreter than a run does, a stub for any import
+and the IR a module compiled to among it, as an example of the test crate.
 Every transcript below is a real run, so the figures can be re-derived rather
 than taken on trust, and all but the last two are against one artifact —
 `out/main.wasm`, built by `infc main.inf --target spacewasm` from

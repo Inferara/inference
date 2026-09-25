@@ -286,6 +286,42 @@ mod tests {
                     error.to_string(),
                     format!("`f` takes an {} argument, which the runner cannot pass", type_name(ty))
                 );
+                assert_eq!(
+                    error.clause("`infs run`"),
+                    format!("`f` takes an {} argument, which `infs run` cannot pass", type_name(ty))
+                );
+                assert_eq!(error.clause("the runner"), error.to_string());
+            }
+        }
+    }
+
+    /// Only a floating-point parameter's refusal names the program passing
+    /// the arguments, so every other refusal's clause is its text, whichever
+    /// name a caller gives.
+    ///
+    /// Fails if a caller's name leaks into a refusal that names no program,
+    /// or a clause drifts from the text it is.
+    #[test]
+    fn a_refusal_naming_no_program_reads_as_its_text_for_every_caller() {
+        let add = function("add", &[ValType::I32, ValType::I32]);
+        let refused = |args: &[&str]| {
+            coerce_arguments(&add, &raw(args)).expect_err("the arguments are refused")
+        };
+        let errors = [refused(&["1"]), refused(&["1", "4x"]), refused(&["1", "5000000000"])];
+        assert!(
+            matches!(
+                errors,
+                [
+                    ArgumentError::Count { .. },
+                    ArgumentError::NotAnInteger { .. },
+                    ArgumentError::OutOfRange { .. }
+                ]
+            ),
+            "one row per refusal that names no program: {errors:?}"
+        );
+        for error in errors {
+            for embedder in ["`infs run`", "the runner"] {
+                assert_eq!(error.clause(embedder), error.to_string(), "{error:?} for {embedder}");
             }
         }
     }

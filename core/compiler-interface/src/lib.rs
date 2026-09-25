@@ -619,36 +619,6 @@ impl TargetName {
         }
     }
 
-    /// Whether a module built for this target can be invoked by a plain
-    /// WebAssembly runtime — one that calls an export by name and passes each
-    /// argument as a value of the declared parameter type.
-    ///
-    /// This is the question `infs run` asks before handing an artifact to
-    /// `wasmtime`, and it has no emission-side counterpart: whether a module
-    /// *runs* under a general-purpose runtime is a property of the calling
-    /// convention its runtime imposes, which code generation never sees. A
-    /// target that imposes one answers `false` — not because the module is
-    /// invalid WebAssembly, but because invoking it this way returns a wrong
-    /// answer rather than an error.
-    ///
-    /// A target that adds no convention answers `true` even when it is not the
-    /// default: the SpaceWasm artifact is the default's bytes, with no wrapper
-    /// or tagged word of its own around any export, `main` included, so a
-    /// general-purpose runtime can invoke it.
-    ///
-    /// That is an answer about the calling convention and nothing else. The
-    /// runtime a `true` here reaches is not the target's runtime, so running the
-    /// module locally exercises the module and not the environment it was built
-    /// for: none of that environment's decode-time maxima, and nothing else it
-    /// does differently, is checked by running it here.
-    #[must_use]
-    pub fn runs_under_a_plain_wasm_runtime(self) -> bool {
-        match self {
-            Self::Wasm32 | Self::SpaceWasm => true,
-            Self::Stellar => false,
-        }
-    }
-
     /// What a build loses if a caller drops this target instead of forwarding
     /// it, as a sentence appended to the refusal that would otherwise report
     /// only version arithmetic.
@@ -1730,14 +1700,10 @@ mod tests {
     }
 
     /// The predicates a front end holding only a name can answer, pinned per
-    /// variant. Two of them are copies of the emission-side target's, and the
-    /// mirror test in `inference-wasm-codegen` is what holds the copies to the
+    /// variant. Both are copies of the emission-side target's, and the mirror
+    /// test in `inference-wasm-codegen` is what holds the copies to the
     /// originals; this pins what the copies say, so a change here is deliberate
     /// rather than a silent widening of what a manifest may ask for.
-    ///
-    /// The third has no emission-side original — whether a plain runtime can
-    /// invoke the module is not a question code generation answers — so these
-    /// assertions are the only thing pinning it at all.
     ///
     /// Every conversion of a `matches!(self, Self::Wasm32)` into an exhaustive
     /// match belongs here in the same change. A new variant inherits `false`
@@ -1748,13 +1714,10 @@ mod tests {
     fn each_target_records_what_it_permits() {
         assert!(TargetName::Wasm32.supports_proof_mode());
         assert!(TargetName::Wasm32.permits_bulk_memory());
-        assert!(TargetName::Wasm32.runs_under_a_plain_wasm_runtime());
         assert!(!TargetName::Stellar.supports_proof_mode());
         assert!(!TargetName::Stellar.permits_bulk_memory());
-        assert!(!TargetName::Stellar.runs_under_a_plain_wasm_runtime());
         assert!(!TargetName::SpaceWasm.supports_proof_mode());
         assert!(!TargetName::SpaceWasm.permits_bulk_memory());
-        assert!(TargetName::SpaceWasm.runs_under_a_plain_wasm_runtime());
     }
 
     /// The two per-name clauses, pinned the same way and for the same reason:

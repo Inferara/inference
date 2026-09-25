@@ -250,8 +250,9 @@ infc_version = "{infc_version}"
 # is the SpaceWasm flight interpreter, and adds nothing to the module: the
 # artifact is the "wasm32" one byte for byte. It narrows only what a build may
 # contain -- no proof mode and no wasm-features -- and leaves [build.wasm-opt]
-# and `infs run` available. Names are matched exactly; an unrecognized one is a
-# load error, not a fall back to the default.
+# available; `infs run` executes it under the SpaceWasm interpreter itself,
+# with the F Prime reference host functions and no wasmtime. Names are matched
+# exactly; an unrecognized one is a load error, not a fall back to the default.
 # target = "wasm32"
 # Compilation mode: "compile" (executable WASM) or "proof" (Rocq specs).
 mode = "compile"

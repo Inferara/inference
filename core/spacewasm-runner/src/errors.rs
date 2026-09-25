@@ -67,14 +67,11 @@ pub enum LoadError {
     /// The decoder refused the module for want of memory, and its control
     /// nesting and operand stack are within the verifier's bounds, which
     /// leaves the third cause: its compiled form does not fit the IR code
-    /// pages the code builder was given.
+    /// pages the code builder was given. [`code_pages_exhausted`] words why,
+    /// naming the program that loaded it.
     #[error(
-        "the module does not load under the SpaceWasm interpreter: the interpreter's compiled \
-         form of it does not fit the {} it was given (the interpreter reported \
-         AllocError(OutOfMemory) at byte {}); its control nesting and operand stack are within \
-         the limits it was loaded at",
-        code_pages(*.pages),
-        .verdict.offset
+        "the module does not load under the SpaceWasm interpreter: {}",
+        code_pages_exhausted(*.pages, .verdict, "the runner")
     )]
     CodePagesExhausted {
         /// The IR code pages the code builder was given.
@@ -90,13 +87,11 @@ pub enum LoadError {
     ///
     /// A verdict the check leaves to the embedder or cannot reproduce is
     /// never this, since the check's maintainers could do nothing with a
-    /// report of it; [`LoadError::Decode`] lists them.
+    /// report of it; [`LoadError::Decode`] lists them. [`conformance_gap`]
+    /// words why.
     #[error(
-        "the module does not load under the SpaceWasm interpreter: {:?} at byte {}. infc's \
-         conformance check accepts this module, so this is a gap in that check; please report it \
-         at https://github.com/Inferara/inference/issues with the artifact",
-        .0.err.err,
-        .0.offset
+        "the module does not load under the SpaceWasm interpreter: {}",
+        conformance_gap(.0)
     )]
     ConformanceGap(ParseError),
 
@@ -330,7 +325,7 @@ pub enum ArgumentError {
     },
 
     /// A floating-point parameter, which no argument written as text fills.
-    #[error("`{function}` takes an {} argument, which the runner cannot pass", type_name(*.ty))]
+    #[error("{}", floating_point_clause(.function, *.ty, "the runner"))]
     FloatingPoint {
         /// The function called.
         function: String,
@@ -339,6 +334,25 @@ pub enum ArgumentError {
         /// The parameter's type.
         ty: ValType,
     },
+}
+
+impl ArgumentError {
+    /// The refusal as a clause, naming `embedder` where it names the program
+    /// passing the arguments, written as it should appear, backticks
+    /// included. Only a floating-point parameter's refusal names one — "`f`
+    /// takes an f32 argument, which `infs run` cannot pass" — and its text
+    /// names the runner; every other refusal reads as its text.
+    #[must_use]
+    pub fn clause(&self, embedder: &str) -> String {
+        match self {
+            ArgumentError::FloatingPoint { function, ty, .. } => {
+                floating_point_clause(function, *ty, embedder)
+            }
+            ArgumentError::Count { .. }
+            | ArgumentError::NotAnInteger { .. }
+            | ArgumentError::OutOfRange { .. } => self.to_string(),
+        }
+    }
 }
 
 /// The imports of a module that the F´ reference hosts do not provide as the
@@ -510,6 +524,44 @@ impl fmt::Display for OverLimit {
     }
 }
 
+/// Why a module did not load whose compiled form does not fit the `pages` IR
+/// code pages `embedder` gave the code builder, with the decoder's `verdict`,
+/// in the words [`LoadError::CodePagesExhausted`] is reported in: the compiled
+/// form does not fit "the 256 IR code pages `infs run` provides", the decoder
+/// reported `AllocError(OutOfMemory)` at the byte `verdict` names, and the
+/// control nesting and the operand stack are "within the limits `infs run`
+/// loads it at".
+///
+/// `embedder` names the program that loaded the module, written as it should
+/// appear, backticks included; the variant's own text names the runner.
+#[must_use]
+pub fn code_pages_exhausted(pages: usize, verdict: &ParseError, embedder: &str) -> String {
+    format!(
+        "the interpreter's compiled form of it does not fit the {} {embedder} provides (the \
+         interpreter reported AllocError(OutOfMemory) at byte {}); its control nesting and \
+         operand stack are within the limits {embedder} loads it at",
+        code_pages(pages),
+        verdict.offset
+    )
+}
+
+/// Why a module the target's conformance check accepts did not load, when the
+/// decoder's `verdict` is one the check should have given too, in the words
+/// [`LoadError::ConformanceGap`] is reported in: the verdict and the byte it
+/// names, that infc's conformance check accepts the module and so has a gap,
+/// and where to report it.
+///
+/// Unlike [`code_pages_exhausted`] it names no embedder: the gap is the
+/// check's, whichever program loaded the module.
+#[must_use]
+pub fn conformance_gap(verdict: &ParseError) -> String {
+    format!(
+        "{:?} at byte {}. infc's conformance check accepts this module, so this is a gap in that \
+         check; please report it at https://github.com/Inferara/inference/issues with the artifact",
+        verdict.err.err, verdict.offset
+    )
+}
+
 /// "it exports `a`, `b`" or "it exports no functions".
 fn exports_clause(exports: &[String]) -> String {
     if exports.is_empty() {
@@ -564,4 +616,9 @@ fn accepted_range(ty: ValType) -> String {
 /// "1 IR code page" or "256 IR code pages".
 fn code_pages(count: usize) -> String {
     if count == 1 { "1 IR code page".to_string() } else { format!("{count} IR code pages") }
+}
+
+/// "`f` takes an f32 argument, which `infs run` cannot pass".
+fn floating_point_clause(function: &str, ty: ValType, embedder: &str) -> String {
+    format!("`{function}` takes an {} argument, which {embedder} cannot pass", type_name(ty))
 }

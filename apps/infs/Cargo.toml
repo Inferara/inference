@@ -36,6 +36,12 @@ anyhow.workspace = true
 thiserror.workspace = true
 inference-compiler-interface.workspace = true
 inference-target-conformance.workspace = true
+# The SpaceWasm flight interpreter, embedded: `infs run` executes a `spacewasm`
+# build in process with it rather than through a runtime on PATH, so it is an
+# ordinary dependency of the binary, not an optional or a dev one. The runner
+# owns the interpreter's one `global_allocator!` invocation, which is why
+# nothing in this crate, `main.rs` included, declares an allocator for it.
+inference-spacewasm-runner.workspace = true
 inf-wasmparser.workspace = true
 wasm-encoder.workspace = true
 

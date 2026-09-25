@@ -335,6 +335,83 @@ fn a_reexported_host_import_is_refused_naming_the_import() {
     );
 }
 
+/// A name resolves to the function a call of it would run, with its
+/// WebAssembly signature, and a name no call could run to the refusal the call
+/// would give: nothing by that name, a memory, a table or a global by kind, and
+/// a host import exported again by the import behind it. The module is only
+/// read, so nothing runs.
+///
+/// Fails if a lookup reports another signature than the call would check,
+/// refuses a name another way than the call does, or finds a function the call
+/// would refuse.
+#[test]
+fn a_name_resolves_to_its_function_as_a_call_would_without_running_it() {
+    let mut session = Session::acquire();
+    {
+        let wasm = wat(ARITHMETIC);
+        let module = loaded(&mut session, &wasm);
+        assert_eq!(
+            module.function("add"),
+            Ok(ExportedFunction {
+                name: "add".to_string(),
+                params: vec![ValType::I32, ValType::I32],
+                result: Some(ValType::I32),
+            })
+        );
+        assert_eq!(
+            module.function("wide").map(|function| (function.params, function.result)),
+            Ok((vec![ValType::I64], Some(ValType::I64)))
+        );
+        assert_eq!(
+            module.function("nothing").map(|function| (function.params, function.result)),
+            Ok((Vec::new(), None))
+        );
+        assert_eq!(
+            module.function("absent"),
+            Err(InvokeError::NoSuchExport {
+                export: "absent".to_string(),
+                exports: ["add", "wide", "nothing", "boom", "divide", "spin"]
+                    .map(str::to_string)
+                    .to_vec(),
+            })
+        );
+    }
+    {
+        let wasm = wat(
+            r#"(module
+                 (memory (export "mem") 1)
+                 (table (export "tbl") 1 funcref)
+                 (global (export "g") i32 (i32.const 7)))"#,
+        );
+        let module = loaded(&mut session, &wasm);
+        for (export, kind) in
+            [("mem", ExportKind::Memory), ("tbl", ExportKind::Table), ("g", ExportKind::Global)]
+        {
+            assert_eq!(
+                module.function(export),
+                Err(InvokeError::NotAFunction { export: export.to_string(), kind })
+            );
+        }
+    }
+    let wasm = wat(
+        r#"(module
+             (import "env" "f" (func $f))
+             (export "again" (func $f))
+             (func (export "call") call $f))"#,
+    );
+    let hosts = env_f(&session, HostFunctionBreak::Trap);
+    let module = load_with::<FRAMES, DEPTH>(&mut session, &wasm, hosts, BUDGET, ENGINE)
+        .expect("the import is supplied");
+    assert_eq!(
+        module.function("again"),
+        Err(InvokeError::HostReexport { export: "again".to_string(), import: "env.f".to_string() })
+    );
+    assert_eq!(
+        module.function("call").map(|function| (function.params, function.result)),
+        Ok((Vec::new(), None))
+    );
+}
+
 /// A host that pauses a call is an error, since the runner never resumes one,
 /// and the engine is idle again afterwards.
 ///

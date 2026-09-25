@@ -113,10 +113,13 @@
 //! The runner states what it knows in words and leaves the rest to its caller:
 //! a [`TrapReport`] gives a trap's first line and its explanation, the
 //! [`trap_phrase`] and [`trap_group`] behind them are public, [`out_of_fuel`]
-//! is the core of the sentence an exhausted budget is reported in, and the
-//! over-limit and import refusals carry their facts as fields beside their
-//! texts. None of these names the program embedding the runner: where a
-//! sentence has to, the caller passes its name.
+//! is the core of the sentence an exhausted budget is reported in,
+//! [`code_pages_exhausted`] and [`conformance_gap`] say why a module the
+//! target's conformance check accepts did not load when no verifier bound is
+//! over, [`ArgumentError::clause`] is an argument refusal, and the over-limit
+//! and import refusals carry their facts as fields beside their texts. None of
+//! these names the program embedding the runner: where a sentence has to, the
+//! caller passes its name.
 
 #![warn(clippy::pedantic)]
 
@@ -131,7 +134,7 @@ mod session;
 pub use args::{coerce_arguments, render, type_name};
 pub use errors::{
     ArgumentError, ExportKind, HostSetError, ImportProblem, InvokeError, Limit, LoadError,
-    OverLimit, UnsupportedImport, UnsupportedImports,
+    OverLimit, UnsupportedImport, UnsupportedImports, code_pages_exhausted, conformance_gap,
 };
 pub use hosts::{HostLog, HostSet, host_module, host_set};
 pub use inference_target_conformance::spacewasm::{

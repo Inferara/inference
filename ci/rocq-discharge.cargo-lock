@@ -2640,6 +2640,7 @@ dependencies = [
  "hex",
  "inf-wasmparser",
  "inference-compiler-interface",
+ "inference-spacewasm-runner",
  "inference-target-conformance",
  "predicates",
  "ratatui",
