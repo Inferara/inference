@@ -393,6 +393,7 @@ mod tests {
     use spacewasm::SectionDecodeError;
 
     use super::*;
+    use crate::errors::{code_pages_exhausted, conformance_gap};
     use crate::fprime::REFERENCE_HOSTS;
 
     /// Every trap reason the interpreter has, each with the phrase and the
@@ -781,9 +782,9 @@ mod tests {
         assert_eq!(
             explained.to_string(),
             "the module does not load under the SpaceWasm interpreter: the interpreter's compiled \
-             form of it does not fit the 3 IR code pages it was given (the interpreter reported \
-             AllocError(OutOfMemory) at byte 42); its control nesting and operand stack are \
-             within the limits it was loaded at"
+             form of it does not fit the 3 IR code pages the runner provides (the interpreter \
+             reported AllocError(OutOfMemory) at byte 42); its control nesting and operand stack \
+             are within the limits the runner loads it at"
         );
         let LoadError::OverLimit(frames) =
             explain_refusal(&conformant(), out_of_memory(), 0, 256, 3)
@@ -801,6 +802,56 @@ mod tests {
         assert_eq!(
             (Limit::ControlFrames.const_generic(), Limit::OperandStack.const_generic()),
             ("MAX_CONTROL_FRAMES", "MAX_STACK_DEPTH")
+        );
+    }
+
+    /// The two reasons a module the check accepts does not load inside both
+    /// verifier bounds are worded once, here: too much IR for the code pages,
+    /// naming the embedder given in both places a sentence names it and the
+    /// page count in the grammar it takes, and a gap in the check, which names
+    /// no embedder. Each variant's own text is that wording naming the runner.
+    ///
+    /// Fails if a caller's name is dropped, or replaced by the runner's, if a
+    /// variant's text drifts from the wording a caller composes from, or if a
+    /// page count of one is spelled as a plural.
+    #[test]
+    fn the_reasons_a_conformant_module_does_not_load_name_the_embedder_given() {
+        let out_of_memory = verdict(ValidationError::AllocError(AllocError::OutOfMemory));
+        for (embedder, pages, text) in [
+            (
+                "`infs run`",
+                256,
+                "the interpreter's compiled form of it does not fit the 256 IR code pages `infs \
+                 run` provides (the interpreter reported AllocError(OutOfMemory) at byte 42); its \
+                 control nesting and operand stack are within the limits `infs run` loads it at",
+            ),
+            (
+                "the runner",
+                1,
+                "the interpreter's compiled form of it does not fit the 1 IR code page the runner \
+                 provides (the interpreter reported AllocError(OutOfMemory) at byte 42); its \
+                 control nesting and operand stack are within the limits the runner loads it at",
+            ),
+        ] {
+            assert_eq!(code_pages_exhausted(pages, &out_of_memory, embedder), text);
+        }
+        let exhausted = LoadError::CodePagesExhausted { pages: 1, verdict: out_of_memory.clone() };
+        assert_eq!(
+            exhausted.to_string(),
+            format!(
+                "the module does not load under the SpaceWasm interpreter: {}",
+                code_pages_exhausted(1, &out_of_memory, "the runner")
+            )
+        );
+
+        let type_mismatch = verdict(ValidationError::TypeMismatch);
+        let gap = "TypeMismatch at byte 42. infc's conformance check accepts this module, so this \
+                   is a gap in that check; please report it at \
+                   https://github.com/Inferara/inference/issues with the artifact";
+        assert_eq!(conformance_gap(&type_mismatch), gap);
+        assert_eq!(
+            LoadError::ConformanceGap(type_mismatch).to_string(),
+            format!("the module does not load under the SpaceWasm interpreter: {gap}")
         );
     }
 }

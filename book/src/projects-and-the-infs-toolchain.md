@@ -131,8 +131,9 @@ admits no `wasm-features` and no `mode = "proof"`, on load, for the same reason
 — the interpreter decodes neither the post-MVP families nor the custom `0xfc`
 instructions. But it keeps `[build.wasm-opt]`, because what that refusal
 protects is a contract's wrappers and its `contractenvmetav0` section, and
-this target's module has neither, and it keeps `infs run`, because the
-artifact is plain WebAssembly whose `main` a runtime can invoke. Nothing
+this target's module has neither, and it keeps `infs run`, which executes the
+build in process under the SpaceWasm interpreter itself rather than under
+`wasmtime`. Nothing
 narrows what an exported function may declare: the bytes are the `"wasm32"`
 build's. The same load-time strictness applies to keys: every fixed-schema
 table rejects a key it does not recognize, naming the
@@ -291,13 +292,19 @@ directory), with no manifest `output-dir` forwarded.
 
 ## `infs run`
 
-`infs run` builds and then executes the resulting WASM via wasmtime:
+`infs run` builds and then executes the resulting WASM where the build's
+`[build] target` says: a `wasm32` build under `wasmtime`, and a `spacewasm`
+build in process under the SpaceWasm interpreter, with the F´ (F Prime)
+reference host functions and no `wasmtime` at all (see [Running a SpaceWasm
+build](compilation_targets.md#running-a-spacewasm-build)). A `stellar` build is
+refused before anything is built.
 
 ```bash
 infs run                                 # project mode: build + invoke main
 infs run program.inf                     # single-file: compile and invoke main
 infs run program.inf --entry-point helper  # single-file: invoke helper()
 infs run program.inf -L libs             # single-file: search libs/ for external .wasm
+infs run --fuel 1000000                  # spacewasm: stop after 10^6 interpreter instructions
 ```
 
 Flags:
@@ -305,6 +312,7 @@ Flags:
 | Flag | Description |
 |------|-------------|
 | `--entry-point <name>` | Function to invoke in single-file mode (default `main`); rejected for anything but `main` in project mode |
+| `--fuel <N>` | Stop a `spacewasm` run after N of the interpreter's own instructions, exiting with status 1; without it a run has no budget. Refused, before anything is built, for a build that runs under `wasmtime` |
 | `-L <DIR>` / `--wasm-lib-dir <DIR>` | Add a directory to search for external `.wasm` modules; repeatable. Anchored to the invocation directory in project mode; in single-file mode no anchoring step runs, since `infc` already inherits that directory |
 | `--no-wasm-opt` | Skip `[build.wasm-opt]` post-build optimization (project mode only) |
 
@@ -318,53 +326,65 @@ In **project mode** (no path given):
 
 - Always builds in compile mode, regardless of `[build] mode` in the manifest.
   Proof-mode WASM embeds custom non-deterministic opcodes (`0xfc` family) that
-  wasmtime cannot execute. The one thing `[build] mode` can still do to `run` is
-  stop it before it starts: `mode = "proof"` paired with a target that has no
-  proof mode is a load error for every command, `run` included — a value `run`
-  would ignore can still refuse to be read.
+  neither wasmtime nor the SpaceWasm interpreter can decode. The one thing
+  `[build] mode` can still do to `run` is stop it before it starts:
+  `mode = "proof"` paired with a target that has no proof mode is a load error
+  for every command, `run` included — a value `run` would ignore can still
+  refuse to be read.
 - Always invokes `main`, with no arguments, so a `main` that takes any runs
   only in single-file mode: one that declares parameters, and one that returns
-  a struct or array, which takes a hidden result address (see below). Passing
-  `--entry-point` to anything other than `main` is rejected with guidance to
-  use single-file mode instead.
-- Checks wasmtime availability before starting the build, failing fast if the
-  runtime is absent.
+  a struct or array, which takes a hidden result address (see below). Such a
+  `main` is refused before it is invoked, on either runtime, naming what it
+  takes and the single-file command that passes it. Passing `--entry-point` to
+  anything other than `main` is rejected with guidance to use single-file mode
+  instead.
+- For a `wasm32` build, checks wasmtime availability before starting the
+  build, failing fast if the runtime is absent; a `spacewasm` build never looks
+  for it.
 - Resolves the manifest's `[wasm-dependencies]` and forwards any `-L`
   directories the same way project `build` does, anchored to the invocation
   directory, so a project binding `use { … } from <module>` runs without a
   separate link step.
 - `out/main.wasm` is the expected artifact; if the build succeeds but the file
-  is absent, `run` errors before invoking wasmtime.
-- Refuses to execute an artifact that imports a function. `run` supplies no
-  host functions and does not let wasmtime stand in for the embedder a program
-  binding `use { … } from host::…` is written for — not even for the WASI
-  functions the wasmtime CLI provides on its own. It builds the program, reads
-  the imports off the artifact — after `[build.wasm-opt]`, so the bytes it asks
-  about are the ones that would run — and names each one, pointing at the
-  embedder that must supply them. Single-file `run` refuses the same way,
-  naming `out/<stem>.wasm`. The wasmtime check above still comes first, so a
-  machine without the runtime is told to install it before it can hear this
-  refusal.
+  is absent, `run` errors before executing anything.
+- Judges the imports of the artifact it built — after `[build.wasm-opt]`, so
+  the bytes it asks about are the ones that would run — before anything runs.
+  A `wasm32` artifact that imports any function is refused: wasmtime runs it
+  with no host function registered, and `run` does not let wasmtime stand in
+  for the embedder a program binding `use { … } from host::…` is written for —
+  not even for the WASI functions the wasmtime CLI provides on its own. The
+  refusal names each import and, when every one is an F´ reference host at its
+  reference signature, the `spacewasm` target that provides them. The wasmtime
+  check above still comes first, so a machine without the runtime is told to
+  install it before it can hear this refusal. A `spacewasm` artifact may import
+  the F´ reference hosts at their reference signatures and nothing else, and
+  one that imports anything else is refused before the interpreter decodes a
+  byte of it. Single-file `run` refuses the same way, naming
+  `out/<stem>.wasm`.
 
 In **single-file mode** (path given), `--entry-point` (default `main`) selects
 which exported function to invoke, and that function receives the trailing
 arguments from the command line — anything after the first bare token that
-options did not consume, or after `--`. `main` is no exception: wasmtime
-parses each argument into the type of the matching parameter of the compiled
-function, so `infs run program.inf 41` hands 41 to a `pub fn main(x: i32)`.
+options did not consume, or after `--`. `main` is no exception: each argument
+becomes the matching parameter of the compiled function, so `infs run
+program.inf 41` hands 41 to a `pub fn main(x: i32)`. Under wasmtime the
+arguments are handed to wasmtime as written, and it parses them; under the
+SpaceWasm interpreter `run` reads each as the parameter's `i32` or `i64`, in
+its signed or its unsigned range, and refuses a count that differs.
 Those parameters are the ones the source declares, with two differences that
 apply to every function, `main` included. A struct or array parameter is a
 memory address. A function that returns a struct or array takes the address
 to write its result to as a hidden first parameter and returns nothing, so
 `pub fn main() -> [i32; 4]` needs that address on the command line and prints
-no value. `run` passes these addresses as written and checks none of
+no value. `run` passes these addresses as numbers and checks none of
 them. Single-file `run` also resolves the enclosing manifest's
 `[wasm-dependencies]` and forwards any `-L` directories verbatim: `infc`
 inherits the invoking shell's working directory here, so a relative `-L`
 already means what it meant at the shell, with no anchoring step needed.
 
-Both modes require `wasmtime` in `PATH`. Installation instructions are printed
-when it is not found.
+A `wasm32` build requires `wasmtime` in `PATH`, in both modes, and
+installation instructions are printed when it is not found. A `spacewasm`
+build requires no runtime at all: the interpreter is part of `infs`.
 
 ## Scaffolding
 
@@ -547,8 +567,10 @@ infs run <path> (single-file mode)
 `infc`'s default, and neither `-v` nor `--mode` is ever part of its argv: the
 `RunArgs` struct (`apps/infs/src/commands/run.rs`) carries no such flags. Once
 `infc` exits, both `run` routes read the imports off the artifact they are about
-to execute and refuse one that imports any function, before wasmtime is
-invoked — see [`infs run`](#infs-run).
+to execute before anything runs: a `wasm32` artifact that imports any function
+is refused before wasmtime is invoked, and a `spacewasm` artifact importing
+anything but the F´ reference hosts at their reference signatures before the
+interpreter decodes it — see [`infs run`](#infs-run).
 
 **`infc` flags** confirmed against `core/cli/src/parser.rs`:
 

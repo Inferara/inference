@@ -316,7 +316,7 @@ program that binds host imports](#running-a-program-that-binds-host-imports)).
 | A host import at a target that does not bind the host-call convention (`stellar`) | `infc`, before external resolution, in code generation's words; code generation itself for any other caller |
 | A host import no embedder could register — a module or field name over 31 bytes, or more than nine parameters — at `--target spacewasm` | `infc` over the declarations, after external resolution and before the allowlist; the post-link conformance check over the bytes |
 | A host import the build's allowlist does not admit | `infc`, after external resolution |
-| Executing an artifact that imports any function | `infs run`, after the build, from the artifact's import section |
+| Executing an artifact that imports a function — at `wasm32` any function; at `spacewasm` any function outside the F´ reference hosts or at another signature | `infs run`, after the build, from the artifact's import section |
 
 The proof refusal is raised before external resolution deliberately. A program
 that is both mixed and a proof build would otherwise hear the mixed-program
@@ -486,21 +486,41 @@ so a host import's declaration may come to carry more than a signature.
 
 ### Running a program that binds host imports
 
-A program that binds a host import runs under the embedder that supplies it,
-and `infs run` is not one: it supplies no host functions, and it does not let
-wasmtime stand in for an embedder either — not even for the WASI functions the
-wasmtime CLI provides on its own, which a program importing them could
-otherwise run against. Which host functions happen to be at hand is a property
-of the runtime, not of the program. `infs run` therefore builds such a program
-and then refuses to execute it, naming each function the artifact imports:
+A program that binds a host import runs under the embedder that supplies it.
+`infs run` supplies one set of host functions, and to a `spacewasm` build only:
+the F´ (F Prime) reference hosts of `spacewasm_std`, the reference embedder in
+the SpaceWasm repository, at the signatures that embedder registers them with
+([Running a SpaceWasm build](compilation_targets.md#running-a-spacewasm-build)
+lists them). A `spacewasm` build whose imports are all among them runs in
+process under the SpaceWasm interpreter, each host logging its calls to stderr;
+one that imports anything else, or a reference host at another signature, is
+refused with nothing executed, naming each such import and the declaration that
+would match.
+
+A `wasm32` build runs under `wasmtime`, where `infs run` registers no host
+function, and it does not let wasmtime stand in for an embedder either — not
+even for the WASI functions the wasmtime CLI provides on its own, which a
+program importing them could otherwise run against. Which host functions happen
+to be at hand is a property of the runtime, not of the program. `infs run`
+therefore builds such a program and then refuses to execute it, naming each
+function the artifact imports — and, when every one is an F´ reference host at
+its reference signature, the target that provides them:
 
 ```text
-Error: `infs run` cannot execute this program: out/main.wasm imports 3 functions that its embedder must supply.
+Error: `infs run` cannot execute this program at the `wasm32` target: out/main.wasm imports 3 functions that its embedder must supply.
   env.clock_ms
   fprime_core.command
   fprime_core.telemetry
-`infs run` supplies no host functions and does not stand in for an embedder, not even with the WASI functions the wasmtime CLI provides on its own, so it executes no artifact that imports a function. Run the program from your embedder, which supplies these functions. See the book's External Functions and WASM Linking chapter ("Running a program that binds host imports") for how an embedder registers them.
+A `wasm32` build runs under wasmtime, where `infs run` registers no host functions. All three are F Prime reference hosts, which `infs run` provides to a `spacewasm` build: set `target = "spacewasm"` under `[build]` in Inference.toml and run it again to execute the program under the SpaceWasm interpreter. Otherwise, run it from the embedder that supplies them. See the book's External Functions and WASM Linking chapter ("Running a program that binds host imports").
 ```
+
+A project whose manifest sets `mode = "proof"` or a `wasm-features` list, which
+a manifest naming the `spacewasm` target may not, is told to remove them as well
+as to set the target. A file outside any project is told to run `infs init`
+first, since it has no manifest to name a target in. A program with any other
+import is told only that `infs run` provides host functions to a `spacewasm`
+build alone, and only the F´ reference set at its reference signatures, and to
+run it from the embedder that supplies them.
 
 The refusal is decided from the artifact rather than from the manifest, because
 a `[host-imports]` table is an allowlist and not a declaration: a project can
@@ -580,11 +600,12 @@ declared, in WebAssembly's types — each array a single `i32` address, as
 runtime checks it when it binds the import: wasmtime at instantiation,
 SpaceWasm while it decodes the module.
 
-Without an embedder of your own, the repository's SpaceWasm harness is the
-ready-made way to try this: each `--host MODULE.FIELD=PARAMS[:RESULT]` builds a
-function like `clock_ms` above that answers zero and logs each call it
-receives, and the harness runs the program under the flight interpreter. See
-[Running a module under the embedder
+Without an embedder of your own, `infs run` on a `spacewasm` build is the
+ready-made way to run a program whose imports are the F´ reference hosts. For
+any other import, the repository's SpaceWasm harness is: each
+`--host MODULE.FIELD=PARAMS[:RESULT]` builds a function like `clock_ms` above
+that answers zero and logs each call it receives, and the harness runs the
+program under the flight interpreter. See [Running a module under the embedder
 harness](compilation_targets.md#running-a-module-under-the-embedder-harness).
 
 ## Calling an External Function
@@ -737,9 +758,11 @@ restrictions of its own:
   import](#no-contract-travels-with-a-host-import): nothing in the build
   describes what the function does, and its declaration holds an embedder to
   nothing.
-- `infs run` refuses every artifact that still imports a function once the build
-  has finished, including a project's `[build.wasm-opt]` step; see [Running a
-  program that binds host imports](#running-a-program-that-binds-host-imports).
+- `infs run` executes it only as a `spacewasm` build whose imports are all F´
+  reference hosts at their reference signatures, and refuses every other
+  artifact that still imports a function once the build has finished,
+  including a project's `[build.wasm-opt]` step; see [Running a program that
+  binds host imports](#running-a-program-that-binds-host-imports).
   A `[build.wasm-opt]` step that runs at any level but `"0"` leaves out a host
   import the program never calls, so an optimized program whose host imports
   are all uncalled runs; see [A bound host import is emitted whether or not it
@@ -768,6 +791,7 @@ of each export, and merges the bodies into a single output module.
 - [The WASM Linker](the-wasm-linker.md) — the subsystem deep-dive: merge algorithm, feasibility tiers, the Tier-B provenance proof, and the link-error taxonomy
 - [Projects and the infs Toolchain](projects-and-the-infs-toolchain.md) — declaring external `.wasm` modules in `Inference.toml` under `[wasm-dependencies]`
 - [Compilation Targets: SpaceWasm host imports](compilation_targets.md#host-imports) — the registration caps `infc` asks of a host import's declaration at `--target spacewasm`, and the conformance check that asks them again of the bytes
+- [Compilation Targets: Running a SpaceWasm build](compilation_targets.md#running-a-spacewasm-build) — `infs run` executing a `spacewasm` build under the SpaceWasm interpreter, with the F´ reference hosts and nothing else
 - [Compilation Targets: the embedder harness](compilation_targets.md#running-a-module-under-the-embedder-harness) — running a host-import program under the SpaceWasm interpreter with `--host` stubs that log each call
 - `core/wasm-linker/README.md` — the merge algorithm, tier classification, and entry point API
 - `core/wasm-codegen/docs/function-calls-lowering.md` — three-stage index pre-scan and import section emission

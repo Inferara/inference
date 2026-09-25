@@ -7,9 +7,12 @@ use thiserror::Error;
 pub enum InfsError {
     /// Subprocess exited with non-zero code.
     ///
-    /// This variant is used when a subprocess (like wasmtime or coqc) exits
-    /// with a non-zero exit code. The exit code should be propagated to the
-    /// parent process without printing additional error messages.
+    /// This variant is used when a subprocess — `infc`, or `wasmtime` running a
+    /// `wasm32` build — exits with a non-zero exit code. The exit code should be
+    /// propagated to the parent process without printing additional error
+    /// messages. A `spacewasm` build runs in process rather than in a
+    /// subprocess, so a refusal, a trap or an exhausted budget there is an
+    /// ordinary error, reported and exiting with status 1.
     #[error("process exited with code {code}")]
     ProcessExitCode {
         /// The exit code from the subprocess.

@@ -10,9 +10,10 @@ is a module the target runtime accepts, and a refusal carries the byte offset
 and the reason a flight computer would have given. The library has no command
 line and no allocator of its own: an embedder supplies both. This crate is that
 embedder for every program in this workspace that runs a SpaceWasm artifact —
-today the SpaceWasm test tier and the `spacewasm-embed` example built on it —
-and it registers the F´ (F Prime) reference host functions of upstream's
-reference embedder for a program that imports them.
+`infs run`, for a `spacewasm` build, the SpaceWasm test tier and the
+`spacewasm-embed` example built on it — and it registers the F´ (F Prime)
+reference host functions of upstream's reference embedder for a program that
+imports them.
 
 ```rust,ignore
 use inference_spacewasm_runner::{EngineConfig, Fuel, HostLog, Outcome, Session, Value, fprime};
@@ -54,8 +55,10 @@ match module.invoke("add", &[Value::I32(2), Value::I32(40)])? {
   table or one of its globals. Whatever the call does, the engine is idle
   again afterwards.
 - `exported_functions` and `exported_host_imports` list what a module exports,
-  with each function's WebAssembly signature; `ir_stats` measures the IR it
-  compiled to, computed as upstream's `spacewasm_std` computes its own figures.
+  with each function's WebAssembly signature, and `function` resolves one name
+  as a call would — its signature, or the `InvokeError` the call would give —
+  without running anything; `ir_stats` measures the IR it compiled to, computed
+  as upstream's `spacewasm_std` computes its own figures.
 - `host_module` and `host_set` build the `HostSet` `load_with` binds imports to.
 - `fprime` holds the F´ reference hosts, the import check against them and
   `fprime::load`, the one way to run a module with them; see below.
@@ -77,9 +80,10 @@ can panic inside `spacewasm`, where no runner can turn the failure into a value.
 `EngineConfig` carries the two parts of the configuration an embedder chooses at
 run time: the words of value stack and the IR pages the code builder may fill.
 `EngineConfig::REFERENCE` is the reference embedder's: `REFERENCE_STACK_WORDS`,
-1,024 words, and `REFERENCE_MAX_CODE_PAGES`, 256 pages. The SpaceWasm test tier
-runs with 65,536 words of stack instead, because it runs the whole codegen
-corpus rather than one program.
+1,024 words, and `REFERENCE_MAX_CODE_PAGES`, 256 pages, and it is what `infs
+run` loads every module at. The SpaceWasm test tier runs with 65,536 words of
+stack instead, because it runs the whole codegen corpus rather than one
+program.
 
 `Fuel` is the instruction budget of a whole run: `Fuel::Unbounded`, which runs
 until the call returns or traps, or `Fuel::Limited(n)`. The interpreter counts
@@ -194,12 +198,14 @@ cannot reproduce without being the interpreter.
 
 The texts the runner produces — the per-import lines of an import refusal, the
 note explaining WebAssembly signatures, the reference table, a trap's first line
-and its explanation, a host's detail, the over-limit facts, the argument
-refusals, a function's arity clause, what an export that is not a function is,
-and the core of the out-of-fuel sentence — state what the runner knows and
-never name the program embedding it. Where a sentence has to, the caller passes
-its name; everything a caller composes around them, such as the artifact's
-path, its own flags and its own remedies, is the caller's.
+and its explanation, a host's detail, the over-limit facts, why a conformant
+module inside both verifier bounds did not load (`code_pages_exhausted`,
+`conformance_gap`), the argument refusals (`ArgumentError::clause`), a
+function's arity clause, what an export that is not a function is, and the core
+of the out-of-fuel sentence — state what the runner knows and never name the
+program embedding it. Where a sentence has to, the caller passes its name;
+everything a caller composes around them, such as the artifact's path, its own
+flags and its own remedies, is the caller's.
 
 ## The allocator singleton
 

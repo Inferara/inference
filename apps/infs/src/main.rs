@@ -11,7 +11,8 @@
 //! - `new` - Create a new Inference project
 //! - `init` - Initialize an existing directory as an Inference project
 //! - `build` - Compile Inference source files
-//! - `run` - Build and execute WASM with wasmtime
+//! - `run` - Build and execute WASM: under wasmtime, or in process under the
+//!   `SpaceWasm` flight interpreter for a `spacewasm` build
 //! - `version` - Display version information
 //! - `install` - Install toolchain versions
 //! - `uninstall` - Remove toolchain versions
@@ -133,13 +134,10 @@ pub enum Commands {
     Build(build::BuildArgs),
 
     /// Build and run an Inference program.
-    ///
-    /// With a path, compiles that source file to WASM and executes it with
-    /// wasmtime, invoking `--entry-point` (default `main`); arguments after the
-    /// path are passed to the invoked function. With no path, runs in project
-    /// mode: discovers `Inference.toml`, builds `<root>/out/main.wasm`, and
-    /// invokes `main` (trailing arguments and `--entry-point` overrides are not
-    /// honored in project mode).
+    // The long help is built by `run::long_about`, which lists the F´ reference
+    // hosts a `spacewasm` build may import from the runner's own table, so the
+    // list `--help` prints is the list the interpreter registers.
+    #[command(long_about = run::long_about())]
     Run(run::RunArgs),
 
     /// Display version information.
@@ -244,5 +242,61 @@ async fn run() -> Result<()> {
                 tui::run()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+    use inference_spacewasm_runner::{LIMITS_FROM, fprime};
+
+    /// The long help of `infs run`, as `infs run --help` prints it.
+    fn run_long_help() -> String {
+        let mut command = Cli::command();
+        command
+            .find_subcommand_mut("run")
+            .expect("`infs run` is a subcommand")
+            .render_long_help()
+            .to_string()
+    }
+
+    /// `infs run --help` lists every F´ reference host a `spacewasm` build may
+    /// import, each on a line of its own exactly as the runner's table writes
+    /// it, and names the interpreter release the build runs under.
+    ///
+    /// Fails if a row goes missing or drifts from the table the interpreter
+    /// registers, which a list copied into the help would do the moment a row
+    /// changed, or if the release stops being named.
+    #[test]
+    fn run_help_lists_every_reference_host_the_interpreter_registers() {
+        let help = run_long_help();
+        let rows = fprime::reference_table_lines();
+        assert_eq!(rows.len(), fprime::REFERENCE_HOSTS.len());
+        for row in rows {
+            assert!(
+                help.lines().any(|line| line == row),
+                "`infs run --help` must carry the line `{row}`, got:\n{help}"
+            );
+        }
+        assert!(
+            help.contains(&format!("SpaceWasm flight interpreter\n({LIMITS_FROM})")),
+            "`infs run --help` must name the interpreter release, got:\n{help}"
+        );
+    }
+
+    /// The short help keeps to one line, and the long help opens with it: the
+    /// table is long-help material only.
+    #[test]
+    fn run_short_help_is_one_line() {
+        let mut command = Cli::command();
+        let run = command
+            .find_subcommand_mut("run")
+            .expect("`infs run` is a subcommand");
+        assert_eq!(
+            run.get_about().map(ToString::to_string).as_deref(),
+            Some("Build and run an Inference program")
+        );
+        assert!(run_long_help().starts_with("Build and run an Inference program.\n\n"));
     }
 }

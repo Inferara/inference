@@ -5,7 +5,10 @@
 //! ## Compilation Commands
 //!
 //! - [`build`] - Compile Inference source files
-//! - [`run`] - Build and execute WASM with wasmtime
+//! - [`run`] - Build and execute WASM: under wasmtime, or in process under the
+//!   `SpaceWasm` interpreter for a `spacewasm` build
+//! - [`interpreter`] - The `spacewasm` route of `run`: the `SpaceWasm` interpreter,
+//!   embedded, with the F´ reference hosts
 //! - [`project_build`] - Shared project-build helper used by `build` and `run`
 //! - [`wasm_opt`] - Post-build WASM optimization via the external `wasm-opt` binary
 //! - [`version`] - Display version information
@@ -32,6 +35,7 @@ pub mod default;
 pub mod doctor;
 pub mod init;
 pub mod install;
+pub(crate) mod interpreter;
 pub mod list;
 pub mod new;
 pub(crate) mod project_build;

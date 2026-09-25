@@ -969,8 +969,8 @@ fn a_module_within_both_bounds_that_runs_out_of_memory_is_too_much_ir() {
     assert!(
         error.to_string().starts_with(
             "the module does not load under the SpaceWasm interpreter: the interpreter's compiled \
-             form of it does not fit the 1 IR code page it was given (the interpreter reported \
-             AllocError(OutOfMemory) at byte "
+             form of it does not fit the 1 IR code page the runner provides (the interpreter \
+             reported AllocError(OutOfMemory) at byte "
         ),
         "{error}"
     );

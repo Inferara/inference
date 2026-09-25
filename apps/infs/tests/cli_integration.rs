@@ -39,7 +39,8 @@
 //!
 //! ### Phase 6: Run Command
 //!
-//! 16. **Run command**: Help display, path validation, wasmtime availability check
+//! 16. **Run command**: Help display, path validation, wasmtime availability check,
+//!     and `spacewasm` builds under the in-process `SpaceWasm` interpreter
 //!
 //! ## Test Infrastructure
 //!
@@ -1035,7 +1036,8 @@ const PROJECT_MAIN_NONZERO_SRC: &str = "pub fn main() -> i32 {\n    return 42;\n
 /// compile error propagates as a non-zero exit before wasmtime is invoked.
 const PROJECT_MAIN_BROKEN_SRC: &str = "pub fn main() -> i32 {\n    return nope;\n}\n";
 
-/// Both `infc` and `wasmtime` are required to execute a project end-to-end.
+/// Both `infc` and `wasmtime` are required to execute a `wasm32` project
+/// end-to-end; a `spacewasm` build runs in process and needs `infc` alone.
 /// Returns the `infc` path when both are present; otherwise defers to
 /// [`require_wasmtime`] and [`require_infc`], which skip locally and abort
 /// under CI.
@@ -1159,23 +1161,29 @@ const MAIN_RETURNING_AN_ARRAY_SRC: &str =
 const MAIN_RETURNING_A_STRUCT_SRC: &str = "struct Point {\n    x: i32;\n    y: i32;\n}\n\n\
      pub fn main() -> Point {\n    return Point { x: 1, y: 2 };\n}\n";
 
-/// Project mode passes `main` no arguments, so every `main` that takes one
-/// reaches wasmtime and fails there for want of it rather than running on an
-/// invented value: one declaring an `i32` or an array parameter, and one
-/// returning an array or a struct, whose only parameter is the hidden result
-/// address. Asserted as the announcement being the last line on stdout, with
-/// no value after it, and a failing exit; wasmtime's own wording is its to
-/// change and is not pinned.
+/// Project mode passes `main` no arguments, so every `main` that takes one is
+/// refused before wasmtime is invoked, rather than running on an invented value
+/// or failing inside wasmtime in its own words: one declaring an `i32` or an
+/// array parameter, and one returning an array or a struct, whose only
+/// parameter is the hidden result address. The refusal names what `main`
+/// takes and the single-file command that passes it, and nothing is announced.
 ///
 /// Fails if project mode hands `main` arguments of its own again: `0 0` ran
 /// every row, the first printing `1` for `x = 0`, the second reading the array
-/// at address 0, and the last two writing their result there.
+/// at address 0, and the last two writing their result there. Fails too if the
+/// refusal stops reading the compiled parameters, which is the only way the
+/// last two rows take one.
 #[test]
 fn project_run_passes_main_no_arguments() {
     let Some(infc_path) = require_infc_and_wasmtime() else {
         return;
     };
 
+    let refusal = format!(
+        "Error: `main` takes 1 argument (i32), and project mode passes none. Run the entry file \
+         with its arguments after the path: `infs run {} <i32>`.",
+        joined(&["src", "main.inf"]).display()
+    );
     let rows = [
         ("an i32 parameter", MAIN_WITH_A_PARAMETER_SRC),
         ("an array parameter", MAIN_WITH_AN_ARRAY_PARAMETER_SRC),
@@ -1192,14 +1200,20 @@ fn project_run_passes_main_no_arguments() {
             .arg("run");
         let output = cmd.output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        assert!(
-            !output.status.success(),
-            "a `main` with {shape} must fail for want of an argument, got stdout: {stdout}"
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "a `main` with {shape} must be refused, got stdout: {stdout}"
         );
         assert_eq!(
-            stdout.lines().last(),
-            Some("Invoking 'main' with wasmtime..."),
-            "a `main` with {shape} must reach wasmtime and print no value, got stdout: {stdout}"
+            stderr.lines().last(),
+            Some(refusal.as_str()),
+            "a `main` with {shape} must be refused naming what it takes, got stderr: {stderr}"
+        );
+        assert!(
+            !stdout.contains("Invoking"),
+            "a `main` with {shape} must not reach wasmtime, got stdout: {stdout}"
         );
     }
 }
@@ -4928,7 +4942,9 @@ fn is_wasmtime_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Gate for the tests that execute compiled WASM: true when wasmtime is usable.
+/// Gate for the tests that execute a `wasm32` build, which `infs run` hands to
+/// wasmtime: true when wasmtime is usable. A `spacewasm` build runs in process
+/// and needs no gate.
 ///
 /// Mirrors [`require_infc`]. A local run without wasmtime skips with a notice,
 /// while CI aborts: every workflow leg installs wasmtime unconditionally before
@@ -8648,6 +8664,33 @@ fn the_stellar_run_refusal_precedes_the_wasmtime_probe() {
     assert_refused(single_file);
 }
 
+/// `--fuel` does not change which refusal a Stellar build gets: the target is
+/// refused before the flag is asked about, in project mode and for a file inside
+/// the project alike, so the reader hears that the build cannot run here at all
+/// rather than that the flag belongs to another target — a refusal whose remedy,
+/// to name the `spacewasm` target, would be wrong advice for a contract.
+///
+/// Fails if the `--fuel` refusal is moved ahead of the target's.
+#[test]
+fn the_stellar_run_refusal_precedes_the_fuel_refusal() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_CONTRACT_SRC, STELLAR_BUILD_TABLE);
+    let entry = joined(&["src", "main.inf"]);
+
+    for args in [vec!["run", "--fuel", "5"], vec!["run", "--fuel", "5", entry.to_str().unwrap()]] {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.current_dir(temp.path()).args(&args);
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("cannot run a `stellar` build"))
+            .stderr(predicate::str::contains("`--fuel` applies only to a `spacewasm` build").not());
+    }
+    assert!(
+        !temp.child("out").path().exists(),
+        "the refusal must precede the build, so nothing is compiled"
+    );
+}
+
 /// The Stellar target and `[build.wasm-opt]` are individually valid and together
 /// a manifest that fails to load, for every command.
 ///
@@ -8770,62 +8813,54 @@ fn infs_build_on_a_spacewasm_project_writes_the_default_targets_module() {
     );
 }
 
-/// `infs run` builds and executes a `SpaceWasm` project, which is the first time
-/// the path past the wasmtime refusal is reachable for a non-default target.
+/// Runs `infs` in `dir` with `args` against the `infc` at `infc_path`, with
+/// `wasmtime` — and the other tools the suite gates on — absent from PATH.
 ///
-/// The refusal asks whether the target's artifact can be invoked by a plain
-/// runtime, not whether it is the default, and this is the case that tells the
-/// two questions apart: the artifact is the default's bytes and `main` keeps the
-/// shape wasmtime calls, so wasmtime can invoke it. What that shows is that the
-/// module runs — not that it runs the way the flight interpreter would, which
-/// this executes nothing of.
-///
-/// The returned `42` is the load-bearing assertion. A build that stopped after
-/// compiling, or a wasmtime invocation of the wrong export, would pass an
-/// exit-code-only check.
-///
-/// Fails if `SpaceWasm` stops answering `runs_under_a_plain_wasm_runtime`, or
-/// if the refusal reverts to a comparison against the default target.
-#[test]
-fn infs_run_executes_a_spacewasm_project() {
-    let Some(infc_path) = require_infc_and_wasmtime() else {
-        return;
-    };
-
-    let temp = assert_fs::TempDir::new().unwrap();
-    scaffold_project_with_manifest(
-        &temp,
-        "demo",
-        PROJECT_MAIN_NONZERO_SRC,
-        SPACEWASM_BUILD_TABLE,
-    );
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", &infc_path)
-        .current_dir(temp.path())
-        .arg("run");
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("target: spacewasm"))
-        .stdout(predicate::str::contains("42"));
+/// A `spacewasm` build runs in process under the interpreter, so every row
+/// driven through this passes on a machine without `wasmtime` and shows the
+/// route needs none: a build handed to `wasmtime` instead fails its probe.
+fn infs_without_wasmtime(
+    infc_path: &std::path::Path,
+    dir: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
+    Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .env("INFC_PATH", infc_path)
+        .env("PATH", path_without_tools())
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("infs must run")
 }
 
-/// The same execution on the single-file path, whose call site of the refusal is
-/// a second one: the enclosing manifest decides the target there too.
+/// The lines of one output stream, as text.
+fn lines_of(stream: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stream)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The line `infs run` prints before it calls `entry` under the interpreter,
+/// with no `--fuel` budget.
+fn interpreter_announcement(entry: &str) -> String {
+    format!("Invoking '{entry}' with the SpaceWasm interpreter (spacewasm 0.7.1)...")
+}
+
+/// `infs run` builds a `SpaceWasm` project and executes it in process under the
+/// `SpaceWasm` interpreter, with `wasmtime` absent from PATH: the announcement
+/// names the interpreter, and `main`'s return value is the last line on stdout.
 ///
-/// Both sites are pinned for Stellar, and pinning only one of them here would
-/// leave a positional check reintroduced at the single-file site — refusing a
-/// file inside a `spacewasm` project for being non-default — with nothing to
-/// catch it.
+/// The returned `42` is the load-bearing assertion: a build that stopped after
+/// compiling, or a call of the wrong export, would pass an exit-code-only
+/// check. `wasmtime` is absent so the row also shows the route needs no
+/// runtime on PATH.
 ///
-/// The returned `42` is the load-bearing assertion, for the reason it is above.
-///
-/// Fails if the single-file path reintroduces a comparison against
-/// `TargetName::DEFAULT` in place of asking `runs_under_a_plain_wasm_runtime`, or
-/// if it stops reading the target off the enclosing manifest.
+/// Fails if a `spacewasm` build is handed to `wasmtime`, which fails its probe
+/// here, or if the value or the announcement moves off the end of stdout.
 #[test]
-fn infs_run_executes_a_file_inside_a_spacewasm_project() {
-    let Some(infc_path) = require_infc_and_wasmtime() else {
+fn infs_run_executes_a_spacewasm_project() {
+    let Some(infc_path) = require_infc() else {
         return;
     };
 
@@ -8837,15 +8872,57 @@ fn infs_run_executes_a_file_inside_a_spacewasm_project() {
         SPACEWASM_BUILD_TABLE,
     );
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", &infc_path)
-        .current_dir(temp.path())
-        .arg("run")
-        .arg(joined(&["src", "main.inf"]));
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("target: spacewasm"))
-        .stdout(predicate::str::contains("42"));
+    let output = infs_without_wasmtime(&infc_path, temp.path(), &["run"]);
+    let stdout = lines_of(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the project must run, got stdout: {stdout:?}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.iter().any(|line| line == "target: spacewasm"));
+    assert_eq!(
+        stdout[stdout.len() - 2..],
+        [interpreter_announcement("main"), "42".to_string()],
+        "the announcement and then the value must end stdout"
+    );
+}
+
+/// The same execution on the single-file path, whose dispatch is a second
+/// call site: the enclosing manifest decides the target there too.
+///
+/// Pinning only the project route would leave the single-file route free to
+/// hand a file inside a `spacewasm` project to `wasmtime`, with nothing to
+/// catch it; `wasmtime` is absent from PATH, so that regression fails here.
+///
+/// Fails if the single-file path stops reading the target off the enclosing
+/// manifest, or routes it anywhere but the interpreter.
+#[test]
+fn infs_run_executes_a_file_inside_a_spacewasm_project() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_NONZERO_SRC,
+        SPACEWASM_BUILD_TABLE,
+    );
+
+    let entry = joined(&["src", "main.inf"]);
+    let output = infs_without_wasmtime(&infc_path, temp.path(), &["run", entry.to_str().unwrap()]);
+    let stdout = lines_of(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the file must run, got stdout: {stdout:?}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.iter().any(|line| line == "target: spacewasm"));
+    assert_eq!(
+        stdout[stdout.len() - 2..],
+        [interpreter_announcement("main"), "42".to_string()]
+    );
 }
 
 /// `mode = "proof"` on a `SpaceWasm` project fails to load, for every command, and
@@ -8926,21 +9003,23 @@ fn a_spacewasm_project_requesting_a_feature_fails_to_load() {
 /// The manifest having loaded is asserted positively, through the `target:`
 /// echo: `forward_target` prints it after the manifest is read and before `infc`
 /// is spawned, so it is reached by a load and by nothing that precedes one. The
-/// outcome of the build itself is deliberately not asserted — completing it
-/// needs an external `wasm-opt`, which is exactly the dependency the Stellar
-/// refusal exists to avoid depending on.
+/// outcome of `infs build` is deliberately not asserted — completing it needs an
+/// external `wasm-opt`, which is exactly the dependency the Stellar refusal
+/// exists to avoid depending on.
 ///
-/// `run` needs a runtime besides, and the echo it is asserted on is printed
-/// after the wasmtime probe rather than before it, so that row runs behind
-/// `require_wasmtime` while `build` needs only `infc`.
+/// `infs run` is followed to the end instead, against the fake `wasm-opt`, which
+/// copies the module unchanged, and with `wasmtime` absent from PATH: it loads
+/// the manifest, builds, optimizes and executes the project under the
+/// interpreter, whose announcement and then `main`'s value end stdout.
 ///
 /// The forbidden text is the pairing message's own invariant half, not the half
 /// that names a target, because generalizing the arm to "any non-default target"
 /// leaves the hard-coded `stellar` in its format argument: a predicate naming
 /// `spacewasm` would not match the message that regression produces.
 ///
-/// Fails the moment the optimizer arm stops being a name equality, and fails if
-/// the manifest stops loading for this pairing at all.
+/// Fails the moment the optimizer arm stops being a name equality, if the
+/// manifest stops loading for this pairing at all, or if `infs run` stops
+/// executing such a project under the interpreter.
 #[test]
 fn a_spacewasm_project_declaring_the_optimizer_still_loads() {
     let Some(infc_path) = require_infc() else {
@@ -8951,26 +9030,874 @@ fn a_spacewasm_project_declaring_the_optimizer_still_loads() {
     scaffold_project_with_manifest(
         &temp,
         "demo",
-        PROJECT_MAIN_SRC,
+        PROJECT_MAIN_NONZERO_SRC,
         "[build]\ntarget = \"spacewasm\"\n\n[build.wasm-opt]\nlevel = \"s\"\n",
     );
+    let refusal = "cannot be combined with a `[build.wasm-opt]` table";
 
-    for command in ["build", "run"] {
-        if command == "run" && !require_wasmtime() {
-            continue;
-        }
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .stdout(predicate::str::contains("target: spacewasm"))
+        .stderr(predicate::str::contains(refusal).not());
 
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-        cmd.env("INFC_PATH", &infc_path)
-            .current_dir(temp.path())
-            .arg(command);
-        cmd.assert()
-            .stdout(predicate::str::contains("target: spacewasm"))
-            .stderr(
-                predicate::str::contains("cannot be combined with a `[build.wasm-opt]` table")
-                    .not(),
-            );
+    let run = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .env("INFC_PATH", &infc_path)
+        .env("PATH", path_without_tools())
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .current_dir(temp.path())
+        .arg("run")
+        .output()
+        .unwrap();
+    let stdout = lines_of(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(
+        run.status.success(),
+        "the project must run, got stdout: {stdout:?}\nstderr: {stderr}"
+    );
+    assert!(!stderr.contains(refusal), "got stderr: {stderr}");
+    assert!(stdout.iter().any(|line| line == "target: spacewasm"));
+    assert_eq!(
+        stdout[stdout.len() - 2..],
+        [interpreter_announcement("main"), "42".to_string()],
+        "the interpreter must run the optimized project, got stdout: {stdout:?}"
+    );
+}
+
+// `infs run` on a `spacewasm` build: in process, under the SpaceWasm
+// interpreter, with the F´ reference hosts and no `wasmtime`.
+
+/// A program in the shape of an F´ component, binding four of the six F´
+/// reference hosts at their reference signatures: it announces itself, sends a
+/// command, downlinks one telemetry value and reads the clock twice.
+///
+/// It returns 42 only when every host answered as the reference hosts do — 0
+/// from `command` and `telemetry` — and `telemetry` wrote its zero time into the
+/// caller's `mut` buffer, which is passed by address: a buffer still holding its
+/// seed returns 2, a clock running backwards 3.
+const SPACEWASM_FPRIME_SRC: &str = "external fn message(text: [u8; 5], len: i32);\n\
+     external fn command(opcode: i32, arg: i32) -> i32;\n\
+     external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; 4], \
+     value_len: i32) -> i32;\n\
+     use { message, command, telemetry } from host::fprime_core;\n\
+     external fn clock_ms() -> i64;\n\
+     use { clock_ms } from host::env;\n\n\
+     pub fn main() -> i32 {\n    \
+     let started: i64 = clock_ms();\n    \
+     let hello: [u8; 5] = [104, 101, 108, 108, 111];\n    \
+     message(hello, 5);\n    \
+     let status: i32 = command(42, 7);\n    \
+     let mut time: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];\n    \
+     let reading: [u8; 4] = [21, 0, 0, 0];\n    \
+     let sent: i32 = telemetry(3, time, 11, reading, 4);\n    \
+     if time[10] != 0 {\n        return 2;\n    }\n    \
+     if clock_ms() < started {\n        return 3;\n    }\n    \
+     return 42 + status + sent;\n}\n";
+
+/// The lines the reference hosts log for [`SPACEWASM_FPRIME_SRC`], in call
+/// order; `clock_ms` logs nothing.
+const SPACEWASM_FPRIME_LOG: [&str; 3] = ["MESSAGE hello", "COMMAND 42 7", "TELEMETRY 3"];
+
+/// The host-log lines among `stderr`'s, in order.
+fn host_log_lines(stderr: &[u8]) -> Vec<String> {
+    lines_of(stderr)
+        .into_iter()
+        .filter(|line| {
+            ["MESSAGE ", "COMMAND ", "TELEMETRY ", "RSLEEP ", "PANIC "]
+                .iter()
+                .any(|verb| line.starts_with(verb))
+        })
+        .collect()
+}
+
+/// An F´ program runs against the reference hosts, in project mode and from
+/// its file, with `wasmtime` absent: each host logs its call to stderr as it
+/// is made, in call order, and `main`'s value ends stdout after the
+/// announcement. With `--fuel` the announcement names the budget, and a budget
+/// the program fits changes nothing else.
+///
+/// Fails if a host is not registered, answers other than the reference host,
+/// logs out of order or to stdout, or leaves the caller's time buffer as it
+/// was; or if `--fuel` stops reaching the announcement.
+#[test]
+fn infs_run_executes_an_fprime_program_against_the_reference_hosts() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", SPACEWASM_FPRIME_SRC, SPACEWASM_BUILD_TABLE);
+    let entry = joined(&["src", "main.inf"]);
+    let entry = entry.to_str().unwrap();
+
+    let rows: [(&[&str], &str); 3] = [
+        (&["run"], "(spacewasm 0.7.1)"),
+        (&["run", entry], "(spacewasm 0.7.1)"),
+        (&["run", "--fuel", "1000000"], "(spacewasm 0.7.1, fuel 1000000)"),
+    ];
+    for (args, version) in rows {
+        let output = infs_without_wasmtime(&infc_path, temp.path(), args);
+        let stdout = lines_of(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "`infs {}` must run, got stdout: {stdout:?}\nstderr: {stderr}",
+            args.join(" ")
+        );
+        assert_eq!(
+            stdout[stdout.len() - 2..],
+            [
+                format!("Invoking 'main' with the SpaceWasm interpreter {version}..."),
+                "42".to_string()
+            ],
+            "`infs {}`",
+            args.join(" ")
+        );
+        assert_eq!(
+            host_log_lines(&output.stderr),
+            SPACEWASM_FPRIME_LOG,
+            "`infs {}` must log each host call once, in order, got stderr: {stderr}",
+            args.join(" ")
+        );
+        assert!(
+            !stdout.iter().any(|line| line.starts_with("MESSAGE")),
+            "the host log goes to stderr, not stdout"
+        );
     }
+}
+
+/// A module of exports for the argument rows: an `i32` pair, an `i32` and an
+/// `i64` echoed back, a function returning nothing, and two whose arithmetic
+/// traps on the arguments a row passes.
+const SPACEWASM_EXPORTS_SRC: &str = "pub fn main() -> i32 {\n    return 0;\n}\n\n\
+     pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n\n\
+     pub fn echo(x: i32) -> i32 {\n    return x;\n}\n\n\
+     pub fn wide(x: i64) -> i64 {\n    return x;\n}\n\n\
+     pub fn nothing() {\n}\n\n\
+     pub fn overflow(x: i32) -> i32 {\n    return x + 1;\n}\n\n\
+     pub fn div(a: i32, b: i32) -> i32 {\n    return a / b;\n}\n";
+
+/// A project of [`SPACEWASM_EXPORTS_SRC`] at the `spacewasm` target.
+fn exports_project() -> assert_fs::TempDir {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", SPACEWASM_EXPORTS_SRC, SPACEWASM_BUILD_TABLE);
+    temp
+}
+
+/// `infs run <file> <args>`, over the entry file of `project`.
+fn run_entry_file(
+    infc_path: &std::path::Path,
+    project: &assert_fs::TempDir,
+    args: &[&str],
+) -> std::process::Output {
+    let entry = joined(&["src", "main.inf"]);
+    let mut command_line = vec!["run", entry.to_str().unwrap()];
+    command_line.extend_from_slice(args);
+    infs_without_wasmtime(infc_path, project.path(), &command_line)
+}
+
+/// Single-file arguments are read as the invoked export's parameters: an
+/// `i32` or `i64` in its signed range or its unsigned one, taken as the bit
+/// pattern, a negative one after `--`. The export's value ends stdout, and one
+/// returning nothing prints nothing after the announcement.
+///
+/// Every expected value is one the regressions it guards cannot produce:
+/// `4294967295` read as a signed number is refused, and read at the other
+/// width prints `4294967295` rather than `-1`.
+///
+/// Fails if an argument is dropped, reordered or read at the wrong width, or
+/// if a unit function prints a value.
+#[test]
+fn infs_run_reads_arguments_as_the_parameters_of_the_invoked_export() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let project = exports_project();
+    let rows: [(&[&str], &str, Option<&str>); 7] = [
+        (&["--entry-point", "add", "2", "40"], "add", Some("42")),
+        (&["--entry-point", "add", "--", "-50", "8"], "add", Some("-42")),
+        (&["--entry-point", "echo", "4294967295"], "echo", Some("-1")),
+        (&["--entry-point", "echo", "2147483648"], "echo", Some("-2147483648")),
+        (&["--entry-point", "wide", "18446744073709551615"], "wide", Some("-1")),
+        (&["--entry-point", "wide", "4294967295"], "wide", Some("4294967295")),
+        (&["--entry-point", "nothing"], "nothing", None),
+    ];
+    for (args, entry, value) in rows {
+        let output = run_entry_file(&infc_path, &project, args);
+        let stdout = lines_of(&output.stdout);
+        assert!(
+            output.status.success(),
+            "`infs run src/main.inf {}` must succeed, got stdout: {stdout:?}\nstderr: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut tail = vec![interpreter_announcement(entry)];
+        tail.extend(value.map(str::to_string));
+        assert_eq!(
+            stdout[stdout.len() - tail.len()..],
+            tail,
+            "`infs run src/main.inf {}`",
+            args.join(" ")
+        );
+    }
+}
+
+/// An argument the invoked export cannot take is refused before the call,
+/// naming the export's parameters and what was written: a count that differs,
+/// a value past both ranges of its width, text that is no number — with a
+/// pointer at an option written after the first argument — and a name the
+/// module exports no function under. Nothing is announced, since nothing runs.
+///
+/// Fails if a refusal reaches the interpreter, loses its wording, or stops
+/// pointing a misplaced option back before the arguments.
+#[test]
+fn infs_run_refuses_arguments_the_invoked_export_cannot_take() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let project = exports_project();
+    let artifact = joined(&["out", "main.wasm"]);
+    let rows: [(&[&str], String); 5] = [
+        (
+            &["--entry-point", "add", "2", "40", "7"],
+            "`add` takes 2 arguments (i32, i32), and 3 were given: 2 40 7.".to_string(),
+        ),
+        (
+            &["--entry-point", "echo", "4294967296"],
+            "argument 1 for `echo` is 4294967296, which does not fit an i32 (-2147483648 to \
+             4294967295; a value above 2147483647 is taken as its unsigned bit pattern)."
+                .to_string(),
+        ),
+        (
+            &["--entry-point", "add", "2", "--fuel"],
+            "argument 2 for `add` is `--fuel`, which is not a decimal integer; `add` takes (i32, \
+             i32). Options go before the first argument: everything from `2` on is passed to \
+             `add` unparsed, so move `--fuel` before it."
+                .to_string(),
+        ),
+        (
+            &["5"],
+            "`main` takes no arguments, and 1 was given: 5.".to_string(),
+        ),
+        (
+            &["--entry-point", "helper"],
+            format!(
+                "{} exports no function named `helper`. It exports: `main`, `add`, `echo`, \
+                 `wide`, `nothing`, `overflow`, `div`. A function is exported when it is declared \
+                 `pub` at the top level of the entry file.",
+                artifact.display()
+            ),
+        ),
+    ];
+    for (args, refusal) in rows {
+        let output = run_entry_file(&infc_path, &project, args);
+        let stderr = lines_of(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`infs run src/main.inf {}` must be refused",
+            args.join(" ")
+        );
+        assert_eq!(
+            stderr.last().map(String::as_str),
+            Some(format!("Error: {refusal}").as_str()),
+            "`infs run src/main.inf {}`",
+            args.join(" ")
+        );
+        assert!(
+            !lines_of(&output.stdout).iter().any(|line| line.starts_with("Invoking")),
+            "a refused argument runs nothing"
+        );
+    }
+}
+
+/// A trap ends the run with exit status 1, its first line naming the export,
+/// what went wrong and the interpreter's reason, and a second explaining it:
+/// an overflowed `+`, which Inference checks with an `unreachable`, a division
+/// by zero, and the one signed division a quotient cannot hold. The call began,
+/// so it was announced.
+///
+/// Fails if a trap exits 0, loses its explanation, or is reported in the
+/// interpreter's bare words.
+#[test]
+fn infs_run_reports_a_trap_with_its_reason_and_explanation() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let project = exports_project();
+    let rows: [(&[&str], &str); 3] = [
+        (
+            &["--entry-point", "overflow", "2147483647"],
+            "`overflow` trapped: a runtime check failed (Unreachable).\nInference compiles each \
+             of its runtime checks to a WebAssembly `unreachable`, so the interpreter cannot say \
+             which one failed: an arithmetic overflow (`+`, `-`, `*` or unary `-` outside \
+             `wrapping(...)`), an array index out of bounds, `MIN / -1` at `i8` or `i16`, a \
+             failed `assert`, or an out-of-range enum value passed to an exported function.",
+        ),
+        (
+            &["--entry-point", "div", "7", "0"],
+            "`div` trapped: division by zero (DivideByZero).\nA `/` or `%` was evaluated with a \
+             divisor of 0.",
+        ),
+        (
+            &["--entry-point", "div", "--", "-2147483648", "-1"],
+            "`div` trapped: signed division overflow (IntegerOverflow).\nA signed `/` divided the \
+             type's minimum by -1, a quotient an `i32` or `i64` cannot hold.",
+        ),
+    ];
+    for (args, report) in rows {
+        let output = run_entry_file(&infc_path, &project, args);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert_eq!(output.status.code(), Some(1), "a trap exits with status 1");
+        assert!(
+            stderr.ends_with(&format!("Error: {report}\n")),
+            "`infs run src/main.inf {}` must end:\n{report}\ngot:\n{stderr}",
+            args.join(" ")
+        );
+        assert!(
+            lines_of(&output.stdout)
+                .last()
+                .is_some_and(|line| line.starts_with("Invoking '")),
+            "the trapping call was announced and printed no value"
+        );
+    }
+}
+
+/// `panic` logs its `PANIC` line and stops the program, and the trap is
+/// reported by what the host recorded rather than as a bare `Host` trap.
+///
+/// Fails if the host's detail stops reaching the report, or the `PANIC` line
+/// stops preceding it.
+#[test]
+fn infs_run_reports_the_reference_panic_host_stopping_the_program() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        "external fn panic(text: [u8; 4], len: i32, line: i32);\n\
+         use { panic } from host::fprime_core;\n\n\
+         pub fn main() -> i32 {\n    let text: [u8; 4] = [98, 111, 111, 109];\n    \
+         panic(text, 4, 17);\n    return 0;\n}\n",
+        SPACEWASM_BUILD_TABLE,
+    );
+    let output = infs_without_wasmtime(&infc_path, temp.path(), &["run"]);
+    let stderr = lines_of(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr[stderr.len() - 2..],
+        [
+            "PANIC boom:17".to_string(),
+            "Error: `main` trapped: it called `fprime_core.panic`, which always stops the \
+             program; its message is the PANIC line above (Host)."
+                .to_string()
+        ]
+    );
+}
+
+/// A program counting to a million after one host call, for the fuel rows.
+const SPACEWASM_SPIN_SRC: &str = "external fn message(text: [u8; 5], len: i32);\n\
+     use { message } from host::fprime_core;\n\n\
+     pub fn main() -> i32 {\n    let hello: [u8; 5] = [104, 101, 108, 108, 111];\n    \
+     message(hello, 5);\n    let mut i: i32 = 0;\n    loop i < 1000000 {\n        \
+     i = i + 1;\n    }\n    return i;\n}\n";
+
+/// A run that exhausts its `--fuel` budget ends with exit status 1, naming the
+/// budget and the flag, and saying the host calls it logged were made — only
+/// when it logged any — in project mode and from the entry file alike. Without
+/// `--fuel` the same program runs to its end.
+///
+/// Fails if the budget stops reaching the interpreter on either route, if a
+/// count of one is spelled as a plural, or if the host-call clause is missing
+/// after a host call or present before one.
+#[test]
+fn infs_run_stops_a_run_that_exhausts_its_fuel() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", SPACEWASM_SPIN_SRC, SPACEWASM_BUILD_TABLE);
+    let advice = "before it returned. Either it never returns or it needs a larger budget: raise \
+                  `--fuel`, or leave it out to run without one.";
+
+    let entry = joined(&["src", "main.inf"]);
+    let one = format!(
+        "Error: `main` ran out of fuel: the SpaceWasm interpreter stopped it after 1 interpreter \
+         instruction (`--fuel 1`) {advice}"
+    );
+    for args in [vec!["run", "--fuel", "1"], vec!["run", entry.to_str().unwrap(), "--fuel", "1"]] {
+        let output = infs_without_wasmtime(&infc_path, temp.path(), &args);
+        assert_eq!(output.status.code(), Some(1), "`infs {}`", args.join(" "));
+        assert_eq!(host_log_lines(&output.stderr), Vec::<String>::new());
+        assert_eq!(
+            lines_of(&output.stderr).last(),
+            Some(&one),
+            "`infs {}`",
+            args.join(" ")
+        );
+        assert_eq!(
+            lines_of(&output.stdout).last().map(String::as_str),
+            Some("Invoking 'main' with the SpaceWasm interpreter (spacewasm 0.7.1, fuel 1)..."),
+            "`infs {}`",
+            args.join(" ")
+        );
+    }
+
+    let output = infs_without_wasmtime(&infc_path, temp.path(), &["run", "--fuel", "1000"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(host_log_lines(&output.stderr), ["MESSAGE hello"]);
+    assert_eq!(
+        lines_of(&output.stderr).last().map(String::as_str),
+        Some(
+            format!(
+                "Error: `main` ran out of fuel: the SpaceWasm interpreter stopped it after 1000 \
+                 interpreter instructions (`--fuel 1000`) {advice} The host calls logged above \
+                 had already been made."
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        lines_of(&output.stdout).last().map(String::as_str),
+        Some("Invoking 'main' with the SpaceWasm interpreter (spacewasm 0.7.1, fuel 1000)...")
+    );
+
+    let output = infs_without_wasmtime(&infc_path, temp.path(), &["run"]);
+    assert!(output.status.success(), "with no budget the loop runs to its end");
+    assert_eq!(lines_of(&output.stdout).last().map(String::as_str), Some("1000000"));
+}
+
+/// `--fuel` on a build that runs under wasmtime is refused after the target is
+/// resolved and before anything else — the wasmtime probe and the build
+/// included — in the words of the scope the build came from: a `wasm32`
+/// project, a file inside one, and a file outside any project.
+///
+/// `wasmtime` is absent from PATH, which is what tells the orders apart: a
+/// refusal behind the probe reads `wasmtime not found`, and one behind the
+/// build leaves an `out/`.
+///
+/// Fails if the refusal is dropped, moved behind the probe or the build, or
+/// tells a file outside any project to edit a manifest.
+#[test]
+fn fuel_on_a_build_wasmtime_runs_is_refused_before_anything_is_built() {
+    let project_text = "Error: `--fuel` applies only to a `spacewasm` build, and this project \
+                        builds at the `wasm32` target, which `infs run` executes under wasmtime \
+                        without an instruction budget. Remove `--fuel`, or set `target = \
+                        \"spacewasm\"` under `[build]` in Inference.toml to run the program \
+                        under the SpaceWasm interpreter, which counts its instructions.";
+    let project = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&project, "demo", PROJECT_MAIN_SRC);
+    let entry = joined(&["src", "main.inf"]);
+    let loose = assert_fs::TempDir::new().unwrap();
+    loose.child("sensor.inf").write_str(PROJECT_MAIN_SRC).unwrap();
+    let loose_text = "Error: `--fuel` applies only to a `spacewasm` build, and sensor.inf is \
+                      outside any project, so it builds at the default `wasm32` target, which \
+                      `infs run` executes under wasmtime without an instruction budget. Remove \
+                      `--fuel`.";
+
+    let rows: [(&assert_fs::TempDir, Vec<&str>, &str); 3] = [
+        (&project, vec!["run", "--fuel", "5"], project_text),
+        (&project, vec!["run", "--fuel", "5", entry.to_str().unwrap()], project_text),
+        (&loose, vec!["run", "sensor.inf", "--fuel", "5"], loose_text),
+    ];
+    for (dir, args, refusal) in rows {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+            .env("PATH", path_without_tools())
+            .env_remove("INFC_PATH")
+            .current_dir(dir.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert_eq!(output.status.code(), Some(1), "`infs {}`", args.join(" "));
+        assert_eq!(
+            stderr.trim_end(),
+            refusal,
+            "`infs {}` must be refused before the probe and the build",
+            args.join(" ")
+        );
+        assert!(
+            !dir.child("out").path().exists(),
+            "`infs {}` must build nothing",
+            args.join(" ")
+        );
+    }
+}
+
+/// `--fuel 0` is refused by the argument parser, with the spelling of "no
+/// budget", before any project is looked for.
+#[test]
+fn a_fuel_budget_of_zero_is_refused_with_the_spelling_of_no_budget() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).args(["run", "--fuel", "0"]);
+    cmd.assert().code(2).stderr(predicate::str::contains(
+        "invalid value '0' for '--fuel <N>': `--fuel` must be at least 1; omit it to run without \
+         a budget",
+    ));
+}
+
+/// Imports the reference hosts do not provide as declared are refused after
+/// the build and before anything is decoded or run: an unknown name, a
+/// reference name at another signature — each with what is wrong, the
+/// declaration that would match, the note on WebAssembly signatures and the
+/// reference table — and a reference field under the other module name.
+///
+/// The artifact is asserted to exist, since the refusal reads it, and no
+/// announcement to have been printed. The book's chapter is read too, so
+/// renaming the section the refusal names reds this test.
+///
+/// Fails if an unsupported import reaches the interpreter, or if any part of
+/// the refusal drifts.
+#[test]
+fn infs_run_refuses_imports_the_reference_hosts_do_not_provide() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        "external fn beep();\nexternal fn message(text: [u8; 5]);\n\
+         use { beep, message } from host::fprime_core;\n\n\
+         pub fn main() -> i32 {\n    beep();\n    let text: [u8; 5] = [1, 2, 3, 4, 5];\n    \
+         message(text);\n    return 0;\n}\n",
+        SPACEWASM_BUILD_TABLE,
+    );
+    let output = infs_without_wasmtime(&infc_path, temp.path(), &["run"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let expected = format!(
+        "Error: `infs run` cannot execute this program: {} imports 2 functions that `infs run` \
+         does not provide as declared.\n  fprime_core.beep\n    not a host function `infs run` \
+         provides\n  fprime_core.message\n    this program declares  (i32)\n    the host \
+         provides      (ptr: i32, len: i32)\n    a declaration that matches: external fn \
+         message(text: [u8; N], len: i32);   (N: your buffer's length)\nSignatures are \
+         WebAssembly's: an array or struct argument is passed as its address, and every integer \
+         narrower than 64 bits and every `bool` travels as one i32, so `text: [u8; 5]` is `i32` \
+         here.\nA `spacewasm` build runs with the F Prime reference hosts of spacewasm_std, the \
+         reference embedder in NASA's spacewasm repository, and with no others:\n  \
+         fprime_core.panic(addr: i32, len: i32, line: i32)\n  fprime_core.rsleep(ticks: i64)\n  \
+         fprime_core.command(opcode: i32, arg: i32) -> i32\n  fprime_core.message(ptr: i32, len: \
+         i32)\n  fprime_core.telemetry(id: i32, time_ptr: i32, time_len: i32, value_ptr: i32, \
+         value_len: i32) -> i32\n  env.clock_ms() -> i64\nNothing was executed. Change each \
+         declaration to match, or run the program from an embedder that supplies these \
+         functions. See the book's Compilation Targets chapter (\"Running a SpaceWasm build\").\n",
+        joined(&["out", "main.wasm"]).display()
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr.ends_with(&expected),
+        "the refusal must read exactly:\n{expected}\ngot:\n{stderr}"
+    );
+    assert!(
+        temp.child("out").child("main.wasm").path().is_file(),
+        "the refusal is decided from the artifact, so the build must have happened"
+    );
+    assert!(
+        !lines_of(&output.stdout).iter().any(|line| line.starts_with("Invoking")),
+        "nothing may be executed"
+    );
+
+    temp.child("src")
+        .child("main.inf")
+        .write_str(
+            "external fn clock_ms() -> i64;\nuse { clock_ms } from host::fprime_core;\n\n\
+             pub fn main() -> i32 {\n    let now: i64 = clock_ms();\n    return 0;\n}\n",
+        )
+        .unwrap();
+    let output = infs_without_wasmtime(&infc_path, temp.path(), &["run"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.contains(
+            "imports 1 function that `infs run` does not provide as declared.\n  \
+             fprime_core.clock_ms\n    not a host function `infs run` provides; `clock_ms` is \
+             provided under `env`: use { clock_ms } from host::env;\n"
+        ),
+        "a reference field under the other module names the module it is under, got:\n{stderr}"
+    );
+    assert!(
+        stderr.ends_with(
+            "Nothing was executed. Change the declaration to match, or run the program from an \
+             embedder that supplies it. See the book's Compilation Targets chapter (\"Running a \
+             SpaceWasm build\").\n"
+        ),
+        "one import is named in the singular, got:\n{stderr}"
+    );
+
+    let chapter = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("book")
+            .join("src")
+            .join("compilation_targets.md"),
+    )
+    .expect("the book chapter must be readable");
+    for heading in ["# Compilation Targets", "#### Running a SpaceWasm build"] {
+        assert!(
+            chapter.lines().any(|line| line == heading),
+            "the refusal names `{heading}`, so the book must still carry it as a heading"
+        );
+    }
+}
+
+/// `[memory] pages` reaches the module the interpreter loads: a host handed a
+/// buffer past the end of memory names the memory's size, which is one page by
+/// default and four when the manifest asks for four.
+///
+/// Fails if the table is dropped on the way to the interpreter, or if a host's
+/// out-of-bounds detail stops naming the size of the memory it read.
+#[test]
+fn infs_run_loads_the_memory_the_manifest_declares() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let source = "external fn message(text: [u8; 5], len: i32);\n\
+                  use { message } from host::fprime_core;\n\n\
+                  pub fn main() -> i32 {\n    let hello: [u8; 5] = [104, 101, 108, 108, 111];\n    \
+                  message(hello, 300000);\n    return 0;\n}\n";
+    for (memory, bytes) in [("", 65_536), ("\n[memory]\npages = 4\n", 262_144)] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(
+            &temp,
+            "demo",
+            source,
+            &format!("{SPACEWASM_BUILD_TABLE}{memory}"),
+        );
+        let output = infs_without_wasmtime(&infc_path, temp.path(), &["run"]);
+        let stderr = lines_of(&output.stderr);
+        let [report, explanation] = &stderr[stderr.len() - 2..] else {
+            panic!("the run must end in a two-line report, got: {stderr:?}");
+        };
+        assert!(
+            report.starts_with(
+                "Error: `main` trapped: `fprime_core.message` was given 300000 bytes at address "
+            ) && report.ends_with(&format!(
+                ", outside the module's {bytes}-byte linear memory (Host)."
+            )),
+            "`{memory}` must load a {bytes}-byte memory, got: {report}"
+        );
+        assert_eq!(
+            explanation,
+            "The host reads `len` bytes from the address it is given; check the length you pass \
+             with the array."
+        );
+    }
+}
+
+/// With `[build.wasm-opt]`, the interpreter runs the bytes the optimizer
+/// wrote, and asks its import question of them: the fake optimizer replaces a
+/// program that returns 42 and imports an unsupported host with one that
+/// imports nothing and returns 0, so the run prints 0 — and the same project
+/// run with `--no-wasm-opt` is refused for the import instead.
+///
+/// Fails if the interpreter loads the compiler's artifact rather than the
+/// optimized one, or checks the imports of the wrong bytes.
+#[test]
+fn infs_run_executes_the_bytes_the_optimizer_wrote() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        "external fn beep();\nuse { beep } from host::env;\n\n\
+         pub fn main() -> i32 {\n    return 42;\n}\n",
+        &format!("{SPACEWASM_BUILD_TABLE}\n[build.wasm-opt]\nlevel = \"z\"\n"),
+    );
+    let run = |args: &[&str]| {
+        Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+            .env("INFC_PATH", &infc_path)
+            .env("PATH", path_without_tools())
+            .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+            .env("FAKE_WASM_OPT_NO_IMPORTS", "1")
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let optimized = run(&["run"]);
+    let stdout = lines_of(&optimized.stdout);
+    assert!(
+        optimized.status.success(),
+        "the optimized bytes import nothing and run, got stdout: {stdout:?}\nstderr: {}",
+        String::from_utf8_lossy(&optimized.stderr)
+    );
+    assert_eq!(
+        stdout[stdout.len() - 2..],
+        [interpreter_announcement("main"), "0".to_string()],
+        "the value is the optimizer's module's, not the compiler's 42"
+    );
+
+    let unoptimized = run(&["run", "--no-wasm-opt"]);
+    let stderr = String::from_utf8_lossy(&unoptimized.stderr).into_owned();
+    assert_eq!(unoptimized.status.code(), Some(1));
+    assert!(
+        stderr.contains(
+            "imports 1 function that `infs run` does not provide as declared.\n  env.beep\n    \
+             not a host function `infs run` provides\n"
+        ),
+        "the compiler's bytes import `env.beep`, got:\n{stderr}"
+    );
+}
+
+/// Project mode passes `main` no arguments, and on the interpreter a `main`
+/// that takes any is refused before it is called, naming what it takes and the
+/// single-file command that passes it — a parameter it declares, and the
+/// hidden result address of an array return alike.
+///
+/// Fails if project mode calls such a `main` with nothing, or with arguments
+/// of its own, or stops counting the compiled parameters.
+#[test]
+fn project_run_on_the_interpreter_refuses_a_main_that_takes_arguments() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    for (shape, source) in [
+        ("an i32 parameter", MAIN_WITH_A_PARAMETER_SRC),
+        ("an array result", MAIN_RETURNING_AN_ARRAY_SRC),
+    ] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(&temp, "demo", source, SPACEWASM_BUILD_TABLE);
+        let output = infs_without_wasmtime(&infc_path, temp.path(), &["run"]);
+        assert_eq!(output.status.code(), Some(1), "a `main` with {shape}");
+        assert_eq!(
+            lines_of(&output.stderr).last().map(String::as_str),
+            Some(
+                format!(
+                    "Error: `main` takes 1 argument (i32), and project mode passes none. Run the \
+                     entry file with its arguments after the path: `infs run {} <i32>`.",
+                    joined(&["src", "main.inf"]).display()
+                )
+                .as_str()
+            ),
+            "a `main` with {shape}"
+        );
+        assert!(
+            !lines_of(&output.stdout).iter().any(|line| line.starts_with("Invoking")),
+            "a `main` with {shape} must not be called"
+        );
+    }
+}
+
+/// A conformant module nesting deeper than the reference embedder's 64
+/// control frames is refused on load, naming the nesting, the function, the
+/// reference configuration `infs run` loads at, and the const generic an
+/// embedder would raise, after the build's own warning about the same module.
+///
+/// The depth is the compiler's to decide, so it is read off the build's
+/// warning rather than written here; what this pins is that the two agree and
+/// that the refusal follows the warning it points at.
+///
+/// Fails if the module reaches the interpreter's decoder unexplained, if the
+/// refusal and the warning disagree, or if the refusal precedes the warning.
+#[test]
+fn a_module_over_the_reference_configuration_is_refused_naming_the_limit() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let mut body = String::from("    r = r + 1;\n");
+    for level in (0..70).rev() {
+        body = format!("    if r > {level} {{\n{body}    }}\n");
+    }
+    let source =
+        format!("pub fn main() -> i32 {{\n    let mut r: i32 = 100;\n{body}    return r;\n}}\n");
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", &source, SPACEWASM_BUILD_TABLE);
+    let output = infs_without_wasmtime(&infc_path, temp.path(), &["run"]);
+    let stderr = lines_of(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+
+    let warning = stderr
+        .iter()
+        .position(|line| line.starts_with("warning: spacewasm: control nesting "))
+        .unwrap_or_else(|| panic!("the build must warn about the nesting, got: {stderr:?}"));
+    let depth: u32 = stderr[warning]
+        .trim_start_matches("warning: spacewasm: control nesting ")
+        .split(' ')
+        .next()
+        .and_then(|depth| depth.parse().ok())
+        .expect("the warning opens with the depth");
+    assert!(depth > 64, "the program must nest past the reference bound, got {depth}");
+    assert_eq!(
+        stderr[stderr.len() - 2..],
+        [
+            format!(
+                "Error: `infs run` cannot load {}: its control nesting of {depth} frames (in \
+                 `main`) exceeds the 64 that `infs run` gives the SpaceWasm interpreter.",
+                joined(&["out", "main.wasm"]).display()
+            ),
+            format!(
+                "`infs run` loads every module at the spacewasm_std reference configuration (64 \
+                 control frames, 256 operand-stack values, 256 IR code pages), and the build \
+                 warned above that this module needs more. The module is conformant, and an \
+                 embedder built with MAX_CONTROL_FRAMES >= {depth} loads it; to run it here, \
+                 flatten the nesting in the functions that warning names."
+            ),
+        ]
+    );
+    assert!(warning < stderr.len() - 2, "the warning precedes the refusal");
+}
+
+/// `infs run` gives the interpreter the reference embedder's 1,024 words of
+/// value stack: a chain of four calls whose frames hold 300 locals each needs
+/// more, and traps, although it fits the 65,536 words the test tier runs with.
+///
+/// Fails if the run is given any stack but the reference one — the test tier's
+/// among them, under which this chain returns.
+#[test]
+fn the_interpreter_runs_with_the_reference_embedders_stack() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let function = |name: &str, callee: Option<&str>| {
+        let locals = (0..300)
+            .map(|index| format!("    let v{index}: i32 = {index};\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let call = callee.map(|callee| format!(" + {callee}()")).unwrap_or_default();
+        format!("fn {name}() -> i32 {{\n{locals}    return v0 + v299{call};\n}}\n\n")
+    };
+    let source = format!(
+        "pub fn main() -> i32 {{\n    return first();\n}}\n\n{}{}{}{}",
+        function("first", Some("second")),
+        function("second", Some("third")),
+        function("third", Some("fourth")),
+        function("fourth", None),
+    );
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", &source, SPACEWASM_BUILD_TABLE);
+    let output = infs_without_wasmtime(&infc_path, temp.path(), &["run"]);
+    let stderr = lines_of(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "got stderr: {stderr:?}");
+    assert_eq!(
+        stderr[stderr.len() - 2..],
+        [
+            "Error: `main` trapped: the interpreter's call stack is full (StackOverflow)."
+                .to_string(),
+            "`infs run` gives the interpreter 1024 words of call stack, as spacewasm_std does, \
+             and this call chain's frames need more. Recursion is refused at compile time \
+             (A035), so a deep chain of large frames is the cause."
+                .to_string(),
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -8981,8 +9908,10 @@ fn a_spacewasm_project_declaring_the_optimizer_still_loads() {
 // token, and only to a compiler that can honor it. A malformed table fails every
 // command that loads the manifest, and a `[wasm-dependencies]` key under the
 // reserved `host` segment is refused before a compiler is asked to build.
-// `infs run` builds a program that binds host imports and then refuses to
-// execute it: it supplies no host functions and stands in for no embedder.
+// `infs run` builds a `wasm32` program that binds host imports and then refuses
+// to execute it: wasmtime runs it with no host function registered. When every
+// import is an F´ reference host at its reference signature, the refusal names
+// the `spacewasm` target, whose route provides them.
 // ---------------------------------------------------------------------------
 
 /// `src/main.inf` binding three host imports from two modules, in the F´
@@ -9315,19 +10244,20 @@ fn the_allowlist_gate_opens_at_minor_eight_or_on_a_matching_commit() {
     );
 }
 
-/// `infs run` builds a program that binds host imports, then refuses to execute
-/// it: it supplies no host functions and does not stand in for an embedder, so
-/// handing the artifact to wasmtime would fail on an unknown import, in words
-/// that read as a broken build.
+/// `infs run` builds a `wasm32` program that binds host imports, then refuses to
+/// execute it: wasmtime runs it with no host function registered, so handing it
+/// the artifact would fail on an unknown import, in words that read as a broken
+/// build. Every import here is an F´ reference host at its reference signature,
+/// so the refusal names the target whose route provides them.
 ///
-/// The whole diagnosis is pinned — the count, one `module.field` line per import
-/// sorted by module and then field, the policy, where the program does run, and
-/// the book's chapter and section. The book itself is read too, so renaming the
-/// chapter or the section the refusal names reds this test rather than leaving
-/// the refusal pointing at a heading that is gone. `out/main.wasm` is asserted
-/// to exist, because the refusal is decided from the artifact and so must follow
-/// the build rather than precede it; and wasmtime is asserted never to have been
-/// invoked.
+/// The whole diagnosis is pinned — the target, the count, one `module.field`
+/// line per import sorted by module and then field, the policy, the target to
+/// switch to, where else the program runs, and the book's chapter and section.
+/// The book itself is read too, so renaming the chapter or the section the
+/// refusal names reds this test rather than leaving the refusal pointing at a
+/// heading that is gone. `out/main.wasm` is asserted to exist, because the
+/// refusal is decided from the artifact and so must follow the build rather
+/// than precede it; and wasmtime is asserted never to have been invoked.
 #[test]
 fn infs_run_refuses_a_project_whose_artifact_imports_host_functions() {
     let Some(infc_path) = require_infc_and_wasmtime() else {
@@ -9346,14 +10276,15 @@ fn infs_run_refuses_a_project_whose_artifact_imports_host_functions() {
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
 
     let expected = format!(
-        "`infs run` cannot execute this program: {} imports 3 functions that its \
-         embedder must supply.\n  env.clock_ms\n  fprime_core.command\n  \
-         fprime_core.telemetry\n`infs run` supplies no host functions and does not stand \
-         in for an embedder, not even with the WASI functions the wasmtime CLI provides \
-         on its own, so it executes no artifact that imports a function. Run the program \
-         from your embedder, which supplies these functions. See the book's External \
-         Functions and WASM Linking chapter (\"Running a program that binds host \
-         imports\") for how an embedder registers them.",
+        "`infs run` cannot execute this program at the `wasm32` target: {} imports 3 \
+         functions that its embedder must supply.\n  env.clock_ms\n  fprime_core.command\n  \
+         fprime_core.telemetry\nA `wasm32` build runs under wasmtime, where `infs run` \
+         registers no host functions. All three are F Prime reference hosts, which `infs run` \
+         provides to a `spacewasm` build: set `target = \"spacewasm\"` under `[build]` in \
+         Inference.toml and run it again to execute the program under the SpaceWasm \
+         interpreter. Otherwise, run it from the embedder that supplies them. See the book's \
+         External Functions and WASM Linking chapter (\"Running a program that binds host \
+         imports\").",
         joined(&["out", "main.wasm"]).display()
     );
     assert!(
@@ -9388,12 +10319,105 @@ fn infs_run_refuses_a_project_whose_artifact_imports_host_functions() {
     }
 }
 
+/// A `wasm32` project whose manifest sets `mode = "proof"` and a
+/// `wasm-features` list, both of which the `spacewasm` target refuses, is told
+/// to remove them as well as to set the target, from project mode and from a
+/// file inside the project alike, which reads the same manifest. `infs run`
+/// builds in compile mode whatever `[build] mode` says, so the program builds
+/// and is refused for its imports.
+///
+/// Fails if the remedy promises a run that loading the edited manifest would
+/// refuse, or if either route stops handing the refusal the manifest it built
+/// with.
+#[test]
+fn infs_run_tells_a_project_to_remove_the_keys_the_spacewasm_target_refuses() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_HOST_SRC,
+        "[build]\nmode = \"proof\"\nwasm-features = [\"bulk-memory\"]\n",
+    );
+    let remedy = "All three are F Prime reference hosts, which `infs run` provides to a \
+                  `spacewasm` build: set `target = \"spacewasm\"` under `[build]` in \
+                  Inference.toml, remove `mode = \"proof\"` and `wasm-features`, which that \
+                  target refuses, and run it again to execute the program under the SpaceWasm \
+                  interpreter.";
+    let entry = joined(&["src", "main.inf"]);
+    for args in [vec!["run"], vec!["run", entry.to_str().unwrap()]] {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .args(&args);
+        let assert = cmd.assert().code(1);
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains(remedy),
+            "`infs {}` must read:\n{remedy}\ngot:\n{stderr}",
+            args.join(" ")
+        );
+    }
+}
+
+/// A host import outside the F´ reference set, or a reference host at another
+/// signature, is refused with no target to switch to, since the `spacewasm`
+/// route would refuse it too: the policy, and only where the program runs.
+///
+/// Fails if the choice between the two refusals reads names and not
+/// signatures, or offers the `spacewasm` target to a program it cannot run.
+#[test]
+fn infs_run_refuses_host_imports_outside_the_reference_set_with_no_target_to_switch_to() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    for (source, listed) in [
+        (
+            "external fn beep();\nexternal fn clock_ms() -> i64;\n\
+             use { beep, clock_ms } from host::env;\n\n\
+             pub fn main() -> i32 {\n    return 0;\n}\n",
+            "imports 2 functions that its embedder must supply.\n  env.beep\n  env.clock_ms\n",
+        ),
+        (
+            "external fn clock_ms() -> i32;\nuse { clock_ms } from host::env;\n\n\
+             pub fn main() -> i32 {\n    return 0;\n}\n",
+            "imports 1 function that its embedder must supply.\n  env.clock_ms\n",
+        ),
+    ] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project(&temp, "demo", source);
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("run");
+        let assert = cmd.assert().code(1);
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(stderr.contains(listed), "got:\n{stderr}");
+        assert!(
+            stderr.contains(
+                "A `wasm32` build runs under wasmtime, and `infs run` registers no host \
+                 functions there — not even the WASI functions the wasmtime CLI provides on its \
+                 own — so it executes no `wasm32` artifact that imports a function. `infs run` \
+                 provides host functions only to a `spacewasm` build, and only the F Prime \
+                 reference set at its reference signatures,"
+            ),
+            "got:\n{stderr}"
+        );
+        assert!(!stderr.contains("set `target"), "no target is offered, got:\n{stderr}");
+    }
+}
+
 /// The same refusal on the single-file path, naming the artifact that path
 /// writes — `out/<stem>.wasm` — and in the singular for a program binding one
-/// host import, so every agreement in the sentence is exercised. Single-file
-/// `run` refuses from its own call site, so it is asserted on its own that
-/// wasmtime never ran: a refusal printed after an attempt to execute would read
-/// the same.
+/// host import, so every agreement in the sentence is exercised. The file is
+/// outside any project, so it has no manifest to name a target in, and the
+/// refusal says how to make one first. Single-file `run` refuses from its own
+/// call site, so it is asserted on its own that wasmtime never ran: a refusal
+/// printed after an attempt to execute would read the same.
 #[test]
 fn infs_run_refuses_a_single_file_whose_artifact_imports_a_host_function() {
     let Some(infc_path) = require_infc_and_wasmtime() else {
@@ -9418,13 +10442,15 @@ fn infs_run_refuses_a_single_file_whose_artifact_imports_a_host_function() {
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
 
     let expected = format!(
-        "`infs run` cannot execute this program: {} imports 1 function that its embedder \
-         must supply.\n  env.clock_ms\n`infs run` supplies no host functions and does not \
-         stand in for an embedder, not even with the WASI functions the wasmtime CLI \
-         provides on its own, so it executes no artifact that imports a function. Run the \
-         program from your embedder, which supplies this function. See the book's \
-         External Functions and WASM Linking chapter (\"Running a program that binds host \
-         imports\") for how an embedder registers it.",
+        "`infs run` cannot execute this program at the `wasm32` target: {} imports 1 function \
+         that its embedder must supply.\n  env.clock_ms\nA `wasm32` build runs under wasmtime, \
+         where `infs run` registers no host functions. `env.clock_ms` is an F Prime reference \
+         host, which `infs run` provides to a `spacewasm` build. This file is not inside a \
+         project, so it builds at the default `wasm32` target: run `infs init` in its \
+         directory, set `target = \"spacewasm\"` under `[build]` in the Inference.toml it \
+         writes, and run it again. Otherwise, run it from the embedder that supplies it. See \
+         the book's External Functions and WASM Linking chapter (\"Running a program that \
+         binds host imports\").",
         joined(&["out", "sensor.wasm"]).display()
     );
     assert!(
@@ -9621,8 +10647,8 @@ fn a_host_import_the_optimizer_removed_is_reported_and_no_longer_blocks_infs_run
     let refused = infs(&["run", "--no-wasm-opt"]).assert().code(1);
     let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
     let expected = format!(
-        "`infs run` cannot execute this program: {} imports 1 function that its embedder \
-         must supply.\n  env.clock_ms\n",
+        "`infs run` cannot execute this program at the `wasm32` target: {} imports 1 function \
+         that its embedder must supply.\n  env.clock_ms\n",
         joined(&["out", "main.wasm"]).display()
     );
     assert!(

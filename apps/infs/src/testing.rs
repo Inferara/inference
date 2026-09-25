@@ -157,6 +157,69 @@ pub(crate) fn module_with_imports(imports: &[(&str, &str, wasm_encoder::EntityTy
     module.finish()
 }
 
+/// A module importing each `(module, field, params, results)` as a function of
+/// that signature, each under a type of its own, and holding nothing else.
+///
+/// The typed counterpart of [`module_with_imports`], for a question that reads
+/// an import's signature as well as its names.
+pub(crate) fn module_with_function_imports(
+    imports: &[(&str, &str, &[wasm_encoder::ValType], &[wasm_encoder::ValType])],
+) -> Vec<u8> {
+    use wasm_encoder::{EntityType, ImportSection, Module, TypeSection};
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    let mut section = ImportSection::new();
+    for (index, &(module_name, field, params, results)) in (0_u32..).zip(imports) {
+        types
+            .ty()
+            .function(params.iter().copied(), results.iter().copied());
+        section.import(module_name, field, EntityType::Function(index));
+    }
+    module.section(&types);
+    module.section(&section);
+    module.finish()
+}
+
+/// A module exporting each `(name, params, results)` as a function of that
+/// signature whose body leaves a zero of each result type, and holding nothing
+/// else.
+pub(crate) fn module_exporting(
+    functions: &[(&str, &[wasm_encoder::ValType], &[wasm_encoder::ValType])],
+) -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
+        TypeSection, ValType,
+    };
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    let mut funcs = FunctionSection::new();
+    let mut exports = ExportSection::new();
+    let mut code = CodeSection::new();
+    for (index, &(name, params, results)) in (0_u32..).zip(functions) {
+        types
+            .ty()
+            .function(params.iter().copied(), results.iter().copied());
+        funcs.function(index);
+        exports.export(name, ExportKind::Func, index);
+        let mut body = Function::new([]);
+        for result in results {
+            match result {
+                ValType::I64 => body.instruction(&Instruction::I64Const(0)),
+                ValType::F32 => body.instruction(&Instruction::F32Const(0.0_f32.into())),
+                ValType::F64 => body.instruction(&Instruction::F64Const(0.0_f64.into())),
+                _ => body.instruction(&Instruction::I32Const(0)),
+            };
+        }
+        body.instruction(&Instruction::End);
+        code.function(&body);
+    }
+    module.section(&types);
+    module.section(&funcs);
+    module.section(&exports);
+    module.section(&code);
+    module.finish()
+}
+
 /// How many times [`retry_while_exec_busy`] runs its operation before giving up.
 const EXEC_BUSY_ATTEMPTS: u32 = 50;
 

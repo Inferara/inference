@@ -30,8 +30,8 @@ cargo build -p infs --release
 |---------|-------------|
 | `infs build` | Compile project entry point (`src/main.inf`) to WASM (project mode) |
 | `infs build <file>` | Compile a single source file to WASM (single-file mode) |
-| `infs run` | Build project entry point and execute with wasmtime (project mode) |
-| `infs run <file>` | Build and execute a single source file with wasmtime |
+| `infs run` | Build project entry point and execute it (project mode): under wasmtime, or in process under the SpaceWasm interpreter for a `spacewasm` build |
+| `infs run <file>` | Build and execute a single source file, on the same runtime its enclosing project's target selects |
 
 ### Project Management
 
@@ -132,7 +132,7 @@ Five manifest settings are also honored in **single-file** mode, by walking up t
 
 Every table with a fixed set of fields rejects keys it does not recognize, so a misspelled manifest key is an error naming the offending key and the accepted ones, not a setting that silently does nothing.
 
-CLI flags always override manifest settings. `infs run` ignores `[build] mode` entirely and always builds an executable in `out/` (proof-mode WASM contains non-deterministic opcodes that `wasmtime` cannot execute) — but it does honor `[build.wasm-opt]`, since `run` optimizes exactly what it then executes. `[build.wasm-opt]` applies only to compile-mode artifacts (proof-mode and `-v` builds always skip it) and can be skipped for a single invocation with `--no-wasm-opt`. `wasm-opt` itself does not need to be preinstalled: run `infs component add wasm-opt` to provision the pinned, checksum-verified Binaryen up front, or set `auto-install = true` under `[build.wasm-opt]` to have `infs` download it automatically the first time a build needs it. See [`docs/inference-toml.md`](docs/inference-toml.md) for the full field reference, including the non-deterministic-construct hard error and the complete `wasm-opt` resolution order.
+CLI flags always override manifest settings. `infs run` ignores `[build] mode` entirely and always builds an executable in `out/` (proof-mode WASM contains non-deterministic opcodes that neither `wasmtime` nor the SpaceWasm interpreter can decode) — but it does honor `[build.wasm-opt]`, since `run` optimizes exactly what it then executes. `[build.wasm-opt]` applies only to compile-mode artifacts (proof-mode and `-v` builds always skip it) and can be skipped for a single invocation with `--no-wasm-opt`. `wasm-opt` itself does not need to be preinstalled: run `infs component add wasm-opt` to provision the pinned, checksum-verified Binaryen up front, or set `auto-install = true` under `[build.wasm-opt]` to have `infs` download it automatically the first time a build needs it. See [`docs/inference-toml.md`](docs/inference-toml.md) for the full field reference, including the non-deterministic-construct hard error and the complete `wasm-opt` resolution order.
 
 ### Run Command
 
@@ -156,6 +156,9 @@ infs run example.inf -L libs
 # Pass arguments to the program (single-file only)
 infs run example.inf -- arg1 arg2
 
+# spacewasm build: stop the interpreter after 10^6 instructions
+infs run --fuel 1000000
+
 # Project mode: build, but skip [build.wasm-opt] for this run
 infs run --no-wasm-opt
 ```
@@ -165,12 +168,13 @@ infs run --no-wasm-opt
 | Flag | Description |
 |------|-------------|
 | `--entry-point <name>` | Function to invoke in single-file mode (default `main`); project mode always invokes `main`, and requesting anything else is rejected with guidance to use single-file mode |
+| `--fuel <N>` | Stop a `spacewasm` run after N of the SpaceWasm interpreter's own instructions, exiting with status 1; without it a run has no budget. Refused, before anything is built, for a build that runs under wasmtime |
 | `-L <dir>` / `--wasm-lib-dir <dir>` | Directory to search for external `.wasm` modules referenced by `use { … } from <module>;`; repeatable. In project mode a relative dir is anchored to the directory you invoked `infs` from; in single-file mode no anchoring step runs, because `infc` already inherits that directory as its working directory |
 | `--no-wasm-opt` | Skip `[build.wasm-opt]` post-build optimization (project mode only) |
 
 In single-file mode, options must appear before the first bare trailing token: everything from that token onward — including anything that looks like a flag — is passed to the invoked function instead of being parsed by `infs run`. `infs run f.inf -L libs 1` parses `-L libs` and passes `1` to the function; `infs run f.inf 1 -L libs` passes `1 -L libs` verbatim and parses no `-L` at all. Use `--` to pass arguments that themselves start with `-` unambiguously.
 
-Requires `wasmtime` to be installed. In both modes, `infs run` resolves the enclosing or discovered manifest's `[wasm-dependencies]` and forwards any `-L` directories, so a file or project binding `use { … } from <module>` runs without a separate link step. In project mode, `infs run` also applies the same `[build.wasm-opt]` post-build optimization as `infs build` before executing the result. A program that binds host imports (`use { … } from host::<module>`) is built and then refused, naming each function its artifact imports — in project mode after a `[build.wasm-opt]` step that runs, which at any level but `"0"` removes a host import the program never calls: `infs run` supplies no host functions and does not let wasmtime stand in for the embedder that does — not even for the WASI functions the wasmtime CLI provides on its own — so the program runs only under that embedder.
+Where the build runs is its `[build] target`'s to decide. A `wasm32` build runs under `wasmtime`, which must be installed. A `spacewasm` build runs in process under the SpaceWasm flight interpreter, embedded through `inference-spacewasm-runner` at the reference embedder's configuration, and needs no runtime of its own; `main`'s return value is the last line on stdout, the F´ (F Prime) reference hosts log their calls to stderr, and a refused import, a trap or an exhausted `--fuel` budget exits with status 1. A `stellar` build is refused before anything is built. In both modes, `infs run` resolves the enclosing or discovered manifest's `[wasm-dependencies]` and forwards any `-L` directories, so a file or project binding `use { … } from <module>` runs without a separate link step. In project mode, `infs run` also applies the same `[build.wasm-opt]` post-build optimization as `infs build` before executing the result. A program that binds host imports (`use { … } from host::<module>`) runs only as a `spacewasm` build whose imports are all F´ reference hosts at their reference signatures — `infs run` provides those six and no others, and refuses any other import before the interpreter decodes the module. At `wasm32` it is built and then refused, naming each function its artifact imports — in project mode after a `[build.wasm-opt]` step that runs, which at any level but `"0"` removes a host import the program never calls: `infs run` registers no host function under wasmtime and does not let wasmtime stand in for the embedder that does — not even for the WASI functions the wasmtime CLI provides on its own. When every import is an F´ reference host at its reference signature, the refusal names the `spacewasm` target; otherwise the program runs only under its embedder.
 
 ### Project Commands
 
@@ -298,7 +302,8 @@ This crate is the unified CLI that orchestrates:
 | Module | Description |
 |--------|-------------|
 | `commands::build` | `infs build`: single-file and project-mode compilation |
-| `commands::run` | `infs run`: compile + execute via wasmtime |
+| `commands::run` | `infs run`: compile + execute, choosing the runtime from the target |
+| `commands::interpreter` | The `spacewasm` route of `infs run`: the SpaceWasm interpreter, embedded, with the F´ reference hosts |
 | `commands::project_build` | Shared project-build helper (spawn, ABI handshake, `--out-dir` gate) |
 | `commands::new` | `infs new`: scaffold a project in a new directory |
 | `commands::init` | `infs init`: initialize the current directory as a project |
@@ -312,7 +317,7 @@ Some commands require external tools:
 
 | Command | Requires |
 |---------|----------|
-| `infs run` | wasmtime |
+| `infs run` | wasmtime, for a `wasm32` build; nothing, for a `spacewasm` build, whose interpreter is part of `infs` |
 
 Run `infs doctor` to check if all dependencies are available.
 
@@ -458,6 +463,9 @@ Test fixtures are located in `tests/fixtures/`:
 Some integration tests are conditional:
 - `run_full_workflow_with_wasmtime` - requires wasmtime
 - Unix-specific tests (permissions) - `#[cfg(unix)]`
+
+The `infs run` rows that execute a `spacewasm` build need `infc` only: each runs with wasmtime removed from
+PATH, which is what shows that route needs no runtime of its own.
 
 These tests skip gracefully when external tools or platforms are unavailable, except when `CI` is set to
 a non-empty, non-`0` value: a missing `infc` or `wasmtime` then fails the run rather than skipping, because

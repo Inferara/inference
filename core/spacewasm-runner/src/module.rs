@@ -371,6 +371,26 @@ impl LoadedModule<'_> {
             .collect()
     }
 
+    /// The function this module exports under `name`, with its WebAssembly
+    /// signature, or the refusal [`LoadedModule::invoke`] would give a call
+    /// of it.
+    ///
+    /// It resolves the name as a call does and stops there, so a caller can
+    /// read what a function takes before it decides to call it — and, taking
+    /// the module shared, it cannot run any of it.
+    ///
+    /// # Errors
+    ///
+    /// [`InvokeError::NoSuchExport`] when the module exports nothing under
+    /// `name`, [`InvokeError::NotAFunction`] when it exports a memory, a table
+    /// or a global, and [`InvokeError::HostReexport`] when it exports a host
+    /// import again.
+    pub fn function(&self, name: &str) -> Result<ExportedFunction, InvokeError> {
+        let reference = self.resolve(name)?;
+        let (params, result) = self.signature(reference);
+        Ok(ExportedFunction { name: name.to_string(), params, result })
+    }
+
     /// Calls `export` with `args` under a `fuel`-instruction budget of its
     /// own, whatever the budget the module was loaded under.
     ///

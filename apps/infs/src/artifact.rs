@@ -15,11 +15,15 @@
 //! needs a different subset of the same facts reads them from the module that
 //! owns the parse, instead of reaching into a sibling command for them or
 //! opening a second pass of its own.
+//!
+//! One question is asked on its own pass, [`exported_function_signature`]: the
+//! type of one export, which only `infs run` needs, of one artifact it is about
+//! to invoke, and which no answer of the scan has to agree with.
 
 use std::path::Path;
 
 use anyhow::Result;
-use inf_wasmparser::{Operator, Parser, Payload, TypeRef};
+use inf_wasmparser::{ExternalKind, FuncType, Operator, Parser, Payload, TypeRef};
 
 /// The custom section recording which functions of a module trap on arithmetic
 /// overflow.
@@ -148,6 +152,69 @@ pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<Artifa
         records_overflow_guards,
         function_imports,
     })
+}
+
+/// The WebAssembly type of the function `wasm_bytes` exports as `name`, or
+/// `None` when it exports no function by that name.
+///
+/// The type is the compiled function's, which is not always the one its source
+/// declares: a struct or array parameter is an `i32` address, and a function
+/// returning a struct or array takes the address to write its result to as a
+/// hidden first parameter and returns nothing. An exported import is typed by
+/// its import, since imported functions come first in the function index space.
+///
+/// `artifact` is the file `wasm_bytes` were read from, and names it in a
+/// failure, as it does for [`scan_artifact`].
+///
+/// # Errors
+///
+/// Errors if the artifact's type, import, function or export section cannot be
+/// read.
+pub(crate) fn exported_function_signature(
+    wasm_bytes: &[u8],
+    name: &str,
+    artifact: &Path,
+) -> Result<Option<FuncType>> {
+    let unreadable = |err: inf_wasmparser::BinaryReaderError| {
+        anyhow::anyhow!("failed to read {}: {err}", artifact.display())
+    };
+    let mut types = Vec::new();
+    let mut function_types = Vec::new();
+    let mut exported = None;
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        match payload.map_err(unreadable)? {
+            Payload::TypeSection(reader) => {
+                for ty in reader.into_iter_err_on_gc_types() {
+                    types.push(ty.map_err(unreadable)?);
+                }
+            }
+            Payload::ImportSection(reader) => {
+                for import in reader {
+                    if let TypeRef::Func(ty) = import.map_err(unreadable)?.ty {
+                        function_types.push(ty);
+                    }
+                }
+            }
+            Payload::FunctionSection(reader) => {
+                for ty in reader {
+                    function_types.push(ty.map_err(unreadable)?);
+                }
+            }
+            Payload::ExportSection(reader) => {
+                for export in reader {
+                    let export = export.map_err(unreadable)?;
+                    if export.name == name && export.kind == ExternalKind::Func {
+                        exported = Some(export.index);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(exported
+        .and_then(|function| function_types.get(function as usize))
+        .and_then(|ty| types.get(*ty as usize))
+        .cloned())
 }
 
 /// Whether `op` belongs to the bulk-memory proposal.
@@ -391,5 +458,88 @@ mod tests {
                 "no function import was declared, got: {function_imports:?}"
             );
         }
+    }
+
+    /// The type of the function a module exports under a name, read in the
+    /// function index space: a local function by its own type, an exported
+    /// import by its import's, and nothing for a name that is not a function's.
+    ///
+    /// Fails if the index space stops counting imports first, which reads a
+    /// local export's type off the wrong entry once a module imports anything.
+    #[test]
+    fn an_exports_signature_is_read_in_the_function_index_space() {
+        use crate::testing::module_exporting;
+        use inf_wasmparser::ValType as Read;
+        use wasm_encoder::{
+            CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
+            ImportSection, Instruction, MemorySection, MemoryType, Module, TypeSection,
+            ValType::{I32, I64},
+        };
+
+        let signature = |module: &[u8], name: &str| {
+            exported_function_signature(module, name, Path::new("scanned.wasm"))
+                .expect("the module parses")
+                .map(|ty| (ty.params().to_vec(), ty.results().to_vec()))
+        };
+
+        let plain = module_exporting(&[("add", &[I32, I32], &[I32]), ("main", &[I64], &[])]);
+        assert_eq!(signature(&plain, "main"), Some((vec![Read::I64], vec![])));
+        assert_eq!(
+            signature(&plain, "add"),
+            Some((vec![Read::I32, Read::I32], vec![Read::I32]))
+        );
+        assert_eq!(signature(&plain, "missing"), None);
+
+        // Type 0 is the import's `(i64) -> i32`, type 1 the local `main`'s
+        // `(i32) -> ()`; `main` is function 1, after the one import.
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([I64], [I32]);
+        types.ty().function([I32], []);
+        module.section(&types);
+        let mut imports = ImportSection::new();
+        imports.import("env", "f", EntityType::Function(0));
+        module.section(&imports);
+        let mut funcs = FunctionSection::new();
+        funcs.function(1);
+        module.section(&funcs);
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&memories);
+        let mut exports = ExportSection::new();
+        exports.export("main", ExportKind::Func, 1);
+        exports.export("reexported", ExportKind::Func, 0);
+        exports.export("memory", ExportKind::Memory, 0);
+        module.section(&exports);
+        let mut code = CodeSection::new();
+        let mut body = Function::new([]);
+        body.instruction(&Instruction::End);
+        code.function(&body);
+        module.section(&code);
+        let module = module.finish();
+
+        assert_eq!(signature(&module, "main"), Some((vec![Read::I32], vec![])));
+        assert_eq!(
+            signature(&module, "reexported"),
+            Some((vec![Read::I64], vec![Read::I32]))
+        );
+        assert_eq!(
+            signature(&module, "memory"),
+            None,
+            "a memory is not a function, whatever its name"
+        );
+        assert!(
+            exported_function_signature(b"\0asm\x01\0\0\0\x07", "main", Path::new("cut.wasm"))
+                .expect_err("a truncated export section is an error")
+                .to_string()
+                .contains("cut.wasm"),
+            "a failure names the artifact"
+        );
     }
 }
