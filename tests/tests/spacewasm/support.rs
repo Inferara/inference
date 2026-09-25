@@ -116,7 +116,7 @@
 //! for `f32` and `d` for `f64` — so an artifact binding
 //! `use { f } from host::<module>;` can be loaded and called here instead of
 //! only being named as a load failure. `--host env.clock_ms=:I` is a nullary
-//! import returning an `i64`; `--host fprime_core.telemetry=ii:i` takes two
+//! import returning an `i64`; `--host fprime_core.command=ii:i` takes two
 //! `i32` and returns one.
 //!
 //! A stub is not an embedder. It returns zero of its result type, never

@@ -363,7 +363,7 @@ level = "z"
 `infc` emits an import for every `use { … } from host::<module>` binding, whether or not the program calls the function, and its `host imports:` line names each one. At every level but `"0"`, `wasm-opt` removes unused module elements, an imported function nothing calls among them, so the optimized artifact declares only the host imports the program calls. That is by design: the shipped artifact states the interface the program uses. When the optimizer changed the set, the build log says so right after the size line, naming what went and what is left:
 
 ```text
-wasm-opt -Oz: main.wasm 163 -> 103 bytes
+wasm-opt -Oz: main.wasm 300 -> 202 bytes
 wasm-opt removed 1 host import the program never calls: env.clock_ms; the artifact now imports fprime_core.command, fprime_core.telemetry
 ```
 

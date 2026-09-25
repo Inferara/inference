@@ -815,22 +815,33 @@ for `i64`, `f` for `f32` and `d` for `f64`, so `env.clock_ms=:I` takes nothing
 and returns an `i64`. A stub answers zero of its result type, never traps and
 never reads guest memory, and each call it receives is printed to stderr as
 `host call: module.field(arg, …)`, ahead of the result of the invocation that
-made it. What that shows is which host functions the program asked for, with
-which arguments and in which order; what a real host would have answered is
-your embedder's to decide. For the F´ program
+made it. An array argument reaches a host as the address of the caller's
+buffer, so a stub logs that address, not the bytes behind it. What that shows
+is which host functions the program asked for, with which arguments and in
+which order; what a real host would have answered is your embedder's to
+decide. For the F´ program, which binds all six host functions of the F´
+(F Prime) reference set, at the signatures `spacewasm_std` registers them with,
+and calls four of them,
 
 ```inference
-external fn telemetry(channel: i32, value: i32) -> i32;
-external fn command(opcode: i32) -> i32;
-use { telemetry, command } from host::fprime_core;
+external fn panic(text: [u8; 6], len: i32, line: i32);
+external fn rsleep(ticks: i64);
+external fn command(opcode: i32, arg: i32) -> i32;
+external fn message(text: [u8; 6], len: i32);
+external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; 4], value_len: i32) -> i32;
+use { panic, rsleep, command, message, telemetry } from host::fprime_core;
 
 external fn clock_ms() -> i64;
 use { clock_ms } from host::env;
 
 pub fn report(channel: i32) -> i64 {
-    let ack: i32 = command(channel);
-    let sent: i32 = telemetry(channel, ack);
-    if sent == 0 {
+    let text: [u8; 6] = [114, 101, 112, 111, 114, 116]; // "report"
+    message(text, 6);
+    let id: i32 = command(1, channel);
+    let mut time: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]; // distinct from zeroed memory
+    let value: [u8; 4] = [21, 0, 0, 0]; // 21, as a little-endian u32
+    let status: i32 = telemetry(id, time, 11, value, 4);
+    if status != 0 {
         return 0;
     }
     return clock_ms();
@@ -841,17 +852,25 @@ built into `out/main.wasm` the same way:
 
 ```bash
 cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm \
-    --host fprime_core.telemetry=ii:i --host fprime_core.command=i:i \
-    --host env.clock_ms=:I --invoke report 1
-host call: fprime_core.command(1)
-host call: fprime_core.telemetry(1, 0)
+    --host fprime_core.panic=iii --host fprime_core.rsleep=I \
+    --host fprime_core.command=ii:i --host fprime_core.message=ii \
+    --host fprime_core.telemetry=iiiii:i --host env.clock_ms=:I \
+    --invoke report 3
+host call: fprime_core.message(65504, 6)
+host call: fprime_core.command(1, 3)
+host call: fprime_core.telemetry(0, 65510, 11, 65521, 4)
+host call: env.clock_ms()
 report = 0
 ```
 
-`telemetry`'s stub answered zero, so `report` returned zero without asking the
-clock. A name longer than 31 bytes, more than nine parameters or more than one
-result is a usage error that names the interpreter's own refusal and the limit
-behind it, both read from the interpreter rather than restated by the harness.
+Every stub answered zero: `command`'s zero became `telemetry`'s id,
+`telemetry`'s zero read as accepted, so `report` went on to ask the clock, and
+the clock's zero is what it returned. `panic` and `rsleep` are bound and never
+called, and still need a stub, because the interpreter binds every import when
+it decodes the module. A name longer than 31 bytes, more than nine parameters
+or more than one result is a usage error that names the interpreter's own
+refusal and the limit behind it, both read from the interpreter rather than
+restated by the harness.
 Two counts are usage errors as well, because the interpreter does not check them
 and would bind the excess imports to other stubs without a word: more than 256
 module names, which its one-byte host-module reference cannot address, and more
@@ -863,12 +882,15 @@ verdict names no import, so the harness reads the module a second time and
 lists each `module.field` beside the spec it needs:
 
 ```bash
-cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm --invoke report 1
-error: out/main.wasm does not load under the SpaceWasm interpreter: FunctionImportNotFound at byte 58
+cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm --invoke report 3
+error: out/main.wasm does not load under the SpaceWasm interpreter: FunctionImportNotFound at byte 73
   reading the Import section
   it imports these, and no `--host` stub was registered for any of them:
-    fprime_core.telemetry: no stub; it needs `--host fprime_core.telemetry=ii:i`
-    fprime_core.command: no stub; it needs `--host fprime_core.command=i:i`
+    fprime_core.panic: no stub; it needs `--host fprime_core.panic=iii`
+    fprime_core.rsleep: no stub; it needs `--host fprime_core.rsleep=I`
+    fprime_core.command: no stub; it needs `--host fprime_core.command=ii:i`
+    fprime_core.message: no stub; it needs `--host fprime_core.message=ii`
+    fprime_core.telemetry: no stub; it needs `--host fprime_core.telemetry=iiiii:i`
     env.clock_ms: no stub; it needs `--host env.clock_ms=:I`
   register a stub for each with `--host MODULE.FIELD=PARAMS[:RESULT]`, or run the module from the embedder that supplies them
 ```

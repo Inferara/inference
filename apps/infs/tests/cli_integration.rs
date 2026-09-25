@@ -8823,15 +8823,20 @@ fn a_spacewasm_project_declaring_the_optimizer_still_loads() {
 // ---------------------------------------------------------------------------
 
 /// `src/main.inf` binding three host imports from two modules, in the F´
-/// flight-software vocabulary: a telemetry channel and a command dispatcher from
-/// `fprime_core`, and a clock from `env`. `clock_ms` is bound and never called,
-/// which ships its import all the same.
-const PROJECT_MAIN_HOST_SRC: &str = "external fn telemetry(channel: i32, value: i32) -> i32;\n\
-     external fn command(opcode: i32) -> i32;\n\
+/// flight-software vocabulary and at the signatures the F´ reference embedder
+/// registers: a telemetry downlink and a command dispatcher from `fprime_core`,
+/// and a clock from `env`. `clock_ms` is bound and never called, which ships
+/// its import all the same.
+const PROJECT_MAIN_HOST_SRC: &str = "external fn telemetry(id: i32, mut time: [u8; 11], \
+     time_len: i32, value: [u8; 4], value_len: i32) -> i32;\n\
+     external fn command(opcode: i32, arg: i32) -> i32;\n\
      use { telemetry, command } from host::fprime_core;\n\
      external fn clock_ms() -> i64;\n\
      use { clock_ms } from host::env;\n\n\
-     pub fn main() -> i32 {\n    let ack: i32 = command(1);\n    return telemetry(1, ack);\n}\n";
+     pub fn main() -> i32 {\n    let id: i32 = command(1, 0);\n    \
+     let mut time: [u8; 11] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];\n    \
+     let value: [u8; 4] = [21, 0, 0, 0];\n    \
+     return telemetry(id, time, 11, value, 4);\n}\n";
 
 /// A `[host-imports]` table admitting all three of those, written out of sorted
 /// order in both directions — modules and the fields of one — so a forward that
@@ -9756,6 +9761,33 @@ fn a_malformed_host_imports_table_fails_every_command_that_loads_it() {
     }
 }
 
+/// Every function `wasm` imports, as `wasmprinter` renders its import with the
+/// signature its type index names written in place of the index — `(import
+/// "env" "clock_ms" (func (result i64)))` — in import-section order.
+fn function_import_signatures(wasm: &[u8]) -> Vec<String> {
+    let wat = wasmprinter::print_bytes(wasm).expect("the artifact must be printable");
+    let types: Vec<&str> = wat
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("(type (;"))
+        .enumerate()
+        .map(|(position, rest)| {
+            let (index, func) = rest.split_once(";) ").expect("a type is printed with its index");
+            assert_eq!(index, position.to_string(), "types are printed in index order");
+            func.strip_suffix(')').expect("a type's line closes it")
+        })
+        .collect();
+    wat.lines()
+        .filter_map(|line| line.trim().strip_prefix("(import "))
+        .filter_map(|rest| {
+            let (names, func) = rest.split_once(" (func ")?;
+            let (_, index) = func.split_once("(type ")?;
+            let (index, _) = index.split_once(')')?;
+            let index: usize = index.parse().expect("an import's type index is a number");
+            Some(format!("(import {names} {})", types[index]))
+        })
+        .collect()
+}
+
 /// End to end through the real compiler, at the one target that checks what a
 /// host import may be named: the table is forwarded, `infc` accepts it in the
 /// spelling it was given, and the build log shows each step in order — the
@@ -9763,7 +9795,9 @@ fn a_malformed_host_imports_table_fails_every_command_that_loads_it() {
 /// no `(no allowlist)` qualifier), and the conformance summary. The manifest has
 /// no `[build.wasm-opt]`, so the inventory is the last word on the imports: the
 /// lines naming imports are the echo and the inventory, once each and in that
-/// order, and no `wasm-opt` line follows them.
+/// order, and no `wasm-opt` line follows them. The artifact's imports are read
+/// back too, each at the signature the F´ reference embedder registers its host
+/// with, which is what [`PROJECT_MAIN_HOST_SRC`] is written to.
 ///
 /// The second project's table omits `env`, and its build fails with `infc`'s own
 /// refusal — which is what proves the flag reached a real compiler at all, and
@@ -9826,6 +9860,16 @@ fn a_host_imports_table_reaches_the_real_compiler() {
     assert!(
         temp.child("out").child("main.wasm").path().is_file(),
         "the admitted build must write out/main.wasm"
+    );
+    assert_eq!(
+        function_import_signatures(&read_project_artifact(&temp)),
+        [
+            "(import \"fprime_core\" \"telemetry\" \
+             (func (param i32 i32 i32 i32 i32) (result i32)))",
+            "(import \"fprime_core\" \"command\" (func (param i32 i32) (result i32)))",
+            "(import \"env\" \"clock_ms\" (func (result i64)))",
+        ],
+        "each import must carry the F´ reference embedder's signature for its host"
     );
 
     let omitting = assert_fs::TempDir::new().unwrap();
