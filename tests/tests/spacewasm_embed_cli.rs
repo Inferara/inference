@@ -9,14 +9,14 @@
 //! In process and not through the built binary. `CARGO_BIN_EXE_*` — the way the
 //! `rocq-discharge` CLI test finds its subject — is set only for a package's
 //! `[[bin]]` targets, and the harness is deliberately an example so that it can
-//! see `spacewasm`, which is a dev-dependency. What is left is shelling out to
-//! `cargo run --example` from inside `cargo test`, which contends for the build
-//! lock the test run is already holding, on every CI leg at once.
+//! see the runner and `spacewasm`, which are dev-dependencies. What is left is
+//! shelling out to `cargo run --example` from inside `cargo test`, which
+//! contends for the build lock the test run is already holding, on every CI leg
+//! at once.
 //!
-//! This is a binary of its own, so it declares the interpreter's allocator
-//! singleton at its own root, exactly as the corpus-sweep binary next door does
-//! and for the same reason: the macro expands to `static mut` globals, and one
-//! binary is one interpreter.
+//! This is a binary of its own, and like the corpus-sweep binary next door it
+//! declares no interpreter allocator: `inference-spacewasm-runner`, which the
+//! harness loads through, defines it once for every program that links it.
 
 #[path = "spacewasm/support.rs"]
 mod support;
@@ -28,8 +28,6 @@ use std::rc::Rc;
 
 use inference_tests::corpus::wasm_for_target;
 use inference_wasm_codegen::Target;
-
-spacewasm::global_allocator!(support::StdAllocator, support::StdAllocator);
 
 // ---------------------------------------------------------------------------
 // Rigging
@@ -2015,6 +2013,61 @@ fn a_start_call_is_printed_once_before_the_invocations_calls() {
     assert_eq!(run.code, support::exit::OK, "{}", run.transcript());
     assert_eq!(run.out, "go = (unit)\n", "{}", run.transcript());
     assert_eq!(run.err, "host call: env.ping()\nhost call: env.pong()\n", "{}", run.transcript());
+}
+
+/// A start function that traps ends the run with the trap code, naming the
+/// start function and the interpreter's reason, after the calls it made.
+///
+/// The start function runs inside the load, so a module whose start traps
+/// never loaded: nothing is listed, measured or invoked, and stdout stays
+/// empty whatever the command line asked for. The second module traps for
+/// another reason and registers no host, so the line is shown to carry the
+/// reason the interpreter gave rather than one written down here. Fails if a
+/// trapping start function panics — which is what the harness did with one
+/// before the runner reported it as a load failure of its own — if it exits
+/// with another code or is reported as the decoder's refusal, if the line
+/// drops the start function or the reason, or if the call the start function
+/// made is dropped or printed after the line.
+#[test]
+fn a_trapping_start_function_exits_with_the_trap_code() {
+    let artifact = Artifact::assembled(
+        r#"(module
+             (import "env" "ping" (func $ping))
+             (func $setup (call $ping) (unreachable))
+             (start $setup)
+             (func (export "go")))"#,
+    );
+    let path = artifact.arg();
+    let expected = format!(
+        "host call: env.ping()\nerror: {path} does not load under the SpaceWasm interpreter: its \
+         start function trapped: Unreachable\n"
+    );
+    let asked: [&[&str]; 4] = [&[], &["--stats"], &["--stats", "--json"], &["--invoke", "go"]];
+    for tail in asked {
+        let mut argv = vec![path.as_str(), "--host", "env.ping="];
+        argv.extend_from_slice(tail);
+        let run = Run::of(&argv);
+        assert_eq!(run.code, support::exit::TRAP, "{tail:?}: {}", run.transcript());
+        assert_eq!(run.out, "", "{tail:?}: {}", run.transcript());
+        assert_eq!(run.err, expected, "{tail:?}: {}", run.transcript());
+    }
+
+    let dividing = Artifact::assembled(
+        "(module (func $setup (drop (i32.div_s (i32.const 1) (i32.const 0)))) (start $setup))",
+    );
+    let run = Run::of(&[&dividing.arg()]);
+    assert_eq!(run.code, support::exit::TRAP, "{}", run.transcript());
+    assert_eq!(run.out, "", "{}", run.transcript());
+    assert_eq!(
+        run.err,
+        format!(
+            "error: {} does not load under the SpaceWasm interpreter: its start function \
+             trapped: DivideByZero\n",
+            dividing.arg()
+        ),
+        "{}",
+        run.transcript()
+    );
 }
 
 /// A host call made before a trap is printed before the trap is.

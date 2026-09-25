@@ -38,6 +38,7 @@ inference-wasm-codegen = { path = "./core/wasm-codegen", version = "0.0.1" }
 inference-wasm-linker = { path = "./core/wasm-linker", version = "0.0.1" }
 inference-stellar-abi = { path = "./core/stellar-abi", version = "0.0.1" }
 inference-target-conformance = { path = "./core/target-conformance", version = "0.0.1" }
+inference-spacewasm-runner = { path = "./core/spacewasm-runner", version = "0.0.1" }
 inference-analysis = { path = "./core/analysis", version = "0.0.1" }
 inference-compiler-interface = { path = "./core/compiler-interface", version = "0.0.1" }
 inference-fn-key = { path = "./core/fn-key", version = "0.0.1" }
@@ -69,6 +70,17 @@ wasm-encoder = "0.254.0"
 # because the only consumer parses and validates a core module: no component
 # model, no serde, no SIMD.
 wasmparser = { version = "0.254.0", default-features = false, features = ["std", "validate", "features", "hash-collections"] }
+# The SpaceWasm flight interpreter, the runtime the `spacewasm` target is named
+# for: a `no_std` WebAssembly 1.0 decoder with no post-MVP proposal support.
+# The `=`-pin is the point rather than caution — its acceptance set is what
+# `inference-spacewasm-runner` loads against and what the test suite records,
+# and `inference-target-conformance` transcribes its limits from this release,
+# so a version bump has to be a reviewed act with the sweeps re-measured.
+# Features are chosen by each dependent, not here.
+# It brings one exact pin of its own, `libm =0.2.16`, and `libm` is shared with
+# cranelift and wasmtime: a future bump that needs a newer `libm` is
+# unresolvable until this pin moves, and that failure surfaces far from here.
+spacewasm = { version = "=0.7.1" }
 
 anyhow = "1.0.104"
 thiserror = "2.0.19"

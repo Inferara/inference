@@ -1,0 +1,26 @@
+[package]
+name = "inference-spacewasm-runner"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Loads and runs a WebAssembly module in process under the SpaceWasm flight interpreter"
+keywords = ["compiler", "webassembly", "spacewasm", "interpreter", "wasm"]
+categories = ["compilers", "wasm"]
+
+[dependencies]
+# The interpreter itself, pinned at the workspace. `strict-assertions` is on
+# unconditionally: without it the interpreter reads its own IR with
+# `get_unchecked` and its value-stack bounds checks compile to nothing, so a
+# malformed IR word or an out-of-range stack slot is undefined behaviour rather
+# than a panic. Upstream's own `spacewasm_std` embedding turns it on too.
+spacewasm = { workspace = true, features = ["strict-assertions"] }
+# The source of the reference embedder's two verifier bounds and of the
+# release the limits describe, which this crate re-exports rather than
+# restating.
+inference-target-conformance.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+wat = "1.225.0"

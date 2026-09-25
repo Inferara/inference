@@ -26,17 +26,16 @@
 //! Each stub answers zero and prints the calls it receives; what a stub is and
 //! is not is set out in the shared support module.
 //!
-//! An **example** rather than a `src/bin` target, because `spacewasm` is a
-//! dev-dependency of this package and only a test, an example or a bench sees
-//! one. The harness itself lives in the SpaceWasm tier's shared support module,
-//! which this file includes by path and which the CLI matrix drives in process;
-//! everything here is the binary root the interpreter's allocator singleton has
-//! to be declared at.
+//! An **example** rather than a `src/bin` target, because the runner it loads
+//! through, `inference-spacewasm-runner`, is a dev-dependency of this package
+//! and only a test, an example or a bench sees one. The harness itself lives in
+//! the SpaceWasm tier's shared support module, which this file includes by path
+//! and which the CLI matrix drives in process, so this file is only the binary
+//! root. It declares no interpreter allocator: the runner defines it once for
+//! every program that links it.
 
 #[path = "../tests/spacewasm/support.rs"]
 mod support;
-
-spacewasm::global_allocator!(support::StdAllocator, support::StdAllocator);
 
 fn main() -> std::process::ExitCode {
     support::run(std::env::args().skip(1).collect())

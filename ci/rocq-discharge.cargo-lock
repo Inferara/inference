@@ -2489,6 +2489,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-spacewasm-runner"
+version = "0.0.1"
+dependencies = [
+ "inference-target-conformance",
+ "spacewasm",
+ "thiserror 2.0.20",
+ "wat",
+]
+
+[[package]]
 name = "inference-stellar-abi"
 version = "0.0.1"
 dependencies = [
@@ -2521,6 +2531,7 @@ dependencies = [
  "inference-ast",
  "inference-hassert",
  "inference-parser",
+ "inference-spacewasm-runner",
  "inference-stellar-abi",
  "inference-target-conformance",
  "inference-type-checker",

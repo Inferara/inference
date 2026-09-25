@@ -156,7 +156,12 @@ fn refusals(label: &str, wasm: &[u8]) -> Vec<Violation> {
 /// register, which is a property of the row rather than of the module under
 /// test — the rows that mean to exceed those caps call the constructors
 /// directly and assert on the error.
-fn host_exporting(module: &str, field: &str, params: usize) -> spacewasm::Vec<HostModule> {
+fn host_exporting(
+    session: &SpaceWasmSession,
+    module: &str,
+    field: &str,
+    params: usize,
+) -> spacewasm::Vec<HostModule> {
     let signature = "i".repeat(params);
     let function = HostFunction::new(
         HostName::try_from_str(field).expect("the row's field name is registrable"),
@@ -164,10 +169,9 @@ fn host_exporting(module: &str, field: &str, params: usize) -> spacewasm::Vec<Ho
         HostValList::new(""),
         |_: &mut spacewasm::Engine, _: &[Value]| core::ops::ControlFlow::Continue(None),
     );
-    host_set(vec![
-        host_module(module, vec![function], Vec::new())
-            .expect("the row's module name is registrable"),
-    ])
+    let host = host_module(session, module, vec![function], Vec::new())
+        .expect("the row's module name is registrable");
+    host_set(session, vec![host]).expect("the host set allocates")
 }
 
 /// A module whose single function declares `params` parameters of `ty`.
@@ -838,17 +842,20 @@ fn immutable_i32() -> GlobalType {
 
 /// A host module named `module` exporting one immutable `i32` global named
 /// `field` and holding [`IMPORTED_GLOBAL`], so a module importing it decodes.
-fn host_with_global(module: &str, field: &str) -> spacewasm::Vec<HostModule> {
+fn host_with_global(
+    session: &SpaceWasmSession,
+    module: &str,
+    field: &str,
+) -> spacewasm::Vec<HostModule> {
     let global = HostGlobal {
         name: HostName::try_from_str(field).expect("the row's global name is registrable"),
         value: spacewasm::Box::new(ImportedGlobal)
             .expect("one host global allocates")
             .into_global_value_dyn(),
     };
-    host_set(vec![
-        host_module(module, Vec::new(), vec![global])
-            .expect("the row's module name is registrable"),
-    ])
+    let host = host_module(session, module, Vec::new(), vec![global])
+        .expect("the row's module name is registrable");
+    host_set(session, vec![host]).expect("the host set allocates")
 }
 
 /// The immutable `i32` an embedder supplies for the import-shift row.
@@ -1231,8 +1238,9 @@ fn an_imported_global_shifts_where_the_truncation_begins() {
         check(&shifted).is_ok(),
         "with one imported global, index 65536 is definition 65535 and fits"
     );
+    let hosts = host_with_global(&session, "h", "g0");
     assert_eq!(
-        value_read_by_get(&mut session, &shifted, host_with_global("h", "g0")),
+        value_read_by_get(&mut session, &shifted, hosts),
         OTHER_GLOBAL,
         "the shifted reference is not merely accepted: it reads the global it names"
     );
@@ -1251,8 +1259,9 @@ fn an_imported_global_shifts_where_the_truncation_begins() {
         "the finding reports the written index and the position it resolves to, which \
          differ by the imported count"
     );
+    let hosts = host_with_global(&session, "h", "g0");
     assert_eq!(
-        value_read_by_get(&mut session, &past, host_with_global("h", "g0")),
+        value_read_by_get(&mut session, &past, hosts),
         FIRST_GLOBAL,
         "definition 65536 narrows to definition 0, whatever the written index was"
     );
@@ -1561,7 +1570,7 @@ fn an_index_past_what_the_module_defines_is_one_finding_not_two() {
         (
             "an export of global 65538 from a module importing one and defining 65,537",
             module_exporting_global(1, declared, declared + 1),
-            host_with_global("h", "g0"),
+            host_with_global(&session, "h", "g0"),
             ValidationError::GlobalIdxOutOfRange,
         ),
     ] {
@@ -2504,13 +2513,8 @@ fn import_names_agree_at_the_registration_cap() {
     let field = "f".repeat(MAX_IMPORT_NAME_BYTES);
 
     let accepted = module_importing(&long, &field, 1, 0);
-    agree(
-        &mut session,
-        "31-byte import names",
-        &accepted,
-        host_exporting(&long, &field, 1),
-        true,
-    );
+    let hosts = host_exporting(&session, &long, &field, 1);
+    agree(&mut session, "31-byte import names", &accepted, hosts, true);
 
     for (which, module_name, field_name) in [
         (NamePart::Module, "m".repeat(32), String::from("f")),
@@ -2586,13 +2590,8 @@ fn host_arity_agrees_at_the_registration_cap() {
     let mut session = SpaceWasmSession::acquire();
 
     let accepted = module_importing("host", "call", MAX_HOST_FUNCTION_PARAMS, 0);
-    agree(
-        &mut session,
-        "a 9-parameter import",
-        &accepted,
-        host_exporting("host", "call", MAX_HOST_FUNCTION_PARAMS),
-        true,
-    );
+    let hosts = host_exporting(&session, "host", "call", MAX_HOST_FUNCTION_PARAMS);
+    agree(&mut session, "a 9-parameter import", &accepted, hosts, true);
 
     assert!(
         HostValList::try_new(&"i".repeat(MAX_HOST_FUNCTION_PARAMS + 1)).is_err(),

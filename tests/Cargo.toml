@@ -82,23 +82,24 @@ soroban-spec = "=28.0.0"
 # against the real algorithm rather than against a second reading of it. It
 # has no dependencies of its own.
 # The `=`-pin holds the transcription to the version the CLI locks rather than
-# to whatever 0.5.x resolves. It has the cost the `spacewasm` entry below
+# to whatever 0.5.x resolves. It has the cost the workspace's `spacewasm` entry
 # records of its own pin: an exact pin stops resolving if another dependency
 # later needs a newer 0.5.x, and that is the moment to re-read the CLI's lock.
 heck = "=0.5.0"
 
-# The SpaceWasm flight interpreter, used only by the `spacewasm` integration
-# binary to decode, instantiate and execute compiler output in-process. It is
-# chosen because it *is* the runtime the target names: a `no_std` WebAssembly
-# 1.0 decoder with no post-MVP proposal support, which is what makes it an
-# oracle for the target's bulk-memory refusal rather than a second opinion.
-# The `=`-pin is the point rather than caution — the decoder's acceptance set is
-# what this tier records, so a version bump has to be a reviewed act with the
-# sweeps re-measured. `strict-assertions` is upstream's own dev-dependency
-# setting: it re-checks at run time the bounds the verifier established, so it
-# can only make this tier stricter, never let a module through that the default
-# build would reject.
-# It brings one exact pin of its own, `libm =0.2.16`, and `libm` is shared with
-# cranelift and wasmtime: a future bump that needs a newer `libm` is
-# unresolvable until this pin moves, and that failure surfaces far from here.
-spacewasm = { version = "=0.7.1", features = ["strict-assertions"] }
+# The SpaceWasm embedder, used by the `spacewasm` integration binary, the
+# `spacewasm-embed` example and the CLI matrix that drives it, to load and run
+# compiler output in process. A dev-dependency, so it stays out of this
+# package's library and its `rocq-discharge` binaries; it is also where the
+# interpreter's allocator symbols are defined, which is why none of those three
+# binary roots defines them.
+inference-spacewasm-runner.workspace = true
+
+# The SpaceWasm flight interpreter itself, pinned at the workspace, for the
+# same three binaries, which build hand-written hosts and read the decoder's
+# verdicts with its raw types. It is the crate the runner is built on, so a
+# value built here is one the runner takes. `strict-assertions` is upstream's
+# own dev-dependency setting and the runner's: it re-checks at run time the
+# bounds the verifier established, so it can only make this tier stricter,
+# never let a module through that the default build would reject.
+spacewasm = { workspace = true, features = ["strict-assertions"] }
