@@ -6,14 +6,14 @@ interpreter, and reports every way that can fail as a value.
 `spacewasm` is a `no_std` WebAssembly 1.0 interpreter written for on-board use.
 It decodes, validates and compiles a module to its own sixteen-bit IR in one
 pass, then runs that IR against an instruction budget, so a module that loads
-is a module the target runtime accepts, and a refusal carries the byte offset
-and the reason a flight computer would have given. The library has no command
-line and no allocator of its own: an embedder supplies both. This crate is that
-embedder for every program in this workspace that runs a SpaceWasm artifact —
-`infs run`, for a `spacewasm` build, the SpaceWasm test tier and the
-`spacewasm-embed` example built on it — and it registers the F´ (F Prime)
-reference host functions of upstream's reference embedder for a program that
-imports them.
+is one the interpreter itself accepts, at the configuration it was loaded
+with, and a refusal carries the byte offset and the interpreter's own reason.
+The library has no command line and no allocator of its own: an embedder
+supplies both. This crate is that embedder for every program in this workspace
+that runs a SpaceWasm artifact — `infs run`, for a `spacewasm` build, the
+SpaceWasm test tier and the `spacewasm-embed` example built on it — and it
+registers the F´ (F Prime) reference host functions of upstream's reference
+embedder for a program that imports them.
 
 ```rust,ignore
 use inference_spacewasm_runner::{EngineConfig, Fuel, HostLog, Outcome, Session, Value, fprime};
@@ -268,7 +268,10 @@ functions after acquiring the session, and move them straight into
 interpreter reads its own IR with `get_unchecked` and compiles its value-stack
 bounds checks to nothing, so a malformed IR word or an out-of-range stack slot
 would be undefined behaviour instead of a panic; upstream's own `spacewasm_std`
-embedding turns it on as well.
+embedding turns it on as well. It is licensed under Apache-2.0 and ships a
+`NOTICE` file, and `libm`, its one dependency, under MIT, so a binary that links
+this crate carries both: the release archives ship their texts in `licenses/`
+at the repository root, whose `README.md` records where each file comes from.
 
 `inference-target-conformance` is the source of the reference embedder's two
 verifier bounds, `REFERENCE_MAX_CONTROL_FRAMES` and `REFERENCE_MAX_STACK_DEPTH`,

@@ -763,6 +763,10 @@ operand-stack values, 256 IR code pages, and 1,024 words of value stack. A
 conformant module over either verifier bound is refused on load, naming the
 function and the const generic an embedder would have to raise, and a call
 chain whose frames need more than 1,024 words ends in a `StackOverflow` trap.
+The interpreter's own allocations are the one part of the configuration that is
+not the reference embedder's: they go to this machine's allocator, with no
+bound, where `spacewasm_std` runs behind an allocator of sixteen 8 KiB pages
+(`core/spacewasm-runner/README.md` says why).
 
 A program may bind the six F´ (F Prime) reference host functions
 `spacewasm_std` registers, at the signatures it registers them with, and no
@@ -787,14 +791,20 @@ answer 0, the time `telemetry` writes into the caller's buffer is zero,
 Each but `clock_ms` logs its calls to stderr as it is made, in the style of the
 reference embedder's lines — `MESSAGE hello`, `COMMAND 42 7`, `TELEMETRY 3` —
 and `core/spacewasm-runner/README.md` lists the five ways they differ from the
-reference embedder's.
+reference embedder's. One of them keeps every call on one line: a `MESSAGE` or
+`PANIC` payload has its control characters escaped, so a buffer padded with
+zeros logs as `MESSAGE hello\0\0\0`, and a newline inside a payload cannot
+forge a log line of its own.
 
 The value the entry point returns is the last line on stdout, after
 `Invoking 'main' with the SpaceWasm interpreter (spacewasm 0.7.1)...`, and a
-function returning nothing prints nothing after it. The exit status is 0
-whenever the call returns, whatever it returned; a refused load, a refused
-argument, a trap and an exhausted budget exit with status 1, and a trap is
-reported with the interpreter's reason and what it means in Inference code.
+function returning nothing prints nothing after it. The value prints as a
+signed decimal, as it does under wasmtime, so a `u32` or `u64` result above its
+type's signed maximum prints as the negative number with the same bits: a
+`u32` of 4294967295 prints `-1`. The exit status is 0 whenever the call
+returns, whatever it returned; a refused load, a refused argument, a trap and
+an exhausted budget exit with status 1, and a trap is reported with the
+interpreter's reason and what it means in Inference code.
 `--fuel N` stops the run after N of the interpreter's own instructions, and
 without it a run has no budget. In single-file mode the arguments after the
 source path are read as the invoked function's parameters — an `i32` or an
@@ -802,39 +812,201 @@ source path are read as the invoked function's parameters — an `i32` or an
 project mode `main` is given none, and a `main` that takes any is refused with
 the single-file command that passes them.
 
+**A first run.** The program below is a health check in the shape of an F´
+component: it announces itself, sends a command, downlinks one telemetry value
+and counts what went wrong. Create a project, point it at this target by
+replacing the commented-out `# target = "wasm32"` line under `[build]` in its
+`Inference.toml` with `target = "spacewasm"`, and replace its `src/main.inf`
+with the program:
+
+```bash
+infs new fprime_demo
+cd fprime_demo
+```
+
+```inference
+// A health check in the shape of an F´ component: announce itself, send a
+// command, downlink one telemetry value, and count what went wrong.
+//
+// Inference has no string type, so text is a byte array. A host function that
+// takes a buffer takes its address and its length, and an array argument is
+// passed as its address.
+external fn message(text: [u8; 5], len: i32);
+external fn command(opcode: i32, arg: i32) -> i32;
+external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; 4], value_len: i32) -> i32;
+use { message, command, telemetry } from host::fprime_core;
+
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+
+pub fn main() -> i32 {
+    let started: i64 = clock_ms();
+
+    let hello: [u8; 5] = [104, 101, 108, 108, 111]; // "hello"
+    message(hello, 5);
+
+    let status: i32 = command(42, 7);
+
+    let mut time: [u8; 11] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let reading: [u8; 4] = [21, 0, 0, 0]; // 21, as a little-endian u32
+    let sent: i32 = telemetry(3, time, 11, reading, 4);
+
+    let elapsed: i64 = clock_ms() - started;
+
+    let mut faults: i32 = 0;
+    if status != 0 {
+        faults = faults + 1;
+    }
+    if sent != 0 {
+        faults = faults + 1;
+    }
+    if elapsed > 1000 {
+        faults = faults + 1;
+    }
+    return faults;
+}
+```
+
+```text
+$ infs run 2> host.log
+target: spacewasm
+Parsed: src/main.inf
+Analyzed: src/main.inf
+Codegen complete
+host imports (no allowlist): env.clock_ms, fprime_core.command, fprime_core.message, fprime_core.telemetry
+spacewasm: conformant with WebAssembly 1.0; deepest control nesting 3 in `main`, tallest operand stack 5 values in `main` (peak 5 stack words in `main`). Build the embedder with MAX_CONTROL_FRAMES >= 3 and MAX_STACK_DEPTH >= 5 (spacewasm_std uses 64 and 256); limits from spacewasm 0.7.1.
+WASM generated at: out/main.wasm
+Invoking 'main' with the SpaceWasm interpreter (spacewasm 0.7.1)...
+0
+$ cat host.log
+MESSAGE hello
+COMMAND 42 7
+TELEMETRY 3
+```
+
+Standard output carries the build log, the `Invoking 'main' …` line and the
+return value; the host lines go to standard error, which the first command
+sends to `host.log`. Without the redirection a terminal shows them between the
+`Invoking 'main' …` line and the `0`, as each call is made. Read against the
+program:
+
+- **`0` is the nominal answer.** `command` and `telemetry` answered 0, as the
+  stubs always do, and no more than a second passed between the two readings
+  of the clock, so `main` counted no fault. The run exits with status 0, and it
+  would have exited 0 having counted three: the status says that the call
+  returned, and what it returned is the last line of standard output.
+- **`clock_ms` logs nothing.** It was called twice, and neither call has a line.
+- **`time` is `mut` because the host writes into it.** An array argument is
+  passed as its address, not copied, so the eleven bytes `telemetry` writes land
+  in `main`'s own `time`, which after the call holds the host's zero time
+  whatever it held before. `mut` on the parameter is why the call site needs a
+  `mut` binding (A047), but nothing checks the declaration against what the host
+  does: with `mut` left off both, the program compiles and runs, and its `time`
+  is overwritten all the same. See [`mut` on a host parameter is an assertion,
+  not a contract](external-functions-and-wasm-linking.md#mut-on-a-host-parameter-is-an-assertion-not-a-contract)
+  and issue #470.
+- **The host trusts `len`.** It reads `len` bytes at the address it is given,
+  whatever the array's length: `message(hello, 3)` logs `MESSAGE hel`, and a
+  `len` past the end of the array reads whatever follows it in memory, with no
+  refusal. What stops the program is a range that leaves linear memory, with a
+  trap naming the host, the address, the length and the size of the memory, or
+  bytes that are not UTF-8, since `message` and `panic` print text.
+- **`telemetry` writes an eleven-byte F´ time.** `infs run` stops the program,
+  before anything is written, when `time_len` is less than eleven — a departure
+  from the reference embedder, which writes the eleven bytes whatever
+  `time_len` says, past the end of a shorter buffer and into the caller's frame.
+  Passing 8 instead of 11 ends the run with:
+
+  ```text
+  Error: `main` trapped: `fprime_core.telemetry` writes an 11-byte F Prime time, and `time_len` is 8 (Host).
+  Declare the parameter `mut time: [u8; 11]` and pass 11.
+  ```
+
+- **`--fuel` can stop a run part way.** Sixty of the interpreter's
+  instructions take this program through its calls to `message` and `command`
+  and not as far as `telemetry`, as standard error alone shows:
+
+  ```text
+  $ infs run --fuel 60 > /dev/null
+  MESSAGE hello
+  COMMAND 42 7
+  Error: `main` ran out of fuel: the SpaceWasm interpreter stopped it after 60 interpreter instructions (`--fuel 60`) before it returned. Either it never returns or it needs a larger budget: raise `--fuel`, or leave it out to run without one. The host calls logged above had already been made.
+  ```
+
+  The count is of the interpreter's own compiled form of the module, so the
+  budget that stops a program at a given point depends on the compiler and the
+  interpreter that produced that form.
+
+A project written for a flight embedder can also name the host functions it may
+bind in a [`[host-imports]`](external-functions-and-wasm-linking.md#the-allowlist)
+allowlist, so that `infc` refuses a program that binds any other; `infs run`
+decides what it can execute from the artifact's imports, with or without one.
+
+In single-file mode any exported function can be run with `--entry-point`, and
+an array or struct in its signature stands for an address: such a parameter
+receives the number given on the command line as an address, and a function
+returning an array or struct takes a hidden first parameter, the address to
+write its result to, and prints nothing (see
+[`infs run`](projects-and-the-infs-toolchain.md#infs-run)).
+
+**What a run shows, and what it does not.** `infs run` executes the artifact
+once, under the interpreter the target is for, against stand-in hosts. It is a
+test: it shows that this module loads at the reference limits, what this
+execution computed, and which host functions it called, as far as their log
+lines record the calls. It is not a proof. A program that binds a host import
+has no proof path at all — host imports are not yet modeled in the proof
+translation, so `infc` refuses every build that writes a `.v` for such a
+program, at every target (issue #469) — and running it changes nothing about
+that. The reference hosts are stubs: `command` and `telemetry` answer 0, the
+time `telemetry` writes is zero, and `clock_ms` reads this machine's clock, so
+two runs of one program need not agree. A run therefore says nothing about how
+the program behaves against real F´ flight software. It also runs on this
+machine's allocator at `spacewasm_std`'s reference limits, not on a vehicle's
+configuration. For a program that binds no host import, [Proving the
+`wasm32` build and deploying the SpaceWasm one](#proving-the-wasm32-build-and-deploying-the-spacewasm-one)
+still applies unchanged, and a run under the interpreter is a differential
+check of the very module that proof is about.
+
 #### Running a module under the embedder harness
 
-The SpaceWasm interpreter runs a module only inside an embedder, which decides
-the hosts it registers, the limits it loads under and what a run reports.
-`infs run` is one embedder — see [Running a SpaceWasm
-build](#running-a-spacewasm-build) — and this repository also ships a developer
-tool that exposes more of the interpreter than a run does, a stub for any import
-and the IR a module compiled to among it, as an example of the test crate.
-Every transcript below is a real run, so the figures can be re-derived rather
-than taken on trust, and all but the last two are against one artifact —
-`out/main.wasm`, built by `infc main.inf --target spacewasm` from
-`pub fn main() -> i32 { return 10; }`, whose `pub` is what puts `main` in the
-export section:
+To run a program, use `infs run` — see [Running a SpaceWasm
+build](#running-a-spacewasm-build). The SpaceWasm interpreter runs a module
+only inside an embedder, which decides the hosts it registers, the limits it
+loads under and what a run reports, and `infs run` is the embedder for a
+program: it builds the source, supplies the F´ reference hosts and reports what
+the program did. This repository also ships a developer tool, an example of the
+test crate, for the questions `infs run` leaves alone: running an artifact that
+is already on disk, standing a stub in for any import at any signature, not
+only the six reference hosts, and measuring the IR a module compiled to
+(`--stats`, and `--json` to track it over time). It loads at the reference
+embedder's verifier bounds and IR code pages, but with the 65,536 words of
+value stack the SpaceWasm test tier runs the codegen corpus with rather than
+the reference 1,024. Every transcript below is a real run, so the figures can
+be re-derived rather than taken on trust, and all but the last two are against
+one artifact — `out/main.wasm`, built by `infc main.inf --target spacewasm`
+from `pub fn main() -> i32 { return 10; }`, whose `pub` is what puts `main` in
+the export section:
 
 ```bash
 cargo run -p inference-tests --example spacewasm-embed -- out/main.wasm --invoke main
 main = 10
 ```
 
-It loads the artifact under the reference embedder configuration, calls one
-export, and prints the result as `NAME = value`, or `NAME = (unit)` for a
-function that returns nothing. Arguments follow the export name and are decimal
-integers coerced to the parameter types the artifact declares
-(`--invoke add 2 40`). With neither `--invoke` nor `--stats` it reports what the
-module exports and stops, which is the cheapest way to ask whether an artifact
-loads at all; asking for a measurement makes the measurement the report.
+It loads the artifact, calls one export, and prints the result as
+`NAME = value`, or `NAME = (unit)` for a function that returns nothing.
+Arguments follow the export name and are decimal integers coerced to the
+parameter types the artifact declares (`--invoke add 2 40`). With neither
+`--invoke` nor `--stats` it reports what the module exports and stops, which is
+the cheapest way to ask whether an artifact loads at all; asking for a
+measurement makes the measurement the report.
 
 Each way a run can end has an exit code of its own — a module that could not be
 read, one the interpreter refused, a missing export, a trap, an exhausted fuel
 budget — so a script can tell them apart without reading the message. A trap
-prints the interpreter's own reason. Execution runs under an instruction budget
-that `--fuel N` sets, so a program that does not terminate fails the run instead
-of hanging it.
+prints the interpreter's own reason. Execution always runs under an instruction
+budget, 100,000,000 unless `--fuel N` sets another, so a program that does not
+terminate fails the run instead of hanging it — where `infs run` runs without a
+budget unless it is given one.
 
 `--stats` reports what the module cost the interpreter — the IR pages it
 compiled to, the sixteen-bit words written into them against the words those
@@ -922,17 +1094,23 @@ report = 0
 
 Every stub answered zero: `command`'s zero became `telemetry`'s id,
 `telemetry`'s zero read as accepted, so `report` went on to ask the clock, and
-the clock's zero is what it returned. `panic` and `rsleep` are bound and never
-called, and still need a stub, because the interpreter binds every import when
-it decodes the module. A name longer than 31 bytes, more than nine parameters
-or more than one result is a usage error that names the interpreter's own
-refusal and the limit behind it, both read from the interpreter rather than
-restated by the harness.
-Two counts are usage errors as well, because the interpreter does not check them
-and would bind the excess imports to other stubs without a word: more than 256
-module names, which its one-byte host-module reference cannot address, and more
-than 65,536 stubs under one module name, whose positions its binder narrows to
-sixteen bits.
+the clock's zero is what it returned. These imports are all F´ reference hosts
+at their reference signatures, so `infs run` runs this program as well, from a
+project whose manifest sets `target = "spacewasm"`
+(`infs run src/main.inf --entry-point report 3`), against the hosts
+themselves: `message` and `panic` read the buffers they are given, and
+`telemetry` writes the time into its buffer. A stub reads no buffer and writes
+nothing, and the harness registers one for any import, in that set or out of
+it. `panic` and `rsleep` are bound and never called, and still need a stub,
+because the interpreter binds every import when it decodes the module. A name
+longer than 31 bytes, more than nine parameters or more than one result is a
+usage error that names the interpreter's own refusal and the limit behind it,
+both read from the interpreter rather than restated by the harness. Two counts
+are usage errors as well, because the interpreter does not check them and
+would bind the excess imports to other stubs without a word: more than 256
+module names, which its one-byte host-module reference cannot address, and
+more than 65,536 stubs under one module name, whose positions its binder
+narrows to sixteen bits.
 
 A module whose imports have no stub is still a load failure. The interpreter's
 verdict names no import, so the harness reads the module a second time and

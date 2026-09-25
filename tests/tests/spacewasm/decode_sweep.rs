@@ -150,8 +150,9 @@ fn classified(partition: &[PathBuf], class: NotDecodable) -> Vec<PathBuf> {
 // The default partition: everything loads
 // ---------------------------------------------------------------------------
 
-/// Every WebAssembly 1.0 golden decodes, validates and IR-compiles under the
-/// reference embedder configuration.
+/// Every WebAssembly 1.0 golden decodes, validates and IR-compiles at the
+/// reference embedder's verifier bounds and IR page budget, with the tier's
+/// 65,536-word stack.
 ///
 /// This is the tier's central claim. The four existing golden tiers establish
 /// that the artifacts are what the compiler emitted, that they read as the
@@ -482,8 +483,8 @@ pub fn twice_of_seven() -> i32 { return double(7); }
 // The embedder's own bounds
 // ---------------------------------------------------------------------------
 
-/// The verifier's control-frame bound is a real gate, and the reference
-/// configuration clears what the compiler emits.
+/// The verifier's control-frame bound is a real gate, and the reference bound
+/// clears what the compiler emits.
 ///
 /// `MAX_CONTROL_FRAMES` is a const generic on the decoder rather than a runtime
 /// field, so "how deep may an embedder's nesting go" can only be asked by
@@ -500,7 +501,7 @@ pub fn twice_of_seven() -> i32 { return double(7); }
 /// rather than the one the decoder produces is how a report ends up promising a
 /// diagnostic the runtime cannot emit.
 ///
-/// Fails if the bound stops being enforced, if the reference configuration stops
+/// Fails if the bound stops being enforced, if the reference bound stops
 /// accepting a fixture the compiler emits, or if a future version routes the
 /// refusal through a different verdict — which is a signal, not a regression.
 #[test]

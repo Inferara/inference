@@ -80,6 +80,9 @@ wasmparser = { version = "0.254.0", default-features = false, features = ["std",
 # It brings one exact pin of its own, `libm =0.2.16`, and `libm` is shared with
 # cranelift and wasmtime: a future bump that needs a newer `libm` is
 # unresolvable until this pin moves, and that failure surfaces far from here.
+# Release archives ship both crates' license texts, so a bump also re-copies
+# `licenses/spacewasm` and `licenses/libm` from the new packages (see
+# `licenses/README.md`); a test holds that file's versions to this pin.
 spacewasm = { version = "=0.7.1" }
 
 anyhow = "1.0.104"

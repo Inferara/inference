@@ -340,6 +340,31 @@ fn telemetry_writes_the_callers_time_and_refuses_a_short_one() {
     assert_eq!(log.line_count(), 0);
 }
 
+/// With `mut` left off both the parameter and the binding, the downlink still
+/// compiles, and `telemetry` still writes its time into the caller's array:
+/// the sum read back after the call is 0, where an untouched array sums to 66.
+///
+/// This pins issue #470's current behaviour rather than a property the
+/// language promises: `mut` on a host parameter is the author's assertion,
+/// and nothing checks a declaration against what the host does. The book's
+/// "Running a SpaceWasm build" says as much — the program compiles and runs,
+/// and its `time` is overwritten all the same — so a fix that refuses the
+/// declaration, or hands the host a copy, fails this row, and that sentence of
+/// the book changes with it.
+#[test]
+fn telemetry_overwrites_a_time_declared_without_mut() {
+    assert_eq!(DOWNLINK.matches("mut time").count(), 2, "the parameter and the binding");
+    let without_mut = compiled(&DOWNLINK.replace("mut time", "time"));
+    let run = call(&without_mut, "downlink", &[Value::I32(11)]);
+    assert_eq!(
+        run.outcome,
+        Outcome::Returned(Some(Value::I32(0))),
+        "the host writes the caller's array whether or not either side says `mut`"
+    );
+    assert_eq!(run.log, ["TELEMETRY 3"]);
+    assert_eq!(run.detail, None);
+}
+
 /// A compiled program that sends a command and then counts past its budget
 /// runs out of fuel with the command logged, and given no budget counts to
 /// the end.

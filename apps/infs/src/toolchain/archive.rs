@@ -820,56 +820,295 @@ mod tests {
         );
     }
 
-    /// Creates a tar.gz archive mimicking CI infc toolchain structure.
-    fn create_tar_gz_like_ci_infc_toolchain(archive_path: &Path) {
+    /// One member of a release package as `.github/workflows/reusable-build.yml`
+    /// stages it: a directory, or a file and its bytes. The name is the archive
+    /// member name relative to the package root, `/`-separated as both archive
+    /// formats spell it.
+    enum PackageEntry {
+        Dir(String),
+        File(String, Vec<u8>),
+    }
+
+    /// The repository's `licenses/` directory, which CI copies into every
+    /// release package beside the binaries.
+    fn repository_licenses() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("licenses")
+    }
+
+    /// What CI stages for a release package: each of `binaries` at the root,
+    /// then `cp -R licenses` — the repository's notices, read from the
+    /// checkout, so the fixture follows the directory as it grows.
+    fn ci_package(binaries: &[&str]) -> Vec<PackageEntry> {
+        let mut entries: Vec<PackageEntry> = binaries
+            .iter()
+            .map(|name| PackageEntry::File((*name).to_string(), format!("{name} binary").into()))
+            .collect();
+        push_tree(&mut entries, &repository_licenses(), "licenses");
+        entries
+    }
+
+    /// Appends `dir` as the member `name` and then everything under it,
+    /// parents before children and siblings in name order.
+    fn push_tree(entries: &mut Vec<PackageEntry>, dir: &Path, name: &str) {
+        entries.push(PackageEntry::Dir(name.to_string()));
+        let mut children: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("{} must be readable: {e}", dir.display()))
+            .map(|entry| entry.expect("Should read directory entry").path())
+            .collect();
+        children.sort();
+        for child in children {
+            let child_name = child
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("a notice's name is UTF-8");
+            let member = format!("{name}/{child_name}");
+            if child.is_dir() {
+                push_tree(entries, &child, &member);
+            } else {
+                let bytes = std::fs::read(&child)
+                    .unwrap_or_else(|e| panic!("{} must be readable: {e}", child.display()));
+                entries.push(PackageEntry::File(member, bytes));
+            }
+        }
+    }
+
+    /// Packs `entries` as `tar -czf ARCHIVE -C STAGING .` does on the Linux and
+    /// macOS runners: a `./` member first and every other member under `./`,
+    /// a directory as a member of its own, binaries executable and notices not.
+    fn create_tar_gz_like_ci(archive_path: &Path, entries: &[PackageEntry]) {
+        fn append_dir<W: Write>(builder: &mut Builder<W>, member: &str) {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, member, std::io::empty())
+                .expect("Should append dir");
+        }
+
         let file = std::fs::File::create(archive_path).expect("Should create file");
         let encoder = GzEncoder::new(file, Compression::default());
         let mut builder = Builder::new(encoder);
 
-        // Add ./ directory entry
-        let mut header = tar::Header::new_gnu();
-        header.set_entry_type(tar::EntryType::Directory);
-        header.set_size(0);
-        header.set_mode(0o755);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "./", std::io::empty())
-            .expect("Should append dir");
-
-        // Add ./infc (compiler at root)
-        let mut header = tar::Header::new_gnu();
-        header.set_size(14);
-        header.set_mode(0o755);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "./infc", b"infc binary...".as_slice())
-            .expect("Should append infc");
+        append_dir(&mut builder, "./");
+        for entry in entries {
+            match entry {
+                PackageEntry::Dir(name) => append_dir(&mut builder, &format!("./{name}/")),
+                PackageEntry::File(name, bytes) => {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(u64::try_from(bytes.len()).expect("a member fits in a tar header"));
+                    header.set_mode(if name.contains('/') { 0o644 } else { 0o755 });
+                    header.set_cksum();
+                    builder
+                        .append_data(&mut header, format!("./{name}"), bytes.as_slice())
+                        .expect("Should append file");
+                }
+            }
+        }
 
         builder.finish().expect("Should finish");
     }
 
+    /// Packs `entries` as `7z a -tzip ARCHIVE .\STAGING\*` does on the Windows
+    /// runner: every member at its name under the staging directory, with no
+    /// `./` and no root member, a directory as a member of its own.
+    fn create_zip_like_ci(archive_path: &Path, entries: &[PackageEntry]) {
+        let file = std::fs::File::create(archive_path).expect("Should create file");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for entry in entries {
+            match entry {
+                PackageEntry::Dir(name) => zip
+                    .add_directory(format!("{name}/"), options)
+                    .expect("Should add directory"),
+                PackageEntry::File(name, bytes) => {
+                    zip.start_file(name.as_str(), options)
+                        .expect("Should start file");
+                    zip.write_all(bytes).expect("Should write");
+                }
+            }
+        }
+        zip.finish().expect("Should finish");
+    }
+
+    /// The path of the archive member `name` under `dir`.
+    fn member_path(dir: &Path, name: &str) -> PathBuf {
+        name.split('/').fold(dir.to_path_buf(), |path, part| path.join(part))
+    }
+
+    /// Asserts that `dest` holds exactly what `entries` staged, where an install
+    /// looks for it: each binary at the root and each notice under `licenses/`,
+    /// byte for byte, and nothing else at the root — no `.` directory, no
+    /// stripped or doubled `licenses` level.
+    fn assert_extracted_as_staged(dest: &Path, entries: &[PackageEntry]) {
+        for entry in entries {
+            match entry {
+                PackageEntry::Dir(name) => assert!(
+                    member_path(dest, name).is_dir(),
+                    "{name}/ must be extracted as a directory"
+                ),
+                PackageEntry::File(name, bytes) => assert_eq!(
+                    std::fs::read(member_path(dest, name))
+                        .unwrap_or_else(|e| panic!("{name} must be extracted: {e}")),
+                    *bytes,
+                    "{name} must be extracted byte for byte"
+                ),
+            }
+        }
+        let mut root: Vec<String> = std::fs::read_dir(dest)
+            .expect("Should read the destination")
+            .map(|entry| {
+                entry
+                    .expect("Should read directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        root.sort();
+        let mut staged: Vec<String> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                PackageEntry::Dir(name) | PackageEntry::File(name, _) => {
+                    (!name.contains('/')).then(|| name.clone())
+                }
+            })
+            .collect();
+        staged.sort();
+        assert_eq!(root, staged, "the package root must be the destination's root");
+    }
+
+    /// The binaries of an `infc` release package: the compiler and every
+    /// optional binary, at the names `infs install` looks for on `platform`.
+    fn toolchain_binaries(platform: crate::toolchain::Platform) -> Vec<String> {
+        std::iter::once(crate::toolchain::ToolchainPaths::MANAGED_BINARY)
+            .chain(crate::toolchain::ToolchainPaths::OPTIONAL_MANAGED_BINARIES.iter().copied())
+            .map(|name| format!("{name}{}", platform.executable_extension()))
+            .collect()
+    }
+
+    /// Creates a tar.gz archive with CI's `infc` package layout: the compiler,
+    /// the language server and the third-party notices.
+    fn create_tar_gz_like_ci_infc_toolchain(archive_path: &Path) {
+        let binaries = toolchain_binaries(crate::toolchain::Platform::LinuxX64);
+        let binaries: Vec<&str> = binaries.iter().map(String::as_str).collect();
+        create_tar_gz_like_ci(archive_path, &ci_package(&binaries));
+    }
+
+    /// An `infc` release archive packed as CI packs it on Linux and macOS
+    /// extracts, through the format choice `infs install` makes, with the
+    /// compiler and the language server at the toolchain root and the notices
+    /// in `licenses/` beside them; setting the binaries executable then leaves
+    /// the notices alone.
+    ///
+    /// Fails if the `./` root is kept as a directory, if a nested member is
+    /// dropped or lands a level off, or if the notices stop surviving the
+    /// round trip byte for byte.
     #[test]
     fn extract_tar_gz_ci_infc_toolchain_structure() {
         let temp_dir = temp_test_dir();
         let archive_path = temp_dir.path().join("infc-linux-x64.tar.gz");
         let dest_dir = temp_dir.path().join("toolchain");
-
-        // Create archive exactly like CI produces for infc toolchain
-        create_tar_gz_like_ci_infc_toolchain(&archive_path);
-
-        extract_tar_gz(&archive_path, &dest_dir).expect("Should extract");
-
-        // Verify infc binary is in expected location
+        let binaries = toolchain_binaries(crate::toolchain::Platform::LinuxX64);
+        let binaries: Vec<&str> = binaries.iter().map(String::as_str).collect();
+        let entries = ci_package(&binaries);
         assert!(
-            dest_dir.join("infc").exists(),
-            "infc should exist at toolchain root"
+            entries.iter().any(|entry| matches!(
+                entry,
+                PackageEntry::File(name, _) if name == "licenses/spacewasm/NOTICE"
+            )),
+            "the fixture must carry the nested notices it is about"
         );
 
-        // Verify ./ directory was NOT created (it should be stripped)
-        assert!(
-            !dest_dir.join(".").exists() || dest_dir.join(".") == dest_dir,
-            "No literal '.' directory should be created"
-        );
+        create_tar_gz_like_ci(&archive_path, &entries);
+        extract_archive(&archive_path, &dest_dir).expect("Should extract");
+
+        assert_extracted_as_staged(&dest_dir, &entries);
+        set_executable_permissions(&dest_dir).expect("Should set permissions");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: PathBuf| {
+                std::fs::metadata(path)
+                    .expect("Should get metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777
+            };
+            for binary in &binaries {
+                assert_eq!(mode(dest_dir.join(binary)), 0o755, "{binary}");
+            }
+            assert_eq!(
+                mode(member_path(&dest_dir, "licenses/spacewasm/NOTICE")),
+                0o644,
+                "a notice is not made executable"
+            );
+        }
+    }
+
+    /// An `infs` release archive packed as CI packs it on Linux and macOS
+    /// extracts with `infs` at the root, where `infs self update` looks for
+    /// it, and the notices in `licenses/` beside it.
+    ///
+    /// Fails if `licenses/` displaces the binary, or if a nested member is
+    /// dropped or lands a level off.
+    #[test]
+    fn extract_tar_gz_ci_infs_package_structure() {
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("infs-macos-apple-silicon.tar.gz");
+        let dest_dir = temp_dir.path().join("infs-temp");
+        let entries = ci_package(&["infs"]);
+
+        create_tar_gz_like_ci(&archive_path, &entries);
+        extract_archive(&archive_path, &dest_dir).expect("Should extract");
+
+        assert_extracted_as_staged(&dest_dir, &entries);
+    }
+
+    /// An `infc` release archive packed as CI packs it on Windows extracts,
+    /// through the format choice `infs install` makes, with `infc.exe` and
+    /// `inference-lsp.exe` at the toolchain root and the notices in
+    /// `licenses/` beside them.
+    ///
+    /// The members have more than one root, so nothing may be stripped. Fails
+    /// if a directory member is written as a file, if a nested member is
+    /// dropped or lands a level off, or if a root is stripped.
+    #[test]
+    fn extract_zip_ci_infc_toolchain_structure() {
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("infc-windows-x64.zip");
+        let dest_dir = temp_dir.path().join("toolchain");
+        let binaries = toolchain_binaries(crate::toolchain::Platform::WindowsX64);
+        let binaries: Vec<&str> = binaries.iter().map(String::as_str).collect();
+        let entries = ci_package(&binaries);
+
+        create_zip_like_ci(&archive_path, &entries);
+        extract_archive(&archive_path, &dest_dir).expect("Should extract");
+
+        assert_extracted_as_staged(&dest_dir, &entries);
+    }
+
+    /// An `infs` release archive packed as CI packs it on Windows extracts
+    /// with `infs.exe` at the root, where `infs self update` looks for it, and
+    /// the notices in `licenses/` beside it.
+    ///
+    /// Fails if a directory member is written as a file, if a nested member is
+    /// dropped or lands a level off, or if a root is stripped.
+    #[test]
+    fn extract_zip_ci_infs_package_structure() {
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("infs-windows-x64.zip");
+        let dest_dir = temp_dir.path().join("infs-temp");
+        let entries = ci_package(&["infs.exe"]);
+
+        create_zip_like_ci(&archive_path, &entries);
+        extract_archive(&archive_path, &dest_dir).expect("Should extract");
+
+        assert_extracted_as_staged(&dest_dir, &entries);
     }
 
     #[test]

@@ -161,12 +161,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path artifact-infc
           Copy-Item target\x86_64-pc-windows-gnu\release\infc.exe artifact-infc\
           Copy-Item target\x86_64-pc-windows-gnu\release\inference-lsp.exe artifact-infc\
+          Copy-Item -Recurse licenses artifact-infc\
 
       - name: Prepare infs Artifact Package (Windows)
         if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
         run: |
           New-Item -ItemType Directory -Force -Path artifact-infs
           Copy-Item target\x86_64-pc-windows-gnu\release\infs.exe artifact-infs\
+          Copy-Item -Recurse licenses artifact-infs\
       
       - name: Prepare infc Artifact Package (Linux)
         if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
@@ -174,12 +176,14 @@ jobs:
           mkdir -p artifact-infc
           cp target/release/infc artifact-infc/
           cp target/release/inference-lsp artifact-infc/
+          cp -R licenses artifact-infc/
 
       - name: Prepare infs Artifact Package (Linux)
         if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
         run: |
           mkdir -p artifact-infs
           cp target/release/infs artifact-infs/
+          cp -R licenses artifact-infs/
       
       - name: Package infc Artifact (Windows)
         if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
@@ -213,12 +217,14 @@ jobs:
           mkdir -p artifact-infc
           cp target/release/infc artifact-infc/
           cp target/release/inference-lsp artifact-infc/
+          cp -R licenses artifact-infc/
 
       - name: Prepare infs Artifact Package (macOS)
         if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
         run: |
           mkdir -p artifact-infs
           cp target/release/infs artifact-infs/
+          cp -R licenses artifact-infs/
       
       - name: Package infc Artifact (macOS)
         if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
