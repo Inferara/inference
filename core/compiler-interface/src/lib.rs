@@ -632,8 +632,9 @@ impl TargetName {
     /// answer rather than an error.
     ///
     /// A target that adds no convention answers `true` even when it is not the
-    /// default: the SpaceWasm artifact is the default's bytes and its `main`
-    /// keeps the `argc, argv` shape, so a general-purpose runtime can invoke it.
+    /// default: the SpaceWasm artifact is the default's bytes, with no wrapper
+    /// or tagged word of its own around any export, `main` included, so a
+    /// general-purpose runtime can invoke it.
     ///
     /// That is an answer about the calling convention and nothing else. The
     /// runtime a `true` here reaches is not the target's runtime, so running the

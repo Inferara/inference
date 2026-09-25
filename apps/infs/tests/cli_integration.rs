@@ -1094,6 +1094,169 @@ fn project_run_prints_main_return_value() {
         .stdout(predicate::str::contains("42"));
 }
 
+/// A `main` that declares a parameter, returning it plus one so the printed
+/// value names the argument `main` received, beside a two-parameter export.
+const MAIN_WITH_A_PARAMETER_SRC: &str = "pub fn main(x: i32) -> i32 {\n    return x + 1;\n}\n\n\
+     pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n";
+
+/// `main` is an ordinary entry point under wasmtime: single-file `run` hands it
+/// the trailing arguments exactly as it hands them to any other export, and the
+/// printed value is computed from them. The rows cover one argument, a negative
+/// one passed after `--`, the explicit `--entry-point main`, and a named entry
+/// point with two arguments beside them.
+///
+/// Fails if `main` is special-cased again: an appended `0 0` in place of the
+/// arguments makes the first three rows print `1`, and a `main` handed nothing
+/// fails in wasmtime for want of an argument.
+#[test]
+fn single_file_run_hands_main_its_trailing_arguments() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    temp.child("main.inf")
+        .write_str(MAIN_WITH_A_PARAMETER_SRC)
+        .unwrap();
+
+    let rows: [(&[&str], &str, &str); 4] = [
+        (&["41"], "main", "42"),
+        (&["--", "-5"], "main", "-4"),
+        (&["--entry-point", "main", "9"], "main", "10"),
+        (&["--entry-point", "add", "2", "40"], "add", "42"),
+    ];
+    for (args, entry_point, value) in rows {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("run")
+            .arg("main.inf")
+            .args(args);
+        let assert = cmd.assert().success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+        let tail: Vec<&str> = stdout.lines().rev().take(2).collect();
+        let announcement = format!("Invoking '{entry_point}' with wasmtime...");
+        assert_eq!(
+            tail,
+            [value, announcement.as_str()],
+            "`infs run main.inf {}` must invoke `{entry_point}` and print {value} last, \
+             got stdout: {stdout}",
+            args.join(" ")
+        );
+    }
+}
+
+/// A `main` taking an array, which it receives as the address of its elements.
+const MAIN_WITH_AN_ARRAY_PARAMETER_SRC: &str =
+    "pub fn main(a: [i32; 2]) -> i32 {\n    return a[0] + a[1];\n}\n";
+
+/// A `main` returning an array, which code generation lowers to a function
+/// taking the address to write the array to and returning nothing.
+const MAIN_RETURNING_AN_ARRAY_SRC: &str =
+    "pub fn main() -> [i32; 4] {\n    return [1, 2, 3, 4];\n}\n";
+
+/// A `main` returning a struct, lowered like [`MAIN_RETURNING_AN_ARRAY_SRC`].
+const MAIN_RETURNING_A_STRUCT_SRC: &str = "struct Point {\n    x: i32;\n    y: i32;\n}\n\n\
+     pub fn main() -> Point {\n    return Point { x: 1, y: 2 };\n}\n";
+
+/// Project mode passes `main` no arguments, so every `main` that takes one
+/// reaches wasmtime and fails there for want of it rather than running on an
+/// invented value: one declaring an `i32` or an array parameter, and one
+/// returning an array or a struct, whose only parameter is the hidden result
+/// address. Asserted as the announcement being the last line on stdout, with
+/// no value after it, and a failing exit; wasmtime's own wording is its to
+/// change and is not pinned.
+///
+/// Fails if project mode hands `main` arguments of its own again: `0 0` ran
+/// every row, the first printing `1` for `x = 0`, the second reading the array
+/// at address 0, and the last two writing their result there.
+#[test]
+fn project_run_passes_main_no_arguments() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let rows = [
+        ("an i32 parameter", MAIN_WITH_A_PARAMETER_SRC),
+        ("an array parameter", MAIN_WITH_AN_ARRAY_PARAMETER_SRC),
+        ("an array result", MAIN_RETURNING_AN_ARRAY_SRC),
+        ("a struct result", MAIN_RETURNING_A_STRUCT_SRC),
+    ];
+    for (shape, source) in rows {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project(&temp, "demo", source);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("run");
+        let output = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            !output.status.success(),
+            "a `main` with {shape} must fail for want of an argument, got stdout: {stdout}"
+        );
+        assert_eq!(
+            stdout.lines().last(),
+            Some("Invoking 'main' with wasmtime..."),
+            "a `main` with {shape} must reach wasmtime and print no value, got stdout: {stdout}"
+        );
+    }
+}
+
+/// A `main` returning an array or a struct takes the address to write its
+/// result to as its one parameter, which single-file `run` leaves to the
+/// command line like any other argument. The rows tell that parameter apart
+/// from surplus: with no argument wasmtime has none to bind and fails, an
+/// in-bounds address runs to completion, and `-1` (the last byte of the 32-bit
+/// address space) fails because the first store through it traps. Each
+/// prints no value, since the function returns nothing: the announcement is
+/// the last line on stdout.
+///
+/// Fails, one row each, if `main` given nothing is handed `0 0` again (the
+/// first row runs), if its trailing arguments are dropped (the in-bounds row
+/// fails), or if anything is put ahead of them, which leaves `-1` as surplus
+/// (the last row runs).
+#[test]
+fn single_file_run_hands_a_compound_returning_main_its_result_address() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let rows: [(&[&str], bool); 3] = [(&[], false), (&["1024"], true), (&["--", "-1"], false)];
+    for (shape, source) in [
+        ("an array", MAIN_RETURNING_AN_ARRAY_SRC),
+        ("a struct", MAIN_RETURNING_A_STRUCT_SRC),
+    ] {
+        temp.child("main.inf").write_str(source).unwrap();
+        for (args, runs) in rows {
+            let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+            cmd.env("INFC_PATH", &infc_path)
+                .current_dir(temp.path())
+                .arg("run")
+                .arg("main.inf")
+                .args(args);
+            let output = cmd.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            assert_eq!(
+                output.status.success(),
+                runs,
+                "`infs run main.inf {}` on a `main` returning {shape} must {}, got stdout: \
+                 {stdout}\nstderr: {}",
+                args.join(" "),
+                if runs { "succeed" } else { "fail" },
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                stdout.lines().last(),
+                Some("Invoking 'main' with wasmtime..."),
+                "a `main` returning {shape} must print no value, got stdout: {stdout}"
+            );
+        }
+    }
+}
+
 /// Project `run` invoked from a nested subdir still builds at the root and runs
 /// `<root>/out/main.wasm`.
 #[test]

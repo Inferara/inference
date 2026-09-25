@@ -53,12 +53,15 @@
 //! - **Always invokes `main`**. Project mode has no notion of an alternate
 //!   entry point yet; a non-`main` `--entry-point` is rejected with guidance to
 //!   use single-file mode rather than silently ignored.
-//! - **Trailing var-args are ignored**: `main` is always invoked with
-//!   `argc=0, argv=0`. Note that project mode is structurally arg-free: the
-//!   first bare token on the command line binds to the positional `path` and
-//!   therefore selects *single-file* mode, so trailing args cannot actually
-//!   reach project mode through the CLI. The warning below is retained as a
-//!   defensive, self-documenting guard should the argument layout ever change.
+//! - **Passes `main` no arguments**, so a `main` that takes any runs only in
+//!   single-file mode, with its arguments after the path. That is a `main`
+//!   declaring parameters, and also one returning a struct or array, which
+//!   takes its result address as a hidden first parameter. Project mode is
+//!   structurally arg-free: the first bare token on the command line binds to
+//!   the positional `path` and therefore selects *single-file* mode, so
+//!   trailing args cannot actually reach project mode through the CLI. The
+//!   warning naming any that did is retained as a defensive, self-documenting
+//!   guard should the argument layout ever change.
 //! - **Gains the `infc` compatibility handshake** for free via the shared
 //!   project-build helper. Single-file `run` keeps its prior no-handshake
 //!   behavior except when the enclosing manifest asks for something an older
@@ -99,6 +102,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -143,7 +147,8 @@ pub struct RunArgs {
     /// Function to invoke as entry point.
     ///
     /// Defaults to "main". The function must be exported (marked `pub` in source).
-    /// For `main`, argc/argv arguments (0 0) are passed automatically.
+    /// `main` is an ordinary entry point: it receives the trailing arguments as
+    /// any other function does (see `[ARGS]` for the parameters they bind to).
     ///
     /// In project mode only `main` is supported; a non-`main` value is an error
     /// (run a single file for custom entry points).
@@ -177,10 +182,15 @@ pub struct RunArgs {
 
     /// Arguments to pass to the invoked function.
     ///
-    /// For functions other than `main`, these are passed directly as function arguments.
-    /// For `main`, these are ignored (argc=0, argv=0 is always used). These only
-    /// apply in single-file mode: the first bare token binds to `path`, so
-    /// project mode (no path) never receives trailing args.
+    /// Handed to wasmtime as written, after the module path, whichever function
+    /// is invoked, `main` included; wasmtime parses each into the type of the
+    /// matching parameter of the compiled function. Those are the parameters
+    /// the source declares, with two differences for any function: a struct or
+    /// array parameter is a memory address, and a function returning a struct
+    /// or array takes the address to write its result to as a hidden first
+    /// parameter and returns nothing, so no value is printed. These only apply
+    /// in single-file mode: the first bare token binds to `path`, so project
+    /// mode (no path) never receives trailing args, and passes `main` none.
     ///
     /// Collection starts at the first bare token after the source path and takes
     /// everything from there, options included — so `infs run f.inf 1 -L libs`
@@ -308,11 +318,11 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 /// Resolves the project from the current directory, performs the shared project
 /// build (which runs the `infc` compatibility handshake and forwards the
 /// `-L` directories given here), then invokes `main` on `<root>/out/main.wasm`
-/// via wasmtime. Project mode always invokes `main`; a non-`main` `--entry-point`
-/// is rejected. Trailing var-args cannot reach this path (the first token binds
-/// to `path`); the warning is a defensive guard documenting the ignore-args
-/// policy. `-L` is the one flag that *can* reach here, since it takes its own
-/// value rather than a bare token.
+/// via wasmtime, with no arguments. Project mode always invokes `main`; a
+/// non-`main` `--entry-point` is rejected. Trailing var-args cannot reach this
+/// path (the first token binds to `path`); the warning is a defensive guard
+/// documenting the ignore-args policy. `-L` is the one flag that *can* reach
+/// here, since it takes its own value rather than a bare token.
 ///
 /// The project is discovered and its target refused before wasmtime is looked
 /// for, because a target this command cannot run is not a missing-runtime
@@ -349,10 +359,7 @@ fn execute_project(args: &RunArgs) -> Result<()> {
     }
 
     if !args.args.is_empty() {
-        eprintln!(
-            "warning: trailing arguments are ignored in project mode; `main` \
-             is invoked with argc=0, argv=0."
-        );
+        eprintln!("{}", ignored_project_arguments_warning(&args.args));
     }
 
     let cwd =
@@ -392,6 +399,15 @@ fn execute_project(args: &RunArgs) -> Result<()> {
     run_wasmtime(&wasm_path, DEFAULT_ENTRY_POINT, &[])
 }
 
+/// The warning project mode prints for trailing arguments: it passes `main`
+/// none, so it names each one it drops, space-separated in the order given.
+fn ignored_project_arguments_warning(args: &[String]) -> String {
+    format!(
+        "warning: project mode passes no arguments to `main`; these are ignored: {}",
+        args.join(" ")
+    )
+}
+
 /// The conventional project output path: `<root>/out/main.wasm`.
 ///
 /// `out/` is `infc`'s default output directory and the build spawns `infc` with
@@ -410,9 +426,11 @@ fn project_wasm_path(ctx: &ProjectContext) -> PathBuf {
 /// shape: every method takes and returns the host's 64-bit tagged word, so a
 /// `5` typed on the command line arrives as a word whose low byte is read as the
 /// tag and whose payload is empty — decoding, silently, to a zero-valued
-/// integer rather than to five. `main` is worse: this path hands it the
-/// `argc, argv` pair a C entry point takes, which a value-ABI wrapper does not
-/// have, and the call fails on arity for a reason that says nothing about why.
+/// integer rather than to five. `main` is no exception, since its value-ABI
+/// wrapper's parameters are tagged words like every other method's, and
+/// neither is its result: wasmtime prints the returned word itself, so a `main`
+/// that takes nothing and returns 42 prints 180388626437, the word carrying 42
+/// in its upper half and the tag in its low byte.
 ///
 /// Both outcomes are wrong answers rather than missing features, which is why
 /// this is a refusal and not a warning. Nothing here can be fixed by passing
@@ -691,9 +709,8 @@ fn compile_to_wasm(
 
 /// Runs wasmtime with the given WASM file, invoking a specific function.
 ///
-/// Uses `--invoke <entry_point>` to call the specified exported function.
-/// For `main`, automatically passes argc=0, argv=0 arguments.
-/// For other functions, passes user-provided arguments.
+/// Calls `entry_point` with `args`, on the command line [`wasmtime_argv`]
+/// builds.
 ///
 /// Stderr is captured and only displayed if wasmtime fails, to suppress
 /// the experimental feature warnings about `--invoke` that appear on success.
@@ -704,19 +721,8 @@ fn compile_to_wasm(
 fn run_wasmtime(wasm_path: &Path, entry_point: &str, args: &[String]) -> Result<()> {
     println!("Invoking '{entry_point}' with wasmtime...");
 
-    let mut cmd = Command::new("wasmtime");
-    cmd.arg("--invoke").arg(entry_point).arg(wasm_path);
-
-    if entry_point == "main" {
-        // main(argc: i32, argv: i32) -> i32 requires two arguments
-        cmd.arg("0").arg("0");
-    } else {
-        for arg in args {
-            cmd.arg(arg);
-        }
-    }
-
-    let output = cmd
+    let output = Command::new("wasmtime")
+        .args(wasmtime_argv(wasm_path, entry_point, args))
         .stdin(std::process::Stdio::inherit())
         .output()
         .with_context(|| "Failed to execute wasmtime")?;
@@ -736,6 +742,31 @@ fn run_wasmtime(wasm_path: &Path, entry_point: &str, args: &[String]) -> Result<
         let code = output.status.code().unwrap_or(1);
         Err(InfsError::process_exit_code(code).into())
     }
+}
+
+/// The arguments `run` hands the `wasmtime` CLI: `--invoke <entry_point>
+/// <wasm_path>`, then `args` exactly as the user wrote them.
+///
+/// `main` is not special-cased: it takes the trailing arguments as any other
+/// export does, and wasmtime parses each into the type of the matching
+/// parameter of the compiled function. Code generation lowers `main` like every
+/// other function, so those are the parameters its source declares, except that
+/// a struct or array parameter is an `i32` address and a struct or array result
+/// is written through an address taken as a hidden first parameter:
+/// `pub fn main() -> i32` is `(func (result i32))`, while `pub fn main() ->
+/// [i32; 4]` is `(func (param i32))`. Neither difference is detected here; the
+/// argument for an address parameter is the user's to write like any other.
+/// Nothing is rewritten or dropped, an argument shaped like a flag included:
+/// wasmtime reads everything after the module path as the invoked function's
+/// arguments.
+fn wasmtime_argv(wasm_path: &Path, entry_point: &str, args: &[String]) -> Vec<OsString> {
+    let mut command_line = vec![
+        OsString::from("--invoke"),
+        OsString::from(entry_point),
+        OsString::from(wasm_path),
+    ];
+    command_line.extend(args.iter().map(OsString::from));
+    command_line
 }
 
 #[cfg(test)]
@@ -958,6 +989,144 @@ mod tests {
             assert!(
                 !msg.contains("Project mode always invokes `main`"),
                 "explicit `main` must not hit the custom-entry-point bail; got: {msg}"
+            );
+        }
+    }
+
+    /// The command line `run` hands wasmtime for `entry_point` and `args`, on the
+    /// artifact project mode runs, as strings: every entry these tests build is
+    /// UTF-8.
+    fn wasmtime_argv_of(entry_point: &str, args: &[&str]) -> Vec<String> {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+        wasmtime_argv(&Path::new("out").join("main.wasm"), entry_point, &args)
+            .into_iter()
+            .map(|entry| entry.into_string().expect("every entry is UTF-8"))
+            .collect()
+    }
+
+    /// `--invoke <entry_point> out/main.wasm`, the part of the command line every
+    /// invocation starts with.
+    fn invocation_of(entry_point: &str) -> Vec<String> {
+        vec![
+            "--invoke".to_string(),
+            entry_point.to_string(),
+            Path::new("out").join("main.wasm").display().to_string(),
+        ]
+    }
+
+    /// A `main` given no arguments gets none: nothing follows the module path.
+    /// The command line once appended `0 0` to every `main` call. A `main` that
+    /// takes nothing ran regardless, because the wasmtime CLI ignores arguments
+    /// beyond the last parameter; one taking an `i32` ran with it set to 0, and
+    /// one returning a struct or array took the first 0 as its result address.
+    ///
+    /// Fails if `main` is special-cased again with any appended argument.
+    #[test]
+    fn main_gets_nothing_after_the_module_path_when_given_no_arguments() {
+        for entry_point in [DEFAULT_ENTRY_POINT, "helper"] {
+            assert_eq!(
+                wasmtime_argv_of(entry_point, &[]),
+                invocation_of(entry_point),
+                "`{entry_point}` given no arguments must get none"
+            );
+        }
+    }
+
+    /// `main` is an ordinary entry point: the trailing arguments follow the
+    /// module path, in the order given, exactly as they do for any other export.
+    /// Each row is asked of `main` and of two other names, so a command line
+    /// that treated `main` differently in any row reads differently from theirs.
+    ///
+    /// Fails if `main`'s arguments are dropped, replaced or reordered, or if any
+    /// entry point's are.
+    #[test]
+    fn every_entry_point_receives_the_trailing_arguments_in_order() {
+        let rows: [&[&str]; 5] = [&["5"], &["2", "40"], &["0", "0"], &["-7", "8", "9"], &["x"]];
+        for args in rows {
+            for entry_point in [DEFAULT_ENTRY_POINT, "add", "main2"] {
+                let mut expected = invocation_of(entry_point);
+                expected.extend(args.iter().map(|arg| (*arg).to_string()));
+                assert_eq!(
+                    wasmtime_argv_of(entry_point, args),
+                    expected,
+                    "`{entry_point}` must receive {args:?} after the module path"
+                );
+            }
+        }
+    }
+
+    /// An argument shaped like a flag reaches wasmtime as written, after the
+    /// module path, where wasmtime reads it as the function's rather than its
+    /// own. That includes `--invoke` and `--`, which `run` must neither interpret
+    /// nor strip: clap has already consumed the `--` that separated them on the
+    /// `infs` command line, so any that remain are the program's.
+    ///
+    /// Fails if an argument is filtered, split or re-spelled on its way through.
+    #[test]
+    fn flag_shaped_arguments_are_passed_verbatim() {
+        let rows: [&[&str]; 5] = [
+            &["-L", "libs"],
+            &["--entry-point", "helper"],
+            &["--invoke", "other"],
+            &["--", "-5"],
+            &["-5", "--no-wasm-opt"],
+        ];
+        for args in rows {
+            for entry_point in [DEFAULT_ENTRY_POINT, "add"] {
+                let argv = wasmtime_argv_of(entry_point, args);
+                assert_eq!(
+                    argv[3..],
+                    *args,
+                    "`{entry_point}` must receive {args:?} verbatim, got argv: {argv:?}"
+                );
+                assert_eq!(
+                    argv[..3],
+                    invocation_of(entry_point),
+                    "the invocation must precede every argument, got argv: {argv:?}"
+                );
+            }
+        }
+    }
+
+    /// The module path is one argv entry, whatever it contains, and an argument
+    /// containing a space stays one entry too: nothing is joined into a string
+    /// and re-split on the way to wasmtime.
+    #[test]
+    fn a_path_or_argument_with_a_space_stays_one_entry() {
+        let wasm = Path::new("my project").join("out").join("main.wasm");
+        let argv = wasmtime_argv(&wasm, DEFAULT_ENTRY_POINT, &["1 2".to_string()]);
+        assert_eq!(
+            argv,
+            [
+                OsString::from("--invoke"),
+                OsString::from(DEFAULT_ENTRY_POINT),
+                OsString::from(&wasm),
+                OsString::from("1 2"),
+            ]
+        );
+    }
+
+    /// Project mode's warning for trailing arguments names each one it drops,
+    /// in the order given, and says what `main` receives instead: nothing.
+    ///
+    /// Unit-tested because no command line reaches it (the first bare token
+    /// binds to the source path), so without this pin its text could go false
+    /// with nothing turning red.
+    #[test]
+    fn the_project_mode_warning_names_every_ignored_argument() {
+        let rows: [(&[&str], &str); 3] = [
+            (&["5"], "5"),
+            (&["2", "40"], "2 40"),
+            (&["1", "-L", "libs"], "1 -L libs"),
+        ];
+        for (args, listed) in rows {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+            assert_eq!(
+                ignored_project_arguments_warning(&args),
+                format!(
+                    "warning: project mode passes no arguments to `main`; these are ignored: \
+                     {listed}"
+                )
             );
         }
     }
