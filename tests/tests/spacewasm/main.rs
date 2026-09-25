@@ -29,18 +29,13 @@
 //! a host only so that a hand-written module can load, and the sweeps register
 //! none.
 //!
-//! The interpreter's allocator is a pair of `no_mangle` symbols the library
-//! resolves its internal allocations to, so every binary that links it declares
-//! them itself. That is what the invocation below is; `support` deliberately
-//! never invokes the macro, so including it elsewhere stays possible.
-//!
-//! The interpreter is a dev-dependency and this is an integration binary, so
-//! neither `cargo build` nor `cargo clippy` without `--all-targets` compiles any
-//! of it.
-
-use support::StdAllocator;
-
-spacewasm::global_allocator!(StdAllocator, StdAllocator);
+//! The interpreter is embedded through `inference-spacewasm-runner`, which
+//! defines the interpreter's allocator symbols once for every program that
+//! links it, so this binary defines none. The runner is a workspace member, so
+//! `cargo build` compiles it and the interpreter with it; this binary is an
+//! integration test of the package that takes the runner as a dev-dependency,
+//! so neither `cargo build` nor `cargo clippy` without `--all-targets` compiles
+//! the binary itself.
 
 mod conformance_oracle;
 mod decode_sweep;

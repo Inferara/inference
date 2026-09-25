@@ -1,5 +1,5 @@
 //! Harness for driving this compiler's output against the real SpaceWasm
-//! interpreter, in process.
+//! interpreter, in process, through `inference-spacewasm-runner`.
 //!
 //! SpaceWasm is a `no_std` flight interpreter: it decodes, validates and
 //! compiles a WebAssembly 1.0 module to its own 16-bit IR, then runs that IR
@@ -8,52 +8,58 @@
 //! statement "this artifact loads on the target runtime", and a [`ParseError`]
 //! carries both the offset and the reason a flight computer would have given.
 //!
+//! The runner is the embedder. It loads a module, runs its start function,
+//! calls its exports and measures the IR it compiled to, and it returns every
+//! way that can fail as a value. This file adapts it to the tier twice over.
+//! The sweeps, the oracle and the host-imports rows want a harness fault to
+//! fail the test where it happened, so [`decode`], [`decode_with`],
+//! [`decode_with_pages`] and [`LoadedModule::invoke`] are thin wrappers that
+//! keep the decoder's verdict as an `Err` and panic on everything else: an
+//! interpreter that cannot be built, a start function that does not complete,
+//! a call the engine refuses. The embed harness below wants a start function
+//! that traps as an exit code of its own, so it loads through the runner
+//! directly.
+//!
 //! # The single-threaded contract, and why this tier is stricter than its sibling
 //!
-//! `spacewasm::global_allocator!` expands to two `static mut` globals and the
-//! `#[no_mangle] extern "C"` symbols the library's internal allocations resolve
-//! to. Upstream documents those entry points as single-threaded and
-//! non-re-entrant, and puts the synchronization on the embedder: reaching them
-//! from more than one thread is undefined behaviour by that contract, and
-//! `cargo test` runs a binary's tests on many threads at once. The token below
-//! is that synchronization.
+//! The interpreter allocates through two `#[no_mangle] extern "C"` symbols
+//! backed by two `static mut` globals. Upstream documents those entry points as
+//! single-threaded and non-re-entrant, and puts the synchronization on the
+//! embedder: reaching them from more than one thread is undefined behaviour by
+//! that contract, and `cargo test` runs a binary's tests on many threads at
+//! once. The runner's session is that synchronization, and this tier names it
+//! [`SpaceWasmSession`].
 //!
 //! The contract is the reason rather than an observed write, and deliberately
-//! so. [`StdAllocator`] is zero-sized, so today neither static is written after
-//! its initializer and two threads decoding at once would only read them. That
-//! is what makes the token look like ceremony to a reader who checks — and it
-//! stops being one the moment the allocator carries state, which the bounded
-//! page allocator a flight embedder actually ships would give it.
+//! so. The runner's allocator is zero-sized, so today neither static is written
+//! after its initializer and two threads decoding at once would only read them.
+//! That is what makes the session look like ceremony to a reader who checks —
+//! and it stops being one the moment the allocator carries state, which the
+//! bounded page allocator a flight embedder actually ships would give it.
 //!
-//! [`SpaceWasmSession`] is the answer, and it is deliberately stricter than the
-//! Soroban tier's plain `session()` guard next door. There, a forgotten lock
-//! costs a flaky host; here it puts the harness outside the library's stated
-//! contract, so for loading, running and freeing a module the lock is not a
-//! convention a test is asked to remember: it is a token no test can forge, and
-//! the only route to a loaded module is [`SpaceWasmSession::acquire`] followed
-//! by [`decode`]. A [`LoadedModule`] additionally *borrows* the session it was
-//! decoded under, so a module cannot outlive the lock that protects the
-//! allocator it will be freed through — the case a bare token would still let a
-//! test write.
+//! The session is deliberately stricter than the Soroban tier's plain
+//! `session()` guard next door. There, a forgotten lock costs a flaky host;
+//! here it puts the harness outside the library's stated contract, so the lock
+//! is not a convention a test is asked to remember: it is a token no test can
+//! forge, and the only route to a loaded module is
+//! [`SpaceWasmSession::acquire`] followed by a load. A [`LoadedModule`]
+//! additionally *borrows* the session it was loaded under, so a module cannot
+//! outlive the lock that protects the allocator it will be freed through — the
+//! case a bare token would still let a test write.
 //!
-//! One route is guarded by convention alone: building a host value. A host
-//! function boxes its closure and a host module or a host set is a list, all
-//! allocated through the same allocator, yet [`host_module`], [`host_set`] and
-//! the interpreter's own `HostFunction::try_new` take no token. So a caller
-//! builds its hosts after `acquire` and moves them straight into
-//! [`decode_with`], as every caller in this tier does. No token is threaded
-//! through the two builders because one could not close the route:
-//! spacewasm's own public constructors, `HostFunction::try_new` and
-//! `spacewasm::Vec::from_exact_iter` among them, allocate, and no signature in
-//! this file stops a test calling them. It would also cost the oracle its
-//! inline host sets: a host set built as an argument beside the `&mut` session
-//! the decode takes would borrow the session twice in one call.
+//! Building a host set takes the session as well, since [`host_module`] and
+//! [`host_set`] allocate through the same allocator, so a row registering
+//! hosts builds them after `acquire` and before the load that consumes them.
+//! One route is guarded by convention alone: the interpreter's own public
+//! constructors, `HostFunction::try_new` among them, allocate too, and no
+//! signature in this file stops a test calling them. Every caller in this tier
+//! builds its host functions while it holds the session.
 //!
-//! The macro is invoked at each **binary root** and never here, so the `static
-//! mut` cannot reach this crate's library or its `rocq-discharge` binaries.
-//! Three roots invoke it: the corpus-sweep binary this file sits beside, the
-//! `spacewasm-embed` example, and the CLI matrix that drives that example's
-//! entry point in process.
+//! The allocator symbols are the runner's to define, once. No binary that
+//! links it defines them again — not the corpus-sweep binary this file sits
+//! beside, not the `spacewasm-embed` example, not the CLI matrix that drives
+//! that example's entry point in process — and the runner's own tests read
+//! every Rust source in the workspace for a second definition.
 //!
 //! # The embedder harness
 //!
@@ -93,7 +99,7 @@
 //! divides the live bytes its bounded `PageAllocator` holds — the engine, the
 //! guest memory and the module metadata as much as the IR — by the artifact's
 //! size, and this harness cannot produce that figure, because it runs on the
-//! unbounded [`StdAllocator`] this tier needs and that allocator keeps no
+//! runner's unbounded allocator, which this tier needs and which keeps no
 //! statistics. What is measured here is the compiled IR alone against the
 //! WebAssembly it was compiled from, so it is named for what it is: a number
 //! that is not upstream's must not travel into a log under upstream's name,
@@ -135,45 +141,38 @@
 //! parameters, more than one result. None of those numbers is written down
 //! here, so none of them can drift from the interpreter this tier pins.
 
-use std::alloc::Layout;
 use std::cell::RefCell;
 use std::io::Write;
-use std::marker::PhantomData;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use inference_spacewasm_runner::{
+    self as runner, EngineConfig, ExportedFunction, HostSetError, InvokeError, IrStats, LoadError,
+    REFERENCE_MAX_CODE_PAGES, REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH,
+    ReexportedImport, coerce_arguments, render, type_name,
+};
+pub use inference_spacewasm_runner::{Session as SpaceWasmSession, host_module, host_set};
 use rustc_hash::{FxHashMap, FxHashSet};
 use spacewasm::{
-    AllocError, Allocator, CodeBuilder, CompilerOptions, Engine, ExportDesc,
-    HOST_FUNCTION_NAME_CAP, HOST_MODULE_NAME_CAP, HostFunction, HostFunctionError, HostGlobal,
-    HostModule, HostModuleRef, HostName, HostNameError, HostValList, InnerVec, Interpreter,
-    InterpreterResult, InterpreterRunner, InvokeError, MAX_HOST_FUNCTION_PARAMS, Module, ModuleRef,
-    ParseError, Ref, SectionKind, TrapReason, ValType, Value, WasmMemoryAllocator, WasmRef,
-    WasmStream,
+    Engine, HOST_FUNCTION_NAME_CAP, HOST_MODULE_NAME_CAP, HostFunction, HostFunctionError,
+    HostModule, HostModuleRef, HostName, HostNameError, HostValList, MAX_HOST_FUNCTION_PARAMS,
+    ParseError, SectionKind, TrapReason, ValType, Value,
 };
 
-/// Control frames the reference embedder's verifier admits.
+/// Control frames the reference embedder's verifier admits, as the const
+/// generic the loaders take.
 ///
 /// `spacewasm_std`, upstream's own `std` embedding, is the configuration this
 /// tier reports against: quoting a number nobody ships would make every depth
-/// finding unactionable.
-pub const EMBEDDER_MAX_CONTROL_FRAMES: usize = 64;
+/// finding unactionable. The number is the conformance checker's, which the
+/// runner re-exports.
+pub const EMBEDDER_MAX_CONTROL_FRAMES: usize = REFERENCE_MAX_CONTROL_FRAMES as usize;
 
 /// Operand-stack depth the reference embedder's verifier admits. See
 /// [`EMBEDDER_MAX_CONTROL_FRAMES`].
-pub const EMBEDDER_MAX_STACK_DEPTH: usize = 256;
-
-/// IR pages the code builder may fill, in `spacewasm_std`'s configuration.
-///
-/// A page holds 256 sixteen-bit words, so this is 128 KiB of compiled IR. A
-/// module needing more fails to load rather than silently growing the budget,
-/// which is the honest reading for a target whose whole premise is a fixed
-/// memory envelope.
-const MAX_CODE_PAGES: usize = 256;
+pub const EMBEDDER_MAX_STACK_DEPTH: usize = REFERENCE_MAX_STACK_DEPTH as usize;
 
 /// Words the interpreter's value stack holds.
 ///
@@ -183,14 +182,13 @@ const MAX_CODE_PAGES: usize = 256;
 /// that says nothing about either engine's semantics.
 const STACK_WORDS: usize = 64 * 1024;
 
-/// Modules one engine may hold. Each [`LoadedModule`] builds its own engine, so
-/// one is all a load ever needs.
-const MAX_MODULES: usize = 1;
+/// The engine every load in this tier builds: [`STACK_WORDS`] of value stack,
+/// and the reference embedder's IR page budget.
+const ENGINE: EngineConfig =
+    EngineConfig { stack_words: STACK_WORDS, max_code_pages: REFERENCE_MAX_CODE_PAGES };
 
-/// Sixteen-bit words one IR page holds.
-const WORDS_PER_PAGE: usize = 256;
-
-/// The instruction budget every invocation in this tier runs under.
+/// The instruction budget every invocation in this tier runs under, and every
+/// start function.
 ///
 /// Large enough that no corpus fixture reaches it — an [`Outcome::OutOfFuel`]
 /// is reported as a failure naming the function rather than tolerated — and
@@ -199,226 +197,14 @@ const WORDS_PER_PAGE: usize = 256;
 pub const FUEL: usize = 100_000_000;
 
 // ---------------------------------------------------------------------------
-// The allocator
+// The tier's loaders
 // ---------------------------------------------------------------------------
 
-/// The interpreter's allocator, backed by the Rust global allocator.
-///
-/// Unbounded on purpose: `spacewasm_std` runs behind a 16 × 8 KiB
-/// `PageAllocator` because a flight computer has that much and no more, and the
-/// same allocator here would starve on the larger corpus modules and report an
-/// allocation failure where this tier means to report a decode verdict. What
-/// the bounded configuration costs is a conformance measurement of its own, not
-/// a verdict about whether an artifact loads, so it is not this tier's to state.
-///
-/// One type serves both allocator traits, as upstream's `RustSystemAllocator`
-/// does: [`Allocator`] for the interpreter's own structures, and
-/// [`WasmMemoryAllocator`] for a module's guest linear memory.
-pub struct StdAllocator;
-
-/// The pointer a zero-sized request is answered with.
-///
-/// `std::alloc::alloc` is undefined behaviour on a zero-sized layout, and both
-/// of the allocator traits below can be reached with one — a module declaring
-/// `(memory 0)` asks for a guest memory of no bytes. Upstream's implementations
-/// pass the layout straight through and lean on the trait's "caller guarantees
-/// non-zero" clause; answering with a dangling but correctly aligned pointer
-/// costs two branches and removes the question, since a zero-sized allocation
-/// is never read or written.
-fn dangling_for(layout: Layout) -> *mut u8 {
-    std::ptr::without_provenance_mut(layout.align())
-}
-
-// SAFETY: every `Ok` is either a live `std::alloc` allocation made with the
-// requested layout, or — for a zero-sized layout, which is never dereferenced —
-// a correctly aligned dangling pointer. `dealloc` releases exactly what `alloc`
-// returned, under the same layout, and skips the zero-sized case that owns
-// nothing.
-unsafe impl Allocator for StdAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> Result<*mut u8, AllocError> {
-        if layout.size() == 0 {
-            return Ok(dangling_for(layout));
-        }
-        let ptr = unsafe { std::alloc::alloc(layout) };
-        if ptr.is_null() {
-            Err(AllocError::AllocationFailed)
-        } else {
-            Ok(ptr)
-        }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if layout.size() == 0 {
-            return;
-        }
-        unsafe { std::alloc::dealloc(ptr, layout) }
-    }
-}
-
-impl WasmMemoryAllocator for StdAllocator {
-    fn allocate(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-        if layout.size() == 0 {
-            return NonNull::new(dangling_for(layout)).ok_or(AllocError::AllocationFailed);
-        }
-        // SAFETY: the layout is non-zero-sized, which is `std::alloc::alloc`'s
-        // only requirement.
-        NonNull::new(unsafe { std::alloc::alloc(layout) }).ok_or(AllocError::AllocationFailed)
-    }
-
-    fn reallocate(
-        &self,
-        ptr: NonNull<u8>,
-        old_layout: Layout,
-        layout: Layout,
-    ) -> Result<NonNull<u8>, AllocError> {
-        if old_layout.size() == 0 {
-            return self.allocate(layout);
-        }
-        if layout.size() == 0 {
-            self.deallocate(ptr, old_layout);
-            return NonNull::new(dangling_for(layout)).ok_or(AllocError::AllocationFailed);
-        }
-        // SAFETY: `ptr` came from `allocate`/`reallocate` under `old_layout`,
-        // both sizes are non-zero, and `realloc` leaves the original block
-        // untouched when it returns null — which is the failure contract this
-        // trait states.
-        NonNull::new(unsafe { std::alloc::realloc(ptr.as_ptr(), old_layout, layout.size()) })
-            .ok_or(AllocError::AllocationFailed)
-    }
-
-    fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        if layout.size() == 0 {
-            return;
-        }
-        // SAFETY: `ptr` was returned by `allocate`/`reallocate` under `layout`.
-        unsafe { std::alloc::dealloc(ptr.as_ptr(), layout) }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The session token
-// ---------------------------------------------------------------------------
-
-/// Exclusive access to the interpreter for the duration of one test.
-///
-/// Holding one is what makes reaching the interpreter sound: see this module's
-/// documentation for why a convention would not be enough here.
-pub struct SpaceWasmSession {
-    /// Held for the token's lifetime and never read: it is the lock itself.
-    _guard: MutexGuard<'static, ()>,
-}
-
-impl SpaceWasmSession {
-    /// Blocks until this binary's interpreter is free, then claims it.
-    ///
-    /// Acquire exactly once per test and pass the `&mut SpaceWasmSession` down:
-    /// the lock is a plain non-reentrant [`Mutex`], so a second acquire on the
-    /// same thread deadlocks the binary with no output at all — the one failure
-    /// mode of this design that does not name itself.
-    ///
-    /// The guard never poisons: a panicking assertion in one test would
-    /// otherwise turn every later `lock()` into an error and bury the one real
-    /// failure under a wall of secondary ones — and a corpus sweep would report
-    /// a hundred of them. This is the Soroban tier's acquire line verbatim, for
-    /// the same reason.
-    #[must_use]
-    pub fn acquire() -> Self {
-        static SESSION: Mutex<()> = Mutex::new(());
-        Self { _guard: SESSION.lock().unwrap_or_else(PoisonError::into_inner) }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The stream
-// ---------------------------------------------------------------------------
-
-/// A [`WasmStream`] over one in-memory module.
-///
-/// The decoder pulls its input in chunks and hands each one back through
-/// [`WasmStream::return_`] so a flight embedder can reuse a fixed buffer. This
-/// one owns a single chunk holding the whole module and lends it out once: the
-/// buffer is never transferred, so the hand-back is a no-op and nothing is
-/// leaked or double-freed.
-pub struct ByteStream {
-    buffer: Vec<u8>,
-    lent: bool,
-}
-
-impl ByteStream {
-    /// Wraps a copy of `wasm`.
-    #[must_use]
-    pub fn new(wasm: &[u8]) -> Self {
-        Self { buffer: wasm.to_vec(), lent: false }
-    }
-}
-
-impl WasmStream for ByteStream {
-    fn read(&mut self) -> Result<Option<InnerVec<u8>>, u8> {
-        if self.lent {
-            return Ok(None);
-        }
-        self.lent = true;
-        let len = self.buffer.len();
-        // SAFETY: the pointer and length describe `self.buffer`, which outlives
-        // every chunk because the decoder returns each one before `Module::new`
-        // returns and this stream owns the allocation throughout. Capacity is
-        // reported as the length so nothing beyond the module's own bytes is
-        // ever addressable through the chunk.
-        Ok(Some(unsafe {
-            InnerVec::from_raw_parts(self.buffer.as_mut_ptr(), len, len)
-        }))
-    }
-
-    fn return_(&mut self, _chunk: InnerVec<u8>) {
-        // Nothing to reclaim, and nothing this body could reclaim: an
-        // `InnerVec` owns no allocation and has no `Drop` of its own, so the
-        // chunk falling out of scope frees nothing. The buffer it views belongs
-        // to `self` and stays alive for the whole decode.
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Loading
-// ---------------------------------------------------------------------------
-
-/// A module decoded, IR-compiled and instantiated inside its own engine.
+/// A module the runner loaded, whose calls panic on anything but an outcome.
 ///
 /// Named for what it is rather than `Decoded`, which the Soroban tier next door
 /// already uses for a decoded `Val`.
-///
-/// The `'session` lifetime is the safety argument: the engine, its IR pages and
-/// the guest memory are all freed through the process-wide interpreter
-/// allocator, so this value may not outlive the lock that serializes it.
-pub struct LoadedModule<'session> {
-    engine: Engine,
-    code_builder: CodeBuilder,
-    module: ModuleRef,
-    session: PhantomData<&'session mut SpaceWasmSession>,
-}
-
-/// One exported function, as the decoder sees it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExportedFunction {
-    /// The name in the export section.
-    pub name: String,
-    /// What the *WebAssembly* signature takes, in order. A hidden pointer the
-    /// lowering introduced for an aggregate return is one of them, which is why
-    /// this is read here and not off the source-level export descriptor — and
-    /// the types rather than a count, because a caller supplying arguments on a
-    /// command line has to know which of them the engine wants 64 bits wide.
-    pub params: Vec<ValType>,
-    /// What it gives back, if anything.
-    pub result: Option<ValType>,
-}
-
-/// One export that is a host import the module exports again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReexportedImport {
-    /// The name in the export section.
-    pub name: String,
-    /// The host import behind it, as `module.field`.
-    pub import: String,
-}
+pub struct LoadedModule<'session>(runner::LoadedModule<'session>);
 
 /// What running an exported function did.
 #[derive(Debug, Clone, PartialEq)]
@@ -436,10 +222,20 @@ pub enum Outcome {
 /// Decodes `wasm` under the reference embedder configuration with no host
 /// module registered.
 ///
+/// The `allow` is the counterpart of the one on [`run`]. Three binaries compile
+/// this file, and the two that run a command line load through the runner
+/// directly and never reach these loaders; seeding liveness here covers
+/// [`decode_with`] and [`decode_with_pages`] behind it.
+///
 /// # Errors
 ///
 /// Returns the decoder's own [`ParseError`], carrying the byte offset and the
 /// validation reason.
+///
+/// # Panics
+///
+/// For the reasons [`decode_with_pages`] does.
+#[allow(dead_code)]
 pub fn decode<'s>(
     session: &'s mut SpaceWasmSession,
     wasm: &[u8],
@@ -457,14 +253,9 @@ pub fn decode<'s>(
 /// The bounds are const generics in the decoder because they size a stack the
 /// verifier walks with, so a tighter embedder is expressed by decoding again
 /// rather than by reading a number off a report. The host set is a parameter
-/// for the callers that register one: the harness's `--host` stubs, the
-/// host-imports tier, which runs a compiled program against recording hosts,
-/// and the oracle rows whose module declares an import. Built with
-/// [`host_module`] and [`host_set`].
-///
-/// The session is never read: it is taken by mutable reference so that the
-/// returned module borrows it, which is what forbids a module outliving the
-/// lock its memory is freed under.
+/// for the callers that register one: the host-imports tier, which runs a
+/// compiled program against recording hosts, and the oracle rows whose module
+/// declares an import. Built with [`host_module`] and [`host_set`].
 ///
 /// # Errors
 ///
@@ -472,21 +263,19 @@ pub fn decode<'s>(
 ///
 /// # Panics
 ///
-/// Panics if the interpreter cannot be built at all — an allocation failure or
-/// an oversized code-page budget — since that is a harness fault rather than a
-/// verdict about `wasm`.
+/// For the reasons [`decode_with_pages`] does.
 pub fn decode_with<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
     session: &'s mut SpaceWasmSession,
     wasm: &[u8],
     hosts: spacewasm::Vec<HostModule>,
 ) -> Result<LoadedModule<'s>, ParseError> {
-    decode_with_pages::<CONTROL_FRAMES, STACK_DEPTH>(session, wasm, hosts, MAX_CODE_PAGES)
+    decode_with_pages::<CONTROL_FRAMES, STACK_DEPTH>(session, wasm, hosts, REFERENCE_MAX_CODE_PAGES)
 }
 
 /// [`decode_with`] with the code builder's IR page budget chosen by the caller
 /// as well.
 ///
-/// `MAX_CODE_PAGES` is `spacewasm_std`'s, and it is the right budget for
+/// The reference budget is `spacewasm_std`'s, and it is the right budget for
 /// every question about an artifact this compiler could write. It is the wrong
 /// one for a module built to sit past an index the interpreter narrows: that
 /// needs more than 65,536 function bodies, which is more compiled IR than a
@@ -495,17 +284,9 @@ pub fn decode_with<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
 ///
 /// The budget is the embedder's own choice — `CompilerOptions::max_code_pages`
 /// is what a mission integrator sets — so widening it is a parameter here
-/// rather than a second allocator or a second session token: the allocator
-/// contract and the single-threaded lock are untouched, and a caller passing a
-/// larger number is describing a larger flight computer, not evading anything.
-///
-/// The module is decoded under the empty name. A named module shares the
-/// namespace the host modules are registered in, and the interpreter refuses
-/// one whose name a host module already carries as `DuplicateModuleName`
-/// before it reads a section, so a guest named `main` would fail at byte 8
-/// beside the host module `--host main.f=…` registers. The empty name is
-/// exempt from that check, and nothing needs the guest's name: an engine here
-/// holds this one module, so no other module imports from it.
+/// rather than a second allocator or a second session: the allocator contract
+/// and the single-threaded lock are untouched, and a caller passing a larger
+/// number is describing a larger flight computer, not evading anything.
 ///
 /// # Errors
 ///
@@ -513,242 +294,59 @@ pub fn decode_with<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
 ///
 /// # Panics
 ///
-/// Panics if the interpreter cannot be built at all, as [`decode_with`] does.
+/// Panics on every other load failure the runner reports, since none is a
+/// verdict about `wasm` this tier compares: an interpreter that cannot be
+/// built at all, or a start function that traps, pauses or outlasts [`FUEL`].
+/// This compiler emits no start function, so the last is a surprise in a
+/// hand-written module rather than a comparable outcome.
 pub fn decode_with_pages<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
-    _session: &'s mut SpaceWasmSession,
+    session: &'s mut SpaceWasmSession,
     wasm: &[u8],
     hosts: spacewasm::Vec<HostModule>,
     max_code_pages: usize,
 ) -> Result<LoadedModule<'s>, ParseError> {
-    let mut code_builder = CodeBuilder::new(CompilerOptions {
-        allow_memory_grow: false,
-        max_backpatch_iterations: None,
-        max_code_pages,
-    })
-    .expect("the code builder's page budget is allocatable");
-    let mut engine = Engine::new(STACK_WORDS, MAX_MODULES, hosts).expect("the engine allocates");
-
-    let mut stream = ByteStream::new(wasm);
-    let module = Module::new::<CONTROL_FRAMES, STACK_DEPTH>(
-        "",
-        &mut stream,
-        &mut engine.store,
-        &mut code_builder,
-        spacewasm::Rc::new(StdAllocator)
-            .expect("the guest memory allocator allocates")
-            .into_wasm_memory_allocator(),
-    )?;
-    let module = engine.push_module(module).expect("one module fits in the store");
-
-    let mut loaded =
-        LoadedModule { engine, code_builder, module, session: PhantomData };
-    loaded.run_start();
-    Ok(loaded)
+    let config = EngineConfig { max_code_pages, ..ENGINE };
+    match runner::load_with::<CONTROL_FRAMES, STACK_DEPTH>(session, wasm, hosts, FUEL, config) {
+        Ok(module) => Ok(LoadedModule(module)),
+        Err(LoadError::Decode(verdict)) => Err(verdict),
+        Err(fault) => panic!("{fault}"),
+    }
 }
 
 impl LoadedModule<'_> {
-    /// Runs the module's start function, if it declares one.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the start function does not complete. A start function that
-    /// traps leaves a module no embedder would use, and this compiler emits
-    /// none at all, so it is a harness surprise rather than a comparable
-    /// outcome.
-    fn run_start(&mut self) {
-        let Some(start) = self.engine.module_start(self.module) else {
-            return;
-        };
-        self.engine.invoke(start, &[]).expect("the start function is invocable");
-        let outcome = Interpreter.run(self.code_builder.pages(), &mut self.engine, FUEL);
-        assert_eq!(
-            outcome,
-            InterpreterResult::Finished,
-            "the start function did not complete: {outcome:?}"
-        );
-    }
-
-    /// Every function this module exports, in export-section order.
-    ///
-    /// A host import the module exports again is left out, because the engine
-    /// invokes only WebAssembly functions and a host function has no body here
-    /// to run; [`LoadedModule::exported_host_imports`] lists those.
-    ///
-    /// # Panics
-    ///
-    /// Panics if an exported function index does not resolve, which is a
-    /// decoder invariant rather than a property of the module under test.
+    /// Every function this module exports, in export-section order, leaving
+    /// out a host import it exports again.
     #[must_use]
     pub fn exported_functions(&self) -> Vec<ExportedFunction> {
-        let module = &self.engine.store.modules()[self.module.0 as usize];
-        module
-            .exports
-            .iter()
-            .filter_map(|export| {
-                let ExportDesc::Func(index) = export.desc else {
-                    return None;
-                };
-                let reference = module
-                    .get_func_ref(index)
-                    .expect("an exported function index resolves");
-                let (owner, local) = match reference {
-                    Ref::Module(local) => (self.module, local),
-                    Ref::Extern { module, index } => (module, index),
-                    Ref::Host { .. } => return None,
-                };
-                let owner = &self.engine.store.modules()[owner.0 as usize];
-                let function = &owner.functions[local as usize];
-                Some(ExportedFunction {
-                    name: export.name.to_string(),
-                    params: owner.types[function.ty.0 as usize].params.iter().copied().collect(),
-                    result: function.return_ty,
-                })
-            })
-            .collect()
+        self.0.exported_functions()
+    }
+
+    /// Every host import this module exports again, in export-section order.
+    ///
+    /// Only the command line asks this, so in the sweep binary it is kept live
+    /// by the `allow` on [`run`] rather than by a caller.
+    #[must_use]
+    pub fn exported_host_imports(&self) -> Vec<ReexportedImport> {
+        self.0.exported_host_imports()
     }
 
     /// Calls `export` with `args` under a `fuel`-instruction budget.
     ///
     /// # Panics
     ///
-    /// Panics if `export` is not an exported function of this module, if it
-    /// resolves to a host import rather than a function with a WebAssembly
-    /// body, if the argument list does not match its signature, or if a
-    /// registered host function pauses the call — all harness faults, not
-    /// program outcomes. A pause is a host asking for asynchronous work, which
-    /// only an embedder that resumes the call can honour, and this harness
-    /// never does.
+    /// Panics if the runner cannot make the call: `export` is not an exported
+    /// function of this module, it resolves to a host import rather than a
+    /// function with a WebAssembly body, the argument list does not match its
+    /// signature, a registered host function pauses the call, or the
+    /// interpreter finishes a function that declares a result without leaving
+    /// one — all harness or interpreter faults, not program outcomes.
     pub fn invoke(&mut self, export: &str, args: &[Value], fuel: usize) -> Outcome {
-        let reference = self.func_ref(export);
-        match self.engine.invoke(reference, args) {
-            Ok(()) => {}
-            Err(InvokeError::StackOverflow) => return Outcome::Trap(TrapReason::StackOverflow),
-            Err(e) => panic!("`{export}` could not be invoked: {e:?}"),
+        match self.0.invoke(export, args, fuel) {
+            Ok(runner::Outcome::Returned(value)) => Outcome::Value(value),
+            Ok(runner::Outcome::Trapped(reason)) => Outcome::Trap(reason),
+            Ok(runner::Outcome::OutOfFuel) => Outcome::OutOfFuel,
+            Err(fault) => panic!("{fault}"),
         }
-        let result_ty = {
-            let owner = &self.engine.store.modules()[reference.module.0 as usize];
-            owner.functions[reference.index as usize].return_ty
-        };
-        match Interpreter.run(self.code_builder.pages(), &mut self.engine, fuel) {
-            InterpreterResult::Finished => Outcome::Value(
-                result_ty.map(|ty| {
-                    self.engine.result.expect("a function with a result leaves one").to_value(ty)
-                }),
-            ),
-            InterpreterResult::Trap(reason) => Outcome::Trap(reason),
-            InterpreterResult::OutOfFuel => Outcome::OutOfFuel,
-            InterpreterResult::Pause => panic!(
-                "`{export}` paused: a registered host function returned \
-                 `HostFunctionBreak::Pause`, and this harness never resumes a paused call"
-            ),
-        }
-    }
-
-    /// Every host import this module exports again, in export-section order:
-    /// the exports [`LoadedModule::exported_functions`] leaves out.
-    ///
-    /// This is how the harness tells a reader what those names are, both where
-    /// it lists the exports and where one is asked for by name — without it,
-    /// the export section would read as shorter than it is.
-    ///
-    /// Only the command line asks this, so in the sweep binary it is kept live
-    /// by the `allow` on [`run`] rather than by a caller.
-    #[must_use]
-    pub fn exported_host_imports(&self) -> Vec<ReexportedImport> {
-        let module = &self.engine.store.modules()[self.module.0 as usize];
-        module
-            .exports
-            .iter()
-            .filter_map(|export| {
-                let ExportDesc::Func(index) = export.desc else {
-                    return None;
-                };
-                match module.get_func_ref(index)? {
-                    Ref::Host { module, index } => Some(ReexportedImport {
-                        name: export.name.to_string(),
-                        import: self.host_function_name(module, index),
-                    }),
-                    Ref::Module(_) | Ref::Extern { .. } => None,
-                }
-            })
-            .collect()
-    }
-
-    /// The `module.field` a host function was registered under.
-    fn host_function_name(&self, module: HostModuleRef, index: u16) -> String {
-        let host = &self.engine.store.host_modules()[usize::from(module.0)];
-        format!("{}.{}", host.name.as_str(), host.functions[usize::from(index)].name())
-    }
-
-    /// Resolves an export name to the reference the engine invokes through.
-    fn func_ref(&self, export: &str) -> WasmRef {
-        let module = &self.engine.store.modules()[self.module.0 as usize];
-        let entry = module
-            .exports
-            .iter()
-            .find(|entry| entry.name == export)
-            .unwrap_or_else(|| panic!("this module exports no `{export}`"));
-        let ExportDesc::Func(index) = entry.desc else {
-            panic!("`{export}` is exported, but not as a function")
-        };
-        match module.get_func_ref(index).expect("an exported function index resolves") {
-            Ref::Module(local) => WasmRef { module: self.module, index: local },
-            Ref::Extern { module, index } => WasmRef { module, index },
-            Ref::Host { module, index } => {
-                panic!("{}", host_export_refusal(export, &self.host_function_name(module, index)))
-            }
-        }
-    }
-}
-
-/// Why an export naming a host import cannot be invoked, worded once for the
-/// command line and for an in-process caller alike.
-///
-/// The sentence carries its reason and its remedy rather than leaving them to
-/// this file: a reader who has just registered the import has no cause to
-/// expect it to be uncallable, and nothing in either caller's context says
-/// what to invoke instead.
-fn host_export_refusal(export: &str, import: &str) -> String {
-    format!(
-        "`{export}` resolves to the host import `{import}`: the interpreter invokes only \
-         functions with a WebAssembly body, and a host import's body is the embedder's, so \
-         invoke an export that calls it instead"
-    )
-}
-
-/// How much IR one module compiled to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IrStats {
-    /// Pages the code builder filled. Each holds 256 sixteen-bit words.
-    pub code_pages: usize,
-    /// Sixteen-bit IR words written, across every page.
-    pub ir_words: usize,
-    /// Bytes of WebAssembly the IR was compiled from.
-    pub wasm_bytes: usize,
-}
-
-impl IrStats {
-    /// The IR as bytes rather than sixteen-bit words.
-    #[must_use]
-    pub fn ir_bytes(self) -> usize {
-        self.ir_words * BYTES_PER_WORD
-    }
-
-    /// Words the pages held could have taken, which is what the words written
-    /// are usefully read against.
-    #[must_use]
-    pub fn ir_words_capacity(self) -> usize {
-        self.code_pages * WORDS_PER_PAGE
-    }
-
-    /// Bytes of IR per byte of WebAssembly.
-    ///
-    /// Only ever computed for a module that decoded, and a module that decoded
-    /// carried at least a magic number and a version, so the divisor is never
-    /// zero.
-    #[must_use]
-    pub fn ir_bytes_per_wasm_byte(self) -> f64 {
-        self.ir_bytes() as f64 / self.wasm_bytes as f64
     }
 }
 
@@ -756,80 +354,12 @@ impl IrStats {
 /// from.
 #[must_use]
 pub fn ir_stats(module: &LoadedModule<'_>, wasm_len: usize) -> IrStats {
-    let pages = module.code_builder.pages().len();
-    // Every page but the last is full; the builder's offset is how far into the
-    // last one the writer got.
-    let filled = pages.saturating_sub(1) * WORDS_PER_PAGE + module.code_builder.offset();
-    IrStats { code_pages: pages, ir_words: filled, wasm_bytes: wasm_len }
-}
-
-// ---------------------------------------------------------------------------
-// Host modules
-// ---------------------------------------------------------------------------
-
-/// The host module an embedder registers under `name`, supplying `functions`
-/// and `globals` to the modules that import them.
-///
-/// Every host module in this tier is built here — the oracle's one-function
-/// and one-global registrations, the host-imports tier's recording hosts and
-/// the harness's `--host` stubs — so the two lists no caller fills, memories
-/// and tables, are left empty in one place rather than in each.
-///
-/// The name is handed to the interpreter's own constructor and its refusal is
-/// returned rather than unwrapped: `--host` passes a name somebody typed, and
-/// one that is too long is a usage error to report rather than a harness fault.
-///
-/// It allocates through the interpreter's allocator and takes no session token;
-/// this module's documentation says why that is the one route left to
-/// convention, and what every caller does instead.
-///
-/// # Errors
-///
-/// Returns the interpreter's [`HostNameError`] when `name` is longer than a
-/// host module name holds.
-///
-/// # Panics
-///
-/// Panics if the interpreter's allocator cannot hold the two lists, which is a
-/// harness fault as it is in [`decode_with`].
-pub fn host_module(
-    name: &str,
-    functions: Vec<HostFunction>,
-    globals: Vec<HostGlobal>,
-) -> Result<HostModule, HostNameError> {
-    Ok(HostModule {
-        name: HostName::try_from_str(name)?,
-        globals: interpreter_vec(globals),
-        functions: interpreter_vec(functions),
-        memory: spacewasm::Vec::zero(),
-        table: spacewasm::Vec::zero(),
-    })
-}
-
-/// `modules` as the host set [`decode_with`] takes.
-///
-/// # Panics
-///
-/// Panics if the interpreter's allocator cannot hold the list, as
-/// [`host_module`] does.
-#[must_use]
-pub fn host_set(modules: Vec<HostModule>) -> spacewasm::Vec<HostModule> {
-    interpreter_vec(modules)
-}
-
-/// `items`, moved into a list allocated by the interpreter's allocator, which
-/// is the only kind of list a host module or a host set is made of.
-fn interpreter_vec<T>(items: Vec<T>) -> spacewasm::Vec<T> {
-    spacewasm::Vec::from_exact_iter(items.into_iter())
-        .expect("the interpreter's allocator holds a host list")
+    runner::ir_stats(&module.0, wasm_len)
 }
 
 // ---------------------------------------------------------------------------
 // The embedder harness
 // ---------------------------------------------------------------------------
-
-/// Bytes one sixteen-bit IR word occupies.
-const BYTES_PER_WORD: usize = 2;
 
 /// How to call the harness, printed under every argument-level refusal.
 ///
@@ -851,10 +381,15 @@ const HOST_FORM: &str = "MODULE.FIELD=PARAMS[:RESULT]";
 /// them into "it did not work" — which is the one thing an integrator already
 /// knows.
 ///
-/// A module the harness cannot start at all is outside that guarantee rather
-/// than an eighth code inside it: this compiler declares no start function, so
-/// a foreign module whose start traps is a harness surprise and not a verdict
-/// about an artifact, and it panics — see [`run_with`]'s own `# Panics`.
+/// A module's start function runs as part of its load, and a start function
+/// that traps is the same fact about an artifact as an invocation that traps,
+/// so it exits with [`exit::TRAP`] and its line names the start function
+/// rather than an export. The rest of what can stop a load is outside the
+/// guarantee rather than an eighth code inside it: an interpreter that cannot
+/// be built at all, or a start function that pauses or is still running after
+/// [`FUEL`](super::FUEL) instructions — which `--fuel` does not govern — is a
+/// harness surprise, since this compiler declares no start function, and it
+/// panics; see [`run_with`]'s own `# Panics`.
 pub mod exit {
     /// The module loaded, and any invocation returned.
     pub const OK: u8 = 0;
@@ -867,7 +402,7 @@ pub mod exit {
     /// The module loaded but exports no function by that name that the
     /// interpreter can invoke: none at all, or a host import it re-exports.
     pub const NO_SUCH_EXPORT: u8 = 5;
-    /// The invocation trapped.
+    /// The invocation trapped, or the module's start function did.
     pub const TRAP: u8 = 6;
     /// The invocation was still running when the fuel ran out.
     pub const OUT_OF_FUEL: u8 = 7;
@@ -1092,10 +627,10 @@ impl Command {
 ///
 /// The `allow` is what keeps this file shared. Three binaries compile it and
 /// only two call a command line: the corpus sweeps next door include it for the
-/// interpreter harness above and reach none of this, and in a binary crate an
-/// item nothing reaches is dead however public it is. Seeding liveness here
-/// covers everything below, which is reachable from this function and from
-/// nowhere else.
+/// loaders above and reach none of this, and in a binary crate an item nothing
+/// reaches is dead however public it is. Seeding liveness here covers
+/// everything below, which is reachable from this function and from nowhere
+/// else.
 #[allow(dead_code)]
 #[must_use]
 pub fn run(argv: Vec<String>) -> ExitCode {
@@ -1110,9 +645,10 @@ pub fn run(argv: Vec<String>) -> ExitCode {
 ///
 /// # Panics
 ///
-/// Panics for the reasons [`decode_with`] and [`LoadedModule::invoke`] do: an
-/// interpreter that cannot be built at all, or a start function that does not
-/// complete. Neither is a verdict about the artifact.
+/// Panics when the interpreter cannot be built at all, when a module's start
+/// function pauses or is still running after [`FUEL`] instructions, and for the
+/// reasons [`LoadedModule::invoke`] does. None of them is a verdict about the
+/// artifact.
 #[must_use]
 pub fn run_with(argv: &[String], out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let command = match Command::parse(argv) {
@@ -1143,10 +679,14 @@ fn line(sink: &mut dyn Write, text: &str) {
 /// the interpreter refuses is a usage error reported before anything is
 /// loaded. Only argument coercion, which needs the export's declared types, is
 /// judged after the load.
+///
+/// The module is loaded through the runner rather than through [`decode_with`],
+/// because the runner reports a start function that traps as a load failure of
+/// its own, and that is an exit code here rather than a panic.
 fn execute(command: &Command, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let mut session = SpaceWasmSession::acquire();
     let calls = HostCalls::default();
-    let hosts = match host_stubs(&command.hosts, &calls) {
+    let hosts = match host_stubs(&session, &command.hosts, &calls) {
         Ok(hosts) => hosts,
         Err(message) => {
             line(err, &format!("error: {message}"));
@@ -1163,23 +703,37 @@ fn execute(command: &Command, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         }
     };
 
-    let decoded = match hosts {
-        None => decode(&mut session, &wasm),
-        Some(hosts) => decode_with::<EMBEDDER_MAX_CONTROL_FRAMES, EMBEDDER_MAX_STACK_DEPTH>(
-            &mut session,
-            &wasm,
-            hosts,
-        ),
-    };
-    let mut module = match decoded {
-        Ok(module) => module,
-        Err(e) => {
-            report_decode_failure(&command.module, &wasm, &e, &command.hosts, err);
+    let loaded = runner::load_with::<EMBEDDER_MAX_CONTROL_FRAMES, EMBEDDER_MAX_STACK_DEPTH>(
+        &mut session,
+        &wasm,
+        hosts,
+        FUEL,
+        ENGINE,
+    );
+    // A start function runs inside the load, and the calls it made are printed
+    // before anything else: before the line saying how it ended when it
+    // trapped, and before anything the command line asked for when it
+    // returned.
+    let mut module = match loaded {
+        Ok(module) => LoadedModule(module),
+        Err(LoadError::Decode(verdict)) => {
+            report_decode_failure(&session, &command.module, &wasm, &verdict, &command.hosts, err);
             return exit::DECODE;
         }
+        Err(LoadError::StartTrapped(reason)) => {
+            calls.flush(err);
+            line(
+                err,
+                &format!(
+                    "error: {} does not load under the SpaceWasm interpreter: its start function \
+                     trapped: {reason:?}",
+                    command.module.display()
+                ),
+            );
+            return exit::TRAP;
+        }
+        Err(fault) => panic!("{fault}"),
     };
-    // A start function runs inside the decode, and the calls it made are
-    // printed before anything the command line asked for.
     calls.flush(err);
 
     // Before the invocation, and unconditionally: a trapping call must not take
@@ -1212,7 +766,10 @@ fn execute(command: &Command, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         let message = match reexported.iter().find(|export| export.name == invocation.export) {
             Some(export) => format!(
                 "error: {path}: {}",
-                host_export_refusal(&invocation.export, &export.import)
+                InvokeError::HostReexport {
+                    export: invocation.export.clone(),
+                    import: export.import.clone(),
+                }
             ),
             None => format!("error: {path} exports no function `{}`", invocation.export),
         };
@@ -1221,10 +778,10 @@ fn execute(command: &Command, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         return exit::NO_SUCH_EXPORT;
     };
 
-    let args = match arguments(signature, &invocation.args) {
+    let args = match coerce_arguments(signature, &invocation.args) {
         Ok(args) => args,
-        Err(message) => {
-            line(err, &format!("error: {message}"));
+        Err(refusal) => {
+            line(err, &format!("error: {refusal}"));
             line(err, USAGE_LINE);
             return exit::USAGE;
         }
@@ -1324,11 +881,6 @@ impl HostCalls {
 /// The host set `--host` asked for: a stub per spec, and one host module per
 /// module name holding every stub registered under it, in the order given.
 ///
-/// `None` when no spec was given, so that [`execute`] decodes through
-/// [`decode`] rather than through [`decode_with`] with an empty set: the two
-/// are the same load, and that call is what keeps `decode` live in the two
-/// binaries that run a command line without the sweeps.
-///
 /// The decode-failure report calls this too: once per suggested spec, through
 /// [`stub_for`], which reaches every refusal [`stub`] and [`host_module`] make
 /// of one spec, and once with every suggestion together, which reaches the two
@@ -1353,12 +905,10 @@ impl HostCalls {
 /// first. No interpreter constructor judges that bound, so the refusal is
 /// sized from the binder's sixteen bits rather than asked for.
 fn host_stubs(
+    session: &SpaceWasmSession,
     specs: &[HostSpec],
     calls: &HostCalls,
-) -> Result<Option<spacewasm::Vec<HostModule>>, String> {
-    if specs.is_empty() {
-        return Ok(None);
-    }
+) -> Result<spacewasm::Vec<HostModule>, String> {
     let mut groups: Vec<(&HostSpec, Vec<HostFunction>)> = Vec::new();
     for spec in specs {
         let function = stub(spec, calls)?;
@@ -1393,12 +943,17 @@ fn host_stubs(
     let modules = groups
         .into_iter()
         .map(|(first, functions)| {
-            host_module(&first.module, functions, Vec::new()).map_err(|error| {
-                name_refusal(first, "module", &first.module, HOST_MODULE_NAME_CAP, error)
+            host_module(session, &first.module, functions, Vec::new()).map_err(|refusal| {
+                match refusal {
+                    HostSetError::Name { error, .. } => {
+                        name_refusal(first, "module", &first.module, HOST_MODULE_NAME_CAP, error)
+                    }
+                    HostSetError::Allocation(_) => panic!("{refusal}"),
+                }
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(host_set(modules)))
+    Ok(host_set(session, modules).unwrap_or_else(|fault| panic!("{fault}")))
 }
 
 /// The stub `spec` registers: it records each call in `calls` and returns zero
@@ -1576,9 +1131,10 @@ fn signature_refusal(spec: &HostSpec, part: SignaturePart, error: &HostFunctionE
 /// gets no closing line.
 ///
 /// It builds stubs through [`stub_for`] and [`host_stubs`], and so through the
-/// interpreter's allocator, which is why it runs only while [`execute`] holds
-/// the session.
+/// interpreter's allocator, which is why it takes the session [`execute`]
+/// holds.
 fn report_decode_failure(
+    session: &SpaceWasmSession,
     path: &Path,
     wasm: &[u8],
     error: &ParseError,
@@ -1597,7 +1153,7 @@ fn report_decode_failure(
     if let Some(section) = error.err.section {
         line(err, &format!("  reading the {section:?} section"));
     }
-    let imports = imports_of(wasm);
+    let imports = imports_of(session, wasm);
     if imports.is_empty() {
         return;
     }
@@ -1654,7 +1210,7 @@ fn report_decode_failure(
             line(err, &format!("    `--host {}` names no import of this module", stub.text()));
         }
     }
-    let refused_as_a_set = set_refusal(&imports);
+    let refused_as_a_set = set_refusal(session, &imports);
     if let Some(refusal) = &refused_as_a_set {
         line(err, &format!("  no `--host` set can supply them all: {refusal}"));
     }
@@ -1694,7 +1250,7 @@ fn report_decode_failure(
 ///
 /// They are deduplicated by their two names first, as a command line has to
 /// be: an import declared twice with one type binds one stub.
-fn set_refusal(imports: &[DeclaredImport]) -> Option<String> {
+fn set_refusal(session: &SpaceWasmSession, imports: &[DeclaredImport]) -> Option<String> {
     let mut named = FxHashSet::default();
     let every_stub: Vec<HostSpec> = imports
         .iter()
@@ -1702,7 +1258,7 @@ fn set_refusal(imports: &[DeclaredImport]) -> Option<String> {
         .filter(|spec| named.insert((spec.module.as_str(), spec.field.as_str())))
         .cloned()
         .collect();
-    host_stubs(&every_stub, &HostCalls::default()).err()
+    host_stubs(session, &every_stub, &HostCalls::default()).err()
 }
 
 /// One import a module declares, as the refusal report names it.
@@ -1782,7 +1338,7 @@ fn unreadable_type() -> Unstubbable {
 /// names nothing. That is the wanted answer rather than a gap: the caller is
 /// reporting bytes the interpreter has already refused, and guessing at what an
 /// unreadable section might have declared would be worse than saying nothing.
-fn imports_of(wasm: &[u8]) -> Vec<DeclaredImport> {
+fn imports_of(session: &SpaceWasmSession, wasm: &[u8]) -> Vec<DeclaredImport> {
     let mut signatures: Vec<Result<String, Unstubbable>> = Vec::new();
     let mut imports = Vec::new();
     for payload in inf_wasmparser::Parser::new(0).parse_all(wasm).flatten() {
@@ -1798,7 +1354,7 @@ fn imports_of(wasm: &[u8]) -> Vec<DeclaredImport> {
                     imports.push(DeclaredImport {
                         module: import.module.to_string(),
                         field: import.name.to_string(),
-                        stub: stub_for(&import, &signatures),
+                        stub: stub_for(session, &import, &signatures),
                     });
                 }
             }
@@ -1853,6 +1409,7 @@ fn refuse_names_imported_again(imports: &mut [DeclaredImport]) {
 /// Such an import is [`Unstubbable::Unloadable`], since the refusal comes from
 /// the host-function constructors every embedder builds its hosts through.
 fn stub_for(
+    session: &SpaceWasmSession,
     import: &inf_wasmparser::Import<'_>,
     signatures: &[Result<String, Unstubbable>],
 ) -> Result<HostSpec, Unstubbable> {
@@ -1887,7 +1444,7 @@ fn stub_for(
             spec.field, spec.module
         )));
     }
-    host_stubs(std::slice::from_ref(&spec), &HostCalls::default())
+    host_stubs(session, std::slice::from_ref(&spec), &HostCalls::default())
         .map_err(Unstubbable::Unloadable)?;
     Ok(spec)
 }
@@ -2020,55 +1577,6 @@ fn results_phrase(types: &[ValType]) -> String {
     names.join(" and ")
 }
 
-/// Coerces the arguments as written to what the export declared.
-fn arguments(signature: &ExportedFunction, raw: &[String]) -> Result<Vec<Value>, String> {
-    if raw.len() != signature.params.len() {
-        return Err(format!(
-            "`{}` takes {}; {} given",
-            signature.name,
-            arguments_phrase(signature.params.len()),
-            arguments_phrase(raw.len())
-        ));
-    }
-    raw.iter()
-        .zip(signature.params.iter())
-        .enumerate()
-        .map(|(index, (text, ty))| match ty {
-            ValType::I32 => text.parse::<i32>().map(Value::I32).map_err(|_| {
-                format!(
-                    "argument {} of `{}` is `i32`, and `{text}` is not one",
-                    index + 1,
-                    signature.name
-                )
-            }),
-            ValType::I64 => text.parse::<i64>().map(Value::I64).map_err(|_| {
-                format!(
-                    "argument {} of `{}` is `i64`, and `{text}` is not one",
-                    index + 1,
-                    signature.name
-                )
-            }),
-            ValType::F32 | ValType::F64 => Err(format!(
-                "argument {} of `{}` is `{}`, and this harness passes decimal integers only: how \
-                 a floating-point argument should be spelled on a command line is a question it \
-                 does not have to settle",
-                index + 1,
-                signature.name,
-                type_name(*ty)
-            )),
-        })
-        .collect()
-}
-
-/// "1 argument" or "3 arguments".
-fn arguments_phrase(count: usize) -> String {
-    if count == 1 {
-        "1 argument".to_string()
-    } else {
-        format!("{count} arguments")
-    }
-}
-
 /// One export as a signature a reader can copy back onto the command line.
 fn describe(function: &ExportedFunction) -> String {
     let params: Vec<&str> = function.params.iter().map(|ty| type_name(*ty)).collect();
@@ -2077,26 +1585,6 @@ fn describe(function: &ExportedFunction) -> String {
         None => String::new(),
     };
     format!("{}({}){result}", function.name, params.join(", "))
-}
-
-/// The WebAssembly spelling of a value type.
-fn type_name(ty: ValType) -> &'static str {
-    match ty {
-        ValType::I32 => "i32",
-        ValType::I64 => "i64",
-        ValType::F32 => "f32",
-        ValType::F64 => "f64",
-    }
-}
-
-/// A returned value as the command line prints it.
-fn render(value: Value) -> String {
-    match value {
-        Value::I32(v) => v.to_string(),
-        Value::I64(v) => v.to_string(),
-        Value::F32(v) => v.to_string(),
-        Value::F64(v) => v.to_string(),
-    }
 }
 
 /// The measurement as a person reads it.

@@ -242,7 +242,7 @@ impl Fprime {
 
     /// The host set an F´ embedder registers: [`REFERENCE_HOSTS`], one host
     /// module per module name.
-    fn hosts(&self, calls: &Calls) -> spacewasm::Vec<HostModule> {
+    fn hosts(&self, session: &SpaceWasmSession, calls: &Calls) -> spacewasm::Vec<HostModule> {
         let modules = ["fprime_core", "env"].map(|module| {
             let functions = REFERENCE_HOSTS
                 .iter()
@@ -257,9 +257,10 @@ impl Fprime {
                     recording(calls, host, signature, self.reply(host.field))
                 })
                 .collect();
-            host_module(module, functions, Vec::new()).expect("the module name is registrable")
+            host_module(session, module, functions, Vec::new())
+                .expect("the module name is registrable")
         });
-        host_set(modules.into())
+        host_set(session, modules.into()).expect("the host set allocates")
     }
 }
 
@@ -338,7 +339,7 @@ fn refusal(session: &mut SpaceWasmSession, hosts: spacewasm::Vec<HostModule>) ->
 fn the_host_answers_travel_through_the_program() {
     let mut session = SpaceWasmSession::acquire();
     let calls = Calls::default();
-    let hosts = Fprime::accepting().hosts(&calls);
+    let hosts = Fprime::accepting().hosts(&session, &calls);
     let mut module = loaded(&mut session, hosts);
 
     assert_eq!(
@@ -368,7 +369,7 @@ fn a_refused_telemetry_skips_the_clock() {
         telemetry: ControlFlow::Continue(Some(Value::I32(1))),
         ..Fprime::accepting()
     }
-    .hosts(&calls);
+    .hosts(&session, &calls);
     let mut module = loaded(&mut session, hosts);
 
     assert_eq!(
@@ -455,7 +456,7 @@ fn a_host_with_the_wrong_signature_is_refused_as_a_mismatch() {
                 mismatched: Some((host.field, signature)),
                 ..Fprime::accepting()
             }
-            .hosts(&calls);
+            .hosts(&session, &calls);
             assert_eq!(
                 refusal(&mut session, hosts),
                 ValidationError::FunctionImportTypeMismatch,
@@ -499,7 +500,7 @@ fn a_trapping_host_traps_the_call() {
         command: ControlFlow::Break(HostFunctionBreak::Trap),
         ..Fprime::accepting()
     }
-    .hosts(&calls);
+    .hosts(&session, &calls);
     let mut module = loaded(&mut session, hosts);
 
     assert_eq!(
