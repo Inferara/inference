@@ -322,8 +322,11 @@ In **project mode** (no path given):
   stop it before it starts: `mode = "proof"` paired with a target that has no
   proof mode is a load error for every command, `run` included — a value `run`
   would ignore can still refuse to be read.
-- Always invokes `main`. Passing `--entry-point` to anything other than `main`
-  is rejected with guidance to use single-file mode instead.
+- Always invokes `main`, with no arguments, so a `main` that takes any runs
+  only in single-file mode: one that declares parameters, and one that returns
+  a struct or array, which takes a hidden result address (see below). Passing
+  `--entry-point` to anything other than `main` is rejected with guidance to
+  use single-file mode instead.
 - Checks wasmtime availability before starting the build, failing fast if the
   runtime is absent.
 - Resolves the manifest's `[wasm-dependencies]` and forwards any `-L`
@@ -344,10 +347,18 @@ In **project mode** (no path given):
   refusal.
 
 In **single-file mode** (path given), `--entry-point` (default `main`) selects
-which exported function to invoke. `main` is called with `argc=0, argv=0`
-automatically; other functions receive the trailing arguments from the command
-line — anything after the first bare token that options did not consume, or
-after `--`. Single-file `run` also resolves the enclosing manifest's
+which exported function to invoke, and that function receives the trailing
+arguments from the command line — anything after the first bare token that
+options did not consume, or after `--`. `main` is no exception: wasmtime
+parses each argument into the type of the matching parameter of the compiled
+function, so `infs run program.inf 41` hands 41 to a `pub fn main(x: i32)`.
+Those parameters are the ones the source declares, with two differences that
+apply to every function, `main` included. A struct or array parameter is a
+memory address. A function that returns a struct or array takes the address
+to write its result to as a hidden first parameter and returns nothing, so
+`pub fn main() -> [i32; 4]` needs that address on the command line and prints
+no value. `run` passes these addresses as written and checks none of
+them. Single-file `run` also resolves the enclosing manifest's
 `[wasm-dependencies]` and forwards any `-L` directories verbatim: `infc`
 inherits the invoking shell's working directory here, so a relative `-L`
 already means what it meant at the shell, with no anchoring step needed.
