@@ -62,16 +62,16 @@ infs run      # builds, then calls main
 
 `infs` is the unified toolchain CLI for Inference.
 
-| Command                                                       | Purpose                                                        |
-| ------------------------------------------------------------- | -------------------------------------------------------------- |
-| `infs new <name>`, `infs init`                                | Create a project: `Inference.toml` and `src/main.inf`          |
-| `infs build [file.inf]`                                       | Compile one file, or the whole project when no file is given   |
-| `infs run [file.inf]`                                         | Build, then call `main` (or `--entry-point <name>`)            |
-| `infs install`, `uninstall`, `list`, `versions`, `default`    | Manage installed toolchain versions                            |
-| `infs component`                                              | Manage optional components such as `wasm-opt`                  |
-| `infs self update`                                            | Update `infs` itself                                           |
-| `infs doctor`                                                 | Check the installation                                         |
-| `infs version`, `infs --version`                              | Show version information                                       |
+| Command                                                    | Purpose                                                              |
+| ---------------------------------------------------------- | -------------------------------------------------------------------- |
+| `infs new <name>`, `infs init`                             | Create a project: `Inference.toml` and `src/main.inf`                |
+| `infs build [file.inf]`                                    | Compile a file and its imports, or the project when no file is given |
+| `infs run [file.inf]`                                      | Build, then call `main` (or `--entry-point <name>`)                  |
+| `infs install`, `uninstall`, `list`, `versions`, `default` | Manage installed toolchain versions                                  |
+| `infs component`                                           | Manage optional components such as `wasm-opt`                        |
+| `infs self update`                                         | Update `infs` itself                                                 |
+| `infs doctor`                                              | Check the installation                                               |
+| `infs version`, `infs --version`                           | Show version information                                             |
 
 Run with no arguments in a terminal, `infs` opens an interactive interface.
 
