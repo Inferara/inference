@@ -1,0 +1,21 @@
+name: Release Dry Run
+
+# Runs the release job on demand without publishing anything: the release
+# build, the release tests and the packaging, on all three platforms, with the
+# packages kept as workflow artifacts rather than attached to a release. Run it
+# on the commit a release will be cut from, since pull requests and pushes to
+# `main` build in debug mode and never exercise the release profile or the
+# packaging steps.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      release-build: true
+      package-artifacts: true
+      upload-to-release: false
