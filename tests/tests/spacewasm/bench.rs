@@ -23,10 +23,17 @@
 //! of each parameter's type, on a module loaded for that one call, at the
 //! tier's configuration. Each F´ program of [`fprime_calls`] is loaded against the
 //! runner's F´ reference hosts at the reference configuration `infs run`
-//! loads at, and called with the arguments that table gives. A fixture the
-//! target refuses, or the interpreter will not load, is not measured: the
-//! tier's sweeps are where that is a failure, and here it shows as a
-//! measurement gone from the history.
+//! loads at, and called with the arguments that table gives.
+//!
+//! A fixture the differential sweep does not run — one the target refuses,
+//! one that declares an import, one that carries a verification operator — is
+//! not one of the programs. The tier's sweeps are where that is a failure;
+//! here a fixture that stops being run is a change to the set of programs,
+//! and `compare` notes its measurements as gone. A program that is one of them
+//! and still cannot be measured — a fixture whose module the interpreter
+//! refuses, an F´ program that does not load, start or take its call — is a
+//! failure of the benchmark's own: `record` records nothing, and `compare`
+//! warns.
 //!
 //! Each call is one measurement: the IR its module compiled to, measured by
 //! the runner's `ir_stats` exactly as the embed harness's `--stats` measures
@@ -75,32 +82,40 @@
 //! `record` measures every program and appends the snapshot to the history,
 //! stamped with the commit `git rev-parse HEAD` names unless `--commit` names
 //! another. It is run by hand before a release, from a clean checkout of the
-//! commit being released, and the lines it appends are committed with it.
+//! commit being released, and the lines it appends are committed with it. A
+//! snapshot is recorded whole or not at all: when a program could not be
+//! measured, `record` names it and why, appends nothing and exits 1. `compare`
+//! looks for what is gone in the newest snapshot alone, so a snapshot that
+//! left a program out would end its series, and no later comparison would
+//! report it gone.
 //!
 //! `compare` measures every program and compares each measurement with the
 //! last line the history holds for it under the same interpreter release. It
 //! warns when a call's instructions, or its module's IR words, grew by more
 //! than the threshold, [`DEFAULT_THRESHOLD_PERCENT`] unless `--threshold`
-//! gives another whole percentage. A module's IR is judged once, however many
-//! of its exports are called, and by its words rather than its pages, since a
-//! page count is only the words rounded up. A call that now ends another way
-//! is noted rather than judged, since its two counts measure two different
-//! runs. It notes as well a measurement the history has never seen, one the
-//! history's latest snapshot holds and this run did not make, and how many
-//! have history only under another interpreter release. Those are not
-//! compared at all, so the pull request that moves the interpreter's pin is
-//! the one to record a snapshot under the new release: until one exists,
-//! `compare` warns about nothing, and a test of the benchmark fails. Inside
-//! GitHub Actions a warning is a `::warning` annotation and a note a
-//! `::notice`, with one annotation counting the warnings ahead of them, since
-//! a pull request shows only the first few of each kind; the job log holds
-//! every line. Elsewhere they are plain lines. Whatever it finds, `compare`
-//! exits 0: it reports, and a person decides. It exits 1 only when it cannot
-//! run: when the history cannot be read.
+//! gives another whole percentage. It warns as well about every program it
+//! could not measure, ahead of the rest, since nothing that program costs is
+//! compared. A module's IR is judged once, however many of its exports are
+//! called, and by its words rather than its pages, since a page count is only
+//! the words rounded up. A call that now ends another way is noted rather
+//! than judged, since its two counts measure two different runs. It notes as
+//! well a measurement the history has never seen, one the history's latest
+//! snapshot holds and this run did not make, and how many have history only
+//! under another interpreter release. Those are not compared at all, so the
+//! pull request that moves the interpreter's pin is the one to record a
+//! snapshot under the new release: until one exists, `compare` judges no
+//! figure, and a test of the benchmark fails. Inside GitHub Actions a warning
+//! is a `::warning` annotation and a note a `::notice`, with one annotation
+//! counting the warnings ahead of them, since a pull request shows only the
+//! first few of each kind; the job log holds every line. Elsewhere they are
+//! plain lines. Whatever it finds, `compare` exits 0: it reports, and a
+//! person decides. It exits 1 only when it cannot run: when the history
+//! cannot be read.
 //!
 //! The history is appended to once a release, so a figure that grew in one
 //! pull request is warned about on every pull request after it until the
-//! next snapshot; every warning names the snapshot it compares with.
+//! next snapshot; every warning about a figure names the snapshot it compares
+//! with.
 
 use std::fmt;
 use std::io::Write;
@@ -144,7 +159,8 @@ const FPRIME_FIXTURE: &str = "codegen/wasm/extern_import/host_import_fprime/host
 pub mod exit {
     /// The command did what it was asked, whatever a comparison found.
     pub const OK: u8 = 0;
-    /// The history could not be read or written, or the commit not named.
+    /// The history could not be read or written, the commit could not be
+    /// named, or `record` could not measure every program.
     pub const FAILED: u8 = 1;
     /// The command line could not be read.
     pub const USAGE: u8 = 2;
@@ -384,8 +400,36 @@ pub fn fprime_calls() -> Vec<FprimeCall> {
     ]
 }
 
-/// Measures every program, the corpus first and the F´ programs after it,
-/// writing to `err` each one that could not be measured.
+/// What measuring the programs gave: the measurements made, and the programs
+/// that were to be measured and could not be.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Measured {
+    /// Every measurement made, in the order the programs were measured.
+    pub measurements: Vec<Measurement>,
+    /// Every program that could not be measured, in the same order.
+    pub unmeasured: Vec<Unmeasured>,
+}
+
+/// A program the benchmark was to measure and could not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unmeasured {
+    /// A fixture's path under `tests/test_data`, or `fprime/NAME`.
+    pub program: String,
+    /// Why it could not be measured.
+    pub why: String,
+}
+
+impl fmt::Display for Unmeasured {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} is not measured: {}", self.program, self.why)
+    }
+}
+
+/// Measures every program, the corpus first and the F´ programs after it.
+///
+/// The corpus programs are the fixtures the differential sweep runs, as
+/// [`spacewasm_build`] selects them; a fixture it does not select is that
+/// sweep's to account for, and is not a program here.
 ///
 /// Acquires the interpreter session itself, so a caller already holding one
 /// would deadlock.
@@ -395,29 +439,46 @@ pub fn fprime_calls() -> Vec<FprimeCall> {
 /// When a fixture or an F´ program does not parse or type-check, as the
 /// SpaceWasm tier's sweeps do.
 #[must_use]
-pub fn measure(err: &mut dyn Write) -> Vec<Measurement> {
-    let mut measurements = Vec::new();
+pub fn measure() -> Measured {
+    let fixtures = single_file_corpus_sources().into_iter().filter_map(|(label, source)| {
+        let SpaceWasmBuild::Runnable(output) = spacewasm_build(&source) else {
+            return None;
+        };
+        Some((relative_to_test_data(Path::new(&label)), output.wasm().to_vec()))
+    });
     let mut session = SpaceWasmSession::acquire();
-    for (label, source) in single_file_corpus_sources() {
-        // The differential sweep's selection: a fixture it does not run is
-        // that sweep's to account for.
-        if let SpaceWasmBuild::Runnable(output) = spacewasm_build(&source) {
-            let program = relative_to_test_data(Path::new(&label));
-            measure_fixture(&mut session, &program, output.wasm(), &mut measurements, err);
+    measure_programs(&mut session, fixtures, &fprime_calls())
+}
+
+/// Measures `fixtures`, each a program and the module it compiled to, as
+/// [`measure_fixture`] does, and then `calls`, as [`measure_fprime`] does,
+/// keeping every program that could not be measured with why.
+pub fn measure_programs(
+    session: &mut SpaceWasmSession,
+    fixtures: impl IntoIterator<Item = (String, Vec<u8>)>,
+    calls: &[FprimeCall],
+) -> Measured {
+    let mut measured = Measured::default();
+    for (program, wasm) in fixtures {
+        match measure_fixture(session, &program, &wasm) {
+            Ok(measurements) => measured.measurements.extend(measurements),
+            Err(why) => measured.unmeasured.push(Unmeasured { program, why }),
         }
     }
-    for call in fprime_calls() {
-        match measure_fprime(&mut session, &call) {
-            Ok(measurement) => measurements.push(measurement),
-            Err(why) => note_unmeasured(err, &call.program, &why),
+    for call in calls {
+        match measure_fprime(session, call) {
+            Ok(measurement) => measured.measurements.push(measurement),
+            Err(why) => {
+                measured.unmeasured.push(Unmeasured { program: call.program.clone(), why });
+            }
         }
     }
-    measurements
+    measured
 }
 
 /// Calls every function the fixture `program`, compiled to `wasm`, exports,
 /// with zero of each parameter's type, on a module loaded for that one call,
-/// and adds a measurement of each to `measurements`.
+/// and measures each call.
 ///
 /// Zero is the one argument every parameter can take — an `i32` or an `i64`,
 /// and an array or a struct, which the lowering passes as an address, here
@@ -429,22 +490,21 @@ pub fn measure(err: &mut dyn Write) -> Vec<Measurement> {
 /// Each call is given a module of its own, as the differential sweep gives
 /// one, so a call's count cannot depend on what an earlier call left in the
 /// module's memory or globals.
+///
+/// # Errors
+///
+/// Why the fixture could not be measured: the interpreter refuses its module.
 pub fn measure_fixture(
     session: &mut SpaceWasmSession,
     program: &str,
     wasm: &[u8],
-    measurements: &mut Vec<Measurement>,
-    err: &mut dyn Write,
-) {
-    let exports = match support::decode(session, wasm) {
-        Ok(module) => module.exported_functions(),
-        Err(verdict) => {
-            let why =
-                format!("the interpreter refuses it: {:?} at byte {}", verdict.err, verdict.offset);
-            note_unmeasured(err, program, &why);
-            return;
-        }
-    };
+) -> Result<Vec<Measurement>, String> {
+    let exports = support::decode(session, wasm)
+        .map_err(|verdict| {
+            format!("the interpreter refuses it: {:?} at byte {}", verdict.err, verdict.offset)
+        })?
+        .exported_functions();
+    let mut measurements = Vec::new();
     for export in exports {
         let args: Vec<Value> = export.params.iter().map(|ty| support::zero_of(*ty)).collect();
         let mut module = support::decode(session, wasm).expect("the module loaded a moment ago");
@@ -458,6 +518,7 @@ pub fn measure_fixture(
         let measured = Measurement::new(program, &export.name, &args, ending, instructions, stats);
         measurements.push(measured);
     }
+    Ok(measurements)
 }
 
 /// Measures `call` against the F´ reference hosts, at the reference
@@ -498,11 +559,6 @@ pub fn measure_fprime(
     Ok(Measurement::new(&call.program, call.export, &call.args, ending, instructions, stats))
 }
 
-/// Says that `program` was not measured, and why.
-fn note_unmeasured(err: &mut dyn Write, program: &str, why: &str) {
-    line(err, &format!("spacewasm-bench: {program} is not measured: {why}"));
-}
-
 // ---------------------------------------------------------------------------
 // Comparing
 // ---------------------------------------------------------------------------
@@ -510,6 +566,9 @@ fn note_unmeasured(err: &mut dyn Write, program: &str, why: &str) {
 /// Something a comparison found.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Finding {
+    /// A program the run was to measure and could not, so nothing it costs
+    /// is compared.
+    Unmeasured(Unmeasured),
     /// A call took more instructions than the threshold allows.
     InstructionsGrew { key: Key, from: usize, to: usize, at: Stamp },
     /// A module compiled to more IR words than the threshold allows.
@@ -526,16 +585,18 @@ pub enum Finding {
 }
 
 impl Finding {
-    /// Whether this is a warning rather than a note: a figure that grew.
+    /// Whether this is a warning rather than a note: a program that could not
+    /// be measured, or a figure that grew.
     #[must_use]
     pub fn is_warning(&self) -> bool {
-        matches!(self, Self::InstructionsGrew { .. } | Self::IrGrew { .. })
+        matches!(self, Self::Unmeasured(_) | Self::InstructionsGrew { .. } | Self::IrGrew { .. })
     }
 }
 
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Unmeasured(unmeasured) => write!(f, "{unmeasured}"),
             Self::InstructionsGrew { key, from, to, at } => write!(
                 f,
                 "{key} took {to} interpreter instructions, {} since {}",
@@ -589,7 +650,8 @@ fn grew_past(from: usize, to: usize, threshold: u32) -> bool {
 /// What comparing a run's measurements with the history found.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Comparison {
-    /// Every finding, in the order the measurements were made, with the
+    /// Every finding: the programs that could not be measured, then the
+    /// findings in the order the measurements were made, with the
     /// measurements gone and those not comparable after them.
     pub findings: Vec<Finding>,
     /// The measurements this run made.
@@ -601,17 +663,18 @@ pub struct Comparison {
 /// Compares `current`, measured under `interpreter`, with `history`, warning
 /// past `threshold` percent.
 ///
-/// A measurement is compared with the last line of the history known by the
-/// same key and recorded under the same interpreter release. A module's IR is
-/// judged at the first of its measurements that has such a line, and only
-/// there; a call's instructions are judged unless it now ends another way,
-/// which is a finding of its own. A measurement is gone when the history's
-/// latest snapshot — the lines stamped as its last line is — holds it and
-/// `current` does not.
+/// Every program `current` could not measure is a finding of its own, ahead
+/// of the rest. A measurement is compared with the last line of the history
+/// known by the same key and recorded under the same interpreter release. A
+/// module's IR is judged at the first of its measurements that has such a
+/// line, and only there; a call's instructions are judged unless it now ends
+/// another way, which is a finding of its own. A measurement is gone when the
+/// history's latest snapshot — the lines stamped as its last line is — holds
+/// it and `current` does not.
 #[must_use]
 pub fn compare(
     history: &[Record],
-    current: &[Measurement],
+    current: &Measured,
     interpreter: &str,
     threshold: u32,
 ) -> Comparison {
@@ -626,10 +689,11 @@ pub fn compare(
         }
     }
 
-    let mut findings = Vec::new();
+    let mut findings: Vec<Finding> =
+        current.unmeasured.iter().cloned().map(Finding::Unmeasured).collect();
     let mut not_comparable = 0;
     let mut ir_judged: FxHashSet<&str> = FxHashSet::default();
-    for measurement in current {
+    for measurement in &current.measurements {
         let key = measurement.key();
         let Some(baseline) = baselines.get(&key) else {
             if elsewhere.contains(&key) {
@@ -669,7 +733,8 @@ pub fn compare(
 
     let latest = history.last().map(|record| record.stamp.clone());
     if let Some(latest) = &latest {
-        let measured: FxHashSet<Key> = current.iter().map(Measurement::key).collect();
+        let measured: FxHashSet<Key> =
+            current.measurements.iter().map(Measurement::key).collect();
         let mut gone: FxHashSet<Key> = FxHashSet::default();
         for record in history.iter().filter(|record| record.stamp == *latest) {
             let key = record.measurement.key();
@@ -684,7 +749,7 @@ pub fn compare(
             interpreter: interpreter.to_string(),
         });
     }
-    Comparison { findings, measured: current.len(), latest }
+    Comparison { findings, measured: current.measurements.len(), latest }
 }
 
 /// Where a comparison's findings are read.
@@ -757,7 +822,8 @@ fn escape_workflow_data(text: &str) -> String {
 /// On [`Channel::Actions`] one warning counting the others goes first when
 /// there are any, because GitHub annotates only the first few warnings of a
 /// step and a pull request would otherwise show a handful of a long list as
-/// though it were all of it.
+/// though it were all of it. It counts the programs that could not be
+/// measured and the figures that grew apart, naming only the kinds there are.
 #[must_use]
 pub fn report(
     comparison: &Comparison,
@@ -773,17 +839,25 @@ pub fn report(
         }
         None => format!("{}, which holds no snapshot yet", shown(history)),
     };
+    let count = |kind: fn(&Finding) -> bool| comparison.findings.iter().filter(|f| kind(f)).count();
+    let unmeasured = count(|f| matches!(f, Finding::Unmeasured(_)));
+    let grew = count(|f| matches!(f, Finding::InstructionsGrew { .. } | Finding::IrGrew { .. }));
     let mut lines = Vec::new();
     if channel == Channel::Actions && !warnings.is_empty() {
-        let count = format!(
-            "{} of the figures measured grew past the {threshold}% threshold against {history}; \
-             this job's log lists every one",
-            warnings.len()
-        );
-        lines.push(format!("::warning title={ANNOTATION_TITLE}::{}", escape_workflow_data(&count)));
+        let mut counted = Vec::new();
+        if unmeasured > 0 {
+            counted.push(format!("{unmeasured} of the programs could not be measured"));
+        }
+        if grew > 0 {
+            counted.push(format!(
+                "{grew} of the figures measured grew past the {threshold}% threshold against \
+                 {history}"
+            ));
+        }
+        let lead = format!("{}; this job's log lists every one", counted.join(", and "));
+        lines.push(format!("::warning title={ANNOTATION_TITLE}::{}", escape_workflow_data(&lead)));
     }
     lines.extend(warnings.iter().chain(&notes).map(|finding| channel.line_for(finding)));
-    let count = |kind: fn(&Finding) -> bool| comparison.findings.iter().filter(|f| kind(f)).count();
     let not_comparable = comparison
         .findings
         .iter()
@@ -794,10 +868,9 @@ pub fn report(
         .sum::<usize>();
     lines.push(format!(
         "spacewasm-bench: compared {} measurements with {history}, at a {threshold}% \
-         threshold: {} grew past it, {} end another way, {} new, {} gone, {not_comparable} not \
-         comparable",
+         threshold: {grew} grew past it, {} end another way, {} new, {} gone, {not_comparable} \
+         not comparable, {unmeasured} could not be measured",
         comparison.measured,
-        warnings.len(),
         count(|f| matches!(f, Finding::OutcomeChanged { .. })),
         count(|f| matches!(f, Finding::New { .. })),
         count(|f| matches!(f, Finding::Gone { .. })),
@@ -909,17 +982,54 @@ pub fn run(argv: &[String]) -> ExitCode {
         },
         Command::Compare { history, threshold } => {
             let channel = Channel::of_environment();
-            compare_with(&history, threshold, channel, &mut out, &mut err)
+            compare_with(&history, threshold, channel, measure, &mut out, &mut err)
         }
     };
     ExitCode::from(code)
 }
 
-/// Measures, and appends the snapshot to `history`, stamped with `commit`.
+/// Measures, and appends the snapshot to `history`, stamped with today's
+/// date in UTC, `commit` and the interpreter release, as [`record_with`]
+/// does.
 fn record(history: &Path, commit: String, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
     let stamp = Stamp { date: utc_date(seconds), commit, interpreter: LIMITS_FROM.to_string() };
-    let measurements = measure(err);
+    record_with(history, &stamp, &measure(), out, err)
+}
+
+/// Appends the snapshot `measured` makes to `history`, stamped with `stamp`,
+/// and says so on `out`.
+///
+/// A snapshot is appended whole or not at all. When a program could not be
+/// measured, each one is named on `err` with why, then the refusal, and the
+/// answer is [`exit::FAILED`] with `history` as it was, absent included:
+/// `compare` looks for what is gone in the newest snapshot alone, so a
+/// snapshot that left a program out would end its series, and no later
+/// comparison would report it gone. A fixture the differential sweep stopped
+/// running was never a program to measure, and is not in `measured`.
+pub fn record_with(
+    history: &Path,
+    stamp: &Stamp,
+    measured: &Measured,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> u8 {
+    if !measured.unmeasured.is_empty() {
+        for unmeasured in &measured.unmeasured {
+            line(err, &format!("spacewasm-bench: {unmeasured}"));
+        }
+        line(
+            err,
+            &format!(
+                "error: {} of the programs could not be measured, so nothing was recorded in {}: \
+                 a snapshot without them would end their series",
+                measured.unmeasured.len(),
+                history.display()
+            ),
+        );
+        return exit::FAILED;
+    }
+    let measurements = &measured.measurements;
     let lines: String = measurements
         .iter()
         .map(|measurement| {
@@ -980,15 +1090,19 @@ fn head_commit() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Measures, and compares with `history`, writing the report to `out`.
+/// Measures, with `measure`, and compares with `history`, writing the report
+/// to `out`.
 ///
 /// The history is read first, so a history that cannot be read or parsed is
-/// refused, with [`exit::FAILED`], before anything is measured. Every other
-/// run answers [`exit::OK`], whatever the comparison found.
+/// refused, with [`exit::FAILED`], before anything is measured; that is why it
+/// takes the measuring, where [`record_with`] takes what was measured. Every
+/// other run answers [`exit::OK`], whatever the comparison found, a program
+/// that could not be measured included.
 pub fn compare_with(
     history: &Path,
     threshold: u32,
     channel: Channel,
+    measure: impl FnOnce() -> Measured,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> u8 {
@@ -1003,8 +1117,7 @@ pub fn compare_with(
             return exit::FAILED;
         }
     };
-    let measurements = measure(err);
-    let comparison = compare(&recorded, &measurements, LIMITS_FROM, threshold);
+    let comparison = compare(&recorded, &measure(), LIMITS_FROM, threshold);
     for text in report(&comparison, history, threshold, channel) {
         line(out, &text);
     }

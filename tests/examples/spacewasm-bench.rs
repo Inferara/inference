@@ -8,11 +8,13 @@
 //! ```
 //!
 //! `compare` measures every program and warns about each figure that grew
-//! past a threshold since the history's last measurement of it, and exits 0
-//! whatever it finds; CI runs it on every pull request. `record` measures every program
-//! and appends the snapshot to `tests/bench/spacewasm/history.jsonl`, and is
-//! run by hand before a release. What is measured, the history's keys and
-//! the comparison's rules are set out in the benchmark module.
+//! past a threshold since the history's last measurement of it, and about
+//! each program it could not measure, and exits 0 whatever it finds; CI runs
+//! it on every pull request. `record` measures every program and appends the
+//! snapshot to `tests/bench/spacewasm/history.jsonl`, or appends nothing and
+//! fails when a program could not be measured, and is run by hand before a
+//! release. What is measured, the history's keys and the comparison's rules
+//! are set out in the benchmark module.
 //!
 //! An **example** for the reason the `spacewasm-embed` harness is one: the
 //! runner and the interpreter are dev-dependencies of this package, which
