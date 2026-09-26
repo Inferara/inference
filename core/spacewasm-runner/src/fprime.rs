@@ -25,11 +25,13 @@
 //!   time context, then `u32` seconds and `u32` microseconds, little-endian —
 //!   logs `TELEMETRY {id}` and answers 0. It reads nothing at `value_ptr`.
 //! - `clock_ms()` answers the milliseconds since the host set was built, which
-//!   is when the module began loading, and logs nothing.
+//!   is when the module began loading — not when it was started — and logs
+//!   nothing.
 //!
 //! A buffer the guest's memory does not hold, and bytes that are not UTF-8,
 //! stop the program with a trap rather than failing the host, and the host
-//! records why in a detail [`HostedModule::host_trap`] reads back, so a trap
+//! records why in a detail [`HostedInstance::host_trap`] reads back after a
+//! call, and [`HostedStartError::host_trap`] after a start function, so a trap
 //! can be reported with its reason.
 //!
 //! Five things differ from the reference embedder, each on purpose:
@@ -68,8 +70,12 @@
 //! provide as declared before any of it is decoded; the interpreter's own
 //! binding, which would refuse the same module while decoding it, stays behind
 //! as the backstop. It then builds the host set under the session and loads
-//! the module at the reference embedder's verifier bounds, with the budget and
-//! the engine configuration the caller chose.
+//! the module at the reference embedder's verifier bounds, with the engine
+//! configuration the caller chose — and runs nothing, so no host is called by
+//! a load. [`HostedModule::start`] runs the module's start function under the
+//! budget the caller chose, and gives the [`HostedInstance`] that calls
+//! exports, or a [`HostedStartError`] carrying what a host recorded if one
+//! stopped the start function.
 
 use std::cell::Cell;
 use std::fmt::{self, Write};
@@ -88,10 +94,11 @@ use wasmparser::{CompositeInnerType, FuncType, Import, Parser, Payload, TypeRef}
 
 use crate::args::type_name;
 use crate::errors::{
-    HostSetError, ImportProblem, InvokeError, LoadError, UnsupportedImport, UnsupportedImports,
+    HostSetError, HostedStartError, ImportProblem, InvokeError, LoadError, UnsupportedImport,
+    UnsupportedImports,
 };
 use crate::hosts::{HostLog, HostSet, host_module, host_set};
-use crate::module::{EngineConfig, Fuel, LoadedModule, Outcome, load_with};
+use crate::module::{EngineConfig, Fuel, Instance, LoadedModule, Outcome, load_with};
 use crate::report::{HostTrap, TrapReport, explain_refusal};
 use crate::session::Session;
 
@@ -446,14 +453,15 @@ fn declared_signature(params: &[String], results: &[String]) -> String {
 }
 
 /// Loads `wasm` against the F´ reference hosts, at the reference embedder's
-/// verifier bounds, under `fuel` and `config`, logging each host call to
-/// `log`.
+/// verifier bounds, under `config`, logging each host call to `log`, and runs
+/// nothing.
 ///
 /// Checks the imports first, then builds the host set under the session —
-/// `clock_ms` counts from that moment — then decodes the module and runs its
-/// start function within `fuel`, which [`HostedModule::invoke`] spends the rest
-/// of. A module the decoder refuses for want of memory is measured again by
-/// the target's conformance check, which says which limit it exceeds.
+/// `clock_ms` counts from that moment, the load, not from the start — then
+/// decodes the module. A module the decoder refuses for want of memory is
+/// measured again by the target's conformance check, which says which limit it
+/// exceeds. [`HostedModule::start`] runs the start function under the budget of
+/// the whole run, which [`HostedInstance::invoke`] spends the rest of.
 ///
 /// # Errors
 ///
@@ -469,7 +477,6 @@ pub fn load<'s>(
     session: &'s mut Session,
     wasm: &[u8],
     log: HostLog,
-    fuel: Fuel,
     config: EngineConfig,
 ) -> Result<HostedModule<'s>, LoadError> {
     check_imports(wasm).map_err(LoadError::UnsupportedImports)?;
@@ -478,7 +485,7 @@ pub fn load<'s>(
     let module = load_with::<
         { REFERENCE_MAX_CONTROL_FRAMES as usize },
         { REFERENCE_MAX_STACK_DEPTH as usize },
-    >(session, wasm, hosts, fuel, config)
+    >(session, wasm, hosts, config)
     .map_err(|error| match error {
         LoadError::Decode(verdict) => explain_refusal(
             wasm,
@@ -492,7 +499,19 @@ pub fn load<'s>(
     Ok(HostedModule { module, context, stack_words: config.stack_words })
 }
 
-/// A module loaded against the F´ reference hosts.
+/// A module loaded against the F´ reference hosts, none of it run yet.
+///
+/// [`HostedModule::module`] reads what it exports, so a caller can refuse a
+/// call before any of the module's code has executed and before any host has
+/// been called. [`HostedModule::start`] runs its start function and gives the
+/// [`HostedInstance`] that calls exports; a hosted module has no call of its
+/// own:
+///
+/// ```compile_fail,E0599
+/// fn call(module: &mut inference_spacewasm_runner::fprime::HostedModule<'_>) {
+///     let _ = module.invoke("main", &[]);
+/// }
+/// ```
 pub struct HostedModule<'session> {
     module: LoadedModule<'session>,
     context: Rc<Context>,
@@ -506,15 +525,57 @@ impl<'session> HostedModule<'session> {
         &self.module
     }
 
-    /// Calls `export` with `args` under what the start function left of the
-    /// load's budget, forgetting any trap detail an earlier call recorded.
+    /// Runs the module's start function, if it declares one, under `fuel`,
+    /// the budget of the whole run, and gives the module up for the
+    /// [`HostedInstance`] that calls its exports, as
+    /// [`LoadedModule::start`] does.
     ///
     /// # Errors
     ///
-    /// As [`LoadedModule::invoke`].
+    /// A [`HostedStartError`] when the start function does not return, holding
+    /// the [`crate::StartError`], the detail a host recorded when a host
+    /// stopped it, and the stack this module was loaded with, for its report.
+    pub fn start(self, fuel: Fuel) -> Result<HostedInstance<'session>, HostedStartError> {
+        let Self { module, context, stack_words } = self;
+        match module.start(fuel) {
+            Ok(instance) => Ok(HostedInstance { instance, context, stack_words }),
+            Err(error) => Err(HostedStartError::new(error, context.trap.get(), stack_words)),
+        }
+    }
+}
+
+/// A module loaded against the F´ reference hosts whose start function has
+/// returned, or that declares none: the one that calls exports.
+///
+/// It borrows the session its module was loaded under, and so is not `Send`:
+///
+/// ```compile_fail,E0277
+/// fn assert_send<T: Send>() {}
+/// assert_send::<inference_spacewasm_runner::fprime::HostedInstance<'static>>();
+/// ```
+pub struct HostedInstance<'session> {
+    instance: Instance<'session>,
+    context: Rc<Context>,
+    stack_words: usize,
+}
+
+impl<'session> HostedInstance<'session> {
+    /// The module itself, for what it exports and what it compiled to.
+    #[must_use]
+    pub fn module(&self) -> &LoadedModule<'session> {
+        self.instance.module()
+    }
+
+    /// Calls `export` with `args` under what the start function left of the
+    /// budget the module was started under, forgetting any trap detail an
+    /// earlier call recorded.
+    ///
+    /// # Errors
+    ///
+    /// As [`Instance::invoke`].
     pub fn invoke(&mut self, export: &str, args: &[Value]) -> Result<Outcome, InvokeError> {
         self.context.trap.set(None);
-        self.module.invoke_within_budget(export, args)
+        self.instance.invoke_within_budget(export, args)
     }
 
     /// Why a host stopped the last call, when one did.
@@ -539,7 +600,8 @@ impl<'session> HostedModule<'session> {
 }
 
 /// What the hosts of one load share with each other and with the
-/// [`HostedModule`] they were loaded into.
+/// [`HostedModule`] they were loaded into, and then with the
+/// [`HostedInstance`] it starts into.
 struct Context {
     log: HostLog,
     trap: Cell<Option<HostTrap>>,

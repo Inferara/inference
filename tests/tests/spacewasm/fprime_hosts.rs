@@ -14,7 +14,7 @@ use std::num::NonZeroUsize;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use inference_spacewasm_runner::fprime::{self, HostedModule, REFERENCE_HOSTS, ReferenceHost};
+use inference_spacewasm_runner::fprime::{self, HostedInstance, REFERENCE_HOSTS, ReferenceHost};
 use inference_spacewasm_runner::{
     EngineConfig, Fuel, HostLog, HostTrap, ImportProblem, LoadError, Outcome, TrapReason, Value,
     out_of_fuel,
@@ -134,14 +134,16 @@ fn host(field: &str) -> &'static ReferenceHost {
 }
 
 /// `wasm` loaded against the reference hosts at the reference configuration,
-/// logging to `log`.
+/// logging to `log`, and started under [`BUDGET`].
 fn hosted<'s>(
     session: &'s mut SpaceWasmSession,
     wasm: &[u8],
     log: &HostLog,
-) -> HostedModule<'s> {
-    fprime::load(session, wasm, log.clone(), BUDGET, EngineConfig::REFERENCE)
+) -> HostedInstance<'s> {
+    fprime::load(session, wasm, log.clone(), EngineConfig::REFERENCE)
         .unwrap_or_else(|e| panic!("the program loads against the reference hosts: {e}"))
+        .start(BUDGET)
+        .unwrap_or_else(|e| panic!("the program has no start function to fail: {e}"))
 }
 
 /// How one call ended: its outcome, the detail a host recorded, and the lines
@@ -396,13 +398,14 @@ pub fn spin(to: i32) -> i32 {
         (1_000_000, Outcome::OutOfFuel { budget: 1_000 }),
     ] {
         let log = HostLog::recording();
-        let mut module =
-            fprime::load(&mut session, &wasm, log.clone(), thousand, EngineConfig::REFERENCE)
-                .unwrap_or_else(|e| panic!("the program loads: {e}"));
-        assert_eq!(module.invoke("spin", &[Value::I32(to)]), Ok(ended), "counting to {to}");
+        let mut instance = fprime::load(&mut session, &wasm, log.clone(), EngineConfig::REFERENCE)
+            .unwrap_or_else(|e| panic!("the program loads: {e}"))
+            .start(thousand)
+            .unwrap_or_else(|e| panic!("the program has no start function to fail: {e}"));
+        assert_eq!(instance.invoke("spin", &[Value::I32(to)]), Ok(ended), "counting to {to}");
         assert_eq!(log.recorded(), ["COMMAND 42 7"], "counting to {to}");
         assert_eq!(log.line_count(), 1);
-        assert_eq!(module.host_trap(), None, "counting to {to}");
+        assert_eq!(instance.host_trap(), None, "counting to {to}");
     }
     assert_eq!(
         out_of_fuel("spin", 1_000),
@@ -411,11 +414,12 @@ pub fn spin(to: i32) -> i32 {
     );
 
     let log = HostLog::recording();
-    let mut module =
-        fprime::load(&mut session, &wasm, log.clone(), Fuel::Unbounded, EngineConfig::REFERENCE)
-            .unwrap_or_else(|e| panic!("the program loads: {e}"));
+    let mut instance = fprime::load(&mut session, &wasm, log.clone(), EngineConfig::REFERENCE)
+        .unwrap_or_else(|e| panic!("the program loads: {e}"))
+        .start(Fuel::Unbounded)
+        .unwrap_or_else(|e| panic!("the program has no start function to fail: {e}"));
     assert_eq!(
-        module.invoke("spin", &[Value::I32(1_000_000)]),
+        instance.invoke("spin", &[Value::I32(1_000_000)]),
         Ok(Outcome::Returned(Some(Value::I32(1_000_000))))
     );
     assert_eq!(log.recorded(), ["COMMAND 42 7"]);
@@ -444,7 +448,7 @@ pub fn go() -> i32 {
     );
     let mut session = SpaceWasmSession::acquire();
     let log = HostLog::recording();
-    let refusal = fprime::load(&mut session, &wasm, log, BUDGET, EngineConfig::REFERENCE)
+    let refusal = fprime::load(&mut session, &wasm, log, EngineConfig::REFERENCE)
         .map(drop)
         .expect_err("the imports are not the reference hosts");
     let LoadError::UnsupportedImports(unsupported) = refusal else {

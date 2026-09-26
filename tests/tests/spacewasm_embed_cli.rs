@@ -1933,8 +1933,9 @@ fn an_export_of_a_host_import_is_named_rather_than_called() {
 /// A call a start function makes is printed straight after the load, before
 /// anything the command line asked for, and whichever way the run then ends.
 ///
-/// The start function runs inside the load, before the command line is acted
-/// on, so its calls would otherwise wait for a later point that some runs
+/// The harness starts the module straight after loading it, as the reference
+/// embedder does, before the command line is acted on, so the start
+/// function's calls would otherwise wait for a later point that some runs
 /// never reach. A bare run is read with both streams interleaved, since the
 /// call line on stderr has to come before the `loaded` line on stdout, and
 /// that order is invisible to the two streams read apart; so is a run asking
@@ -2018,16 +2019,17 @@ fn a_start_call_is_printed_once_before_the_invocations_calls() {
 /// A start function that traps ends the run with the trap code, naming the
 /// start function and the interpreter's reason, after the calls it made.
 ///
-/// The start function runs inside the load, so a module whose start traps
-/// never loaded: nothing is listed, measured or invoked, and stdout stays
-/// empty whatever the command line asked for. The second module traps for
-/// another reason and registers no host, so the line is shown to carry the
-/// reason the interpreter gave rather than one written down here. Fails if a
-/// trapping start function panics — which is what the harness did with one
-/// before the runner reported it as a load failure of its own — if it exits
-/// with another code or is reported as the decoder's refusal, if the line
-/// drops the start function or the reason, or if the call the start function
-/// made is dropped or printed after the line.
+/// The harness starts the module straight after loading it, as the reference
+/// embedder does, so a module whose start function traps is never listed,
+/// measured or invoked, and stdout stays empty whatever the command line
+/// asked for. The second module traps for another reason and registers no
+/// host, so the line is shown to carry the reason the interpreter gave rather
+/// than one written down here. Fails if a trapping start function panics —
+/// which is what the harness did with one before the runner reported it as a
+/// `StartError` from `LoadedModule::start` — if it exits with another code or
+/// is reported as the decoder's refusal, if the line drops the start function
+/// or the reason, or if the call the start function made is dropped or
+/// printed after the line.
 #[test]
 fn a_trapping_start_function_exits_with_the_trap_code() {
     let artifact = Artifact::assembled(

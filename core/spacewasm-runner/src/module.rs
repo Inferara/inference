@@ -1,4 +1,14 @@
-//! Loading a module into an engine of its own, and calling what it exports.
+//! Loading a module into an engine of its own, starting it, and calling what
+//! it exports.
+//!
+//! The two steps are two types, as WebAssembly has them. A load decodes,
+//! validates and compiles the module and allocates what its instance holds —
+//! its linear memory, its globals, its data segments — and runs nothing: a
+//! [`LoadedModule`] can only be read. [`LoadedModule::start`] runs the start
+//! function, and instantiation completes when it returns, as an [`Instance`],
+//! the only type that calls an export. So a caller can resolve an export and
+//! read its arguments against it, and refuse the call, before any code of the
+//! module has executed — including a host call its start function makes.
 
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
@@ -12,7 +22,7 @@ use spacewasm::{
     Value, WasmRef, WasmStream,
 };
 
-use crate::errors::{ExportKind, InvokeError, LoadError, arity_clause};
+use crate::errors::{ExportKind, InvokeError, LoadError, StartError, arity_clause};
 use crate::hosts::HostSet;
 use crate::session::{Session, StdAllocator};
 
@@ -72,9 +82,10 @@ impl EngineConfig {
 /// module, not WebAssembly's, so a budget depends on the interpreter release
 /// and compares with no other engine's fuel.
 ///
-/// One budget covers a whole run: the start function a load runs, and then the
-/// call [`LoadedModule::invoke_within_budget`] makes, which is given what the
-/// start function left of it.
+/// One budget covers a whole run: the start function
+/// [`LoadedModule::start`] runs, and then the call
+/// [`Instance::invoke_within_budget`] makes, which is given what the start
+/// function left of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fuel {
     /// No budget: a run goes on until it returns or traps.
@@ -83,8 +94,34 @@ pub enum Fuel {
     Limited(NonZeroUsize),
 }
 
-/// A module decoded, compiled to IR and instantiated inside an engine of its
-/// own, with its start function run.
+/// A module decoded, validated and compiled to IR inside an engine of its own,
+/// with its linear memory, its globals and its data segments in place, and
+/// none of its code run.
+///
+/// Everything a `LoadedModule` offers reads it: what it exports, what one
+/// export takes, what it compiled to. [`LoadedModule::start`] is the one way
+/// to run any of it, and it gives the module up for the [`Instance`] that
+/// calls its exports. A loaded module has no call of its own, with a budget
+/// of its own or within one:
+///
+/// ```compile_fail,E0599
+/// fn call(module: &mut inference_spacewasm_runner::LoadedModule<'_>) {
+///     let _ = module.invoke("main", &[], 1_000);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// fn call(module: &mut inference_spacewasm_runner::LoadedModule<'_>) {
+///     let _ = module.invoke_within_budget("main", &[]);
+/// }
+/// ```
+///
+/// It is not `Send`, since it borrows a [`Session`], which is not either:
+///
+/// ```compile_fail,E0277
+/// fn assert_send<T: Send>() {}
+/// assert_send::<inference_spacewasm_runner::LoadedModule<'static>>();
+/// ```
 ///
 /// The `'session` lifetime is the safety argument: the engine, its IR pages
 /// and the linear memory are all freed through the interpreter's process-wide
@@ -94,7 +131,22 @@ pub struct LoadedModule<'session> {
     code_builder: CodeBuilder,
     module: ModuleRef,
     session: PhantomData<&'session mut Session>,
-    /// The budget the module was loaded under.
+}
+
+/// A loaded module whose start function has returned, or that declares none:
+/// the only thing that calls an export.
+///
+/// [`Instance::module`] reads it as the [`LoadedModule`] it was started from,
+/// which cannot be started through it again. It borrows the session its
+/// module was loaded under, as the module did, and so is not `Send` either:
+///
+/// ```compile_fail,E0277
+/// fn assert_send<T: Send>() {}
+/// assert_send::<inference_spacewasm_runner::Instance<'static>>();
+/// ```
+pub struct Instance<'session> {
+    module: LoadedModule<'session>,
+    /// The budget the module was started under.
     budget: Fuel,
     /// Instructions its start function spent of [`Self::budget`]: exact under
     /// a limited budget, and zero when there is no start function or no limit.
@@ -149,8 +201,8 @@ pub enum Outcome {
     /// abandoned and the engine is idle again.
     OutOfFuel {
         /// The budget that ran out: every instruction of it was spent. For
-        /// [`LoadedModule::invoke_within_budget`] that is the whole budget the
-        /// module was loaded under, start function included.
+        /// [`Instance::invoke_within_budget`] that is the whole budget the
+        /// module was started under, start function included.
         budget: usize,
     },
 }
@@ -177,7 +229,7 @@ enum Allowance {
 }
 
 /// Loads `wasm` at the reference embedder's verifier bounds, with no host
-/// module registered, and runs its start function under `fuel`.
+/// module registered, and runs nothing.
 ///
 /// The bounds are [`REFERENCE_MAX_CONTROL_FRAMES`] and
 /// [`REFERENCE_MAX_STACK_DEPTH`]; [`load_with`] takes others.
@@ -188,20 +240,18 @@ enum Allowance {
 pub fn load<'s>(
     session: &'s mut Session,
     wasm: &[u8],
-    fuel: Fuel,
     config: EngineConfig,
 ) -> Result<LoadedModule<'s>, LoadError> {
     load_with::<{ REFERENCE_MAX_CONTROL_FRAMES as usize }, { REFERENCE_MAX_STACK_DEPTH as usize }>(
         session,
         wasm,
         spacewasm::Vec::zero(),
-        fuel,
         config,
     )
 }
 
 /// Loads `wasm` with the verifier's two stack bounds and the host set chosen by
-/// the caller, and runs its start function under `fuel`.
+/// the caller, and runs nothing.
 ///
 /// The bounds are const generics in the decoder because they size stacks the
 /// verifier walks with, so a tighter embedder is expressed by loading again
@@ -220,23 +270,18 @@ pub fn load<'s>(
 /// own; the target's conformance check leaves that choice to the embedder, so
 /// a module it accepts can still be refused here for one.
 ///
-/// `fuel` is the budget of the whole run. Under a limit the start function is
-/// stepped one instruction at a time, because the interpreter says how a run
-/// ended and never how much of its budget it spent, and stepping is the one
-/// way to leave [`LoadedModule::invoke_within_budget`] exactly the rest.
-/// Stepping costs a start function a call into the interpreter per
-/// instruction; this compiler never emits one.
+/// A module that loads has its memory, its globals and its data segments in
+/// place, and its start function not yet run: nothing of it runs until
+/// [`LoadedModule::start`], so no host in `hosts` is called by a load.
 ///
 /// # Errors
 ///
-/// [`LoadError::Decode`] when the interpreter refuses the bytes,
-/// [`LoadError::Resource`] when it cannot be built to try, and the `Start*`
-/// variants when the module's start function does not return.
+/// [`LoadError::Decode`] when the interpreter refuses the bytes, and
+/// [`LoadError::Resource`] when it cannot be built to try.
 pub fn load_with<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
     _session: &'s mut Session,
     wasm: &[u8],
     hosts: HostSet,
-    fuel: Fuel,
     config: EngineConfig,
 ) -> Result<LoadedModule<'s>, LoadError> {
     let mut code_builder = CodeBuilder::new(CompilerOptions {
@@ -267,16 +312,7 @@ pub fn load_with<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
         .map_err(MemoryError::from)
         .map_err(resource("a place for the module in its store"))?;
 
-    let mut loaded = LoadedModule {
-        engine,
-        code_builder,
-        module,
-        session: PhantomData,
-        budget: fuel,
-        spent_by_start: 0,
-    };
-    loaded.spent_by_start = loaded.run_start(fuel)?;
-    Ok(loaded)
+    Ok(LoadedModule { engine, code_builder, module, session: PhantomData })
 }
 
 /// The refusal for an interpreter that could not allocate `part`.
@@ -284,21 +320,48 @@ fn resource(part: &'static str) -> impl FnOnce(MemoryError) -> LoadError {
     move |error| LoadError::Resource { part, error }
 }
 
-impl LoadedModule<'_> {
+impl<'session> LoadedModule<'session> {
+    /// Runs the module's start function, if it declares one, under `fuel`,
+    /// and gives the module up for the [`Instance`] that calls its exports.
+    ///
+    /// `fuel` is the budget of the whole run: the start function's, and then
+    /// the call [`Instance::invoke_within_budget`] makes. Under a limit the
+    /// start function is stepped one instruction at a time, because the
+    /// interpreter says how a run ended and never how much of its budget it
+    /// spent, and stepping is the one way to leave that call exactly the rest.
+    /// Stepping costs a start function a call into the interpreter per
+    /// instruction; this compiler never emits one. A module without a start
+    /// function spends nothing here, and leaves the call the whole budget.
+    ///
+    /// A start function that does not return leaves no instance, as a
+    /// WebAssembly instantiation whose start function traps leaves none: the
+    /// module is dropped with its engine.
+    ///
+    /// # Errors
+    ///
+    /// A [`StartError`] when the start function does not return: it traps —
+    /// its frame not fitting the value stack among the ways, as
+    /// `StackOverflow` — it runs out of `fuel`, a host function it calls
+    /// pauses it, or the engine refuses to begin it.
+    pub fn start(mut self, fuel: Fuel) -> Result<Instance<'session>, StartError> {
+        let spent_by_start = self.run_start(fuel)?;
+        Ok(Instance { module: self, budget: fuel, spent_by_start })
+    }
+
     /// Runs the module's start function, if it declares one, under `fuel`,
     /// and answers the instructions it spent: exactly under a limit, zero
     /// without one.
-    fn run_start(&mut self, fuel: Fuel) -> Result<usize, LoadError> {
+    fn run_start(&mut self, fuel: Fuel) -> Result<usize, StartError> {
         let Some(start) = self.engine.module_start(self.module) else {
             return Ok(0);
         };
         match self.engine.invoke(start, &[]) {
             Ok(()) => {}
             Err(spacewasm::InvokeError::StackOverflow) => {
-                return Err(LoadError::StartTrapped(TrapReason::StackOverflow));
+                return Err(StartError::Trapped(TrapReason::StackOverflow));
             }
             Err(refusal) => {
-                return Err(LoadError::StartRefused { refusal: format!("{refusal:?}") });
+                return Err(StartError::Refused { refusal: format!("{refusal:?}") });
             }
         }
         let (ended, spent) = match fuel {
@@ -307,9 +370,9 @@ impl LoadedModule<'_> {
         };
         match ended {
             Ended::Finished => Ok(spent),
-            Ended::Trapped(reason) => Err(LoadError::StartTrapped(reason)),
-            Ended::OutOfFuel { budget } => Err(LoadError::StartOutOfFuel { budget }),
-            Ended::Paused => Err(LoadError::StartPaused),
+            Ended::Trapped(reason) => Err(StartError::Trapped(reason)),
+            Ended::OutOfFuel { budget } => Err(StartError::OutOfFuel { budget }),
+            Ended::Paused => Err(StartError::Paused),
         }
     }
 
@@ -321,7 +384,7 @@ impl LoadedModule<'_> {
     ///
     /// An export whose function index does not resolve is skipped too, without
     /// a word. The decoder refuses a module holding one, so no module that
-    /// loaded does, and [`LoadedModule::invoke`] refuses such a name as
+    /// loaded does, and [`Instance::invoke`] refuses such a name as
     /// [`InvokeError::NoSuchExport`] should one ever appear.
     #[must_use]
     pub fn exported_functions(&self) -> Vec<ExportedFunction> {
@@ -372,12 +435,11 @@ impl LoadedModule<'_> {
     }
 
     /// The function this module exports under `name`, with its WebAssembly
-    /// signature, or the refusal [`LoadedModule::invoke`] would give a call
-    /// of it.
+    /// signature, or the refusal [`Instance::invoke`] would give a call of it.
     ///
     /// It resolves the name as a call does and stops there, so a caller can
-    /// read what a function takes before it decides to call it — and, taking
-    /// the module shared, it cannot run any of it.
+    /// read what a function takes before it decides to start the module and
+    /// call it — and, taking the module shared, it cannot run any of it.
     ///
     /// # Errors
     ///
@@ -391,60 +453,11 @@ impl LoadedModule<'_> {
         Ok(ExportedFunction { name: name.to_string(), params, result })
     }
 
-    /// Calls `export` with `args` under a `fuel`-instruction budget of its
-    /// own, whatever the budget the module was loaded under.
-    ///
-    /// The arguments are values, already of the types the function declares;
-    /// [`crate::coerce_arguments`] reads them from text. Whatever the call
-    /// does, the engine is idle again when this returns, so the module can be
-    /// called once more.
-    ///
-    /// # Errors
-    ///
-    /// An [`InvokeError`] when the call cannot be made: `export` names no
-    /// function this module exports, or names a host import it exports again,
-    /// or `args` does not match the function's parameters — or when a host
-    /// function the call reaches pauses it, which only an embedder that
-    /// resumes the call could honour, or when the call finishes without the
-    /// result the function declares, which only an interpreter defect does.
-    pub fn invoke(
-        &mut self,
-        export: &str,
-        args: &[Value],
-        fuel: usize,
-    ) -> Result<Outcome, InvokeError> {
-        self.call(export, args, Allowance::Limited { left: fuel, budget: fuel })
-    }
-
-    /// Calls `export` with `args` under what the start function left of the
-    /// budget the module was loaded under.
-    ///
-    /// Under [`Fuel::Unbounded`] the call runs until it returns or traps. Under
-    /// [`Fuel::Limited`] it may spend the budget less what the start function
-    /// spent, and an [`Outcome::OutOfFuel`] reports the whole budget, since
-    /// that is how many instructions the run took. A call that returns does
-    /// not say how many it spent, so every call made this way is given the same
-    /// remainder: the budget bounds a run of the start function and one call.
-    ///
-    /// # Errors
-    ///
-    /// As [`LoadedModule::invoke`].
-    pub fn invoke_within_budget(
-        &mut self,
-        export: &str,
-        args: &[Value],
-    ) -> Result<Outcome, InvokeError> {
-        let allowance = match self.budget {
-            Fuel::Unbounded => Allowance::Unbounded,
-            Fuel::Limited(budget) => Allowance::Limited {
-                left: budget.get().saturating_sub(self.spent_by_start),
-                budget: budget.get(),
-            },
-        };
-        self.call(export, args, allowance)
-    }
-
     /// Calls `export` with `args`, spending at most what `allowance` allows.
+    ///
+    /// Only an [`Instance`] reaches this, which is what keeps a loaded module
+    /// from running anything before [`LoadedModule::start`] has run its start
+    /// function.
     fn call(
         &mut self,
         export: &str,
@@ -597,6 +610,68 @@ impl LoadedModule<'_> {
     fn host_function_name(&self, module: HostModuleRef, index: u16) -> String {
         let host = &self.engine.store.host_modules()[usize::from(module.0)];
         format!("{}.{}", host.name.as_str(), host.functions[usize::from(index)].name())
+    }
+}
+
+impl<'session> Instance<'session> {
+    /// The module this instance was started from, for what it exports and
+    /// what it compiled to.
+    #[must_use]
+    pub fn module(&self) -> &LoadedModule<'session> {
+        &self.module
+    }
+
+    /// Calls `export` with `args` under a `fuel`-instruction budget of its
+    /// own, whatever the budget the module was started under.
+    ///
+    /// The arguments are values, already of the types the function declares;
+    /// [`crate::coerce_arguments`] reads them from text. Whatever the call
+    /// does, the engine is idle again when this returns, so the instance can be
+    /// called once more.
+    ///
+    /// # Errors
+    ///
+    /// An [`InvokeError`] when the call cannot be made: `export` names no
+    /// function this module exports, or names a host import it exports again,
+    /// or `args` does not match the function's parameters — or when a host
+    /// function the call reaches pauses it, which only an embedder that
+    /// resumes the call could honour, or when the call finishes without the
+    /// result the function declares, which only an interpreter defect does.
+    pub fn invoke(
+        &mut self,
+        export: &str,
+        args: &[Value],
+        fuel: usize,
+    ) -> Result<Outcome, InvokeError> {
+        self.module.call(export, args, Allowance::Limited { left: fuel, budget: fuel })
+    }
+
+    /// Calls `export` with `args` under what the start function left of the
+    /// budget the module was started under.
+    ///
+    /// Under [`Fuel::Unbounded`] the call runs until it returns or traps. Under
+    /// [`Fuel::Limited`] it may spend the budget less what the start function
+    /// spent, and an [`Outcome::OutOfFuel`] reports the whole budget, since
+    /// that is how many instructions the run took. A call that returns does
+    /// not say how many it spent, so every call made this way is given the same
+    /// remainder: the budget bounds a run of the start function and one call.
+    ///
+    /// # Errors
+    ///
+    /// As [`Instance::invoke`].
+    pub fn invoke_within_budget(
+        &mut self,
+        export: &str,
+        args: &[Value],
+    ) -> Result<Outcome, InvokeError> {
+        let allowance = match self.budget {
+            Fuel::Unbounded => Allowance::Unbounded,
+            Fuel::Limited(budget) => Allowance::Limited {
+                left: budget.get().saturating_sub(self.spent_by_start),
+                budget: budget.get(),
+            },
+        };
+        self.module.call(export, args, allowance)
     }
 }
 

@@ -19,12 +19,15 @@ embedder for a program that imports them.
 use inference_spacewasm_runner::{EngineConfig, Fuel, HostLog, Outcome, Session, Value, fprime};
 
 let mut session = Session::acquire();
-let mut module =
-    fprime::load(&mut session, &wasm, HostLog::stderr(), Fuel::Unbounded, EngineConfig::REFERENCE)?;
-match module.invoke("add", &[Value::I32(2), Value::I32(40)])? {
+// The load runs nothing: a missing `add` is refused before any of the module executes.
+let module = fprime::load(&mut session, &wasm, HostLog::stderr(), EngineConfig::REFERENCE)?;
+let add = module.module().function("add")?;
+// Starting runs the module's start function, if it declares one.
+let mut instance = module.start(Fuel::Unbounded)?;
+match instance.invoke(&add.name, &[Value::I32(2), Value::I32(40)])? {
     Outcome::Returned(value) => println!("{value:?}"),
     Outcome::Trapped(reason) => {
-        let report = module.trap_report("add", reason);
+        let report = instance.trap_report("add", reason);
         println!("{}", report.headline());
     }
     Outcome::OutOfFuel { budget } => println!("stopped after {budget} instructions"),
@@ -34,15 +37,24 @@ match module.invoke("add", &[Value::I32(2), Value::I32(40)])? {
 ## What is here
 
 - `load` decodes a module at the reference embedder's verifier bounds with no
-  host module registered, instantiates it in an engine of its own and runs its
-  start function under a `Fuel` budget; `load_with` takes the two bounds as
-  const generics and a host set. Both return a `LoadedModule` that borrows the
-  session it was loaded under, or a `LoadError`: the decoder's verdict, an
-  interpreter that could not be allocated, or a start function that trapped,
-  ran out of fuel, paused or could not be begun.
-- `LoadedModule::invoke` calls an export under an instruction budget of its
-  own; `LoadedModule::invoke_within_budget` calls it under what the start
-  function left of the load's `Fuel`. A call that returns, traps or runs out of
+  host module registered, in an engine of its own, with its linear memory, its
+  globals and its data segments in place, and runs nothing; `load_with` takes
+  the two bounds as const generics and a host set. Both return a
+  `LoadedModule` that borrows the session it was loaded under, or a
+  `LoadError`: the decoder's verdict, or an interpreter that could not be
+  allocated.
+- `LoadedModule::start` runs the module's start function, if it declares one,
+  under a `Fuel` budget, and gives the module up for an `Instance`, as
+  WebAssembly completes an instantiation when its start function returns; or
+  it fails with a `StartError`: a start function that trapped, ran out of
+  fuel, paused or could not be begun. A `LoadedModule` can only be read, and
+  only an `Instance` calls an export, so a caller that resolves the export and
+  reads its arguments before starting the module refuses a call with none of
+  the module's code run, whatever the module declares.
+- `Instance::invoke` calls an export under an instruction budget of its own;
+  `Instance::invoke_within_budget` calls it under what the start function left
+  of the start's `Fuel`. `Instance::module` reads the instance as the
+  `LoadedModule` it was started from. A call that returns, traps or runs out of
   fuel is an `Outcome` — `OutOfFuel` carrying the budget that ran out, and a
   frame that does not fit the value stack a `StackOverflow` trap, since
   wasmtime reports its own exhausted stack as a trap too. A call that cannot be
@@ -54,11 +66,11 @@ match module.invoke("add", &[Value::I32(2), Value::I32(40)])? {
   is not a function is named for what it is: the module's linear memory, its
   table or one of its globals. Whatever the call does, the engine is idle
   again afterwards.
-- `exported_functions` and `exported_host_imports` list what a module exports,
-  with each function's WebAssembly signature, and `function` resolves one name
-  as a call would — its signature, or the `InvokeError` the call would give —
-  without running anything; `ir_stats` measures the IR it compiled to, computed
-  as upstream's `spacewasm_std` computes its own figures.
+- `exported_functions` and `exported_host_imports` list what a loaded module
+  exports, with each function's WebAssembly signature, and `function` resolves
+  one name as a call would — its signature, or the `InvokeError` the call would
+  give — without running anything; `ir_stats` measures the IR it compiled to,
+  computed as upstream's `spacewasm_std` computes its own figures.
 - `host_module` and `host_set` build the `HostSet` `load_with` binds imports to.
 - `fprime` holds the F´ reference hosts, the import check against them and
   `fprime::load`, the one way to run a module with them; see below.
@@ -68,14 +80,16 @@ match module.invoke("add", &[Value::I32(2), Value::I32(40)])? {
   bit pattern — and `render` writes a value back.
   `ExportedFunction::arity_clause` says what a function takes, the clause a
   refusal of the wrong count opens with: `` `main` takes 1 argument (i32) ``.
-- `TrapReport`, `trap_phrase`, `trap_group` and `out_of_fuel` put a run's
-  ending into words; see below.
+- `TrapReport`, `trap_phrase`, `trap_group`, `out_of_fuel` and
+  `start_out_of_fuel` put a run's ending into words, a call's or a start
+  function's; see below.
 
-Every way a load or a call can fail is a value, and none is a panic. That
-guarantee assumes every host keeps the interpreter's contract: it returns a
-value of the result type it declares, never re-enters the engine it is handed,
-and never pauses an engine already holding a paused call. A host that breaks it
-can panic inside `spacewasm`, where no runner can turn the failure into a value.
+Every way a load, a start or a call can fail is a value, and none is a panic.
+That guarantee assumes every host keeps the interpreter's contract: it returns
+a value of the result type it declares, never re-enters the engine it is
+handed, and never pauses an engine already holding a paused call. A host that
+breaks it can panic inside `spacewasm`, where no runner can turn the failure
+into a value.
 
 `EngineConfig` carries the two parts of the configuration an embedder chooses at
 run time: the words of value stack and the IR pages the code builder may fill.
@@ -85,15 +99,17 @@ run` loads every module at. The SpaceWasm test tier runs with 65,536 words of
 stack instead, because it runs the whole codegen corpus rather than one
 program.
 
-`Fuel` is the instruction budget of a whole run: `Fuel::Unbounded`, which runs
-until the call returns or traps, or `Fuel::Limited(n)`. The interpreter counts
-the instructions of its own compiled form of the module, and a call's closing
-return is one of them, so a budget of exactly the instructions a call takes
-finishes it. The interpreter says how a run ended and never how much of its
-budget it spent, so under a limit a start function is run one instruction at a
-time, which is the one way to leave the call made after it exactly the rest.
-Every load builds its own engine holding exactly one module, compiled with
-`memory.grow` refused and registered under the empty name, which the
+`Fuel` is the instruction budget of a whole run, which `LoadedModule::start`
+takes, since a load runs nothing: `Fuel::Unbounded`, which runs until the call
+returns or traps, or `Fuel::Limited(n)`. The interpreter counts the instructions
+of its own compiled form of the module, and a call's closing return is one of
+them, so a budget of exactly the instructions a call takes finishes it. The
+interpreter says how a run ended and never how much of its budget it spent, so
+under a limit a start function is run one instruction at a time, which is the
+one way to leave the call made after it exactly the rest. A module without a
+start function spends nothing on starting, and the call is given the whole
+budget. Every load builds its own engine holding exactly one module, compiled
+with `memory.grow` refused and registered under the empty name, which the
 interpreter exempts from its check against the names of the host modules
 registered beside it.
 
@@ -130,7 +146,7 @@ Each host does what the reference embedder's does:
   so a time running past the end of memory is written up to the first field
   that does not fit before the program is stopped.
 - `clock_ms` answers the milliseconds since the host set was built, when the
-  module began loading, and logs nothing.
+  module began loading rather than when it was started, and logs nothing.
 
 A buffer outside linear memory, and bytes that are not UTF-8, stop the program
 with a trap rather than failing the host, and the host records why — which
@@ -152,7 +168,7 @@ in the style of the reference embedder's rather than the same bytes:
 3. The lines go to a `HostLog`: standard error, streamed as each call makes it
    and never panicking on a closed stream, or a recording a test reads back.
    The log counts its lines, so a caller can say that host calls had already
-   been made when a call trapped or ran out of fuel.
+   been made when a call or a start function trapped or ran out of fuel.
 4. `telemetry` stops the program, before writing anything, when `time_len` is
    less than eleven. Upstream writes eleven bytes whatever `time_len` says, and
    since an array argument is passed as its address, those bytes land in the
@@ -179,11 +195,17 @@ to the interpreter, which refuses it whole.
 `fprime::load` is the one way to run a module against the hosts. It runs the
 import check first, so a module with an import the hosts do not provide is
 refused before a byte of it is decoded; builds the host set under the session;
-loads the module at the reference verifier bounds with the caller's `Fuel` and
-`EngineConfig`; and returns a `HostedModule`, which calls exports under the
-load's budget and holds the host's trap detail and the log. A module the
-decoder refuses for want of memory — one verdict, `AllocError(OutOfMemory)`, for
-too deep a control nesting, too tall an operand stack or too much IR for the
+loads the module at the reference verifier bounds with the caller's
+`EngineConfig`; and returns a `HostedModule`, having run nothing, so no host
+has been called. `HostedModule::module` reads what it exports, and
+`HostedModule::start` runs its start function under the caller's `Fuel` and
+returns a `HostedInstance`, which calls exports under the start's budget and
+holds the host's trap detail and the log — or a `HostedStartError`, which
+carries the `StartError` and, when a host stopped the start function, the
+detail the host recorded, so that its `trap_report` words a start function's
+trap as specifically as `HostedInstance::trap_report` words a call's. A module
+the decoder refuses for want of memory — one verdict, `AllocError(OutOfMemory)`,
+for too deep a control nesting, too tall an operand stack or too much IR for the
 code pages — is measured again by the target's conformance check, which names
 the limit it exceeds, the function and both numbers; inside both verifier
 bounds it is too much IR. A module the conformance check accepts and the
@@ -198,14 +220,14 @@ cannot reproduce without being the interpreter.
 
 The texts the runner produces — the per-import lines of an import refusal, the
 note explaining WebAssembly signatures, the reference table, a trap's first line
-and its explanation, a host's detail, the over-limit facts, why a conformant
-module inside both verifier bounds did not load (`code_pages_exhausted`,
-`conformance_gap`), the argument refusals (`ArgumentError::clause`), a
-function's arity clause, what an export that is not a function is, and the core
-of the out-of-fuel sentence — state what the runner knows and never name the
-program embedding it. Where a sentence has to, the caller passes its name;
-everything a caller composes around them, such as the artifact's path, its own
-flags and its own remedies, is the caller's.
+and its explanation, a call's or a start function's, a host's detail, the
+over-limit facts, why a conformant module inside both verifier bounds did not
+load (`code_pages_exhausted`, `conformance_gap`), the argument refusals
+(`ArgumentError::clause`), a function's arity clause, what an export that is
+not a function is, and the core of the out-of-fuel sentence — state what the
+runner knows and never name the program embedding it. Where a sentence has
+to, the caller passes its name; everything a caller composes around them, such
+as the artifact's path, its own flags and its own remedies, is the caller's.
 
 ## The allocator singleton
 
@@ -241,14 +263,14 @@ Upstream documents the two allocator symbols as single-threaded and
 non-re-entrant, and puts the synchronization on the embedder. `Session` is that
 synchronization: a process-wide lock, acquired with `Session::acquire` and held
 for as long as the value lives. `load` and `load_with` take it mutably,
-`host_module` and `host_set` take it shared, and a `LoadedModule` borrows it, so
-a module cannot outlive the lock its memory is freed under. The lock never
-poisons, because a caller that panicked while holding it has already stopped
-using the interpreter; and it is not re-entrant, so a second acquire on a thread
-already holding a session deadlocks that thread. A `Session` is neither `Send`
-nor `Sync`: it is released on the thread that acquired it, and a `&Session`,
-the proof of the lock the host builders take, cannot reach another thread while
-this one holds the lock.
+`host_module` and `host_set` take it shared, and a `LoadedModule` and the
+`Instance` it starts into borrow it, so a module cannot outlive the lock its
+memory is freed under. The lock never poisons, because a caller that panicked
+while holding it has already stopped using the interpreter; and it is not
+re-entrant, so a second acquire on a thread already holding a session deadlocks
+that thread. A `Session` is neither `Send` nor `Sync`: it is released on the
+thread that acquired it, and a `&Session`, the proof of the lock the host
+builders take, cannot reach another thread while this one holds the lock.
 
 A host module or a host set must be moved into a load, or dropped, while the
 session it was built under is still held, since dropping it frees through the
