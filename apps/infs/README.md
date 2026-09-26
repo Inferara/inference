@@ -468,9 +468,8 @@ cargo captures the skip notice and a skipped test is otherwise indistinguishable
 
 ### Manual QA Tests
 
-9 tests require manual verification and are documented in `docs/qa-test-suite.md`:
+7 tests require manual verification and are documented in `docs/qa-test-suite.md`:
 - TUI visual verification
-- Verify command (requires coqc)
 - Self-update (requires actual distribution server)
 - Cross-platform builds (requires CI on each platform)
 - Disk full and permission scenarios
