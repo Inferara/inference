@@ -58,10 +58,3 @@ wasmprinter.workspace = true
 tar = "0.4"
 flate2 = "1"
 sha2 = "0.11"
-
-[profile.release]
-opt-level = "z"       # Optimize for size (not speed)
-strip = true          # Remove symbols
-codegen-units = 1     # Better optimization (slower compile)
-lto = true            # Full link-time optimization
-panic = "abort"       # Smaller binary, no unwinding

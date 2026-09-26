@@ -130,3 +130,23 @@ debug = false
 
 [profile.release]
 codegen-units = 1     # Better optimization (slower compile)
+
+# `infs` is the binary a user installs before any toolchain, and the one
+# `infs self update` downloads again, so it is built for size as far as a
+# per-package override of the shared release profile goes. `opt-level` applies
+# to the code compiled into the `infs` crate, which includes the generic and
+# inline code of its dependencies that `infs` instantiates; each dependency
+# crate stays at the release default of 3. `strip` drops the symbol table from
+# what the `infs` package builds and from nothing else, so a panic in a release
+# `infs` still reports its message and source line, but its backtrace names
+# none of `infs`'s functions. `lto` and `panic` cannot be set per package, and
+# `panic = "abort"` across the release profile would break three binaries that
+# unwind on purpose: `infs` restores the terminal its TUI took over in a `Drop`
+# that an abort skips, `inference-lsp` answers a cancelled or panicking request
+# by catching the unwind, and `infc` hands a panic on its compiler thread back
+# to `main` by unwinding, which keeps its exit status. Cargo ignores a
+# `[profile]` table in a member's own manifest, so these settings live here;
+# `apps/infs/tests/workspace_profiles.rs` fails when a member declares one.
+[profile.release.package.infs]
+opt-level = "z"
+strip = true
