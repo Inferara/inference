@@ -19,6 +19,11 @@ mod analysis_rules_tests {
     use inference_analysis::errors::{AnalysisDiagnostic, ParamWords, ParamWordsGroup};
     use inference_analysis::{AnalysisOptions, TargetName};
     use inference_ast::nodes::Location;
+    // Imported, never written out at the use site: a qualified expression path
+    // through `inference_target_conformance::spacewasm::` loads the `spacewasm`
+    // crate into this library's unit-test binary, whose Windows GNU link then
+    // fails for want of the runner's allocator hooks. A `use` does not load it.
+    use inference_target_conformance::spacewasm::MAX_PARAM_WORDS;
     use inference_type_checker::typed_context::TypedContext;
 
     fn type_check(source: &str) -> TypedContext {
@@ -731,7 +736,7 @@ mod analysis_rules_tests {
     fn a055_limit_is_the_conformance_checkers() {
         assert_eq!(
             inference_analysis::rules::param_words_exceeded::SPACEWASM_MAX_PARAM_WORDS,
-            inference_target_conformance::spacewasm::MAX_PARAM_WORDS
+            MAX_PARAM_WORDS
         );
     }
 }
