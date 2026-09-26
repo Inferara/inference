@@ -82,7 +82,7 @@ infs build --mode proof
 infs build --mode compile
 ```
 
-**Single-file mode** (path provided): the historical behavior — compiles exactly the given file.
+**Single-file mode** (path provided): compiles the given file, together with every file it reaches through `use` imports, resolved from the file's own directory.
 
 ```bash
 # Full compilation with WASM output (default — no flags needed)
@@ -90,29 +90,19 @@ infs build example.inf
 
 # Full compilation with Rocq translation
 infs build example.inf -v
-
-# Parse only (syntax check)
-infs build example.inf --parse
-
-# Type checking
-infs build example.inf --analyze
 ```
 
 ### Build Flags
 
 | Flag | Description |
 |------|-------------|
-| `--parse` | Run the parse phase to build the typed AST (overrides default) |
-| `--analyze` | Run the analyze phase for type checking (overrides default) |
-| `--codegen` | Run the codegen phase to emit WebAssembly |
-| `-o` | Generate WASM binary file in `out/` directory |
 | `-v` | Generate Rocq (.v) translation file |
 | `--mode proof` | Proof mode: preserve non-det specs; implies `-v` inside `infc` |
 | `--mode compile` | Compile mode: strip specs for executable WASM |
 | `-L <dir>` / `--wasm-lib-dir <dir>` | Directory to search for external `.wasm` modules referenced by `use { … } from <module>;`; repeatable. In project mode a relative dir is anchored to the directory you invoked `infs` from, not the project root |
 | `--no-wasm-opt` | Skip `[build.wasm-opt]` post-build optimization (project mode only) |
 
-When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk — equivalent to `--codegen -o`.
+`infs build` always runs the full pipeline (parse, analyze, codegen) and writes the WASM binary to disk. To stop after a phase, as a syntax or type check, run `infc` directly: `infc example.inf --parse` or `infc example.inf --analyze`.
 
 ### Project-mode Manifest Semantics
 
