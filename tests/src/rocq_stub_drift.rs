@@ -1064,10 +1064,11 @@ mod drift {
 
     // -------------------------------------------------- always-on pin gates
 
-    /// Prose files restating the pin. Both are the contract documents a reader
-    /// consults instead of the pin file, so both have to agree with it.
+    /// Prose files restating the pin: the contributor guide's Rocq discharge
+    /// gate, the contract document, and the stub README. Each is where a reader
+    /// looks instead of the pin file, so each has to agree with it.
     const PROSE: &[&str] = &[
-        "README.md",
+        "CONTRIBUTING.md",
         "core/wasm-to-v/ROCQ_CONTRACT.md",
         "core/wasm-to-v/rocq-stub/README.md",
     ];

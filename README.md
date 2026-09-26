@@ -6,6 +6,9 @@
 [![Miri Check](https://github.com/Inferara/inference/actions/workflows/miri.yml/badge.svg)](https://github.com/Inferara/inference/actions/workflows/miri.yml)
 [![codecov](https://codecov.io/gh/Inferara/inference/branch/main/graph/badge.svg)](https://codecov.io/gh/Inferara/inference)
 
+[![target: SpaceWasm](https://img.shields.io/badge/target-SpaceWasm-654FF0?logo=webassembly&logoColor=white)](book/src/compilation_targets.md#spacewasm)
+[![target: Stellar](https://img.shields.io/badge/target-Stellar-000000)](book/src/compilation_targets.md#stellar)
+
 </div>
 
 # 🌀 Inference Programming Language
@@ -17,11 +20,27 @@ Inference is a programming language designed for building verifiable software. I
 > [!IMPORTANT]
 > The project is in early development. Internal design and implementation are subject to change. So please be patient with us as we build out the language and tools.
 
+## Install
+
+On Linux x64 or macOS Apple Silicon:
+
+```bash
+curl -fsSL https://inference-lang.org/install.sh | sh
+```
+
+On Windows x64:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "irm https://inference-lang.org/install.ps1 | iex"
+```
+
+The installer puts `infs` in `~/.inference/bin` and adds it to your `PATH`. Then run `infs install` to download the compiler. Prebuilt archives are also attached to every [release](https://github.com/Inferara/inference/releases).
+
 ## Editor Support
 
-Install the official VS Code extension for syntax highlighting:
+The official VS Code extension provides syntax highlighting and runs the language server:
 
-[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/inference-lang.inference?label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=inference-lang.inference)
+[![VS Code Marketplace](https://vsmarketplacebadges.dev/version-short/inference-lang.inference.svg?label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=inference-lang.inference)
 
 ## Learn
 
@@ -29,66 +48,66 @@ Install the official VS Code extension for syntax highlighting:
 - Access our Inference [book](https://inference-lang.org/book) for a guide on how to get started
 - Inference Programming Language [specification](https://github.com/Inferara/inference-language-spec)
 
-## Inference Suite CLI (`infs`)
-
-`infs` is the unified toolchain CLI for Inference. It provides subcommands for building, managing, and working with Inference projects.
-
-### Build Command
-
-The `infs build` command compiles Inference source through three phases:
-
-1. **Parse** (`--parse`) – Build the typed AST with the `inference-parser`
-2. **Analyze** (`--analyze`) – Perform type checking, static analysis, and semantic validation
-3. **Codegen** (`--codegen`) – Emit WebAssembly binary with optional Rocq translation
-
-Phases run in canonical order (parse → analyze → codegen). When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk.
-
-`infs build` operates in two modes. Given a path, it compiles that single file. With no path, it runs in **project mode**: it discovers the project's `Inference.toml` by walking up from the current directory and compiles `src/main.inf` together with every file it reaches through `use` imports — the project's module hierarchy — with output rooted at the project directory. `infs run` mirrors the same two modes.
-
-### Basic Usage
+## Quick Start
 
 ```bash
-# Full compilation (default — no flags needed)
-./target/debug/infs build path/to/file.inf
-
-# Parse only (syntax check)
-cargo run -p infs -- build path/to/file.inf --parse
+infs new hello && cd hello
+infs build    # compiles src/main.inf to out/main.wasm
+infs run      # builds, then calls main
 ```
 
-### Compilation Modes
+`infs run` executes a `wasm32` build with [`wasmtime`](https://wasmtime.dev), which must be on your `PATH`, and a `spacewasm` build in process.
 
-The compiler supports two modes that control optimization and verification behavior:
+## Inference Suite CLI (`infs`)
+
+`infs` is the unified toolchain CLI for Inference.
+
+| Command                                                       | Purpose                                                        |
+| ------------------------------------------------------------- | -------------------------------------------------------------- |
+| `infs new <name>`, `infs init`                                | Create a project: `Inference.toml` and `src/main.inf`          |
+| `infs build [file.inf]`                                       | Compile one file, or the whole project when no file is given   |
+| `infs run [file.inf]`                                         | Build, then call `main` (or `--entry-point <name>`)            |
+| `infs install`, `uninstall`, `list`, `versions`, `default`    | Manage installed toolchain versions                            |
+| `infs component`                                              | Manage optional components such as `wasm-opt`                  |
+| `infs self update`                                            | Update `infs` itself                                           |
+| `infs doctor`                                                 | Check the installation                                         |
+| `infs version`, `infs --version`                              | Show version information                                       |
+
+Run with no arguments in a terminal, `infs` opens an interactive interface.
+
+In project mode, `infs build` finds `Inference.toml` by walking up from the current directory and compiles `src/main.inf` together with every file it reaches through `use` imports. It always runs the full pipeline (parse, analyze, codegen) and writes the WASM binary. Its flags:
+
+- `-v` also writes a Rocq (`.v`) translation, and implies `--mode proof` unless `--mode` is given
+- `--mode compile|proof` selects the compilation mode
+- `-L <dir>` adds a directory to search for linked `.wasm` modules
+- `--no-wasm-opt` skips the project's `[build.wasm-opt]` step
+
+### Compilation Modes
 
 1. **`compile`** produces optimized production binaries. Non-deterministic `spec` nodes are stripped since they have no runtime meaning.
 2. **`proof`** produces WASM for formal verification. Spec functions (containing non-deterministic operations) are compiled unoptimized to preserve structural correspondence with the source code for Rocq formalization. Execution functions use the target's release optimization so that proofs cover the actual deployed code.
 
-Read more about [compilation modes in the book](./book/src/compilation_targets.md).
+### Targets
 
-### Output Flags
+Choose a target with `[build] target` in `Inference.toml`, or with `infc --target`:
 
-- `-o` – Generate WASM binary file in `out/` directory
-- `-v` – Generate Rocq (.v) translation file in `out/` directory
+| Target             | Output                                                                                                                                                                     |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wasm32` (default) | A WebAssembly module                                                                                                                                                       |
+| `spacewasm`        | The same module, checked against the limits of NASA JPL's [SpaceWasm](https://github.com/nasa/spacewasm) flight interpreter; `infs run` executes it in that interpreter |
+| `stellar`          | A deployable Soroban smart contract for the Stellar network                                                                                                                |
 
-### Show Version
-
-```bash
-infs version
-infs --version
-```
+Read more about [compilation modes and targets in the book](./book/src/compilation_targets.md).
 
 ### Exit Codes
 
-| Code | Meaning                    |
-| ---- | -------------------------- |
-| 0    | Success                    |
-| 1    | Usage / IO / Parse failure |
+| Code | Meaning                                                  |
+| ---- | -------------------------------------------------------- |
+| 0    | Success                                                  |
+| 1    | Failure: a compile error, an I/O error, a failed download |
+| 2    | Invalid command-line arguments                           |
 
-### Future Commands (Planned)
-
-- `infs install` – Download and install toolchain versions
-- `infs new` – Scaffold new projects
-- `infs doctor` – Verify installation health
-- `infs` (no args) – Launch TUI interface
+When `infc` or `wasmtime` fails under `infs build` or `infs run`, `infs` exits with its code.
 
 ## Distribution
 
@@ -116,97 +135,24 @@ Prebuilt binaries are available for each release. Two CLI tools are distributed:
 
 The CLI binaries are self-contained and require no external dependencies.
 
-`licenses/` holds the license texts of the SpaceWasm interpreter, which `infs` compiles in to run `spacewasm` builds, and of the one crate the interpreter depends on, with the interpreter's `NOTICE` file. Every archive carries it, the `infc` archive included; [`licenses/README.md`](licenses/README.md) says where each file comes from.
-
-`infs self update` keeps the notices of the `infs` it installs in the toolchain home, as `licenses/` under `~/.inference` (`%APPDATA%\inference` on Windows, or `INFERENCE_HOME` when set), replacing the ones an earlier update left there, and prints where they are. It also refreshes a `licenses/` beside the running `infs` that already holds `infs`'s notices (a file at the same path as one the archive carries, its top-level `README.md` aside), but never creates one there, except to move back the copy an interrupted update set aside: the VS Code extension unpacks the `infs` archive into the home's `bin/`, leaving `bin/licenses/`, and an archive unpacked by hand leaves one beside `infs` too. A `licenses/` there holding none of the archive's notices belongs to another program sharing the directory, as in `/usr/local/bin`, and the update leaves it alone. `infs install` keeps each toolchain's notices in that toolchain's directory, `toolchains/<version>/licenses/`.
+`licenses/` holds the license texts of the SpaceWasm interpreter, which `infs` compiles in to run `spacewasm` builds, and of the one crate the interpreter depends on, with the interpreter's `NOTICE` file. Every archive carries it; [`licenses/README.md`](licenses/README.md) says where each file comes from. `infs self update` and `infs install` keep these notices beside the toolchain they install.
 
 ## Building from Source
 
-To build Inference from source:
-
-For detailed platform-specific setup instructions, see:
-
-- [Linux Development Setup](book/installation_linux.md)
-- [macOS Development Setup](book/installation_macos.md)
-- [Windows Development Setup](book/installation_windows.md)
-
-### Dependencies
-
 No external binaries are required. The compiler generates WebAssembly directly via `wasm-encoder`.
 
-### Build Steps
-
-1. Clone the repository:
-
-   ```bash
-   git clone https://github.com/Inferara/inference.git
-   cd inference
-   ```
-
-2. Build the project:
-
-   ```bash
-   cargo build --release
-   ```
-
-The compiled binaries will be in `target/release/` (`infs` and `infc`).
-
-### Build Commands
-
-The workspace is configured for efficient development:
-
-- **`cargo build`** - Builds only the `core/` crates (faster for core development)
-- **`cargo build-full`** - Builds the entire workspace, including tools and tests
-- **`cargo test`** - Runs tests for `core/` crates and the `tests/` integration suite
-- **`cargo test-full`** - Runs tests for all workspace members, including tools
-
-### Docker-only Rocq discharge development gate
-
-The local emitted-Rocq discharge gate is orchestrated by Docker; it does not use a host Rust or Rocq toolchain. Its public interface is:
-
 ```bash
-./ci/rocq-discharge-docker.sh \
-  --wasm-verifier /absolute/path/to/wasm-verifier \
-  --container wasm-verifier-coq \
-  [--adapter batch|single|both] \
-  [--full]
+git clone https://github.com/Inferara/inference.git
+cd inference
+cargo build --release
 ```
 
-`--adapter` defaults to `both`. `batch` sends one immutable exchange volume to the verifier bridge. `single` makes the seven ordered per-case bridge calls with a new empty `0700` receipt directory for each call. `both` verifies the batch receipts, removes only the validated receipt set, runs the seven single calls, and verifies the replacement receipts. Inference fingerprints `request.json` and all seven ordered raw Rocq inputs before and after every bridge call; it never parses verifier-private proof logs.
+The binaries land in `target/release/`: `infs`, `infc` and `inference-lsp`.
 
-The wrapper composes [`ci/rocq-rust-docker.sh`](ci/rocq-rust-docker.sh), preserving that lane's target lock, source snapshot, persistent Cargo registry/target volumes, pinned Rust image and explicit Rust `1.98.0` toolchain. [`ci/rocq-discharge.cargo-lock`](ci/rocq-discharge.cargo-lock) is the authoritative tracked lock for this lane. The ignored root `Cargo.lock` is excluded from the snapshot and is never an input to the gate. Fetch is the only networked Rust step; all compilation and execution after fetch are locked, offline, socket-free, and run with a read-only root filesystem, dropped capabilities, `no-new-privileges`, and a private `/tmp`.
+- **`cargo build`** / **`cargo test`** - The `core/`, `ide/` and `apps/` crates and the `tests/` integration suite
+- **`cargo build-full`** / **`cargo test-full`** - The whole workspace, including `tools/`
 
-`--full` first runs the focused dischargeability tests, then the adapter flow, then the complete `inference-tests` crate (not the whole workspace). The clean Docker floor is exactly five Cargo `test result:` lines with at least 3,075 passed tests in aggregate and zero failed or filtered tests. Empty, single-binary, malformed, filtered, and under-floor logs fail closed.
-
-The verifier input must be an absolute canonical, clean `wasm-verifier` checkout whose `HEAD` equals the pinned revision `8f485f037a270271bf2e1393c24fc0684097163b` in [`core/wasm-to-v/wasm-verifier-pin.txt`](core/wasm-to-v/wasm-verifier-pin.txt). That revision supplies the live verifier-side bridge contract. Its `ci/discharge/container-pin.json` is exact canonical eight-line JSON, including field order and commas:
-
-```json
-{
-  "protocol": 1,
-  "image_reference": "<pinned reference>",
-  "image_id": "sha256:<64 lowercase hex>",
-  "coq_user": "coq",
-  "repository_mount": "/workspaces/wasm-verifier",
-  "coq_version": "8.20.1"
-}
-```
-
-Immediately before and after every bridge, the wrapper rechecks the clean exact checkout, the identities and Git content of `container-pin.json`, `inspect-container.sh`, the configured public adapters, and the required shared executable `docker-bridge.sh`. Every contract file must remain a regular nonsymlink file with exactly one hard link. Inspection must show exactly one container mount total: a `bind` from the canonical verifier checkout to the pinned repository destination, with no extra bind, volume, socket, or alias mount. It must also show canonical positive-decimal `coq` uid/gid values, exact Coq `8.20.1`, the pinned verifier revision and `coq-wasm` tag/revision, and exact origin `https://github.com/WasmCert/WasmCert-Coq.git`. The inspector must exit zero and emit exactly those eight canonical provenance lines with no extras or duplicates. Batch receives an empty wrapper-owned receipt setting; each single call receives only its new wrapper-owned receipt directory, regardless of ambient environment values.
-
-The seven-case gate requires exactly fifteen positive endpoints plus the negative false-spec certificate. The pinned verifier B certifies all fifteen, `spec_overflow_realization.v` among them, so the lane can require the seven-case marker and pass it. That seventh case, `overflow`, is the only one whose executable body carries an overflow guard, so it is the only endpoint that will be proved about arithmetic that can trap. The deterministic fake self-test freezes the bridge contract and can be run without mounting `docker.sock`:
-
-```bash
-docker run --rm --read-only --network none --cap-drop ALL \
-  --security-opt no-new-privileges \
-  --tmpfs /tmp:rw,mode=1777 --tmpfs /work:rw,exec,mode=1777 \
-  --user 65532:65532 -e TMPDIR=/work \
-  --mount type=bind,src="$PWD",dst=/workspace,readonly \
-  --workdir /workspace \
-  busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0 \
-  sh ci/rocq-discharge-docker-self-test.sh
-```
-
-Every bridge inherits `INFERENCE_WASM_VERIFIER_EVIDENCE_DIR`, the one wrapper-created host `0700` evidence directory. The pinned bridge writes `verifier.log` there before returning nonzero and keeps its public output bounded. The wrapper holds the original identity-checked, single-link `0600` capture through a parent file descriptor and never reopens its bridge-visible path. With `--full`, it likewise creates an unpredictable identity-checked, single-link `0600` Cargo log before any bridge, writes and parses only through retained parent descriptors, and rejects path replacement or added hard links. Evidence logs and receipt files must also be regular, single-link `0600` files. On a valid bridge failure it retains exactly the private evidence directory and prints one sanitized locator; on success, verified cleanup uses exact-name volume enumeration, removes the capture, evidence, transient staging, and owned source/exchange volumes, and confirms absence before the sole pass marker. Identity uncertainty preserves the suspect path and fails closed. Inference retains no raw private proof source or receipt contents.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the test conventions and the Docker-only Rocq discharge gate.
 
 ## Roadmap
 

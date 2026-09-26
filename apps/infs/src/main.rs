@@ -128,9 +128,11 @@ pub enum Commands {
 
     /// Compile Inference source files.
     ///
-    /// The build command runs one or more compilation phases over a single
-    /// .inf source file. Phases execute in canonical order: parse, analyze,
-    /// codegen.
+    /// With a path, compiles that .inf file; without one, finds Inference.toml
+    /// by walking up from the current directory and compiles the project's
+    /// src/main.inf. Either way every file reached through use imports is
+    /// compiled too. Each build runs all phases (parse, analyze, codegen) and
+    /// writes the WASM binary; -v also writes a Rocq (.v) translation.
     Build(build::BuildArgs),
 
     /// Build and run an Inference program.
