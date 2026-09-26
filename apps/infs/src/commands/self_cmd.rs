@@ -181,19 +181,22 @@ fn update_report(version: &str, notices_dirs: &[PathBuf], platform: Platform) ->
 
 /// The directories an update installs the archive's third-party notices at:
 /// the toolchain home's `home_notices`, then the `licenses/` beside the
-/// running binary `running_binary`, when one is already there, is not
-/// `home_notices` itself, however either is spelled, and already holds some of
-/// the notices the archive carries in `archive_notices` (see
-/// [`holds_infs_notices`]).
+/// running binary `running_binary`, when it is not `home_notices` itself,
+/// however either is spelled, and already holds some of the notices the
+/// archive carries in `archive_notices` (see [`holds_infs_notices`]). Where
+/// nothing is at that `licenses/`, the `.licenses.old` directory an
+/// interrupted refresh set aside beside it stands in for it, and
+/// [`install_notices`] moves it back before it refreshes the notices.
 ///
 /// The VS Code extension unpacks the `infs` archive into the home's `bin/`,
 /// and a hand-unpacked archive leaves `licenses/` beside `infs` as well. An
 /// update refreshes that copy, so that it goes on describing the binary beside
 /// it, but never creates one beside a binary that had none: only a directory
-/// counts, not a file or a symbolic link of that name. `infs` may share its
-/// directory with other programs, as in `/usr/local/bin`, so a `licenses/`
-/// there holding none of the archive's notices is another program's, and the
-/// update leaves it alone.
+/// counts, not a file or a symbolic link of that name, and a set-aside copy
+/// only where nothing is at `licenses/`. `infs` may share its directory with
+/// other programs, as in `/usr/local/bin`, so a `licenses/` there, or a
+/// set-aside copy, holding none of the archive's notices is another
+/// program's, and the update leaves it alone.
 fn notices_destinations(
     home_notices: &Path,
     running_binary: &Path,
@@ -201,10 +204,15 @@ fn notices_destinations(
 ) -> Vec<PathBuf> {
     let mut destinations = vec![home_notices.to_path_buf()];
     let beside_binary = running_binary.with_file_name(ARCHIVE_NOTICES_DIR);
-    let is_directory = std::fs::symlink_metadata(&beside_binary).is_ok_and(|m| m.is_dir());
-    if is_directory
-        && !is_same_directory(&beside_binary, home_notices)
-        && holds_infs_notices(&beside_binary, archive_notices)
+    let set_aside = beside(&beside_binary, "old");
+    let notices = if is_absent(&beside_binary) {
+        &set_aside
+    } else {
+        &beside_binary
+    };
+    if is_directory(notices)
+        && !is_same_entry(&beside_binary, home_notices)
+        && holds_infs_notices(notices, archive_notices)
     {
         destinations.push(beside_binary);
     }
@@ -251,12 +259,32 @@ fn push_regular_files(dir: &Path, prefix: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// Whether `a` and `b` name the same directory, however each is spelled.
-fn is_same_directory(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(canonical_a), Ok(canonical_b)) => canonical_a == canonical_b,
+/// Whether `a` and `b` name the same directory entry, however each is spelled
+/// and whether or not anything is there: the same name in directories that are
+/// one. Paths whose directories cannot both be resolved are compared as they
+/// are spelled.
+fn is_same_entry(a: &Path, b: &Path) -> bool {
+    match (canonical_entry(a), canonical_entry(b)) {
+        (Some(entry_a), Some(entry_b)) => entry_a == entry_b,
         _ => a == b,
     }
+}
+
+/// `path` spelled as the canonical path of its directory joined with its own
+/// name, which need not exist; none when the directory cannot be resolved.
+fn canonical_entry(path: &Path) -> Option<PathBuf> {
+    let directory = std::fs::canonicalize(path.parent()?).ok()?;
+    Some(directory.join(path.file_name()?))
+}
+
+/// Whether nothing is at `path`, not even a symbolic link.
+fn is_absent(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Whether `path` is a directory, not a symbolic link to one.
+fn is_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// Installs what the `infs` release archive extracted at `extracted` carries:
@@ -320,14 +348,21 @@ fn install_update(
 /// place, and a failure moving the new ones in moves the old ones back. When
 /// the old ones cannot be moved back either, or the process stops between the
 /// two renames, `dest` is left absent and the old notices remain in the
-/// set-aside `.licenses.old`, which the error of a failed move back names; the
-/// next install discards it, with any staged copy, before it stages anew.
+/// set-aside `.licenses.old`, which the error of a failed move back names.
+/// An install that finds `dest` absent and that directory beside it moves it
+/// back before it stages anything, so that the old notices are never left
+/// only in a copy it could discard, and then replaces them as it would any
+/// others. It discards every other leftover beside `dest` before it stages
+/// anew: a staged copy, and a set-aside copy that is not a directory or that
+/// sits beside notices still in place, as an install whose final removal
+/// failed leaves one.
 ///
 /// # Errors
 ///
-/// Returns an error if `source` is not a directory, if a member of it cannot be
-/// read or is neither a directory nor a regular file, or if staging or
-/// swapping fails.
+/// Returns an error if `source` is not a directory, if the notices an
+/// interrupted install set aside cannot be moved back, if a member of `source`
+/// cannot be read or is neither a directory nor a regular file, or if staging
+/// or swapping fails.
 fn install_notices(source: &Path, dest: &Path) -> Result<bool> {
     install_notices_with(source, dest, |from, to| std::fs::rename(from, to))
 }
@@ -358,6 +393,18 @@ fn install_notices_with(
 
     let staged = beside(dest, "new");
     let old = beside(dest, "old");
+    if is_absent(dest)
+        && is_directory(&old)
+        && let Err(err) = rename(&old, dest)
+    {
+        return Err(err).with_context(|| {
+            format!(
+                "Failed to move the previous third-party notices at {} back to {}",
+                old.display(),
+                dest.display()
+            )
+        });
+    }
     remove_leftover(&staged)?;
     remove_leftover(&old)?;
 
@@ -414,8 +461,8 @@ fn beside(dest: &Path, suffix: &str) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// Removes what `path` holds, a directory tree or a file, if anything: the
-/// staging and set-aside copies an interrupted update leaves behind.
+/// Removes what `path` holds, a directory tree or a file, if anything: a
+/// staged or set-aside copy of the notices that no install needs any more.
 fn remove_leftover(path: &Path) -> Result<()> {
     let removed = match std::fs::symlink_metadata(path) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -675,6 +722,15 @@ mod tests {
             self
         }
 
+        /// The home as an update interrupted between the two renames of its
+        /// swap leaves it: no `licenses/`, and [`previous_notices`] set aside
+        /// in `.licenses.old` (see [`interrupt_install`]).
+        fn after_an_interrupted_update(self) -> Self {
+            let update = self.after_an_earlier_update();
+            interrupt_install(&update.source(), &update.dest());
+            update
+        }
+
         /// The home as the VS Code extension leaves it: an earlier `infs`
         /// archive unpacked into `bin/`, the running binary with
         /// [`previous_notices`] in `licenses/` beside it.
@@ -768,6 +824,34 @@ mod tests {
                 std::fs::rename(from, to)
             }
         }
+    }
+
+    /// A rename for [`install_notices_with`] that renames and records each
+    /// move it makes in `moves`, as `(from, to)`.
+    fn rename_recording(
+        moves: &mut Vec<(PathBuf, PathBuf)>,
+    ) -> impl FnMut(&Path, &Path) -> std::io::Result<()> {
+        move |from, to| {
+            moves.push((from.to_path_buf(), to.to_path_buf()));
+            std::fs::rename(from, to)
+        }
+    }
+
+    /// Interrupts an install of `source` at `dest` between the two renames of
+    /// its swap: the new notices cannot be moved in, nor the previous ones
+    /// back, so nothing is left at `dest` and the notices it held are set
+    /// aside in `.licenses.old` beside it, as a process stopped there leaves
+    /// them.
+    fn interrupt_install(source: &Path, dest: &Path) {
+        let old = beside(dest, "old");
+        install_notices_with(
+            source,
+            dest,
+            rename_failing_from(vec![beside(dest, "new"), old.clone()]),
+        )
+        .expect_err("the injected failures fail the install");
+        assert!(!dest.exists(), "nothing is left at the notices' place");
+        assert!(old.is_dir(), "the previous notices are set aside");
     }
 
     #[test]
@@ -973,24 +1057,28 @@ mod tests {
         assert!(!dest.exists());
     }
 
-    /// The next install after a failed restore discards the notices it left
-    /// set aside and installs the new ones whole where there were none.
+    /// The next install after a failed restore first moves the notices it
+    /// left set aside back into place, then replaces them whole as it would
+    /// any previous notices.
     #[test]
-    fn the_next_install_recovers_from_a_failed_restore() {
-        let update = Update::with_notices().after_an_earlier_update();
+    fn the_next_install_moves_set_aside_notices_back_before_replacing_them() {
+        let update = Update::with_notices().after_an_interrupted_update();
         let dest = update.dest();
-        let old = beside(&dest, "old");
-        install_notices_with(
-            &update.source(),
-            &dest,
-            rename_failing_from(vec![beside(&dest, "new"), old.clone()]),
-        )
-        .expect_err("the injected failures fail the install");
-        assert!(!dest.exists(), "no notices directory is left");
-        assert!(old.exists(), "the previous notices are set aside");
+        let (staged, old) = (beside(&dest, "new"), beside(&dest, "old"));
+        let mut moves = Vec::new();
 
-        install_notices(&update.source(), &dest).expect("Should install");
+        install_notices_with(&update.source(), &dest, rename_recording(&mut moves))
+            .expect("Should install");
 
+        assert_eq!(
+            moves,
+            [
+                (old.clone(), dest.clone()),
+                (dest.clone(), old),
+                (staged, dest.clone()),
+            ],
+            "the set-aside notices are moved back, then aside and replaced"
+        );
         assert_holds(
             &dest,
             &archive_notices(),
@@ -999,8 +1087,148 @@ mod tests {
         assert_eq!(
             update.home_entries(),
             ["downloads", "licenses"],
-            "the set-aside notices are discarded"
+            "neither the staged nor the previous copy is left beside the notices"
         );
+    }
+
+    /// An install that fails staging after an interrupted update leaves the
+    /// notices the interrupted one set aside in place, moved back, rather than
+    /// discarding the only copy of them.
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_failure_after_an_interrupted_update_keeps_the_previous_notices() {
+        let update = Update::with_notices().after_an_interrupted_update();
+        let dest = update.dest();
+        let link = update.source().join("link");
+        std::os::unix::fs::symlink(repository_licenses().join("README.md"), &link)
+            .expect("Should create the symlink");
+
+        let err = install_notices(&update.source(), &dest).expect_err("a symlink is refused");
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "Failed to stage the third-party notices at {}: {} is neither a file nor a \
+                 directory",
+                beside(&dest, "new").display(),
+                link.display()
+            )
+        );
+        assert_holds(&dest, &previous_notices(), "the previous notices");
+        assert_eq!(
+            update.home_entries(),
+            ["downloads", "licenses"],
+            "the previous notices are back in place and nothing is staged"
+        );
+    }
+
+    /// An install that cannot move its new notices into place after an
+    /// interrupted update moves back the notices the interrupted one set
+    /// aside.
+    #[test]
+    fn a_failed_move_into_place_after_an_interrupted_update_restores_the_previous_notices() {
+        let update = Update::with_notices().after_an_interrupted_update();
+        let dest = update.dest();
+        let staged = beside(&dest, "new");
+
+        let err = install_notices_with(
+            &update.source(),
+            &dest,
+            rename_failing_from(vec![staged.clone()]),
+        )
+        .expect_err("the injected failure fails the install");
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "Failed to install the third-party notices at {}: injected failure moving {}",
+                dest.display(),
+                staged.display()
+            )
+        );
+        assert_holds(&dest, &previous_notices(), "the restored notices");
+        assert_eq!(update.home_entries(), ["downloads", "licenses"]);
+    }
+
+    /// When the notices an interrupted update set aside cannot be moved back,
+    /// the install fails before it touches anything else, and the error names
+    /// where they remain, which they do.
+    #[test]
+    fn set_aside_notices_that_cannot_be_moved_back_stay_where_the_error_says() {
+        let update = Update::with_notices().after_an_interrupted_update();
+        let dest = update.dest();
+        let old = beside(&dest, "old");
+
+        let err = install_notices_with(
+            &update.source(),
+            &dest,
+            rename_failing_from(vec![old.clone()]),
+        )
+        .expect_err("the injected failure fails the install");
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "Failed to move the previous third-party notices at {} back to {}: injected \
+                 failure moving {}",
+                old.display(),
+                dest.display(),
+                old.display()
+            )
+        );
+        assert_holds(&old, &previous_notices(), "the set-aside notices");
+        assert_eq!(
+            update.home_entries(),
+            [".licenses.old", "downloads"],
+            "nothing is at the notices' place, and nothing is staged"
+        );
+    }
+
+    /// A set-aside `.licenses.old` that is a file holds no notices: it is
+    /// discarded rather than moved back, and the new notices are installed
+    /// where there were none.
+    #[test]
+    fn a_set_aside_file_is_discarded_rather_than_moved_back() {
+        let update = Update::with_notices();
+        let dest = update.dest();
+        let old = beside(&dest, "old");
+        std::fs::write(&old, b"a set-aside file").expect("Should write");
+        let mut moves = Vec::new();
+
+        install_notices_with(&update.source(), &dest, rename_recording(&mut moves))
+            .expect("Should install");
+
+        assert_eq!(
+            moves,
+            [(beside(&dest, "new"), dest.clone())],
+            "only the staged copy is moved"
+        );
+        assert_holds(&dest, &archive_notices(), "the installed notices");
+        assert_eq!(update.home_entries(), ["downloads", "licenses"]);
+    }
+
+    /// A set-aside copy beside notices that are in place, as an install whose
+    /// final removal failed leaves one, is discarded: the notices in place
+    /// are the ones replaced.
+    #[test]
+    fn a_set_aside_copy_beside_notices_in_place_is_discarded() {
+        let update = Update::with_notices().after_an_earlier_update();
+        let dest = update.dest();
+        let (staged, old) = (beside(&dest, "new"), beside(&dest, "old"));
+        std::fs::create_dir_all(&old).expect("Should create");
+        std::fs::write(old.join("NOTICE"), b"an older set-aside notice").expect("Should write");
+        let mut moves = Vec::new();
+
+        install_notices_with(&update.source(), &dest, rename_recording(&mut moves))
+            .expect("Should install");
+
+        assert_eq!(
+            moves,
+            [(dest.clone(), old), (staged, dest.clone())],
+            "the notices in place are moved aside and replaced"
+        );
+        assert_holds(&dest, &archive_notices(), "the replaced notices");
+        assert_eq!(update.home_entries(), ["downloads", "licenses"]);
     }
 
     /// When the previous notices cannot be moved aside, they stay in place and
@@ -1342,6 +1570,41 @@ mod tests {
         assert_holds(&update.dest(), &archive_notices(), "the home's notices");
     }
 
+    /// A binary running from a home whose update was interrupted has the
+    /// home's absent `licenses/` beside it: the notices set aside there are
+    /// moved back and replaced once.
+    #[test]
+    fn a_binary_in_an_interrupted_home_gets_the_notices_once() {
+        let update = Update::with_notices()
+            .after_an_interrupted_update()
+            .running_from_the_home();
+
+        let installed = update.install(|_| Ok(())).expect("Should update");
+
+        assert_eq!(installed, [update.dest()]);
+        assert_holds(&update.dest(), &archive_notices(), "the home's notices");
+        assert_eq!(update.home_entries(), ["downloads", "licenses"]);
+    }
+
+    /// The home's absent `licenses/`, reached through a symbolic link, is
+    /// still the home's: the notices an interrupted update set aside there
+    /// are moved back and replaced once.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_in_a_link_to_an_interrupted_home_gets_the_notices_once() {
+        let update = Update::with_notices()
+            .after_an_interrupted_update()
+            .running_from_a_link_to_the_home();
+
+        let notices_dirs = update.notices_dirs();
+        let installed = update.install(|_| Ok(())).expect("Should update");
+
+        assert_eq!(notices_dirs, [update.dest()]);
+        assert_eq!(installed, [update.dest()]);
+        assert_holds(&update.dest(), &archive_notices(), "the home's notices");
+        assert_eq!(update.home_entries(), ["downloads", "licenses"]);
+    }
+
     /// A `licenses/` beside the binary holding none of the archive's notices
     /// is another program's, one sharing the binary's directory as in
     /// `/usr/local/bin`, even where its files share a name with a notice: the
@@ -1374,6 +1637,58 @@ mod tests {
         assert_holds(&update.beside_binary(), &theirs, "their licenses");
         assert_holds(&update.dest(), &archive_notices(), "the home's notices");
         assert_eq!(names_in(&update.home.bin), ["infs", "licenses"]);
+    }
+
+    /// The notices an interrupted refresh set aside beside the running
+    /// binary, with no `licenses/` left there, are still `infs`'s: the update
+    /// moves them back and refreshes them, leaving no set-aside copy.
+    #[test]
+    fn notices_an_interrupted_refresh_set_aside_beside_the_binary_are_refreshed() {
+        let update = Update::with_notices().unpacked_into_bin();
+        let beside_binary = update.beside_binary();
+        interrupt_install(&update.source(), &beside_binary);
+
+        let notices_dirs = update.notices_dirs();
+        let installed = update.install(|_| Ok(())).expect("Should update");
+
+        assert_eq!(notices_dirs, [update.dest(), beside_binary.clone()]);
+        assert_eq!(installed, [update.dest(), beside_binary.clone()]);
+        assert_holds(
+            &beside_binary,
+            &archive_notices(),
+            "the notices beside the binary",
+        );
+        assert_eq!(
+            names_in(&update.home.bin),
+            ["infs", "licenses"],
+            "neither a staged nor a set-aside copy is left beside the binary"
+        );
+    }
+
+    /// A set-aside `.licenses.old` beside the binary holding none of the
+    /// archive's notices is another program's: the update leaves it as it is
+    /// and creates no `licenses/` there.
+    #[test]
+    fn another_programs_set_aside_licenses_beside_the_binary_are_left_alone() {
+        let theirs = [
+            dir_entry("licenses"),
+            dir_entry("licenses/other-tool"),
+            file_entry("licenses/other-tool/LICENSE", b"their license\n"),
+            file_entry("licenses/other-tool/NOTICE", b"their notice\n"),
+        ];
+        let update = Update::with_notices().with_licenses_in_bin(&theirs);
+        let set_aside = beside(&update.beside_binary(), "old");
+        std::fs::rename(update.beside_binary(), &set_aside).expect("Should set them aside");
+
+        let installed = update.install(|_| Ok(())).expect("Should update");
+
+        assert_eq!(installed, [update.dest()]);
+        assert_holds(&set_aside, &theirs, "their set-aside licenses");
+        assert_eq!(
+            names_in(&update.home.bin),
+            [".licenses.old", "infs"],
+            "no licenses/ is created beside the binary"
+        );
     }
 
     /// The `README.md` at the top of the notices is a name any directory of

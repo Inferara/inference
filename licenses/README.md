@@ -29,8 +29,9 @@ the `infs` archive into the home's `bin/`, so its copy is `bin/licenses/`, and
 an archive unpacked by hand leaves one beside `infs` too; `infs self update`
 refreshes such a `licenses/` beside the running `infs` as well, but only when it
 already holds one of the files here other than this `README.md`, at the same
-path, and it never creates one there. A `licenses/` holding none of them belongs
-to another program sharing the directory, as in `/usr/local/bin`, and the update
+path, and it never creates one there, except to move back the copy an
+interrupted update set aside. A `licenses/` holding none of them belongs to
+another program sharing the directory, as in `/usr/local/bin`, and the update
 leaves it alone.
 
 This directory holds the texts for these two crates only. The release binaries
