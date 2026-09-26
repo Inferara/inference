@@ -273,7 +273,7 @@ no return, and what the CLI expects.
 
 **`contractmetav0`.** One key-value entry about the contract itself:
 `SCMetaV0 { key: "infver", val }`, where `val` is the crate version the
-workspace declares (`CONTRACT_META_TOOLCHAIN_VERSION`; currently `0.0.1`) —
+workspace declares (`CONTRACT_META_TOOLCHAIN_VERSION`; currently `0.0.6`) —
 the toolchain that produced the contract, not a network protocol. `stellar
 contract info meta` displays it. Tooling reads it too: `soroban-spec`'s spec
 shaking (`src/shaking.rs`) looks there for the Rust SDK's own key,

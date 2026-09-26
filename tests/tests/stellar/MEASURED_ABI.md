@@ -452,7 +452,8 @@ are the tests above.
 `contractmetav0` carries a contract's own key-value metadata. This toolchain
 writes exactly one entry: `SCMetaV0 { key: "infver", val }`, where `val` is
 `inference_stellar_abi::CONTRACT_META_TOOLCHAIN_VERSION`, the workspace version
-(`0.0.1` today). For that version the section body is twenty-eight bytes:
+(`0.0.6` today). For `0.0.1`, the version whose layout the crate pins, the
+section body is twenty-eight bytes:
 
 ```
 00 00 00 00                       ;; SCMetaKind = SC_META_V0
