@@ -146,7 +146,9 @@ codegen-units = 1     # Better optimization (slower compile)
 # by catching the unwind, and `infc` hands a panic on its compiler thread back
 # to `main` by unwinding, which keeps its exit status. Cargo ignores a
 # `[profile]` table in a member's own manifest, so these settings live here;
-# `apps/infs/tests/workspace_profiles.rs` fails when a member declares one.
+# `apps/infs/tests/workspace_profiles.rs` fails when a member declares one,
+# when either setting below goes, and when `[profile.release]` gains `lto` or
+# `panic = "abort"`.
 [profile.release.package.infs]
 opt-level = "z"
 strip = true
