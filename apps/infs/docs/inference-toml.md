@@ -87,17 +87,17 @@ runtime with no diagnostic — the silent downgrade this section promises never
 happens. The promise therefore holds for `target` only from the release that
 introduced target forwarding; every `infs` from that release on refuses an
 unrecognized name loudly, and forwards a recognized one or refuses to build.
-Every released `infs` through `v0.0.5` predates it. (`[build] optimize` is
-parsed and unvalidated in the same way, but nothing reads it, so no build can be
-downgraded by it.)
+Every released `infs` through `v0.0.5` predates it; `v0.0.6` is the first
+release with it. (`[build] optimize` is parsed and unvalidated in the same way,
+but nothing reads it, so no build can be downgraded by it.)
 
-The second is every root table added after `v0.0.5`: the unknown-key refusal is
-itself younger than every release, so an `infs` through `v0.0.5` reads past such
-a table with no diagnostic. `[host-imports]` is where that costs the most. Such
-an `infs` builds under no policy at all — the allowlist dropped silently, which
-is the one outcome the table exists to prevent. Every `infs` that has the
-refusal either forwards the table or refuses the manifest. A project that
-relies on its allowlist has to be built with an `infs` that knows the table.
+The second is every root table added after `v0.0.5`: the unknown-key refusal
+first shipped in `v0.0.6`, so an `infs` through `v0.0.5` reads past such a table
+with no diagnostic. `[host-imports]` is where that costs the most. Such an
+`infs` builds under no policy at all — the allowlist dropped silently, which is
+the one outcome the table exists to prevent. Every `infs` that has the refusal
+either forwards the table or refuses the manifest. A project that relies on its
+allowlist has to be built with an `infs` that knows the table.
 
 ## Settings Honored in Single-File Mode
 
