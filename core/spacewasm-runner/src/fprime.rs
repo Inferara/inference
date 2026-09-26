@@ -98,7 +98,7 @@ use crate::errors::{
     UnsupportedImports,
 };
 use crate::hosts::{HostLog, HostSet, host_module, host_set};
-use crate::module::{EngineConfig, Fuel, Instance, LoadedModule, Outcome, load_with};
+use crate::module::{Counted, EngineConfig, Fuel, Instance, LoadedModule, Outcome, load_with};
 use crate::report::{HostTrap, TrapReport, explain_refusal};
 use crate::session::Session;
 
@@ -576,6 +576,24 @@ impl<'session> HostedInstance<'session> {
     pub fn invoke(&mut self, export: &str, args: &[Value]) -> Result<Outcome, InvokeError> {
         self.context.trap.set(None);
         self.instance.invoke_within_budget(export, args)
+    }
+
+    /// Calls `export` with `args` as [`HostedInstance::invoke`] does, and
+    /// counts the interpreter instructions the call takes as
+    /// [`Instance::invoke_counting`] does: exactly, at the cost of one
+    /// re-entry into the interpreter per instruction. A call into a host is
+    /// one instruction, however much its body does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Instance::invoke`].
+    pub fn invoke_counting(
+        &mut self,
+        export: &str,
+        args: &[Value],
+    ) -> Result<Counted, InvokeError> {
+        self.context.trap.set(None);
+        self.instance.invoke_counting(export, args)
     }
 
     /// Why a host stopped the last call, when one did.

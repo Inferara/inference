@@ -66,6 +66,20 @@ match instance.invoke(&add.name, &[Value::I32(2), Value::I32(40)])? {
   is not a function is named for what it is: the module's linear memory, its
   table or one of its globals. Whatever the call does, the engine is idle
   again afterwards.
+- `Instance::invoke_counting` makes the call `invoke_within_budget` makes and
+  answers a `Counted`: the call's `Outcome` and the exact number of
+  interpreter instructions it took — its closing return, or the instruction
+  that trapped, included, so a budget of exactly that many ends the call the
+  same way and one fewer runs out. A call that ran out executed every
+  instruction it was given, and one whose frame the engine refused to begin
+  executed none. The count is reported, never deducted: a later call is given
+  the same remainder. The interpreter says how a run ended and never how much
+  of its budget it spent, so the call is run one instruction at a time, at the
+  cost of one re-entry into the interpreter per instruction — a measurement,
+  not the way to run a program. `fprime::HostedInstance::invoke_counting` does
+  the same against the reference hosts, where a call into a host is one
+  instruction however much the host does. The test crate's `spacewasm-bench`
+  example counts every call it measures this way.
 - `exported_functions` and `exported_host_imports` list what a loaded module
   exports, with each function's WebAssembly signature, and `function` resolves
   one name as a call would — its signature, or the `InvokeError` the call would

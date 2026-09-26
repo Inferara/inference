@@ -13,3 +13,25 @@ jobs:
     with:
       release-build: false
       package-artifacts: false
+
+  # What this compiler's SpaceWasm output costs the flight interpreter — IR
+  # pages, IR words and the instructions each call takes — measured against
+  # the history the repository keeps in tests/bench/spacewasm/history.jsonl.
+  # A figure that grew past the benchmark's threshold is a warning annotation
+  # on the pull request, never a failure: `compare` exits 0 whatever it finds,
+  # and the job fails only when the benchmark itself cannot run. Linux alone,
+  # in a debug build of the example alone: what is measured is the
+  # interpreter's own IR and instruction count, not the speed of the machine
+  # it runs on.
+  spacewasm-bench:
+    name: SpaceWasm benchmark (warnings only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.1.3
+
+      - name: Compare with the committed history
+        run: cargo run -p inference-tests --example spacewasm-bench -- compare

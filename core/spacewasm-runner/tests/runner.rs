@@ -12,8 +12,8 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use inference_spacewasm_runner::{
-    ArgumentError, EngineConfig, ExportKind, ExportedFunction, Fuel, HostSet, HostSetError,
-    Instance, InvokeError, LoadError, LoadedModule, Outcome, REFERENCE_MAX_CODE_PAGES,
+    ArgumentError, Counted, EngineConfig, ExportKind, ExportedFunction, Fuel, HostSet,
+    HostSetError, Instance, InvokeError, LoadError, LoadedModule, Outcome, REFERENCE_MAX_CODE_PAGES,
     REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH, ReexportedImport, Session,
     StartError, TrapReason, ValType, Value, coerce_arguments, host_module, host_set, ir_stats,
     load, load_with,
@@ -1006,4 +1006,229 @@ fn an_unbounded_run_goes_on_until_the_call_returns() {
         .err()
         .expect("a million instructions do not count to a million");
     assert_eq!(error, StartError::OutOfFuel { budget: 1_000_000 });
+}
+
+// ---------------------------------------------------------------------------
+// Counting
+// ---------------------------------------------------------------------------
+
+/// `outcome`, counted at `instructions`.
+fn counted(outcome: Outcome, instructions: usize) -> Counted {
+    Counted { outcome, instructions }
+}
+
+/// A counted call reports exactly the instructions it took, and ends as the
+/// same call made without counting ends.
+///
+/// Each count is the table's, and a budget of exactly the count finishes the
+/// call while one fewer runs out, so the count is the least budget the call
+/// needs rather than a number merely close to it. Fails if a step executes
+/// more or fewer than one instruction, if the count is off by one at either
+/// end, or if counting changes how a call ends.
+#[test]
+fn a_counted_call_reports_exactly_the_instructions_it_took() {
+    for (body, count) in BODIES {
+        let wasm = wat(&format!(r#"(module (func (export "f") {body}))"#));
+        let mut session = Session::acquire();
+        let mut instance = started(&mut session, &wasm);
+        assert_eq!(
+            instance.invoke_counting("f", &[]),
+            Ok(counted(Outcome::Returned(None), count)),
+            "{body:?}"
+        );
+        assert_eq!(instance.invoke("f", &[], count), Ok(Outcome::Returned(None)), "{body:?}");
+        assert_eq!(
+            instance.invoke("f", &[], count - 1),
+            Ok(Outcome::OutOfFuel { budget: count - 1 }),
+            "{body:?}"
+        );
+    }
+
+    let wasm = wat(ARITHMETIC);
+    let mut session = Session::acquire();
+    let mut instance = started(&mut session, &wasm);
+    let args = [Value::I32(20), Value::I32(22)];
+    let add = instance.invoke_counting("add", &args).expect("`add` takes two i32");
+    assert_eq!(add, counted(Outcome::Returned(Some(Value::I32(42))), 4));
+    assert_eq!(instance.invoke("add", &args, 4), Ok(Outcome::Returned(Some(Value::I32(42)))));
+    assert_eq!(instance.invoke("add", &args, 3), Ok(Outcome::OutOfFuel { budget: 3 }));
+}
+
+/// A counted call that traps counts the instruction that trapped, so a
+/// budget of exactly the count traps the same way and one fewer runs out.
+///
+/// Fails if the trapping step is left out of the count, or counted twice.
+#[test]
+fn a_counted_trap_includes_the_instruction_that_trapped() {
+    let wasm = wat(ARITHMETIC);
+    let mut session = Session::acquire();
+    let mut instance = started(&mut session, &wasm);
+    assert_eq!(
+        instance.invoke_counting("boom", &[]),
+        Ok(counted(Outcome::Trapped(TrapReason::Unreachable), 1))
+    );
+
+    let args = [Value::I32(1), Value::I32(0)];
+    let divided = Ok(counted(Outcome::Trapped(TrapReason::DivideByZero), 3));
+    assert_eq!(instance.invoke_counting("divide", &args), divided);
+    assert_eq!(
+        instance.invoke("divide", &args, 3),
+        Ok(Outcome::Trapped(TrapReason::DivideByZero))
+    );
+    assert_eq!(instance.invoke("divide", &args, 2), Ok(Outcome::OutOfFuel { budget: 2 }));
+}
+
+/// A module whose start function takes three instructions, with an entry
+/// `f` taking five and an entry `spin` that never returns.
+const STARTED_AT_THREE: &str = r#"(module
+  (func $s i32.const 1 drop)
+  (start $s)
+  (func (export "f") i32.const 1 i32.const 2 i32.add drop)
+  (func (export "spin") (loop br 0)))"#;
+
+/// A counted call is given what the start function left of the start's
+/// budget — nothing at all when the start function spent it — counts only
+/// its own instructions, and when it runs out has spent every one of them,
+/// while its outcome reports the whole budget, start function included.
+///
+/// Fails if the count includes the start function's instructions, if the
+/// call is given the whole budget again or a budget of its own, if a call
+/// that ran out is counted short of what it was given, or if a counted and
+/// an uncounted call are given different remainders.
+#[test]
+fn a_counted_call_spends_what_the_start_function_left() {
+    let wasm = wat(STARTED_AT_THREE);
+    let mut session = Session::acquire();
+    for (budget, (f, f_count), (spin, spin_count)) in [
+        (8, (Outcome::Returned(None), 5), (Outcome::OutOfFuel { budget: 8 }, 5)),
+        (7, (Outcome::OutOfFuel { budget: 7 }, 4), (Outcome::OutOfFuel { budget: 7 }, 4)),
+        (3, (Outcome::OutOfFuel { budget: 3 }, 0), (Outcome::OutOfFuel { budget: 3 }, 0)),
+        (1_000, (Outcome::Returned(None), 5), (Outcome::OutOfFuel { budget: 1_000 }, 997)),
+    ] {
+        let mut instance = loaded(&mut session, &wasm)
+            .start(limited(budget))
+            .unwrap_or_else(|e| panic!("the start function fits {budget}: {e}"));
+        assert_eq!(
+            instance.invoke_counting("spin", &[]),
+            Ok(counted(spin, spin_count)),
+            "a budget of {budget}"
+        );
+        assert_eq!(
+            instance.invoke_counting("f", &[]),
+            Ok(counted(f.clone(), f_count)),
+            "a budget of {budget}: the engine is idle after running out, and the next call is \
+             given the same remainder"
+        );
+        assert_eq!(
+            instance.invoke_within_budget("f", &[]),
+            Ok(f),
+            "a budget of {budget}: an uncounted call ends as the counted one did"
+        );
+    }
+}
+
+/// A loop running `n` times and answering `n`.
+const COUNT_TO_N: &str = r#"(module
+  (func (export "count") (param $n i32) (result i32) (local $i i32)
+    (block $done
+      (loop $again
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $again)))
+    (local.get $i)))"#;
+
+/// Without a budget, a counted call is counted all the way to its return,
+/// and the count follows the work: a loop run ninety more times costs ninety
+/// passes more, and the count is still the least budget that finishes it.
+///
+/// Fails if an unbounded count is cut short or stops being exact past the
+/// first few instructions, or if it stops following the loop.
+#[test]
+fn an_unbounded_counted_call_is_counted_to_its_return() {
+    let wasm = wat(COUNT_TO_N);
+    let mut session = Session::acquire();
+    let mut instance = loaded(&mut session, &wasm)
+        .start(Fuel::Unbounded)
+        .expect("a module without a start function starts");
+    let mut count = |n: i32| {
+        let run =
+            instance.invoke_counting("count", &[Value::I32(n)]).expect("`count` takes one i32");
+        assert_eq!(run.outcome, Outcome::Returned(Some(Value::I32(n))), "counting to {n}");
+        run.instructions
+    };
+    let ten = count(10);
+    let pass = count(11) - ten;
+    assert!(pass > 1, "one pass through the loop is several instructions, not {pass}");
+    let hundred = count(100);
+    assert_eq!(hundred, ten + 90 * pass);
+
+    let args = [Value::I32(100)];
+    assert_eq!(
+        instance.invoke("count", &args, hundred),
+        Ok(Outcome::Returned(Some(Value::I32(100))))
+    );
+    assert_eq!(
+        instance.invoke("count", &args, hundred - 1),
+        Ok(Outcome::OutOfFuel { budget: hundred - 1 })
+    );
+}
+
+/// A counted call the engine refuses to begin for want of stack is a
+/// `StackOverflow` trap that executed nothing, and a call that cannot be
+/// made is the error it is uncounted.
+///
+/// Fails if the refusal is counted as an instruction, or if counting turns
+/// an error into an outcome.
+#[test]
+fn a_counted_call_that_never_begins_counts_nothing() {
+    let wasm = wat(ARITHMETIC);
+    let mut session = Session::acquire();
+    let mut instance = load(&mut session, &wasm, EngineConfig { stack_words: 1, ..ENGINE })
+        .expect("the module loads; only calling it needs stack")
+        .start(BUDGET)
+        .expect("the module has no start function to need stack");
+    assert_eq!(
+        instance.invoke_counting("add", &[Value::I32(1), Value::I32(2)]),
+        Ok(counted(Outcome::Trapped(TrapReason::StackOverflow), 0))
+    );
+    drop(instance);
+
+    let mut instance = started(&mut session, &wasm);
+    let Err(InvokeError::NoSuchExport { export, .. }) = instance.invoke_counting("missing", &[])
+    else {
+        panic!("`missing` is not exported");
+    };
+    assert_eq!(export, "missing");
+    assert_eq!(
+        instance.invoke_counting("add", &[Value::I32(1)]),
+        Err(InvokeError::Arity { export: "add".to_string(), expected: 2, given: 1 })
+    );
+}
+
+/// A host that pauses a counted call is an error, as it is for a call made
+/// without counting, and the engine is idle again afterwards.
+///
+/// Fails if a pause is counted as an ending, or leaves the engine busy.
+#[test]
+fn a_paused_counted_call_is_an_error_and_leaves_the_engine_idle() {
+    let wasm = wat(
+        r#"(module
+             (import "env" "f" (func $f))
+             (func (export "call") call $f)
+             (func (export "seven") (result i32) i32.const 7))"#,
+    );
+    let mut session = Session::acquire();
+    let hosts = env_f(&session, HostFunctionBreak::Pause);
+    let mut instance = load_with::<FRAMES, DEPTH>(&mut session, &wasm, hosts, ENGINE)
+        .expect("the import is supplied")
+        .start(BUDGET)
+        .expect("the module has no start function");
+    assert_eq!(
+        instance.invoke_counting("call", &[]),
+        Err(InvokeError::Paused { export: "call".to_string() })
+    );
+    assert_eq!(
+        instance.invoke_counting("seven", &[]),
+        Ok(counted(Outcome::Returned(Some(Value::I32(7))), 2))
+    );
 }

@@ -84,8 +84,8 @@ impl EngineConfig {
 ///
 /// One budget covers a whole run: the start function
 /// [`LoadedModule::start`] runs, and then the call
-/// [`Instance::invoke_within_budget`] makes, which is given what the start
-/// function left of it.
+/// [`Instance::invoke_within_budget`] or [`Instance::invoke_counting`] makes,
+/// which is given what the start function left of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fuel {
     /// No budget: a run goes on until it returns or traps.
@@ -201,10 +201,25 @@ pub enum Outcome {
     /// abandoned and the engine is idle again.
     OutOfFuel {
         /// The budget that ran out: every instruction of it was spent. For
-        /// [`Instance::invoke_within_budget`] that is the whole budget the
-        /// module was started under, start function included.
+        /// [`Instance::invoke_within_budget`] and [`Instance::invoke_counting`]
+        /// that is the whole budget the module was started under, start
+        /// function included.
         budget: usize,
     },
+}
+
+/// How a call ended, and how many of the interpreter's instructions it took:
+/// what [`Instance::invoke_counting`] answers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Counted {
+    /// How the call ended.
+    pub outcome: Outcome,
+    /// Interpreter instructions the call executed, its closing return or the
+    /// instruction that trapped included, so a budget of exactly this many
+    /// ends the call the same way and one fewer runs out. A call that ran out
+    /// of fuel executed every instruction it was given; a call the engine
+    /// refused to begin for want of stack executed none.
+    pub instructions: usize,
 }
 
 /// How one run of the engine ended.
@@ -325,7 +340,8 @@ impl<'session> LoadedModule<'session> {
     /// and gives the module up for the [`Instance`] that calls its exports.
     ///
     /// `fuel` is the budget of the whole run: the start function's, and then
-    /// the call [`Instance::invoke_within_budget`] makes. Under a limit the
+    /// the call [`Instance::invoke_within_budget`] or
+    /// [`Instance::invoke_counting`] makes. Under a limit the
     /// start function is stepped one instruction at a time, because the
     /// interpreter says how a run ended and never how much of its budget it
     /// spent, and stepping is the one way to leave that call exactly the rest.
@@ -366,7 +382,9 @@ impl<'session> LoadedModule<'session> {
         }
         let (ended, spent) = match fuel {
             Fuel::Unbounded => (self.run_unbounded(), 0),
-            Fuel::Limited(budget) => self.run_stepped(budget),
+            Fuel::Limited(budget) => {
+                self.run_stepped(Allowance::Limited { left: budget.get(), budget: budget.get() })
+            }
         };
         match ended {
             Ended::Finished => Ok(spent),
@@ -453,16 +471,17 @@ impl<'session> LoadedModule<'session> {
         Ok(ExportedFunction { name: name.to_string(), params, result })
     }
 
-    /// Calls `export` with `args`, spending at most what `allowance` allows.
+    /// Calls `export` with `args`, running the engine with `run` once the call
+    /// has begun.
     ///
     /// Only an [`Instance`] reaches this, which is what keeps a loaded module
     /// from running anything before [`LoadedModule::start`] has run its start
-    /// function.
+    /// function. `run` is not called for a call the engine refuses to begin.
     fn call(
         &mut self,
         export: &str,
         args: &[Value],
-        allowance: Allowance,
+        run: impl FnOnce(&mut Self) -> Ended,
     ) -> Result<Outcome, InvokeError> {
         let reference = self.resolve(export)?;
         let (params, result_ty) = self.signature(reference);
@@ -489,11 +508,7 @@ impl<'session> LoadedModule<'session> {
                 return Err(InvokeError::Busy { export: export.to_string() });
             }
         }
-        let ended = match allowance {
-            Allowance::Limited { left, budget } => self.run_limited(left, budget),
-            Allowance::Unbounded => self.run_unbounded(),
-        };
-        match ended {
+        match run(self) {
             Ended::Finished => match (result_ty, self.engine.result) {
                 (None, _) => Ok(Outcome::Returned(None)),
                 (Some(ty), Some(raw)) => Ok(Outcome::Returned(Some(raw.to_value(ty)))),
@@ -508,6 +523,15 @@ impl<'session> LoadedModule<'session> {
                 self.engine.reset();
                 Err(InvokeError::Paused { export: export.to_string() })
             }
+        }
+    }
+
+    /// Runs the engine from where an `invoke` left it, spending at most what
+    /// `allowance` allows, without counting what it spends.
+    fn run_uncounted(&mut self, allowance: Allowance) -> Ended {
+        match allowance {
+            Allowance::Limited { left, budget } => self.run_limited(left, budget),
+            Allowance::Unbounded => self.run_unbounded(),
         }
     }
 
@@ -537,15 +561,24 @@ impl<'session> LoadedModule<'session> {
     }
 
     /// Runs the engine from where an `invoke` left it one instruction at a
-    /// time, for at most `budget` instructions, and answers how the run ended
-    /// and how many instructions it took.
+    /// time, spending at most what `allowance` allows, and answers how the run
+    /// ended and how many instructions it took.
     ///
     /// Every step executes exactly one instruction, the last included: the
-    /// interpreter reports a call's return from inside the step that executes
-    /// it, which is also why a single run given exactly as many instructions
-    /// as a call takes finishes it.
-    fn run_stepped(&mut self, budget: NonZeroUsize) -> (Ended, usize) {
-        for spent in 1..=budget.get() {
+    /// interpreter reports a call's return, and a trap, from inside the step
+    /// that executes it, which is also why a single run given exactly as many
+    /// instructions as a call takes ends it the same way. Without a limit the
+    /// count saturates at `usize::MAX` rather than wrapping, which no run
+    /// reaches.
+    fn run_stepped(&mut self, allowance: Allowance) -> (Ended, usize) {
+        let mut spent: usize = 0;
+        loop {
+            if let Allowance::Limited { left, budget } = allowance
+                && spent == left
+            {
+                return (Ended::OutOfFuel { budget }, spent);
+            }
+            spent = spent.saturating_add(1);
             let ended = match self.run(1) {
                 InterpreterResult::Finished => Ended::Finished,
                 InterpreterResult::Trap(reason) => Ended::Trapped(reason),
@@ -554,7 +587,6 @@ impl<'session> LoadedModule<'session> {
             };
             return (ended, spent);
         }
-        (Ended::OutOfFuel { budget: budget.get() }, budget.get())
     }
 
     /// Runs the engine from where an `invoke` left it, under `fuel`
@@ -643,7 +675,8 @@ impl<'session> Instance<'session> {
         args: &[Value],
         fuel: usize,
     ) -> Result<Outcome, InvokeError> {
-        self.module.call(export, args, Allowance::Limited { left: fuel, budget: fuel })
+        let allowance = Allowance::Limited { left: fuel, budget: fuel };
+        self.module.call(export, args, |module| module.run_uncounted(allowance))
     }
 
     /// Calls `export` with `args` under what the start function left of the
@@ -655,6 +688,8 @@ impl<'session> Instance<'session> {
     /// that is how many instructions the run took. A call that returns does
     /// not say how many it spent, so every call made this way is given the same
     /// remainder: the budget bounds a run of the start function and one call.
+    /// [`Instance::invoke_counting`] makes the same call and counts what it
+    /// spends, at a cost.
     ///
     /// # Errors
     ///
@@ -664,14 +699,58 @@ impl<'session> Instance<'session> {
         export: &str,
         args: &[Value],
     ) -> Result<Outcome, InvokeError> {
-        let allowance = match self.budget {
+        let allowance = self.remainder();
+        self.module.call(export, args, |module| module.run_uncounted(allowance))
+    }
+
+    /// Calls `export` with `args` as [`Instance::invoke_within_budget`] does,
+    /// under what the start function left of the budget, and counts the
+    /// interpreter instructions the call takes.
+    ///
+    /// The interpreter says how a run ended and never how much of its budget
+    /// it spent, so the call is run one instruction at a time, as a start
+    /// function under a limit is. That costs one re-entry into the interpreter
+    /// per instruction the call executes, which is what makes the count exact
+    /// and a counted call slower than an uncounted one: this is a measurement,
+    /// not the way to run a program.
+    ///
+    /// The count is the call's alone, never the start function's, and it is
+    /// exact: a call that began and then returned or trapped ends the same way
+    /// when [`Instance::invoke`] makes it with a budget of exactly
+    /// [`Counted::instructions`], and runs out of fuel with one fewer. It is
+    /// reported and never deducted, so a later call is given the same
+    /// remainder, as every call made within the budget is. Under
+    /// [`Fuel::Unbounded`] the count saturates at `usize::MAX` rather than
+    /// wrapping, which no run reaches.
+    ///
+    /// # Errors
+    ///
+    /// As [`Instance::invoke`].
+    pub fn invoke_counting(
+        &mut self,
+        export: &str,
+        args: &[Value],
+    ) -> Result<Counted, InvokeError> {
+        let allowance = self.remainder();
+        let mut instructions = 0;
+        let outcome = self.module.call(export, args, |module| {
+            let (ended, spent) = module.run_stepped(allowance);
+            instructions = spent;
+            ended
+        })?;
+        Ok(Counted { outcome, instructions })
+    }
+
+    /// What the start function left of the budget the module was started
+    /// under.
+    fn remainder(&self) -> Allowance {
+        match self.budget {
             Fuel::Unbounded => Allowance::Unbounded,
             Fuel::Limited(budget) => Allowance::Limited {
                 left: budget.get().saturating_sub(self.spent_by_start),
                 budget: budget.get(),
             },
-        };
-        self.module.call(export, args, allowance)
+        }
     }
 }
 

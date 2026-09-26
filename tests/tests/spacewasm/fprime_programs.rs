@@ -1,6 +1,10 @@
-//! The sources of F´ (F Prime) programs the SpaceWasm tier's F´ rows run and
-//! pin against the reference hosts, in a module of their own so that a binary
-//! other than this tier's can include them by path and run the same text.
+//! The sources of F´ (F Prime) programs that more than one binary runs: the
+//! SpaceWasm tier's F´ rows pin what each does against the reference hosts,
+//! and the `spacewasm-bench` example measures what each costs the
+//! interpreter.
+//!
+//! One text per program, so a benchmark figure is the figure of the program
+//! a row pins, and a change to a program is a change to both at once.
 
 /// A program calling all six reference hosts and ending in `panic`:
 /// `command`'s answer is `telemetry`'s id, and `rsleep` sleeps for the clock

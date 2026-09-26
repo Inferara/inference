@@ -999,7 +999,7 @@ the program did. This repository also ships a developer tool, an example of the
 test crate, for the questions `infs run` leaves alone: running an artifact that
 is already on disk, standing a stub in for any import at any signature, not
 only the six reference hosts, and measuring the IR a module compiled to
-(`--stats`, and `--json` to track it over time). It loads at the reference
+(`--stats`, and `--json` for a script to read). It loads at the reference
 embedder's verifier bounds and IR code pages, but with the 65,536 words of
 value stack the SpaceWasm test tier runs the codegen corpus with rather than
 the reference 1,024. Every transcript below is a real run, so the figures can
@@ -1050,10 +1050,12 @@ bounded page allocator holds, the engine and the guest memory as much as the IR
 — and this harness cannot produce it, because it runs on an unbounded allocator
 that keeps no statistics. A figure that is not upstream's should not travel
 under upstream's name. Adding `--json` prints the measurement as a single line
-of JSON instead, which is the hook for tracking these numbers over time; the
-keys are documented where the harness is implemented, and the ratio is carried
-there at full precision — the two decimals above are a courtesy to a reader,
-not the figure.
+of JSON instead, for a script to read; the keys are documented where the
+harness is implemented, and the ratio is carried there at full precision — the
+two decimals above are a courtesy to a reader, not the figure. How these
+figures move as the compiler changes is tracked by the benchmark described in
+[Tracking what a build costs the
+interpreter](#tracking-what-a-build-costs-the-interpreter).
 
 A program binding `use { f } from host::<module>;` compiles at this target and
 its artifact carries the import, but it loads only once something supplies that
@@ -1155,6 +1157,74 @@ An import registered with a stub of another signature is listed beside that
 stub and the half of its signature that differs. One no stub can supply — a
 global, say — is listed with the reason. A spec naming no import of the module
 is listed after the imports, which is where a misspelt name shows up.
+
+#### Tracking what a build costs the interpreter
+
+For a flight target the IR a module compiles to and the instructions a call
+takes are budget numbers: the code builder fills a fixed number of IR pages,
+and a call has to finish inside its cycle. A second developer tool of the test
+crate, the `spacewasm-bench` example, measures both on a fixed set of programs
+and keeps the measurements in `tests/bench/spacewasm/history.jsonl`, so how
+they move as the compiler changes is on record.
+
+The programs are the ones the SpaceWasm test tier runs: every function
+exported by every single-file codegen fixture that builds at this target,
+binds no host import and carries no verification operator — the fixtures the
+tier's differential sweep runs under wasmtime and the interpreter alike —
+called with zero for each parameter, which for an array or a struct is the
+address 0, and four F´ programs run against the reference hosts `infs run`
+supplies, among them `report(3)` of the program shown in the previous section.
+Zero arguments make every call the same on every run, if not always a
+meaningful one: some trap, and a trap ends the same way each time. Each call
+is one measurement: the IR code pages, IR words, size and IR bytes per byte of
+its module, as `--stats` measures them, and the exact number of the
+interpreter's instructions the call took. The interpreter reports how a run
+ended and never how much of its budget it spent, so the benchmark runs each
+call one instruction at a time, through the runner's
+`Instance::invoke_counting`, and a budget of exactly the count is the least
+that runs the call to the same end.
+
+Each line of the history is one measurement, stamped with the day it was
+recorded, the commit and the interpreter release:
+
+```json
+{"date":"2026-09-26","commit":"3171415bd6732f1707d73d222f225de299430108","interpreter":"spacewasm 0.7.1","program":"fprime/spin","export":"spin","args":["1000"],"outcome":"returned","instructions":22027,"code_pages":1,"ir_words":79,"wasm_bytes":225,"ir_bytes_per_wasm_byte":0.7022222222222222}
+```
+
+The figures are in the interpreter's own terms, its IR and its instructions
+over that IR, so they change with its release as well as with the compiler,
+and a comparison only sets a measurement beside one made under the same
+release. The keys are documented in `tests/tests/spacewasm/bench.rs`.
+
+**Comparing.** A pull request's CI runs
+
+```bash
+cargo run -p inference-tests --example spacewasm-bench -- compare
+```
+
+on Linux, which measures the tree and sets each measurement beside the last
+line the history holds for the same program, function and arguments. A call
+whose instructions, or a module whose IR words, grew by more than 5% is a
+warning — a `::warning` annotation on the pull request inside GitHub Actions,
+and `--threshold N` sets another whole percentage — and a measurement that is
+new, gone from the latest snapshot or ending another way is a note. It exits 0
+whatever it finds: it reports a cost, and whether the cost is worth paying is
+the reviewer's call. The history is recorded once a release, so every warning
+names the snapshot it compares with, and a figure that grew is reported on
+every pull request until the next snapshot records it.
+
+**Recording.** Before a release, from a clean checkout of the commit being
+released, run
+
+```bash
+cargo run -p inference-tests --example spacewasm-bench -- record
+```
+
+and commit the lines it appends: one snapshot, a line per measurement, stamped
+with `git rev-parse HEAD` — or the commit `--commit SHA` names — the day in
+UTC and the interpreter release. A pull request that moves the interpreter's
+pin records a snapshot as well, since until one exists under the new release
+there is nothing to compare with; a test fails until it does.
 
 #### Proving the `wasm32` build and deploying the SpaceWasm one
 
