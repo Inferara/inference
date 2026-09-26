@@ -24,8 +24,9 @@ use std::path::Path;
 
 use bench::{
     Channel, Command, Comparison, DEFAULT_THRESHOLD_PERCENT, Ending, Finding, FprimeCall, Key,
-    Measurement, Record, Stamp, append, committed_history, compare, compare_with, exit,
-    fprime_calls, measure, measure_fixture, measure_fprime, parse_history, report, utc_date,
+    Measured, Measurement, Record, Stamp, Unmeasured, append, committed_history, compare,
+    compare_with, exit, fprime_calls, measure, measure_fixture, measure_fprime, measure_programs,
+    parse_history, record_with, report, utc_date,
 };
 use fprime_programs::SPIN;
 use inference_spacewasm_runner::{
@@ -95,6 +96,12 @@ fn measured_as(
     }
 }
 
+/// A run that measured every program it was to: `measurements`, and nothing
+/// left unmeasured.
+fn complete(measurements: &[Measurement]) -> Measured {
+    Measured { measurements: measurements.to_vec(), unmeasured: Vec::new() }
+}
+
 /// What `program`'s `main` is known by.
 fn key(program: &str) -> Key {
     Key { program: program.to_string(), export: "main".to_string(), args: Vec::new() }
@@ -123,7 +130,7 @@ fn ir_grew(program: &str, from: usize, to: usize) -> Finding {
 
 /// `current` compared with `lines` at the default threshold.
 fn findings(lines: &[String], current: &[Measurement]) -> Vec<Finding> {
-    compare(&history(lines), current, LIMITS_FROM, DEFAULT_THRESHOLD_PERCENT).findings
+    compare(&history(lines), &complete(current), LIMITS_FROM, DEFAULT_THRESHOLD_PERCENT).findings
 }
 
 // ---------------------------------------------------------------------------
@@ -254,9 +261,11 @@ fn growth_past_the_threshold_warns_and_growth_up_to_it_does_not() {
         [ir_grew("a.inf", 200, 211), instructions_grew("a.inf", 100, 106)]
     );
 
-    let loose = compare(&history(&lines), &[measured("a.inf", 110, 220)], LIMITS_FROM, 10);
+    let current = complete(&[measured("a.inf", 110, 220)]);
+    let loose = compare(&history(&lines), &current, LIMITS_FROM, 10);
     assert_eq!(loose.findings, []);
-    let tight = compare(&history(&lines), &[measured("a.inf", 101, 200)], LIMITS_FROM, 0);
+    let current = complete(&[measured("a.inf", 101, 200)]);
+    let tight = compare(&history(&lines), &current, LIMITS_FROM, 0);
     assert_eq!(tight.findings, [instructions_grew("a.inf", 100, 101)]);
 
     let from_nothing = [line("aaaaaaa", "a.inf", 0, 200)];
@@ -347,7 +356,8 @@ fn new_and_gone_measurements_are_noted() {
         ]
     );
 
-    let empty = compare(&[], &[measured("a.inf", 10, 20)], LIMITS_FROM, DEFAULT_THRESHOLD_PERCENT);
+    let current = complete(&[measured("a.inf", 10, 20)]);
+    let empty = compare(&[], &current, LIMITS_FROM, DEFAULT_THRESHOLD_PERCENT);
     assert_eq!(empty.findings, [Finding::New { key: key("a.inf") }]);
     assert_eq!(empty.latest, None);
 }
@@ -446,7 +456,7 @@ fn a_comparison_reads_as_annotations_in_actions_and_as_plain_lines_elsewhere() {
              measurement of it",
             "spacewasm-bench: compared 2 measurements with tests/bench/spacewasm/history.jsonl, \
              whose latest snapshot is 3171415 (2026-09-26), at a 5% threshold: 1 grew past it, 0 \
-             end another way, 1 new, 0 gone, 0 not comparable",
+             end another way, 1 new, 0 gone, 0 not comparable, 0 could not be measured",
         ]
     );
     assert_eq!(
@@ -457,7 +467,7 @@ fn a_comparison_reads_as_annotations_in_actions_and_as_plain_lines_elsewhere() {
             "note: added.inf: main() is new: the history holds no measurement of it",
             "spacewasm-bench: compared 2 measurements with tests/bench/spacewasm/history.jsonl, \
              whose latest snapshot is 3171415 (2026-09-26), at a 5% threshold: 1 grew past it, 0 \
-             end another way, 1 new, 0 gone, 0 not comparable",
+             end another way, 1 new, 0 gone, 0 not comparable, 0 could not be measured",
         ]
     );
 }
@@ -508,20 +518,26 @@ fn every_finding_names_its_figures_and_its_snapshot() {
     assert_eq!(
         report(&quiet, Path::new("h.jsonl"), 5, Channel::Actions),
         ["spacewasm-bench: compared 7 measurements with h.jsonl, which holds no snapshot yet, at \
-          a 5% threshold: 0 grew past it, 0 end another way, 0 new, 0 gone, 0 not comparable"]
+          a 5% threshold: 0 grew past it, 0 end another way, 0 new, 0 gone, 0 not comparable, 0 \
+          could not be measured"]
     );
 }
 
 /// Each kind of finding reaches its channel as a warning or as a note, and
 /// the summary counts each kind apart.
 ///
-/// Only a figure that grew is a warning; an ending that changed, a new, a
-/// gone and a not comparable measurement are notes. Fails if a kind moves
-/// between the two — an IR regression shown as a notice, say — or if the
-/// summary miscounts or swaps two kinds.
+/// A program that could not be measured and a figure that grew are warnings,
+/// and the annotation leading them counts the two kinds apart; an ending that
+/// changed, a new, a gone and a not comparable measurement are notes. Fails if
+/// a kind moves between the two — an IR regression shown as a notice, say —
+/// if the leading annotation counts one kind as the other, or if the summary
+/// miscounts or swaps two kinds.
 #[test]
 fn every_kind_of_finding_reaches_its_channel_and_its_count() {
     let at = stamped("3171415aaaa");
+    let unmeasured = |program: String| {
+        Finding::Unmeasured(Unmeasured { program, why: "it does not load".to_string() })
+    };
     let changed = |program: &str| Finding::OutcomeChanged {
         key: key(program),
         from: Ending::Returned,
@@ -529,7 +545,8 @@ fn every_kind_of_finding_reaches_its_channel_and_its_count() {
         at: at.clone(),
     };
     let gone = |program: &str| Finding::Gone { key: key(program), at: at.clone() };
-    let findings = vec![
+    let mut findings: Vec<Finding> = (1..=5).map(|n| unmeasured(format!("u{n}.inf"))).collect();
+    findings.extend([
         Finding::IrGrew { program: "ir.inf".to_string(), from: 10, to: 20, at: at.clone() },
         changed("c1.inf"),
         changed("c2.inf"),
@@ -538,9 +555,12 @@ fn every_kind_of_finding_reaches_its_channel_and_its_count() {
         gone("g3.inf"),
         Finding::New { key: key("n.inf") },
         Finding::NotComparable { count: 4, interpreter: LIMITS_FROM.to_string() },
-    ];
+    ]);
     let warnings: Vec<bool> = findings.iter().map(Finding::is_warning).collect();
-    assert_eq!(warnings, [true, false, false, false, false, false, false, false]);
+    assert_eq!(
+        warnings,
+        [true, true, true, true, true, true, false, false, false, false, false, false, false]
+    );
     let comparison = Comparison { findings, measured: 9, latest: Some(at.clone()) };
 
     let actions = report(&comparison, Path::new("h.jsonl"), 5, Channel::Actions);
@@ -548,22 +568,33 @@ fn every_kind_of_finding_reaches_its_channel_and_its_count() {
     assert_eq!(
         prefixes,
         [
-            "::warning", "::warning", "::notice ", "::notice ", "::notice ", "::notice ",
-            "::notice ", "::notice ", "::notice ", "spacewasm",
+            "::warning", "::warning", "::warning", "::warning", "::warning", "::warning",
+            "::warning", "::notice ", "::notice ", "::notice ", "::notice ", "::notice ",
+            "::notice ", "::notice ", "spacewasm",
         ]
     );
-    assert!(actions[0].contains("::1 of the figures measured grew past"), "{}", actions[0]);
-    assert!(actions[1].contains("::ir.inf compiled to 20 IR words"), "{}", actions[1]);
-    let summary = "1 grew past it, 2 end another way, 1 new, 3 gone, 4 not comparable";
-    assert!(actions[9].ends_with(summary), "{}", actions[9]);
+    assert_eq!(
+        actions[0],
+        "::warning title=SpaceWasm benchmark::5 of the programs could not be measured, and 1 of \
+         the figures measured grew past the 5%25 threshold against h.jsonl, whose latest snapshot \
+         is 3171415 (2026-09-26); this job's log lists every one"
+    );
+    assert!(actions[1].ends_with("::u1.inf is not measured: it does not load"), "{}", actions[1]);
+    assert!(actions[6].contains("::ir.inf compiled to 20 IR words"), "{}", actions[6]);
+    let summary = "1 grew past it, 2 end another way, 1 new, 3 gone, 4 not comparable, 5 could \
+                   not be measured";
+    assert!(actions[14].ends_with(summary), "{}", actions[14]);
 
     let plain = report(&comparison, Path::new("h.jsonl"), 5, Channel::Plain);
     let kinds: Vec<&str> = plain.iter().map(|line| line.split(':').next().unwrap_or("")).collect();
     assert_eq!(
         kinds,
-        ["warning", "note", "note", "note", "note", "note", "note", "note", "spacewasm-bench"]
+        [
+            "warning", "warning", "warning", "warning", "warning", "warning", "note", "note",
+            "note", "note", "note", "note", "note", "spacewasm-bench",
+        ]
     );
-    assert!(plain[8].ends_with(summary), "{}", plain[8]);
+    assert!(plain[13].ends_with(summary), "{}", plain[13]);
 }
 
 /// GitHub Actions is recognised by `GITHUB_ACTIONS` being `true`, as the
@@ -726,10 +757,8 @@ fn a_measured_count_is_the_least_budget_that_finishes_the_call() {
         panic!("{fixture} runs at the SpaceWasm target");
     };
     let mut session = SpaceWasmSession::acquire();
-    let mut measurements = Vec::new();
-    let mut err = Vec::new();
-    measure_fixture(&mut session, fixture, output.wasm(), &mut measurements, &mut err);
-    assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    let measurements = measure_fixture(&mut session, fixture, output.wasm())
+        .unwrap_or_else(|why| panic!("{fixture} is measured: {why}"));
     let endings: FxHashSet<(Ending, bool)> =
         measurements.iter().map(|m| (m.outcome, m.args.is_empty())).collect();
     assert!(
@@ -825,42 +854,55 @@ fn assert_module_figures(
     assert!((measurement.ir_bytes_per_wasm_byte - ratio).abs() < 1e-12, "{}", measurement.key());
 }
 
-/// A program the benchmark cannot measure is left out and said so, never
-/// measured as something else: a module the interpreter refuses, an F´
-/// program binding a host the reference set lacks, and a call of a function
-/// the program does not export.
+/// A program the benchmark cannot measure is left out and returned with why,
+/// in the order it was met, beside the measurements of the programs that
+/// could be measured, and never measured as something else: a module the
+/// interpreter refuses, an F´ program binding a host the reference set lacks,
+/// and a call of a function the program does not export.
 ///
-/// Fails if a refused module is measured, if its refusal goes unreported, or
-/// if an F´ program that cannot be run is reported as another failure.
+/// Fails if a refused module is measured, if a program that could not be
+/// measured goes unreported or is reported as another, if one that could be
+/// is dropped with it, or if an F´ program that cannot be run is reported as
+/// another failure.
 #[test]
 fn a_program_that_cannot_be_measured_is_left_out_and_named() {
     let grows = wat::parse_str(
         r#"(module (memory 1) (func (export "f") (drop (memory.grow (i32.const 1)))))"#,
     )
     .expect("the module is valid WAT");
-    let mut session = SpaceWasmSession::acquire();
-    let mut measurements = Vec::new();
-    let mut err = Vec::new();
-    measure_fixture(&mut session, "grows.wat", &grows, &mut measurements, &mut err);
-    assert_eq!(measurements, []);
-    let err = String::from_utf8(err).expect("UTF-8");
-    assert!(
-        err.starts_with("spacewasm-bench: grows.wat is not measured: the interpreter refuses it: "),
-        "{err}"
-    );
-
-    let call = |source: &str, export| FprimeCall {
-        program: "fprime/unmeasured".to_string(),
+    let returns = wat::parse_str(r#"(module (func (export "f") (result i32) (i32.const 7)))"#)
+        .expect("the module is valid WAT");
+    let call = |program: &str, source: &str, export| FprimeCall {
+        program: program.to_string(),
         source: source.to_string(),
         export,
         args: vec![Value::I32(1)],
     };
     let beeps = "external fn beep();\nuse { beep } from host::fprime_core;\n\
                  pub fn go(n: i32) -> i32 { beep(); return n; }";
-    let refusal = measure_fprime(&mut session, &call(beeps, "go")).expect_err("no `beep` host");
-    assert!(refusal.starts_with("it does not load: "), "{refusal}");
-    let refusal = measure_fprime(&mut session, &call(SPIN, "spun")).expect_err("no `spun`");
-    assert!(refusal.starts_with("`spun` cannot be called: "), "{refusal}");
+    let fixtures = [("grows.wat".to_string(), grows), ("returns.wat".to_string(), returns)];
+    let calls = [
+        call("fprime/beeps", beeps, "go"),
+        call("fprime/spin", SPIN, "spin"),
+        call("fprime/spun", SPIN, "spun"),
+    ];
+    let mut session = SpaceWasmSession::acquire();
+    let measured = measure_programs(&mut session, fixtures, &calls);
+
+    let programs: Vec<&str> = measured.measurements.iter().map(|m| m.program.as_str()).collect();
+    assert_eq!(programs, ["returns.wat", "fprime/spin"]);
+    let [grew, beeped, spun] = &measured.unmeasured[..] else {
+        panic!("three programs are not measured: {:?}", measured.unmeasured);
+    };
+    for (unmeasured, program, why) in [
+        (grew, "grows.wat", "the interpreter refuses it: "),
+        (beeped, "fprime/beeps", "it does not load: "),
+        (spun, "fprime/spun", "`spun` cannot be called: "),
+    ] {
+        assert_eq!(unmeasured.program, program);
+        assert!(unmeasured.why.starts_with(why), "{program}: {}", unmeasured.why);
+    }
+    assert_eq!(grew.to_string(), format!("grows.wat is not measured: {}", grew.why));
 }
 
 /// A history that cannot be read or parsed stops `compare` with a failure
@@ -868,7 +910,8 @@ fn a_program_that_cannot_be_measured_is_left_out_and_named() {
 /// though it were empty.
 ///
 /// Fails if a missing or broken history turns into a quiet comparison, which
-/// would leave the CI job green with nothing compared.
+/// would leave the CI job green with nothing compared, or if anything is
+/// measured before the history is read.
 #[test]
 fn a_history_that_cannot_be_read_fails_the_comparison() {
     let dir = tempfile::TempDir::new().expect("a temporary directory");
@@ -877,12 +920,162 @@ fn a_history_that_cannot_be_read_fails_the_comparison() {
     let missing = dir.path().join("missing.jsonl");
     for (history, why) in [(missing, "cannot read it: "), (broken, "line 1 is not a record: ")] {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = compare_with(&history, 5, Channel::Plain, &mut out, &mut err);
+        let unread = || panic!("{} is measured against before it is read", history.display());
+        let code = compare_with(&history, 5, Channel::Plain, unread, &mut out, &mut err);
         assert_eq!(code, exit::FAILED, "{}", history.display());
         assert!(out.is_empty(), "nothing is compared: {}", String::from_utf8_lossy(&out));
         let err = String::from_utf8(err).expect("UTF-8");
         let expected = format!("error: {}: {why}", history.display());
         assert!(err.starts_with(&expected), "{err}");
+    }
+}
+
+/// A run that could not measure every program records nothing: `record`
+/// names each program left out and why, then how many there were and that
+/// nothing was recorded, and fails, leaving a history byte for byte as it was
+/// and a history that did not exist absent.
+///
+/// The run measured a program as well, so a snapshot of what it did measure
+/// would change the file. Fails if a snapshot missing a program is appended,
+/// which would end that program's series with no later comparison reporting
+/// it gone, if the refusal answers anything but a failure, or if a program
+/// left out goes unnamed.
+#[test]
+fn a_run_that_left_a_program_unmeasured_records_nothing() {
+    let dir = tempfile::TempDir::new().expect("a temporary directory");
+    let kept = dir.path().join("kept.jsonl");
+    let before = line("aaaaaaa", "a.inf", 10, 20);
+    std::fs::write(&kept, &before).expect("writable");
+    let absent = dir.path().join("absent.jsonl");
+    let unmeasured = |program: &str, why: &str| Unmeasured {
+        program: program.to_string(),
+        why: why.to_string(),
+    };
+    let run = Measured {
+        measurements: vec![measured("a.inf", 11, 20)],
+        unmeasured: vec![
+            unmeasured("b.inf", "the interpreter refuses it: FunctionImportNotFound at byte 73"),
+            unmeasured("fprime/c", "it does not start: no memory"),
+        ],
+    };
+    for history in [&kept, &absent] {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = record_with(history, &stamped("bbbbbbb"), &run, &mut out, &mut err);
+        assert_eq!(code, exit::FAILED, "{}", history.display());
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        assert_eq!(
+            String::from_utf8(err).expect("UTF-8"),
+            format!(
+                "spacewasm-bench: b.inf is not measured: the interpreter refuses it: \
+                 FunctionImportNotFound at byte 73\n\
+                 spacewasm-bench: fprime/c is not measured: it does not start: no memory\n\
+                 error: 2 of the programs could not be measured, so nothing was recorded in {}: \
+                 a snapshot without them would end their series\n",
+                history.display()
+            )
+        );
+    }
+    assert_eq!(std::fs::read(&kept).expect("readable"), before.as_bytes());
+    assert!(!absent.exists(), "a refused snapshot creates no history");
+}
+
+/// A run that measured every program is recorded as one snapshot: a line per
+/// measurement, in the order they were made and each under the same stamp,
+/// after what the history holds, or as a new history when there is none; and
+/// `record` says how many it recorded, under which stamp and where.
+///
+/// Fails if a complete run is refused, if a measurement is dropped, written
+/// twice or stamped otherwise, or if the history's earlier lines move.
+#[test]
+fn a_complete_run_is_recorded_as_one_snapshot() {
+    let dir = tempfile::TempDir::new().expect("a temporary directory");
+    let existing = dir.path().join("existing.jsonl");
+    let earlier = format!("{}\n", line("aaaaaaa", "a.inf", 10, 20));
+    std::fs::write(&existing, &earlier).expect("writable");
+    let absent = dir.path().join("absent.jsonl");
+    let current = complete(&[measured("a.inf", 11, 20), measured("b.inf", 5, 8)]);
+    let snapshot =
+        format!("{}\n{}\n", line("bbbbbbb", "a.inf", 11, 20), line("bbbbbbb", "b.inf", 5, 8));
+    for (history, before) in [(&existing, earlier.as_str()), (&absent, "")] {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = record_with(history, &stamped("bbbbbbb"), &current, &mut out, &mut err);
+        assert_eq!(code, exit::OK, "{}", String::from_utf8_lossy(&err));
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        let after = std::fs::read_to_string(history).expect("readable");
+        assert_eq!(after, format!("{before}{snapshot}"), "{}", history.display());
+        assert_eq!(
+            String::from_utf8(out).expect("UTF-8"),
+            format!(
+                "spacewasm-bench: recorded 2 measurements at bbbbbbb (2026-09-26) under \
+                 {LIMITS_FROM} in {}\n",
+                history.display()
+            )
+        );
+    }
+}
+
+/// A program `compare` could not measure is a warning, ahead of the notes:
+/// inside Actions a `::warning` annotation, `%` encoded, which the annotation
+/// leading the warnings counts, and elsewhere a `warning:` line; the summary
+/// counts it; and the comparison still answers 0, since nothing it finds
+/// fails it. Its measurements in the latest snapshot are gone as well, and
+/// noted as such.
+///
+/// Fails if a program left out goes unreported or reads as a note, if the
+/// leading annotation or the summary drops its count, or if a program that
+/// could not be measured fails the comparison.
+#[test]
+fn a_program_compare_could_not_measure_is_a_warning_that_never_fails_it() {
+    let dir = tempfile::TempDir::new().expect("a temporary directory");
+    let history = dir.path().join("history.jsonl");
+    let lines = [line("aaaaaaa", "a.inf", 10, 20), line("aaaaaaa", "b.inf", 10, 20)];
+    std::fs::write(&history, lines.join("\n")).expect("writable");
+    let measure = || Measured {
+        measurements: vec![measured("a.inf", 10, 20)],
+        unmeasured: vec![Unmeasured {
+            program: "b.inf".to_string(),
+            why: "the interpreter refuses it: 100% of its pages are taken".to_string(),
+        }],
+    };
+    let gone = "b.inf: main() is gone: it was measured at aaaaaaa (2026-09-26) and is not \
+                measured now";
+    let summary = format!(
+        "spacewasm-bench: compared 1 measurements with {}, whose latest snapshot is aaaaaaa \
+         (2026-09-26), at a 5% threshold: 0 grew past it, 0 end another way, 0 new, 1 gone, 0 \
+         not comparable, 1 could not be measured",
+        history.display()
+    );
+    for (channel, expected) in [
+        (
+            Channel::Actions,
+            vec![
+                "::warning title=SpaceWasm benchmark::1 of the programs could not be measured; \
+                 this job's log lists every one"
+                    .to_string(),
+                "::warning title=SpaceWasm benchmark::b.inf is not measured: the interpreter \
+                 refuses it: 100%25 of its pages are taken"
+                    .to_string(),
+                format!("::notice title=SpaceWasm benchmark::{gone}"),
+                summary.clone(),
+            ],
+        ),
+        (
+            Channel::Plain,
+            vec![
+                "warning: b.inf is not measured: the interpreter refuses it: 100% of its pages \
+                 are taken"
+                    .to_string(),
+                format!("note: {gone}"),
+                summary.clone(),
+            ],
+        ),
+    ] {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = compare_with(&history, 5, channel, measure, &mut out, &mut err);
+        assert_eq!(code, exit::OK, "{channel:?}: {}", String::from_utf8_lossy(&err));
+        assert!(err.is_empty(), "{channel:?}: {}", String::from_utf8_lossy(&err));
+        let out = String::from_utf8(out).expect("UTF-8");
+        assert_eq!(out.lines().collect::<Vec<_>>(), expected, "{channel:?}");
     }
 }
 
@@ -904,9 +1097,8 @@ fn a_function_taking_parameters_is_called_with_zeros() {
     )
     .expect("the module is valid WAT");
     let mut session = SpaceWasmSession::acquire();
-    let mut measurements = Vec::new();
-    let mut err = Vec::new();
-    measure_fixture(&mut session, "params.wat", &wasm, &mut measurements, &mut err);
+    let measurements =
+        measure_fixture(&mut session, "params.wat", &wasm).expect("the module is measured");
     let calls: Vec<(&str, Vec<&str>, Ending)> = measurements
         .iter()
         .map(|m| (m.export.as_str(), m.args.iter().map(String::as_str).collect(), m.outcome))
@@ -943,9 +1135,8 @@ fn each_call_is_measured_on_a_module_of_its_own() {
     )
     .expect("the module is valid WAT");
     let mut session = SpaceWasmSession::acquire();
-    let mut measurements = Vec::new();
-    let mut err = Vec::new();
-    measure_fixture(&mut session, "armed.wat", &wasm, &mut measurements, &mut err);
+    let measurements =
+        measure_fixture(&mut session, "armed.wat", &wasm).expect("the module is measured");
     let exports: Vec<&str> = measurements.iter().map(|m| m.export.as_str()).collect();
     assert_eq!(exports, ["arm", "spin"], "measured in export order");
     let mut alone = support::decode(&mut session, &wasm).expect("the module loads");
@@ -964,9 +1155,8 @@ fn each_call_is_measured_on_a_module_of_its_own() {
 /// tree — which would make every comparison noisy.
 #[test]
 fn the_tiers_calls_are_measured_and_twice_compare_quietly() {
-    let mut err = Vec::new();
-    let first = measure(&mut err);
-    assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    let Measured { measurements: first, unmeasured } = measure();
+    assert_eq!(unmeasured, []);
     let fprime_count = fprime_calls().len();
     let measured: FxHashSet<Key> =
         first[..first.len() - fprime_count].iter().map(Measurement::key).collect();
@@ -990,8 +1180,8 @@ fn the_tiers_calls_are_measured_and_twice_compare_quietly() {
         ]
     );
 
-    let second = measure(&mut err);
-    assert_eq!(first, second, "a measurement depends only on the tree");
+    let second = measure();
+    assert_eq!(complete(&first), second, "a measurement depends only on the tree");
     let stamp = stamped("aaaaaaa");
     let recorded: Vec<Record> = first
         .into_iter()
@@ -999,5 +1189,5 @@ fn the_tiers_calls_are_measured_and_twice_compare_quietly() {
         .collect();
     let comparison = compare(&recorded, &second, LIMITS_FROM, 0);
     assert_eq!(comparison.findings, [], "not even a zero threshold finds a difference");
-    assert_eq!(comparison.measured, second.len());
+    assert_eq!(comparison.measured, second.measurements.len());
 }

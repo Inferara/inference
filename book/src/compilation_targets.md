@@ -1207,11 +1207,15 @@ line the history holds for the same program, function and arguments. A call
 whose instructions, or a module whose IR words, grew by more than 5% is a
 warning — a `::warning` annotation on the pull request inside GitHub Actions,
 and `--threshold N` sets another whole percentage — and a measurement that is
-new, gone from the latest snapshot or ending another way is a note. It exits 0
-whatever it finds: it reports a cost, and whether the cost is worth paying is
-the reviewer's call. The history is recorded once a release, so every warning
-names the snapshot it compares with, and a figure that grew is reported on
-every pull request until the next snapshot records it.
+new, gone from the latest snapshot or ending another way is a note. A program
+the benchmark could not measure — a fixture whose module the interpreter
+refuses, or an F´ program that does not load, start or take its call — is a
+warning as well, since nothing it costs was compared, and the summary line
+counts it. It exits 0 whatever it finds: it reports a cost, and whether the
+cost is worth paying is the reviewer's call. The history is recorded once a
+release, so every warning about a figure names the snapshot it compares with,
+and a figure that grew is reported on every pull request until the next
+snapshot records it.
 
 **Recording.** Before a release, from a clean checkout of the commit being
 released, run
@@ -1222,9 +1226,16 @@ cargo run -p inference-tests --example spacewasm-bench -- record
 
 and commit the lines it appends: one snapshot, a line per measurement, stamped
 with `git rev-parse HEAD` — or the commit `--commit SHA` names — the day in
-UTC and the interpreter release. A pull request that moves the interpreter's
-pin records a snapshot as well, since until one exists under the new release
-there is nothing to compare with; a test fails until it does.
+UTC and the interpreter release. A snapshot is recorded whole or not at all:
+when a program could not be measured, `record` names each one and why, appends
+nothing and exits 1. `compare` looks for what is gone in the newest snapshot
+alone, so a snapshot that left a program out would end its series, and no
+later comparison would report it gone. A fixture the differential sweep stops
+running is a change to the set of programs rather than a failure: it is not
+measured, it never stops `record`, and `compare` notes its measurements as
+gone. A pull request that moves the interpreter's pin records a snapshot as
+well, since until one exists under the new release there is nothing to compare
+with; a test fails until it does.
 
 #### Proving the `wasm32` build and deploying the SpaceWasm one
 
