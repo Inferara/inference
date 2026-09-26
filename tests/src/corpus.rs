@@ -103,7 +103,7 @@ pub enum SpaceWasmBuild {
 /// whether the module can be run with no host registered.
 ///
 /// This is the one selection of the fixtures the differential sweep runs, so
-/// that another caller running the same fixtures cannot drift from it. A module
+/// that the benchmark measuring the same fixtures cannot drift from it. A module
 /// carrying a verification operator is classified before one declaring an
 /// import, the reverse of the decode sweep's order, and for the reason that
 /// sweep states its own: there, a module that is both comes back with the

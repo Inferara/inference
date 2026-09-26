@@ -119,6 +119,11 @@
 //! [`Instance::invoke_within_budget`] spends exactly what the start function
 //! left; [`Instance::invoke`] instead gives one call a budget of its own, which
 //! is what a caller wanting to bound each call separately uses.
+//! [`Instance::invoke_counting`] makes the call `invoke_within_budget` makes and
+//! reports, as a [`Counted`], the exact number of instructions it took, which
+//! the interpreter never says: it runs the call one instruction at a time, at
+//! the cost of one re-entry into the interpreter per instruction, so it is for
+//! measuring a program rather than for running one.
 //!
 //! # The F´ reference hosts
 //!
@@ -167,7 +172,7 @@ pub use inference_target_conformance::spacewasm::{
     LIMITS_FROM, REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH,
 };
 pub use module::{
-    EngineConfig, ExportedFunction, Fuel, Instance, IrStats, LoadedModule, Outcome,
+    Counted, EngineConfig, ExportedFunction, Fuel, Instance, IrStats, LoadedModule, Outcome,
     REFERENCE_MAX_CODE_PAGES, REFERENCE_STACK_WORDS, ReexportedImport, ir_stats, load, load_with,
 };
 pub use report::{

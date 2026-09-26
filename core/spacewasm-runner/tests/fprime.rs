@@ -14,9 +14,9 @@ use inference_spacewasm_runner::fprime::{
     reference_table_lines,
 };
 use inference_spacewasm_runner::{
-    ArgumentError, EngineConfig, Fuel, HostLog, HostTrap, HostedStartError, ImportProblem,
-    InvokeError, Limit, LoadError, Outcome, Session, StartError, TrapReason, TrapReport,
-    UnsupportedImports, Value, coerce_arguments, ir_stats,
+    ArgumentError, Counted, EngineConfig, Fuel, HostLog, HostTrap, HostedStartError,
+    ImportProblem, InvokeError, Limit, LoadError, Outcome, Session, StartError, TrapReason,
+    TrapReport, UnsupportedImports, Value, coerce_arguments, ir_stats,
 };
 use inference_target_conformance::spacewasm::check;
 use spacewasm::{AllocError, MemoryError, ValidationError};
@@ -489,6 +489,39 @@ fn a_call_forgets_the_detail_of_an_earlier_one() {
         module.trap_report("boom", TrapReason::Unreachable).headline(),
         "`boom` trapped: a runtime check failed (Unreachable)."
     );
+}
+
+/// A counted call records the detail of a host that stopped it, and forgets
+/// the detail an earlier call's host recorded.
+///
+/// Fails if the counting call keeps a stale detail, which would report an
+/// `unreachable` as the host's trap, or if it loses its own.
+#[test]
+fn a_counted_call_forgets_the_detail_of_an_earlier_one() {
+    let wasm = fprime_module(
+        r#"(func (export "bad") (call $message (i32.const 70000) (i32.const 1)))
+           (func (export "boom") unreachable)"#,
+    );
+    let mut session = Session::acquire();
+    let log = HostLog::recording();
+    let mut module = hosted(&mut session, &wasm, &log);
+    assert_eq!(
+        module.invoke_counting("bad", &[]),
+        Ok(Counted { outcome: Outcome::Trapped(TrapReason::Host), instructions: 3 })
+    );
+    let recorded = HostTrap::OutOfBounds {
+        host: host("fprime_core.message"),
+        address: 70_000,
+        len: 1,
+        memory_bytes: PAGE,
+    };
+    assert_eq!(module.host_trap(), Some(recorded));
+    assert_eq!(module.invoke("bad", &[]), Ok(Outcome::Trapped(TrapReason::Host)));
+    assert_eq!(
+        module.invoke_counting("boom", &[]),
+        Ok(Counted { outcome: Outcome::Trapped(TrapReason::Unreachable), instructions: 1 })
+    );
+    assert_eq!(module.host_trap(), None);
 }
 
 /// A report of a host's trap names what the host recorded, and a report of
@@ -1211,6 +1244,42 @@ fn an_entry_that_runs_out_of_fuel_keeps_the_host_calls_it_made() {
         .expect("the module has no start function");
     assert_eq!(instance.invoke("go", &[]), Ok(Outcome::Returned(Some(Value::I32(1_000_000)))));
     assert_eq!(log.recorded(), ["COMMAND 42 7"]);
+}
+
+/// A counted entry against the reference hosts is given what the start
+/// function left of the start's budget, counts only its own instructions,
+/// and counts a call into a host as the one instruction that reaches it,
+/// keeping the lines a host logged before the budget ran out.
+///
+/// [`SHARED`]'s entry takes five instructions and calls `command` at its
+/// third. Fails if the counting call drops the start's budget — a limit
+/// ignored finishes every row — if it counts the start function's
+/// instructions or anything but the one step a host call takes, or if the
+/// log loses a line around it.
+#[test]
+fn a_counted_entry_shares_the_starts_budget_and_counts_a_host_call_once() {
+    let wasm = fprime_module(SHARED);
+    let both = ["RSLEEP 1", "COMMAND 42 7"];
+    for (fuel, ended, instructions, lines) in [
+        (limited(8), Outcome::Returned(None), 5, &both[..]),
+        (Fuel::Unbounded, Outcome::Returned(None), 5, &both[..]),
+        (limited(7), Outcome::OutOfFuel { budget: 7 }, 4, &both[..]),
+        (limited(5), Outcome::OutOfFuel { budget: 5 }, 2, &both[..1]),
+    ] {
+        let mut session = Session::acquire();
+        let log = HostLog::recording();
+        let mut instance = fprime::load(&mut session, &wasm, log.clone(), EngineConfig::REFERENCE)
+            .expect("the module loads")
+            .start(fuel)
+            .unwrap_or_else(|e| panic!("the start function runs within {fuel:?}: {e}"));
+        assert_eq!(
+            instance.invoke_counting("f", &[]),
+            Ok(Counted { outcome: ended, instructions }),
+            "{fuel:?}"
+        );
+        assert_eq!(log.recorded(), lines, "{fuel:?}");
+        assert_eq!(instance.host_trap(), None, "no host stopped the run: {fuel:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -174,8 +174,8 @@ fn importing_each(imports: &[(String, String)]) -> Artifact {
 /// The table lives in the module that emits the object, and a test comparing
 /// the emitted keys against a copy of it here would go on passing while the two
 /// drifted apart — which is the drift that matters, since the table is what a
-/// benchmark tracker is pointed at. Sorted, for comparison against a sorted set
-/// of emitted keys.
+/// script reading the line is pointed at. Sorted, for comparison against a
+/// sorted set of emitted keys.
 fn documented_keys() -> Vec<String> {
     const SUPPORT: &str = include_str!("spacewasm/support.rs");
     const HEADING: &str = "//! | key | meaning |";
@@ -2163,7 +2163,7 @@ fn stats_json_is_one_documented_object_on_the_first_line() {
     assert_eq!(
         keys,
         documented_keys(),
-        "the documented key set is the contract a benchmark tracker would read"
+        "the documented key set is the contract a script reading the line relies on"
     );
 
     let number = |key: &str| object[key].as_f64().unwrap_or_else(|| panic!("`{key}` is a number"));

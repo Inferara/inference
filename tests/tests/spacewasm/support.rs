@@ -108,12 +108,16 @@
 //! that is not upstream's must not travel into a log under upstream's name,
 //! and a JSON key travels without the sentence that would have explained it.
 //!
-//! Benchmark *tracking* — a history file the way the raytracer keeps one — is
-//! not here; the JSON line is the hook a tracker would read, which is why it
-//! carries the ratio unrounded. Two decimals is around eight percent of the
-//! figure a small module produces, so a rounded key would hold still across
-//! exactly the regressions a tracker exists to catch. The rendering a person
-//! reads rounds, where a reader is not a series.
+//! The JSON line carries the ratio unrounded. Two decimals is around eight
+//! percent of the figure a small module produces, so a rounded key would hold
+//! still across exactly the changes a reader of a series looks for. The
+//! rendering a person reads rounds, where a reader is not a series.
+//!
+//! Benchmark *tracking* is the `spacewasm-bench` example's (`bench.rs` beside
+//! this file): it measures the tier's own programs with the same
+//! [`ir_stats`], writes the same keys but `ir_bytes` into a history the
+//! repository commits, and judges a module's growth by its `ir_words`, of
+//! which the ratio is only a quotient.
 //!
 //! # Host-import stubs
 //!
@@ -232,10 +236,10 @@ pub enum Outcome {
 /// budget, with the tier's 65,536-word stack, and no host module registered,
 /// and starts it.
 ///
-/// The `allow` is the counterpart of the one on [`run`]. Three binaries compile
-/// this file, and the two that run a command line load through the runner
-/// directly and never reach these loaders; seeding liveness here covers
-/// [`decode_with`] and [`decode_with_pages`] behind it.
+/// The `allow` is the counterpart of the one on [`run`]. Several binaries
+/// compile this file and not every one reaches these loaders — the embed
+/// harness and its CLI matrix load through the runner directly — so seeding
+/// liveness here covers [`decode_with`] and [`decode_with_pages`] behind it.
 ///
 /// # Errors
 ///
@@ -358,10 +362,38 @@ impl LoadedModule<'_> {
     /// one — all harness or interpreter faults, not program outcomes.
     pub fn invoke(&mut self, export: &str, args: &[Value], fuel: usize) -> Outcome {
         match self.0.invoke(export, args, fuel) {
-            Ok(runner::Outcome::Returned(value)) => Outcome::Value(value),
-            Ok(runner::Outcome::Trapped(reason)) => Outcome::Trap(reason),
-            Ok(runner::Outcome::OutOfFuel { .. }) => Outcome::OutOfFuel,
+            Ok(outcome) => Outcome::of(outcome),
             Err(fault) => panic!("{fault}"),
+        }
+    }
+
+    /// Calls `export` with `args` within what the module was started under,
+    /// [`FUEL`] less its start function's share, and answers the outcome with
+    /// the exact number of interpreter instructions the call took.
+    ///
+    /// The `allow` is the counterpart of the one on [`run`]: of the binaries
+    /// that compile this file, only the benchmark's example and its tests
+    /// call this.
+    ///
+    /// # Panics
+    ///
+    /// For the reasons [`LoadedModule::invoke`] does.
+    #[allow(dead_code)]
+    pub fn invoke_counting(&mut self, export: &str, args: &[Value]) -> (Outcome, usize) {
+        match self.0.invoke_counting(export, args) {
+            Ok(counted) => (Outcome::of(counted.outcome), counted.instructions),
+            Err(fault) => panic!("{fault}"),
+        }
+    }
+}
+
+impl Outcome {
+    /// The runner's outcome as this tier compares it.
+    fn of(outcome: runner::Outcome) -> Self {
+        match outcome {
+            runner::Outcome::Returned(value) => Self::Value(value),
+            runner::Outcome::Trapped(reason) => Self::Trap(reason),
+            runner::Outcome::OutOfFuel { .. } => Self::OutOfFuel,
         }
     }
 }
@@ -433,8 +465,8 @@ pub mod exit {
     /// here a visible omission rather than an unguarded one.
     ///
     /// The `allow` is the same one [`run`] carries and for the same reason:
-    /// three binaries compile this file, and this list is read by the one that
-    /// drives the command line.
+    /// several binaries compile this file, and only the CLI matrix reads this
+    /// list.
     #[allow(dead_code)]
     pub const ALL: [u8; 7] = [OK, USAGE, UNREADABLE, DECODE, NO_SUCH_EXPORT, TRAP, OUT_OF_FUEL];
 }
@@ -642,12 +674,12 @@ impl Command {
 /// would deadlock; every caller in this repository is a `main` or a test that
 /// holds nothing.
 ///
-/// The `allow` is what keeps this file shared. Three binaries compile it and
-/// only two call a command line: the corpus sweeps next door include it for the
-/// loaders above and reach none of this, and in a binary crate an item nothing
-/// reaches is dead however public it is. Seeding liveness here covers
-/// everything below, which is reachable from this function and from nowhere
-/// else.
+/// The `allow` is what keeps this file shared. Several binaries compile it and
+/// only the embed harness and its CLI matrix call a command line: the corpus
+/// sweeps next door and the benchmark include it for the loaders above and
+/// reach none of this, and in a binary crate an item nothing reaches is dead
+/// however public it is. Seeding liveness here covers everything below, which
+/// is reachable from this function and from nowhere else.
 #[allow(dead_code)]
 #[must_use]
 pub fn run(argv: Vec<String>) -> ExitCode {
@@ -1006,8 +1038,9 @@ fn stub(spec: &HostSpec, calls: &HostCalls) -> Result<HostFunction, String> {
     .map_err(|error| signature_refusal(spec, SignaturePart::Result, &error))
 }
 
-/// Zero of `ty`, which is what every stub answers.
-fn zero_of(ty: ValType) -> Value {
+/// Zero of `ty`, which is what every stub answers and what the benchmark
+/// calls a function with.
+pub fn zero_of(ty: ValType) -> Value {
     match ty {
         ValType::I32 => Value::I32(0),
         ValType::I64 => Value::I64(0),
