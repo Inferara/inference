@@ -443,14 +443,18 @@ Test fixtures are located in `tests/fixtures/`:
 | `trivial.inf` | Simple valid program |
 | `example.inf` | Complex example with multiple functions |
 | `nondet.inf` | Non-deterministic features (forall, exists, assume, unique) |
+| `nondet_unique.inf` | A nested `unique` block, which a proof-mode build refuses with `P002` |
+| `nondet_assume_spec.inf` | An `assume`-bodied spec function, which a proof-mode build refuses with `P001` |
+| `nondet_exists_spec.inf` | An `exists`-bodied spec function, whose obligation a proof-mode build writes to the `.v` |
+| `nondet_unique_spec.inf` | A `unique`-bodied spec function, whose obligation a proof-mode build writes to the `.v` |
 | `syntax_error.inf` | Syntax error handling |
-| `type_error.inf` | Type error handling |
 | `empty.inf` | Empty file edge case |
 | `uzumaki.inf` | Uzumaki operator (`@`) |
 | `forall_test.inf` | Forall block compilation |
 | `exists_test.inf` | Exists block compilation |
 | `assume_test.inf` | Assume block compilation |
 | `unique_test.inf` | Unique block compilation |
+| `fake_wasm_opt.rs` | A stand-in for Binaryen's `wasm-opt`, compiled by the tests, so the `[build.wasm-opt]` tests run without Binaryen |
 
 ### Integration Tests
 

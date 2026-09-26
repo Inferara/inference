@@ -2,7 +2,7 @@
 
 This document contains tests that require manual verification or are not yet automated.
 
-> **Automated Tests:** Run `cargo test -p infs` to execute 388 automated tests (320 unit + 68 integration).
+> **Automated Tests:** Run `cargo test -p infs`; see [Running Automated Tests](#running-automated-tests).
 
 ---
 
@@ -120,20 +120,7 @@ These should be verified via CI on each platform.
 
 ## Test Data Files
 
-Test fixtures are located in `apps/infs/tests/fixtures/`:
-
-| File | Purpose |
-|------|---------|
-| `trivial.inf` | Simple valid program (returns 42) |
-| `example.inf` | Complex example with multiple functions |
-| `nondet.inf` | Non-deterministic features (forall, exists, assume, unique) |
-| `syntax_error.inf` | Syntax error handling |
-| `empty.inf` | Empty file edge case |
-| `uzumaki.inf` | Uzumaki operator (`@`) |
-| `forall_test.inf` | Forall block with binding |
-| `exists_test.inf` | Exists block with binding |
-| `assume_test.inf` | Assume block |
-| `unique_test.inf` | Unique block with binding |
+The fixtures in `apps/infs/tests/fixtures/` are listed in the infs README's [Test Fixtures](../README.md#test-fixtures) table.
 
 ---
 
@@ -152,4 +139,4 @@ cargo test -p infs -- --nocapture
 
 ---
 
-*Last Updated: 2026-02-16*
+*Last Updated: 2026-09-26*
