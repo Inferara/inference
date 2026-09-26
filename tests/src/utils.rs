@@ -150,9 +150,10 @@ pub(crate) fn codegen_impl_with_features(
 ///
 /// Analysis measures the program against the artifact `options` describes, not
 /// against a default one, because that is the pairing a real build must make:
-/// A036's budget is the shadow stack code generation is about to emit. Fixing it
-/// here rather than at each call site means a fixture cannot be analyzed against
-/// a stack its own module does not have.
+/// A036's budget is the shadow stack code generation is about to emit, and
+/// A055's limit is the one its target's runtime sets. Fixing it here rather than
+/// at each call site means a fixture cannot be analyzed against a stack or a
+/// runtime its own module does not have.
 fn codegen_impl_with_options(
     source_code: &str,
     analysis: AnalysisMode,
@@ -163,15 +164,45 @@ fn codegen_impl_with_options(
         .unwrap()
         .typed_context();
     if let AnalysisMode::Run = analysis {
-        let _analysis_result = inference_analysis::analyze_with_options(
-            &typed_context,
-            inference_analysis::AnalysisOptions {
-                stack_budget_bytes: options.layout.stack_size(),
-            },
-        )
-        .unwrap();
+        let _analysis_result =
+            inference_analysis::analyze_with_options(&typed_context, analysis_options(&options))
+                .unwrap();
     }
     inference_wasm_codegen::codegen(&typed_context, "output", options)
+}
+
+/// The analysis settings that describe the artifact `options` builds: its
+/// shadow stack and the runtime its target names.
+///
+/// Every in-process pipeline that analyzes a program before generating code for
+/// it under a `CodegenOptions` goes through here, so none of them can pair a
+/// program with a stack or a runtime its own module does not have. The
+/// pipelines that call `analyze` fix the default layout and target on both
+/// sides, which are the settings it analyzes for.
+pub(crate) fn analysis_options(
+    options: &inference_wasm_codegen::CodegenOptions,
+) -> inference_analysis::AnalysisOptions {
+    inference_analysis::AnalysisOptions {
+        stack_budget_bytes: options.layout.stack_size(),
+        target: target_name(options.target),
+    }
+}
+
+/// The requestable name of an emission target.
+///
+/// An exhaustive match, so a target added to code generation has to decide
+/// which runtime analysis measures its programs against.
+pub(crate) fn target_name(
+    target: inference_wasm_codegen::Target,
+) -> inference_analysis::TargetName {
+    use inference_analysis::TargetName;
+    use inference_wasm_codegen::Target;
+
+    match target {
+        Target::Wasm32 => TargetName::Wasm32,
+        Target::Stellar => TargetName::Stellar,
+        Target::SpaceWasm => TargetName::SpaceWasm,
+    }
 }
 
 /// Generates codegen output from source code using the default target (`Wasm32`) and mode (`Compile`).

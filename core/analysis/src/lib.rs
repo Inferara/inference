@@ -255,6 +255,23 @@
 //!   already use. An annotation A053 owns is skipped. See
 //!   [`rules::arith_mode_changes_nothing`].
 //!
+//! ### Target Limits (A055)
+//!
+//! - A055: a function's parameters must fit the words the runtime its build
+//!   targets can declare for one function. Only `spacewasm` sets such a limit:
+//!   its interpreter counts a function's parameters in four-byte words — two for
+//!   `i64` and `u64`, one for any other type, a struct or an array being passed
+//!   as its address — and keeps the count in a single byte, so 255 is the most a
+//!   function may declare. The count is the signature code generation emits:
+//!   the declared parameters, a `self` receiver, and the hidden pointer a struct
+//!   or array result is written through. Every function the artifact defines is
+//!   measured — top-level functions and struct methods, not a `spec`, which a
+//!   compile-mode build strips, and not an `external fn`, which is an import.
+//!   The target comes from [`AnalysisOptions::target`], and the rule is silent
+//!   for every other one. The post-link conformance check still asks the same
+//!   question of the finished module, which is the only place a function a
+//!   linked module brings in is measured. See [`rules::param_words_exceeded`].
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -272,8 +289,11 @@
 //!
 //! ## Design
 //!
-//! This crate depends on `inference-ast` and `inference-type-checker`.
-//! The entry point accepts `&TypedContext` from the type checker.
+//! This crate depends on `inference-ast` and `inference-type-checker`, on
+//! `inference-compiler-interface` for the build settings some rules measure a
+//! program against, and on `inference-fn-key` for the function identity it
+//! shares with code generation. The entry point accepts `&TypedContext` from the
+//! type checker.
 
 use inference_type_checker::typed_context::TypedContext;
 
@@ -285,6 +305,7 @@ mod walker;
 
 use errors::{AnalysisErrors, AnalysisResult, Severity};
 
+pub use rules::param_words_exceeded::param_words;
 pub use rules::stack_depth::estimate_frame_sizes;
 
 /// Re-exported because [`errors::AnalysisDiagnostic::LiteralOutOfRange`] carries
@@ -292,29 +313,44 @@ pub use rules::stack_depth::estimate_frame_sizes;
 /// direct dependency on the type checker to name the field's type.
 pub use inference_type_checker::errors::TypeMismatchContext;
 
+/// Re-exported because [`AnalysisOptions::target`] is one: a caller that can set
+/// the field must be able to build the value, without a direct dependency on
+/// `inference-compiler-interface` to name its type.
+pub use inference_compiler_interface::TargetName;
+
 /// The facts about the artifact a program will be compiled into that some rules
 /// must measure the program against.
 ///
 /// A rule of this kind is not checking a property of the source alone: A036 asks
 /// whether a call chain's frames fit the shadow stack the emitted module will
-/// actually declare, which is a code generation setting. Carrying the setting
-/// here is what lets the answer follow the build instead of a constant that has
-/// to be kept in sync by hand.
+/// actually declare, which is a code generation setting, and A055 whether each
+/// function's parameters fit the runtime the module is built for. Carrying the
+/// settings here is what lets the answer follow the build instead of a constant
+/// that has to be kept in sync by hand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnalysisOptions {
     /// The shadow-stack size in bytes A036 measures cumulative call-chain frame
     /// usage against. Must equal the stack region code generation emits for the
     /// same build, or the rule polices a budget the artifact does not have.
     pub stack_budget_bytes: u32,
+    /// The runtime the build targets. A055 measures each function's parameter
+    /// words against the limit that runtime sets, and is silent for a runtime
+    /// that sets none. Must name the target code generation builds for, or the
+    /// rule polices a runtime the artifact is not built for — refusing a program
+    /// that builds, or passing one the post-link check then refuses without a
+    /// source location.
+    pub target: TargetName,
 }
 
 /// Implemented by hand rather than derived: a derived `Default` would give a
 /// zero-byte budget, under which every program that touches memory fails. The
-/// value here is the stack region a default build emits.
+/// values here are the stack region a default build emits and the target a
+/// build gets when it names none.
 impl Default for AnalysisOptions {
     fn default() -> Self {
         Self {
             stack_budget_bytes: 65_536,
+            target: TargetName::DEFAULT,
         }
     }
 }
@@ -322,11 +358,12 @@ impl Default for AnalysisOptions {
 /// Performs static analysis on the typed AST under the default artifact
 /// settings.
 ///
-/// This is the *default-layout* entry point. A caller that configures the
-/// memory layout code generation emits must call [`analyze_with_options`]
-/// instead and pass the matching budget, or A036 polices a shadow stack the
-/// artifact does not have — accepting a program that overflows a smaller stack,
-/// or rejecting one a larger stack accommodates.
+/// This is the *default-artifact* entry point: the default memory layout and
+/// the default target. A caller that configures either for code generation
+/// must call [`analyze_with_options`] instead and pass the matching settings,
+/// or a rule measures the program against an artifact that is not the one
+/// being built — A036 against a shadow stack the artifact does not have, and
+/// A055 against the default target, which sets no parameter-word limit.
 ///
 /// # Errors
 ///
@@ -433,6 +470,7 @@ mod tests {
             AnalysisDiagnostic::ConstantArithmeticOverflow { expression: "max + 1".to_string(), operands: errors::FoldedOperands::Binary(2_147_483_647, 1), op: inference_ast::nodes::GuardedOp::Add, number: inference_type_checker::type_info::NumberType::I32, exact: errors::ExactValue::Narrow(2_147_483_648), wrapped: -2_147_483_648, location: dummy_location() },
             AnalysisDiagnostic::ArithModeGovernsNothing { mode: inference_ast::nodes::ArithMode::Wrapping, location: dummy_location() },
             AnalysisDiagnostic::ArithModeChangesNothing { mode: inference_ast::nodes::ArithMode::Wrapping, enclosure: errors::RedundantArithMode::AgainstTheDefault, location: dummy_location() },
+            AnalysisDiagnostic::ParamWordsExceeded { function: "f".to_string(), words: errors::ParamWords { receiver: false, params: Vec::new(), result_pointer: None }, location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

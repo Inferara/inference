@@ -75,9 +75,13 @@ bytes come from through the [`FileLoader`] seam — a trait with two methods,
   reaches this check and fails it; it exists to tie the invariant to where
   segments are created rather than leave it implied by a grammar three crates
   away.
-- **Manifest source-root discovery** — [`manifest_source_root`], which derives
-  the `<manifest_dir>/src` root an opened file's imports resolve against so the
-  IDE resolves exactly as `infs` would.
+- **Manifest discovery** — [`manifest_settings`], which reads what the nearest
+  well-formed manifest says about an opened file: the `<manifest_dir>/src` root
+  its imports resolve against, so the IDE resolves exactly as `infs` would, and
+  the `[build] target` a build of it names, so the IDE analyzes it for the same
+  runtime. The target comes back as written; resolving it is the caller's job,
+  since the target vocabulary lives in `inference-compiler-interface`.
+  [`manifest_source_root`] is its source-root half.
 
 ## Two Outcomes
 
@@ -123,7 +127,8 @@ the compiler and the editor resolve imports the same way.
 Unit tests live alongside each module (`project.rs`, `manifest.rs`). They cover
 the closure walk end to end — cycle termination, canonical ordering, missing
 imports with nearest-match suggestions, resilient-vs-fail-fast arena parity,
-UTF-8 BOM handling, filesystem-root safety, and manifest source-root derivation.
+UTF-8 BOM handling, filesystem-root safety, and deriving a manifest's source root
+and build target.
 
 ```
 cargo test -p inference-project-model

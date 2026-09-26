@@ -69,10 +69,11 @@ the IDE resolve imports identically by construction.
 ## Design: Every Open File Is Its Own Project Entry
 
 `RootDatabase` does not model a single fixed project the way a build tool
-does. Each file the editor opens is analyzed **as its own project entry** — its
-own directory is the source root its imports resolve against — and the
-resulting `FileAnalysis` answers every query for that document, including
-goto-definition into a file it imports. This means:
+does. Each file the editor opens is analyzed **as its own project entry** —
+rooted at its project's source root and analyzed for its project's build
+target, as the next section describes — and the resulting `FileAnalysis`
+answers every query for that document, including goto-definition into a file
+it imports. This means:
 
 - Opening one file in a multi-file project is enough to get diagnostics,
   hover, and navigation for it; there is no "open the workspace root first"
@@ -82,6 +83,29 @@ goto-definition into a file it imports. This means:
   a cache miss: v1 has no shared, project-wide semantic index, only
   per-entry-file analyses. It is simple, always correct, and the duplicated
   work is bounded by how many files the editor happens to have open.
+
+### Source root and build target
+
+Each entry's root is resolved in three tiers (issue #243): the nearest
+`Inference.toml` whose `src/` contains the file; failing that, the root of an
+already-analyzed entry whose import closure contains the file; failing that,
+the file's own directory. The tier that supplies the source root supplies the
+build target with it — the manifest's `[build] target`, resolved through the
+shared target vocabulary, with an absent or unknown name leaving the default
+`wasm32`; the donor entry's own target; the default for the own-directory tier
+— so no entry is analyzed against one project's root and another's target.
+
+Analysis rules run for that target, which is what lets a rule that measures a
+program against its runtime report in the editor what `infs build` would: A055
+refuses a function over SpaceWasm's 255 parameter words, and underlines it in a
+`spacewasm` project only. The other artifact settings are the defaults; A036
+measures against the default shadow stack even in a project whose manifest
+configures a `[memory]` layout.
+
+A manifest or donor root is cached for the document until it is closed, and
+there is no filesystem watch in v1, so a manifest edited while the document is
+open — its `[build] target` included — is observed once the document is
+reopened.
 
 ### Salsa memoization
 
@@ -284,6 +308,6 @@ cargo test -p inference-ide-db
 - [`ide/vfs`](../vfs/README.md) — the path/overlay store `RootDatabase` wraps
 - [`ide/base-db`](../base-db/README.md) — `LineIndex` and the position PODs re-exported here
 - [`ide/ide`](../ide/README.md) — the feature layer built on `FileAnalysis`
-- [`core/project-model`](../../core/project-model/README.md) — `load_project_resilient`, `FileLoader`, and manifest source-root discovery, the leaf front end this crate drives
+- [`core/project-model`](../../core/project-model/README.md) — `load_project_resilient`, `FileLoader`, and manifest discovery (source root and build target), the leaf front end this crate drives
 - [`core/type-checker`](../../core/type-checker/README.md) — `check_with_diagnostics`, the lossless type-check `FileAnalysis` runs
 - [`core/analysis`](../../core/analysis/README.md) — the rules run over every `FileAnalysis`

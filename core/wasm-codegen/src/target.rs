@@ -153,7 +153,10 @@ pub enum Target {
     /// decoder reads. `infc` asks the rest of
     /// `inference-target-conformance`, of the linked artifact and before it
     /// writes it, so a module a `spacewasm` build leaves on disk is one the
-    /// interpreter loads.
+    /// interpreter loads. One of those maxima is asked of the source first:
+    /// analysis rule A055 refuses a function whose signature declares more
+    /// parameter words than the interpreter accepts, at its declaration, before
+    /// this crate runs.
     SpaceWasm,
 }
 

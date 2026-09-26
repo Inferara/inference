@@ -6,17 +6,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 
+use inference_analysis::TargetName;
 use inference_vfs::Vfs;
 use rustc_hash::FxHashMap;
 use salsa::{Database, Setter, Storage};
 
-use crate::analysis::FileAnalysis;
+use crate::analysis::{EntryRoot, FileAnalysis};
 use crate::cancellation::{AnalysisCancelSource, ReaderTokenRegistration};
 
 /// One project entry's Salsa input: its identity plus the eviction lever Salsa's
 /// own dependency tracking cannot supply.
 ///
-/// `path` and `src_root` are the compute's real inputs — a query reading them
+/// `path` and `root` are the compute's real inputs — a query reading them
 /// depends on them the ordinary way. `evicted` is the **eviction** lever: an entry
 /// with no live overlay (a closed document, or a never-opened path pushed out of
 /// the cap) has no file event and so no change stamp to bump, yet its memoized
@@ -38,7 +39,7 @@ struct EntryInput {
     #[returns(ref)]
     path: PathBuf,
     #[returns(ref)]
-    src_root: PathBuf,
+    root: EntryRoot,
     evicted: bool,
 }
 
@@ -188,7 +189,7 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
         return AnalysisResult::Evicted;
     }
     let path = entry.path(db);
-    let src_root = entry.src_root(db);
+    let root = entry.root(db);
     #[cfg(debug_assertions)]
     test_seams::slow_analysis_seam(db, path);
     #[cfg(debug_assertions)]
@@ -207,7 +208,7 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
     // concurrent write, whose stamp bump waits for that clone to drop, always
     // finds the overlay uncontended (#292).
     let vfs = db.vfs();
-    let analysis = FileAnalysis::compute(&vfs, path, src_root, generation, &checkpoint);
+    let analysis = FileAnalysis::compute(&vfs, path, root, generation, &checkpoint);
     drop(vfs);
 
     // Register this compute's content-change dependencies now that the closure is
@@ -240,6 +241,17 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
         let _ = db.availability_epoch().epoch(db);
     }
     AnalysisResult::Computed(Arc::new(analysis))
+}
+
+/// The target a manifest's `[build] target` names, or the default one when it
+/// names none this compiler knows.
+///
+/// `infs` refuses to build a project whose manifest names an unknown target, so
+/// there is no build for the editor to agree with there, and the default is the
+/// target under which the rest of the file is still analyzed in full.
+fn manifest_target(name: Option<&str>) -> TargetName {
+    name.and_then(TargetName::from_name)
+        .unwrap_or(TargetName::DEFAULT)
 }
 
 /// Owns the editor's open-document overlay and the per-entry-file analyses
@@ -297,6 +309,16 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
 /// 3. **Own directory** — otherwise the file's own directory, the behavior for a
 ///    bare, project-less file.
 ///
+/// The tier that supplies the source root supplies the build target with it, and
+/// analysis rules run for that target, so a rule measuring the program against
+/// its runtime (A055, at the `spacewasm` target) reports in the editor what a
+/// build would. A manifest's `[build] target` is resolved through the target
+/// vocabulary; a manifest that names none, or a name the vocabulary does not
+/// hold (which `infs` would refuse to build), leaves the default target. A
+/// closure donor lends the target its own analysis ran for, so a file navigated
+/// into from a project entry is analyzed as that entry's build would compile it.
+/// The own-directory tier has no project, so it takes the default target.
+///
 /// # Sticky per-document source root
 ///
 /// The tiers run only once per open document: a *definitive* root (a manifest or
@@ -313,7 +335,10 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
 ///
 /// A manifest created or edited *after* a file's root was cached is therefore not
 /// observed until the document is closed and reopened: there is no filesystem
-/// watch in v1 (see the `inference_project_model::manifest` module).
+/// watch in v1 (see the `inference_project_model::manifest` module). The cached
+/// root carries the target, so that includes a `[build] target` set or changed
+/// while the document is open — a finding that depends on the target appears or
+/// disappears only once the document is reopened.
 ///
 /// # Closure-aware invalidation
 ///
@@ -480,12 +505,13 @@ struct WorkerState {
     /// `None` between a staleness mark and the next recompute, mirroring an absent
     /// entry in the pre-Salsa memo map.
     entries: FxHashMap<PathBuf, EntryState>,
-    /// Per-document sticky source root, keyed by entry path. Populated the first
-    /// time an entry resolves to a *definitive* root (a manifest or a closure
-    /// donor) and reused on every recompute until the document is closed, so an
-    /// adopted donor root outlives that donor's eviction. The own-directory
-    /// fallback is deliberately absent, keeping the upgrade path alive.
-    source_roots: FxHashMap<PathBuf, PathBuf>,
+    /// Per-document sticky root — the source root and the build target — keyed
+    /// by entry path. Populated the first time an entry resolves to a
+    /// *definitive* root (a manifest or a closure donor) and reused on every
+    /// recompute until the document is closed, so an adopted donor root outlives
+    /// that donor's eviction. The own-directory fallback is deliberately absent,
+    /// keeping the upgrade path alive.
+    roots: FxHashMap<PathBuf, EntryRoot>,
     /// Entry paths of memoized analyses for documents the editor never opened, in
     /// the order they were memoized (oldest first). Bounds the tracked set against
     /// feature requests on arbitrary URIs; see [`MAX_UNOPENED_ANALYSES`].
@@ -771,7 +797,7 @@ impl RootDatabase {
             }
             OverlayOp::Change { .. } => {}
             OverlayOp::Close => {
-                self.worker_mut().source_roots.remove(path);
+                self.worker_mut().roots.remove(path);
                 self.worker_mut()
                     .unopened_order
                     .retain(|tracked| tracked != path);
@@ -838,7 +864,7 @@ impl RootDatabase {
     /// not be evicted, and it must be either a mirror **hit** (memoized — a pool
     /// serve is a zero-write memo hit) or **stale under a cached definitive source
     /// root** (a pool recompute is then identical to a worker recompute, because
-    /// [`resolve_source_root`](Self::resolve_source_root) consults its cache first).
+    /// [`resolve_root`](Self::resolve_root) consults its cache first).
     /// A stale entry whose root is *not* cached (tier-3 provisional) recomputes
     /// serially so a donor/manifest upgrade lands exactly as it does today.
     ///
@@ -867,7 +893,7 @@ impl RootDatabase {
             return ConcurrentReadPlan::Serial;
         }
         let hit = state.analysis.is_some();
-        let cached_root = worker.source_roots.contains_key(path);
+        let cached_root = worker.roots.contains_key(path);
         if !(hit || cached_root) {
             return ConcurrentReadPlan::Serial;
         }
@@ -953,7 +979,7 @@ impl RootDatabase {
     /// request and memoized by Salsa until invalidated.
     ///
     /// The import closure resolves against the source root chosen by
-    /// [`resolve_source_root`](Self::resolve_source_root), so a file in a
+    /// [`resolve_root`](Self::resolve_root), so a file in a
     /// subdirectory of a manifested project resolves its imports as the compiler
     /// would rather than against its own directory. That resolution runs only when
     /// the analysis must be recomputed, so a memoized answer costs no filesystem
@@ -979,8 +1005,8 @@ impl RootDatabase {
         self.drain_pending_sentinel_swaps();
         let recomputed = !self.is_analyzed(path);
         if recomputed {
-            let src_root = self.resolve_source_root(path);
-            self.sync_entry_input(path, &src_root);
+            let root = self.resolve_root(path);
+            self.sync_entry_input(path, &root);
             // The mirror's `evicted` and the Salsa field must agree before the
             // un-evict: a drift means an eviction set one without the other.
             #[cfg(debug_assertions)]
@@ -1097,18 +1123,18 @@ impl RootDatabase {
             .expect("the analysis was stored above")
     }
 
-    /// Ensures an [`EntryInput`] exists for `path` carrying `src_root`.
+    /// Ensures an [`EntryInput`] exists for `path` carrying `root`.
     ///
-    /// A new entry starts un-evicted with no analysis. An existing entry's source
-    /// root is updated only when it drifted (a close/reopen re-resolution), which
-    /// itself marks the query stale so the recompute uses the new root.
-    fn sync_entry_input(&mut self, path: &Path, src_root: &Path) {
+    /// A new entry starts un-evicted with no analysis. An existing entry's root is
+    /// updated only when it drifted (a close/reopen re-resolution), which itself
+    /// marks the query stale so the recompute uses the new root and target.
+    fn sync_entry_input(&mut self, path: &Path, root: &EntryRoot) {
         if let Some(input) = self.worker().entries.get(path).map(|state| state.input) {
-            if input.src_root(&*self).as_path() != src_root {
-                input.set_src_root(self).to(src_root.to_path_buf());
+            if input.root(&*self) != root {
+                input.set_root(self).to(root.clone());
             }
         } else {
-            let input = EntryInput::new(&*self, path.to_path_buf(), src_root.to_path_buf(), false);
+            let input = EntryInput::new(&*self, path.to_path_buf(), root.clone(), false);
             self.worker_mut().entries.insert(
                 path.to_path_buf(),
                 EntryState {
@@ -1306,9 +1332,10 @@ impl RootDatabase {
         }
     }
 
-    /// Resolves the source root `entry`'s import closure should resolve against,
-    /// in three tiers (see the type-level docs and issue #243), caching a
-    /// definitive result so it survives later invalidation.
+    /// Resolves the source root `entry`'s import closure should resolve against
+    /// and the target its analysis runs for, in three tiers (see the type-level
+    /// docs and issue #243), caching a definitive result so it survives later
+    /// invalidation.
     ///
     /// A cached root (from an earlier resolution of the same open document) wins
     /// outright. Otherwise manifest discovery (tier 1) reads the nearest
@@ -1322,44 +1349,52 @@ impl RootDatabase {
     /// fall to tier 3). The own-directory fallback (tier 3) is *not* cached, so a
     /// file resolved provisionally can still be upgraded once a governing entry is
     /// analyzed.
-    fn resolve_source_root(&mut self, entry: &Path) -> PathBuf {
-        if let Some(root) = self.worker().source_roots.get(entry) {
+    fn resolve_root(&mut self, entry: &Path) -> EntryRoot {
+        if let Some(root) = self.worker().roots.get(entry) {
             return root.clone();
         }
-        if let Some(root) = inference_project_model::manifest_source_root(entry) {
+        if let Some(settings) = inference_project_model::manifest_settings(entry) {
+            let root = EntryRoot {
+                src_root: settings.src_root,
+                target: manifest_target(settings.build_target.as_deref()),
+            };
             self.worker_mut()
-                .source_roots
+                .roots
                 .insert(entry.to_path_buf(), root.clone());
             return root;
         }
-        if let Some(root) = self.closure_donor_source_root(entry) {
+        if let Some(root) = self.closure_donor_root(entry) {
             self.worker_mut()
-                .source_roots
+                .roots
                 .insert(entry.to_path_buf(), root.clone());
             return root;
         }
-        entry
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .to_path_buf()
+        EntryRoot {
+            src_root: entry
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf(),
+            target: TargetName::DEFAULT,
+        }
     }
 
-    /// The source root of an already-memoized entry whose import closure contains
-    /// `file`, or `None` when no such entry exists.
+    /// The root of an already-memoized entry whose import closure contains `file`,
+    /// or `None` when no such entry exists.
     ///
     /// The donor's closure is exactly the set of files it reached from its own
     /// source root, so reusing that root resolves `file`'s imports the same way
-    /// the donor resolved them. `file` itself is never its own donor. When several
+    /// the donor resolved them, and the donor's target analyzes `file` for the
+    /// build that compiles it. `file` itself is never its own donor. When several
     /// entries qualify the one with the lexicographically smallest entry path
     /// wins, so the choice is deterministic across repeated analyses.
-    fn closure_donor_source_root(&self, file: &Path) -> Option<PathBuf> {
+    fn closure_donor_root(&self, file: &Path) -> Option<EntryRoot> {
         self.worker()
             .entries
             .iter()
             .filter_map(|(entry, state)| Some((entry, state.analysis.as_ref()?)))
             .filter(|(entry, analysis)| entry.as_path() != file && analysis.closure_contains(file))
             .min_by(|(a, _), (b, _)| a.cmp(b))
-            .map(|(_, analysis)| analysis.source_root().to_path_buf())
+            .map(|(_, analysis)| analysis.root().clone())
     }
 
     /// Marks every memoized analysis a change to `changed` made stale by clearing

@@ -8813,6 +8813,51 @@ fn infs_build_on_a_spacewasm_project_writes_the_default_targets_module() {
     );
 }
 
+/// A `SpaceWasm` project whose `main.inf` declares a function over the 255
+/// parameter words the interpreter accepts fails its build at that
+/// declaration, with analysis rule A055, before any module exists — and the
+/// same source builds in a default-target project.
+///
+/// Fails if the manifest's target stops reaching `infc`'s analysis, or if the
+/// refusal falls through to the post-link conformance check.
+#[test]
+fn infs_build_refuses_a_spacewasm_function_over_its_parameter_words() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+    let params = (0..256)
+        .map(|index| format!("p{index}: u32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!("pub fn wide({params}) -> u32 {{\n    return p0;\n}}\n");
+
+    let named = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&named, "demo", &source, SPACEWASM_BUILD_TABLE);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(named.path())
+        .arg("build");
+    let output = cmd.assert().failure().get_output().clone();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.contains("1:13: error[A055]: `wide` declares 256 parameter words"),
+        "the build must stop at the declaration: {stderr}"
+    );
+    assert!(
+        !stderr.contains("SpaceWasm conformance failed"),
+        "analysis refuses the program before any module exists: {stderr}"
+    );
+    assert!(!named.child("out").child("main.wasm").path().exists());
+
+    let unnamed = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&unnamed, "demo", &source);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(unnamed.path())
+        .arg("build");
+    cmd.assert().success();
+}
+
 /// Runs `infs` in `dir` with `args` against the `infc` at `infc_path`, with
 /// `wasmtime` — and the other tools the suite gates on — absent from PATH.
 ///

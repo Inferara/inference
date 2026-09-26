@@ -27,6 +27,7 @@ pub mod method_never_accesses_self;
 pub mod missing_return;
 pub mod nested_compound_depth;
 pub mod nondet_outside_spec;
+pub mod param_words_exceeded;
 /// Not a rule: the shared vocabulary of value positions the value-rejecting
 /// rules name in their messages.
 pub(crate) mod position;
@@ -82,6 +83,7 @@ use method_never_accesses_self::MethodNeverAccessesSelf;
 use missing_return::MissingReturn;
 use nested_compound_depth::NestedCompoundDepth;
 use nondet_outside_spec::NonDetOutsideSpec;
+use param_words_exceeded::ParamWordsExceeded;
 use recursion::RecursionDetected;
 use reserved_export_name::ReservedExportName;
 use return_inside_loop::ReturnInsideLoop;
@@ -165,5 +167,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &ConstantArithmeticOverflow,
         &ArithModeGovernsNothing,
         &ArithModeChangesNothing,
+        &ParamWordsExceeded,
     ]
 }

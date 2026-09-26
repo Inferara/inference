@@ -344,7 +344,10 @@ The suite is organized into these scenarios:
 5. **`didChange` introducing a type error** — the new diagnostic carries a
    location
 6. **An analysis-rule finding (A041)** — a duplicate local surfaces with the
-   rule's code
+   rule's code; and the build target a project's `Inference.toml` names reaches
+   analysis, so a `spacewasm` project underlines a function over SpaceWasm's
+   parameter words with A055, on its parameter list, while a project with no
+   manifest, no target or `wasm32` shows nothing
 7. **Hover** — over a local variable's type, and over `forall` (explains the
    non-det construct)
 8. **Goto-definition, same file** — reaches a same-file function

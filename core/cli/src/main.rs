@@ -424,35 +424,49 @@ fn resolve_emit_features(entries: &[String]) -> anyhow::Result<EmitFeatures> {
     Ok(features)
 }
 
-/// Resolves the `--target` name into the emission target code generation takes.
+/// Resolves the `--target` name, or the default one when the flag is absent.
 ///
 /// Validation is [`inference_compiler_interface::resolve_target`] — the same
 /// vocabulary and the same wording `infs` uses for the `[build] target` key, so a
 /// name rejected in one place is rejected identically in the other. Its
 /// `TargetError` carries the whole diagnostic, so this surfaces it unchanged.
 ///
-/// The mapping is an exhaustive match with no wildcard arm: a name cannot be
-/// added to the shared vocabulary without an emission target being decided for it
-/// here, which is why there is no "recognized but unsupported" state to report.
-/// A wildcard would let a new name silently resolve to the default and ship an
-/// artifact built for the wrong runtime.
+/// It returns the name rather than an emission target because two phases read
+/// it: analysis measures the program against the runtime the name stands for,
+/// and [`emission_target`] maps it onto what code generation builds.
 ///
 /// # Errors
 ///
 /// Returns the shared diagnostic when `requested` names no target this compiler
 /// builds for.
-fn resolve_target_flag(requested: Option<&str>) -> anyhow::Result<inference_wasm_codegen::Target> {
+fn resolve_target_flag(
+    requested: Option<&str>,
+) -> anyhow::Result<inference_compiler_interface::TargetName> {
     use inference_compiler_interface::{TargetName, TargetSource};
 
-    let name = match requested {
+    Ok(match requested {
         Some(entry) => inference_compiler_interface::resolve_target(entry, TargetSource::Flag)?,
         None => TargetName::DEFAULT,
-    };
-    Ok(match name {
+    })
+}
+
+/// The emission target code generation takes for a requested target name.
+///
+/// The mapping is an exhaustive match with no wildcard arm: a name cannot be
+/// added to the shared vocabulary without an emission target being decided for it
+/// here, which is why there is no "recognized but unsupported" state to report.
+/// A wildcard would let a new name silently resolve to the default and ship an
+/// artifact built for the wrong runtime.
+fn emission_target(
+    name: inference_compiler_interface::TargetName,
+) -> inference_wasm_codegen::Target {
+    use inference_compiler_interface::TargetName;
+
+    match name {
         TargetName::Wasm32 => inference_wasm_codegen::Target::Wasm32,
         TargetName::Stellar => inference_wasm_codegen::Target::Stellar,
         TargetName::SpaceWasm => inference_wasm_codegen::Target::SpaceWasm,
-    })
+    }
 }
 
 /// The one line a Stellar build prints beside its progress lines: what the
@@ -1314,13 +1328,14 @@ fn run() {
     // runtime this compiler does not build for is a mistake about the artifact,
     // and it must be reported before a parse and a type check the user then has
     // to discard.
-    let target = match resolve_target_flag(args.target.as_deref()) {
-        Ok(target) => target,
+    let target_name = match resolve_target_flag(args.target.as_deref()) {
+        Ok(name) => name,
         Err(e) => {
             eprintln!("{e}");
             process::exit(1);
         }
     };
+    let target = emission_target(target_name);
 
     // Refuse a proof artifact for a target whose shipped module is not the one
     // the translation would read, before any phase runs. See
@@ -1431,11 +1446,18 @@ fn run() {
             }
             Ok(tctx) => {
                 // A036's budget is the stack this build will actually emit, not
-                // the default one. Analysis runs ahead of code generation on
-                // every `infc` path that reaches it, which is what keeps a
+                // the default one, and A055's limit is the one the requested
+                // target's runtime sets. Analysis runs ahead of code generation
+                // on every `infc` path that reaches it, which is what keeps a
                 // program whose frame exceeds the stack a diagnostic here rather
-                // than a panic in frame layout later.
-                match analyze_with_options(&tctx, AnalysisOptions { stack_budget_bytes: layout.stack_size() }) {
+                // than a panic in frame layout later, and a function over the
+                // target's parameter words an error at its declaration rather
+                // than a refusal of the finished module.
+                let options = AnalysisOptions {
+                    stack_budget_bytes: layout.stack_size(),
+                    target: target_name,
+                };
+                match analyze_with_options(&tctx, options) {
                     Err(e) => {
                         eprintln!("{e}");
                         process::exit(1);
@@ -2591,19 +2613,21 @@ mod tests {
         let named = resolve_target_flag(Some(TargetName::DEFAULT.as_str()))
             .expect("the default name is requestable");
         assert_eq!(absent, named);
-        assert_eq!(absent, inference_wasm_codegen::Target::Wasm32);
+        assert_eq!(emission_target(absent), inference_wasm_codegen::Target::Wasm32);
     }
 
-    /// Every requestable name must reach an emission target through this
-    /// function, or the flag accepts a name the compiler then cannot build for.
+    /// Every requestable name must reach an emission target through the flag,
+    /// or the flag accepts a name the compiler then cannot build for — and must
+    /// resolve to itself, since analysis reads the name the flag resolves to.
     #[test]
     fn every_requestable_target_resolves_through_the_flag() {
         use inference_compiler_interface::TargetName;
 
         for name in TargetName::ALL {
-            let target = resolve_target_flag(Some(name.as_str()))
+            let resolved = resolve_target_flag(Some(name.as_str()))
                 .unwrap_or_else(|e| panic!("`{}` must resolve: {e}", name.as_str()));
-            assert_eq!(name.as_str(), target.as_str());
+            assert_eq!(resolved, name);
+            assert_eq!(name.as_str(), emission_target(resolved).as_str());
         }
     }
 
