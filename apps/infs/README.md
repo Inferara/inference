@@ -82,7 +82,7 @@ infs build --mode proof
 infs build --mode compile
 ```
 
-**Single-file mode** (path provided): the historical behavior — compiles exactly the given file.
+**Single-file mode** (path provided): compiles the given file, together with every file it reaches through `use` imports, resolved from the file's own directory.
 
 ```bash
 # Full compilation with WASM output (default — no flags needed)
@@ -90,29 +90,19 @@ infs build example.inf
 
 # Full compilation with Rocq translation
 infs build example.inf -v
-
-# Parse only (syntax check)
-infs build example.inf --parse
-
-# Type checking
-infs build example.inf --analyze
 ```
 
 ### Build Flags
 
 | Flag | Description |
 |------|-------------|
-| `--parse` | Run the parse phase to build the typed AST (overrides default) |
-| `--analyze` | Run the analyze phase for type checking (overrides default) |
-| `--codegen` | Run the codegen phase to emit WebAssembly |
-| `-o` | Generate WASM binary file in `out/` directory |
 | `-v` | Generate Rocq (.v) translation file |
 | `--mode proof` | Proof mode: preserve non-det specs; implies `-v` inside `infc` |
 | `--mode compile` | Compile mode: strip specs for executable WASM |
 | `-L <dir>` / `--wasm-lib-dir <dir>` | Directory to search for external `.wasm` modules referenced by `use { … } from <module>;`; repeatable. In project mode a relative dir is anchored to the directory you invoked `infs` from, not the project root |
 | `--no-wasm-opt` | Skip `[build.wasm-opt]` post-build optimization (project mode only) |
 
-When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk — equivalent to `--codegen -o`.
+`infs build` always runs the full pipeline (parse, analyze, codegen) and writes the WASM binary to disk. To stop after a phase, as a syntax or type check, run `infc` directly: `infc example.inf --parse` or `infc example.inf --analyze`.
 
 ### Project-mode Manifest Semantics
 
@@ -453,14 +443,18 @@ Test fixtures are located in `tests/fixtures/`:
 | `trivial.inf` | Simple valid program |
 | `example.inf` | Complex example with multiple functions |
 | `nondet.inf` | Non-deterministic features (forall, exists, assume, unique) |
+| `nondet_unique.inf` | A nested `unique` block, which a proof-mode build refuses with `P002` |
+| `nondet_assume_spec.inf` | An `assume`-bodied spec function, which a proof-mode build refuses with `P001` |
+| `nondet_exists_spec.inf` | An `exists`-bodied spec function, whose obligation a proof-mode build writes to the `.v` |
+| `nondet_unique_spec.inf` | A `unique`-bodied spec function, whose obligation a proof-mode build writes to the `.v` |
 | `syntax_error.inf` | Syntax error handling |
-| `type_error.inf` | Type error handling |
 | `empty.inf` | Empty file edge case |
 | `uzumaki.inf` | Uzumaki operator (`@`) |
 | `forall_test.inf` | Forall block compilation |
 | `exists_test.inf` | Exists block compilation |
 | `assume_test.inf` | Assume block compilation |
 | `unique_test.inf` | Unique block compilation |
+| `fake_wasm_opt.rs` | A stand-in for Binaryen's `wasm-opt`, compiled by the tests, so the `[build.wasm-opt]` tests run without Binaryen |
 
 ### Integration Tests
 
@@ -478,9 +472,8 @@ cargo captures the skip notice and a skipped test is otherwise indistinguishable
 
 ### Manual QA Tests
 
-9 tests require manual verification and are documented in `docs/qa-test-suite.md`:
+7 tests require manual verification and are documented in `docs/qa-test-suite.md`:
 - TUI visual verification
-- Verify command (requires coqc)
 - Self-update (requires actual distribution server)
 - Cross-platform builds (requires CI on each platform)
 - Disk full and permission scenarios

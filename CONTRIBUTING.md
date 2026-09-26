@@ -123,6 +123,54 @@ Rationale: noticing when the behavior is fixed, making sure that even the wrong 
 
 Exception: test data regeneration helpers in `mod regenerate` blocks are `#[ignore]`d by design. These are not behavioral tests; they regenerate expected `.wasm` golden files from the current compiler output and are run explicitly with `--ignored` when the codegen pipeline changes.
 
+### Docker-only Rocq discharge development gate
+
+The local emitted-Rocq discharge gate is orchestrated by Docker; it does not use a host Rust or Rocq toolchain. Its public interface is:
+
+```bash
+./ci/rocq-discharge-docker.sh \
+  --wasm-verifier /absolute/path/to/wasm-verifier \
+  --container wasm-verifier-coq \
+  [--adapter batch|single|both] \
+  [--full]
+```
+
+`--adapter` defaults to `both`. `batch` sends one immutable exchange volume to the verifier bridge. `single` makes the seven ordered per-case bridge calls with a new empty `0700` receipt directory for each call. `both` verifies the batch receipts, removes only the validated receipt set, runs the seven single calls, and verifies the replacement receipts. Inference fingerprints `request.json` and all seven ordered raw Rocq inputs before and after every bridge call; it never parses verifier-private proof logs.
+
+The wrapper composes [`ci/rocq-rust-docker.sh`](ci/rocq-rust-docker.sh), preserving that lane's target lock, source snapshot, persistent Cargo registry/target volumes, pinned Rust image and explicit Rust `1.98.0` toolchain. [`ci/rocq-discharge.cargo-lock`](ci/rocq-discharge.cargo-lock) is the authoritative tracked lock for this lane. The ignored root `Cargo.lock` is excluded from the snapshot and is never an input to the gate. Fetch is the only networked Rust step; all compilation and execution after fetch are locked, offline, socket-free, and run with a read-only root filesystem, dropped capabilities, `no-new-privileges`, and a private `/tmp`.
+
+`--full` first runs the focused dischargeability tests, then the adapter flow, then the complete `inference-tests` crate (not the whole workspace). The clean Docker floor is exactly five Cargo `test result:` lines with at least 3,075 passed tests in aggregate and zero failed or filtered tests. Empty, single-binary, malformed, filtered, and under-floor logs fail closed.
+
+The verifier input must be an absolute canonical, clean `wasm-verifier` checkout whose `HEAD` equals the pinned revision `8f485f037a270271bf2e1393c24fc0684097163b` in [`core/wasm-to-v/wasm-verifier-pin.txt`](core/wasm-to-v/wasm-verifier-pin.txt). That revision supplies the live verifier-side bridge contract. Its `ci/discharge/container-pin.json` is exact canonical eight-line JSON, including field order and commas:
+
+```json
+{
+  "protocol": 1,
+  "image_reference": "<pinned reference>",
+  "image_id": "sha256:<64 lowercase hex>",
+  "coq_user": "coq",
+  "repository_mount": "/workspaces/wasm-verifier",
+  "coq_version": "8.20.1"
+}
+```
+
+Immediately before and after every bridge, the wrapper rechecks the clean exact checkout, the identities and Git content of `container-pin.json`, `inspect-container.sh`, the configured public adapters, and the required shared executable `docker-bridge.sh`. Every contract file must remain a regular nonsymlink file with exactly one hard link. Inspection must show exactly one container mount total: a `bind` from the canonical verifier checkout to the pinned repository destination, with no extra bind, volume, socket, or alias mount. It must also show canonical positive-decimal `coq` uid/gid values, exact Coq `8.20.1`, the pinned verifier revision and `coq-wasm` tag/revision, and exact origin `https://github.com/WasmCert/WasmCert-Coq.git`. The inspector must exit zero and emit exactly those eight canonical provenance lines with no extras or duplicates. Batch receives an empty wrapper-owned receipt setting; each single call receives only its new wrapper-owned receipt directory, regardless of ambient environment values.
+
+The seven-case gate requires exactly fifteen positive endpoints plus the negative false-spec certificate. The pinned verifier B certifies all fifteen, `spec_overflow_realization.v` among them, so the lane can require the seven-case marker and pass it. That seventh case, `overflow`, is the only one whose executable body carries an overflow guard, so it is the only endpoint that will be proved about arithmetic that can trap. The deterministic fake self-test freezes the bridge contract and can be run without mounting `docker.sock`:
+
+```bash
+docker run --rm --read-only --network none --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,mode=1777 --tmpfs /work:rw,exec,mode=1777 \
+  --user 65532:65532 -e TMPDIR=/work \
+  --mount type=bind,src="$PWD",dst=/workspace,readonly \
+  --workdir /workspace \
+  busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0 \
+  sh ci/rocq-discharge-docker-self-test.sh
+```
+
+Every bridge inherits `INFERENCE_WASM_VERIFIER_EVIDENCE_DIR`, the one wrapper-created host `0700` evidence directory. The pinned bridge writes `verifier.log` there before returning nonzero and keeps its public output bounded. The wrapper holds the original identity-checked, single-link `0600` capture through a parent file descriptor and never reopens its bridge-visible path. With `--full`, it likewise creates an unpredictable identity-checked, single-link `0600` Cargo log before any bridge, writes and parses only through retained parent descriptors, and rejects path replacement or added hard links. Evidence logs and receipt files must also be regular, single-link `0600` files. On a valid bridge failure it retains exactly the private evidence directory and prints one sanitized locator; on success, verified cleanup uses exact-name volume enumeration, removes the capture, evidence, transient staging, and owned source/exchange volumes, and confirms absence before the sole pass marker. Identity uncertainty preserves the suspect path and fails closed. Inference retains no raw private proof source or receipt contents.
+
 ## Provide Constructed Function Parameters
 
 When writing a function, prefer to provide already constructed parameters instead of `Option`s or similar structs. This makes the function easier to use and understand.
