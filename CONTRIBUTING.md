@@ -29,6 +29,16 @@ We use the `main` branch as the default branch and create tags for releases. For
 
 Before starting work on a PR, please ensure that there is an issue created for it and that it is assigned to you. If your planned work is only a subset of an existing issue, create a new issue for your specific task and link it to the parent one.
 
+## Releases
+
+A release is cut by creating a GitHub release for a new `vX.Y.Z` tag. That runs the Build Release workflow, which builds, tests and packages `infc`, `inference-lsp` and `infs` on all three platforms and attaches the packages to the release. Before creating it:
+
+1. Set `[workspace.package] version` in the root `Cargo.toml` to the release version, together with the `version` requirement of every workspace member that inherits it, so that `infc --version`, `infs --version` and `infs self update` report the release. Regenerate `ci/rocq-discharge.cargo-lock` for the new member versions with the Rocq lane's toolchain.
+2. Rename `## [Unreleased]` in `CHANGELOG.md` to the release version and date, and open a new empty `## [Unreleased]` above it.
+3. Run the Release Dry Run workflow on the release commit: `gh workflow run release_dry_run.yml --ref <branch>`. Pull requests and pushes to `main` build in debug mode, so it is the only run before the release job that exercises the release profile and the packaging steps.
+
+The packages are made from copies of the binaries taken right after `cargo build --release`. The release tests that follow rebuild `target/*/release` with the dev-dependencies' features unified into the shared dependencies, and those binaries must not ship.
+
 ## Branch Naming
 
 Make branch names inherit the issue that it addresses. The pattern is: `<issue-number>-<type>-<short-description>`.

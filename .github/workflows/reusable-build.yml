@@ -124,6 +124,26 @@ jobs:
         if: runner.os == 'Windows' && inputs.release-build
         run: cargo build --release --verbose --target x86_64-pc-windows-gnu
       
+      # The release test step below compiles the dev-dependencies, which
+      # unifies their features into the shared dependencies and rebuilds every
+      # binary in `target/.../release` with them: test-only features such as
+      # `cov-mark`'s `enable` would ship. The binaries are copied aside here,
+      # exactly as `cargo build --release` produced them, and the packages are
+      # made from these copies, so the test step cannot change what ships.
+      - name: Stage Release Binaries (Non-Windows)
+        if: runner.os != 'Windows' && inputs.release-build
+        run: |
+          mkdir -p staged-release
+          cp target/release/infc target/release/inference-lsp target/release/infs staged-release/
+
+      - name: Stage Release Binaries (Windows MinGW)
+        if: runner.os == 'Windows' && inputs.release-build
+        run: |
+          New-Item -ItemType Directory -Force -Path staged-release
+          Copy-Item target\x86_64-pc-windows-gnu\release\infc.exe staged-release\
+          Copy-Item target\x86_64-pc-windows-gnu\release\inference-lsp.exe staged-release\
+          Copy-Item target\x86_64-pc-windows-gnu\release\infs.exe staged-release\
+
       - name: Test (Non-Windows)
         if: runner.os != 'Windows' && !inputs.release-build
         run: cargo test --verbose
@@ -159,30 +179,30 @@ jobs:
         if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
         run: |
           New-Item -ItemType Directory -Force -Path artifact-infc
-          Copy-Item target\x86_64-pc-windows-gnu\release\infc.exe artifact-infc\
-          Copy-Item target\x86_64-pc-windows-gnu\release\inference-lsp.exe artifact-infc\
+          Copy-Item staged-release\infc.exe artifact-infc\
+          Copy-Item staged-release\inference-lsp.exe artifact-infc\
           Copy-Item -Recurse licenses artifact-infc\
 
       - name: Prepare infs Artifact Package (Windows)
         if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
         run: |
           New-Item -ItemType Directory -Force -Path artifact-infs
-          Copy-Item target\x86_64-pc-windows-gnu\release\infs.exe artifact-infs\
+          Copy-Item staged-release\infs.exe artifact-infs\
           Copy-Item -Recurse licenses artifact-infs\
       
       - name: Prepare infc Artifact Package (Linux)
         if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
         run: |
           mkdir -p artifact-infc
-          cp target/release/infc artifact-infc/
-          cp target/release/inference-lsp artifact-infc/
+          cp staged-release/infc artifact-infc/
+          cp staged-release/inference-lsp artifact-infc/
           cp -R licenses artifact-infc/
 
       - name: Prepare infs Artifact Package (Linux)
         if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
         run: |
           mkdir -p artifact-infs
-          cp target/release/infs artifact-infs/
+          cp staged-release/infs artifact-infs/
           cp -R licenses artifact-infs/
       
       - name: Package infc Artifact (Windows)
@@ -215,15 +235,15 @@ jobs:
         if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
         run: |
           mkdir -p artifact-infc
-          cp target/release/infc artifact-infc/
-          cp target/release/inference-lsp artifact-infc/
+          cp staged-release/infc artifact-infc/
+          cp staged-release/inference-lsp artifact-infc/
           cp -R licenses artifact-infc/
 
       - name: Prepare infs Artifact Package (macOS)
         if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
         run: |
           mkdir -p artifact-infs
-          cp target/release/infs artifact-infs/
+          cp staged-release/infs artifact-infs/
           cp -R licenses artifact-infs/
       
       - name: Package infc Artifact (macOS)
