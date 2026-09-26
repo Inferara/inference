@@ -9,17 +9,19 @@
 //! was decoded with", and a [`ParseError`] carries both the offset and the
 //! interpreter's own reason.
 //!
-//! The runner is the embedder. It loads a module, runs its start function,
-//! calls its exports and measures the IR it compiled to, and it returns every
-//! way that can fail as a value. This file adapts it to the tier twice over.
-//! The sweeps, the oracle and the host-imports rows want a harness fault to
-//! fail the test where it happened, so [`decode`], [`decode_with`],
-//! [`decode_with_pages`] and [`LoadedModule::invoke`] are thin wrappers that
-//! keep the decoder's verdict as an `Err` and panic on everything else: an
-//! interpreter that cannot be built, a start function that does not complete,
-//! a call the engine refuses. The embed harness below wants a start function
-//! that traps as an exit code of its own, so it loads through the runner
-//! directly.
+//! The runner is the embedder. It loads a module, which runs nothing, starts
+//! it, which runs its start function, calls its exports and measures the IR it
+//! compiled to, and it returns every way that can fail as a value. This file
+//! adapts it to the tier twice over. The sweeps, the oracle and the
+//! host-imports rows want a harness fault to fail the test where it happened,
+//! so they go through thin wrappers: [`decode`], [`decode_with`] and
+//! [`decode_with_pages`] load a module and start it, keeping the decoder's
+//! verdict as an `Err`, and [`LoadedModule::invoke`], on this tier's wrapper
+//! of the runner's `Instance`, calls an export; all of them panic on
+//! everything else: an interpreter that cannot be built, a start function
+//! that does not complete, a call the engine refuses. The embed harness below
+//! wants a start function that traps as an exit code of its own, so it loads
+//! and starts through the runner directly.
 //!
 //! # The single-threaded contract, and why this tier is stricter than its sibling
 //!
@@ -153,7 +155,7 @@ use std::rc::Rc;
 use inference_spacewasm_runner::{
     self as runner, EngineConfig, ExportedFunction, Fuel, HostSetError, InvokeError, IrStats,
     LoadError, REFERENCE_MAX_CODE_PAGES, REFERENCE_MAX_CONTROL_FRAMES, REFERENCE_MAX_STACK_DEPTH,
-    ReexportedImport, coerce_arguments, render, type_name,
+    ReexportedImport, StartError, coerce_arguments, render, type_name,
 };
 pub use inference_spacewasm_runner::{Session as SpaceWasmSession, host_module, host_set};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -198,18 +200,20 @@ const ENGINE: EngineConfig =
 /// instead of hanging it.
 pub const FUEL: usize = 100_000_000;
 
-/// [`FUEL`] as the budget every load runs a module's start function under.
+/// [`FUEL`] as the budget every module is started under, which its start
+/// function runs within.
 const START_FUEL: Fuel = Fuel::Limited(NonZeroUsize::new(FUEL).expect("the budget is not zero"));
 
 // ---------------------------------------------------------------------------
 // The tier's loaders
 // ---------------------------------------------------------------------------
 
-/// A module the runner loaded, whose calls panic on anything but an outcome.
+/// A module the runner loaded and started, whose calls panic on anything but
+/// an outcome.
 ///
 /// Named for what it is rather than `Decoded`, which the Soroban tier next door
 /// already uses for a decoded `Val`.
-pub struct LoadedModule<'session>(runner::LoadedModule<'session>);
+pub struct LoadedModule<'session>(runner::Instance<'session>);
 
 /// What running an exported function did.
 #[derive(Debug, Clone, PartialEq)]
@@ -225,7 +229,8 @@ pub enum Outcome {
 }
 
 /// Decodes `wasm` at the reference embedder's verifier bounds and IR page
-/// budget, with the tier's 65,536-word stack, and no host module registered.
+/// budget, with the tier's 65,536-word stack, and no host module registered,
+/// and starts it.
 ///
 /// The `allow` is the counterpart of the one on [`run`]. Three binaries compile
 /// this file, and the two that run a command line load through the runner
@@ -299,11 +304,12 @@ pub fn decode_with<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
 ///
 /// # Panics
 ///
-/// Panics on every other load failure the runner reports, since none is a
-/// verdict about `wasm` this tier compares: an interpreter that cannot be
-/// built at all, or a start function that traps, pauses or outlasts [`FUEL`].
-/// This compiler emits no start function, so the last is a surprise in a
-/// hand-written module rather than a comparable outcome.
+/// Panics on every other load failure the runner reports, and on every start
+/// failure, since none is a verdict about `wasm` this tier compares: an
+/// interpreter that cannot be built at all, or a start function that traps,
+/// pauses or outlasts [`FUEL`]. This compiler emits no start function, so the
+/// last is a surprise in a hand-written module rather than a comparable
+/// outcome.
 pub fn decode_with_pages<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usize>(
     session: &'s mut SpaceWasmSession,
     wasm: &[u8],
@@ -311,11 +317,14 @@ pub fn decode_with_pages<'s, const CONTROL_FRAMES: usize, const STACK_DEPTH: usi
     max_code_pages: usize,
 ) -> Result<LoadedModule<'s>, ParseError> {
     let config = EngineConfig { max_code_pages, ..ENGINE };
-    let loaded =
-        runner::load_with::<CONTROL_FRAMES, STACK_DEPTH>(session, wasm, hosts, START_FUEL, config);
-    match loaded {
-        Ok(module) => Ok(LoadedModule(module)),
-        Err(LoadError::Decode(verdict)) => Err(verdict),
+    let loaded = runner::load_with::<CONTROL_FRAMES, STACK_DEPTH>(session, wasm, hosts, config);
+    let module = match loaded {
+        Ok(module) => module,
+        Err(LoadError::Decode(verdict)) => return Err(verdict),
+        Err(fault) => panic!("{fault}"),
+    };
+    match module.start(START_FUEL) {
+        Ok(instance) => Ok(LoadedModule(instance)),
         Err(fault) => panic!("{fault}"),
     }
 }
@@ -325,7 +334,7 @@ impl LoadedModule<'_> {
     /// out a host import it exports again.
     #[must_use]
     pub fn exported_functions(&self) -> Vec<ExportedFunction> {
-        self.0.exported_functions()
+        self.0.module().exported_functions()
     }
 
     /// Every host import this module exports again, in export-section order.
@@ -334,7 +343,7 @@ impl LoadedModule<'_> {
     /// by the `allow` on [`run`] rather than by a caller.
     #[must_use]
     pub fn exported_host_imports(&self) -> Vec<ReexportedImport> {
-        self.0.exported_host_imports()
+        self.0.module().exported_host_imports()
     }
 
     /// Calls `export` with `args` under a `fuel`-instruction budget.
@@ -361,7 +370,7 @@ impl LoadedModule<'_> {
 /// from.
 #[must_use]
 pub fn ir_stats(module: &LoadedModule<'_>, wasm_len: usize) -> IrStats {
-    runner::ir_stats(&module.0, wasm_len)
+    runner::ir_stats(module.0.module(), wasm_len)
 }
 
 // ---------------------------------------------------------------------------
@@ -388,10 +397,11 @@ const HOST_FORM: &str = "MODULE.FIELD=PARAMS[:RESULT]";
 /// them into "it did not work" — which is the one thing an integrator already
 /// knows.
 ///
-/// A module's start function runs as part of its load, and a start function
-/// that traps is the same fact about an artifact as an invocation that traps,
-/// so it exits with [`exit::TRAP`] and its line names the start function
-/// rather than an export. The rest of what can stop a load is outside the
+/// The harness starts a module the moment it loads, as the reference embedder
+/// does, before it acts on the command line, and a start function that traps
+/// is the same fact about an artifact as an invocation that traps, so it exits
+/// with [`exit::TRAP`] and its line names the start function rather than an
+/// export. The rest of what can stop a load or a start is outside the
 /// guarantee rather than an eighth code inside it: an interpreter that cannot
 /// be built at all, or a start function that pauses or is still running after
 /// [`FUEL`](super::FUEL) instructions — which `--fuel` does not govern — is a
@@ -687,9 +697,11 @@ fn line(sink: &mut dyn Write, text: &str) {
 /// loaded. Only argument coercion, which needs the export's declared types, is
 /// judged after the load.
 ///
-/// The module is loaded through the runner rather than through [`decode_with`],
-/// because the runner reports a start function that traps as a load failure of
-/// its own, and that is an exit code here rather than a panic.
+/// The module is loaded and started through the runner rather than through
+/// [`decode_with`], because the runner reports a start function that traps as
+/// a [`StartError`] of its own, and that is an exit code here rather than a
+/// panic. The module is started straight after the load, before the command
+/// line is acted on, as the reference embedder starts one.
 fn execute(command: &Command, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let mut session = SpaceWasmSession::acquire();
     let calls = HostCalls::default();
@@ -714,20 +726,23 @@ fn execute(command: &Command, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         &mut session,
         &wasm,
         hosts,
-        START_FUEL,
         ENGINE,
     );
-    // A start function runs inside the load, and the calls it made are printed
-    // before anything else: before the line saying how it ended when it
-    // trapped, and before anything the command line asked for when it
-    // returned.
-    let mut module = match loaded {
-        Ok(module) => LoadedModule(module),
+    let loaded = match loaded {
+        Ok(module) => module,
         Err(LoadError::Decode(verdict)) => {
             report_decode_failure(&session, &command.module, &wasm, &verdict, &command.hosts, err);
             return exit::DECODE;
         }
-        Err(LoadError::StartTrapped(reason)) => {
+        Err(fault) => panic!("{fault}"),
+    };
+    // The start function runs straight after the load, and the calls it made
+    // are printed before anything else: before the line saying how it ended
+    // when it trapped, and before anything the command line asked for when it
+    // returned.
+    let mut module = match loaded.start(START_FUEL) {
+        Ok(instance) => LoadedModule(instance),
+        Err(StartError::Trapped(reason)) => {
             calls.flush(err);
             line(
                 err,

@@ -1,6 +1,8 @@
 //! The words a run's ending is reported in: a trap, with the host's own
 //! detail when a host stopped the program; an exhausted budget; and a module
-//! the decoder refused for want of memory.
+//! the decoder refused for want of memory. A run is a call of an export or a
+//! module's start function, and the reports of both are worded alike, naming
+//! the one that ran.
 //!
 //! The texts here state what the runner knows and nothing about the program
 //! that embeds it. Where a sentence has to name that program, the caller
@@ -184,11 +186,45 @@ impl HostTrap {
     }
 }
 
-/// A call that trapped, as it is reported: a first line saying which function
-/// trapped and why, and one line explaining it.
+/// How the reports name a module's start function, where a call's names its
+/// export.
+const START_FUNCTION: &str = "the module's start function";
+
+/// What a start function's trap is headlined with when a host stopped it
+/// without recording why: [`trap_phrase`] says so of a call.
+const STOPPED_BY_A_HOST: &str = "a host function stopped it";
+
+/// The explanation of a start function's trap for every reason but an
+/// exhausted stack and the reasons no module the loader accepts can raise.
+/// It is the one thing about such code that stays true of every module: the
+/// explanations of a call's trap describe what this compiler emits.
+const NOT_FROM_THIS_COMPILER: &str =
+    "Inference never emits a start function, so the code that trapped did not come from this \
+     compiler.";
+
+/// The function a report is about: an export a caller invoked, or the
+/// module's start function, which runs before any export can be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Ran {
+    Export(String),
+    StartFunction,
+}
+
+impl Ran {
+    /// How a sentence names it: `` `main` `` or "the module's start function".
+    fn subject(&self) -> String {
+        match self {
+            Ran::Export(entry) => format!("`{entry}`"),
+            Ran::StartFunction => START_FUNCTION.to_string(),
+        }
+    }
+}
+
+/// A call or a start function that trapped, as it is reported: a first line
+/// saying which function trapped and why, and one line explaining it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrapReport {
-    entry: String,
+    ran: Ran,
     reason: TrapReason,
     host: Option<HostTrap>,
     stack_words: usize,
@@ -205,20 +241,41 @@ impl TrapReport {
         host: Option<HostTrap>,
         stack_words: usize,
     ) -> Self {
+        Self::of(Ran::Export(entry.to_string()), reason, host, stack_words)
+    }
+
+    /// The report of a module's start function that trapped for `reason`,
+    /// whose arguments are read as [`TrapReport::new`] reads a call's. Its
+    /// first line names the start function, and its explanation says only
+    /// what stays true of code this compiler never emits; see
+    /// [`TrapReport::explanation`].
+    #[must_use]
+    pub fn start_function(reason: TrapReason, host: Option<HostTrap>, stack_words: usize) -> Self {
+        Self::of(Ran::StartFunction, reason, host, stack_words)
+    }
+
+    /// The report of `ran` trapping for `reason`, keeping `host` only for a
+    /// host's trap.
+    fn of(ran: Ran, reason: TrapReason, host: Option<HostTrap>, stack_words: usize) -> Self {
         let host = if reason == TrapReason::Host { host } else { None };
-        Self { entry: entry.to_string(), reason, host, stack_words }
+        Self { ran, reason, host, stack_words }
     }
 
     /// The first line: `` `main` trapped: a runtime check failed (Unreachable). ``,
     /// or, when a host recorded why it stopped the program, that reason in its
-    /// place, still ending in `(Host).`
+    /// place, still ending in `(Host).` A start function's names it: `the
+    /// module's start function trapped: …`, and a host that stopped one without
+    /// recording why is said to have stopped it, since it stopped no call.
     #[must_use]
     pub fn headline(&self) -> String {
-        let fact = match self.host {
-            Some(detail) => detail.fact(),
-            None => trap_phrase(self.reason).to_string(),
+        let fact = match (self.host, &self.ran) {
+            (Some(detail), _) => detail.fact(),
+            (None, Ran::StartFunction) if self.reason == TrapReason::Host => {
+                STOPPED_BY_A_HOST.to_string()
+            }
+            (None, Ran::Export(_) | Ran::StartFunction) => trap_phrase(self.reason).to_string(),
         };
-        format!("`{}` trapped: {fact} ({:?}).", self.entry, self.reason)
+        format!("{} trapped: {fact} ({:?}).", self.ran.subject(), self.reason)
     }
 
     /// The line after it, when the reason has one.
@@ -226,8 +283,64 @@ impl TrapReport {
     /// `embedder` names the program that loaded the module, as the two
     /// explanations that are about it begin: the stack it gave the
     /// interpreter, and a trap no module it loads can raise.
+    ///
+    /// A call's trap is explained by what this compiler emits, since the
+    /// function called is one it compiled. A start function's is not: this
+    /// compiler never emits one, so of every reason but those two it says only
+    /// that, and of an exhausted stack only the words the interpreter was
+    /// given, which the start function's call chain needs more of.
     #[must_use]
     pub fn explanation(&self, embedder: &str) -> Option<String> {
+        match self.ran {
+            Ran::Export(_) => self.call_explanation(embedder),
+            Ran::StartFunction => Some(self.start_function_explanation(embedder)),
+        }
+    }
+
+    /// [`TrapReport::explanation`] of a start function's trap.
+    fn start_function_explanation(&self, embedder: &str) -> String {
+        match self.reason {
+            TrapReason::StackOverflow => format!(
+                "{}, and the start function's call chain needs more.",
+                self.stack_given(embedder)
+            ),
+            TrapReason::OutOfMemory
+            | TrapReason::MemoryRefNotUnique
+            | TrapReason::GlobalGetFailed
+            | TrapReason::GlobalSetFailed
+            | TrapReason::MalformedIr => defect(embedder),
+            TrapReason::Unreachable
+            | TrapReason::Host
+            | TrapReason::DivideByZero
+            | TrapReason::IntegerOverflow
+            | TrapReason::MemoryOutOfBounds
+            | TrapReason::InvalidTableIndex
+            | TrapReason::InvalidTableFunctionType
+            | TrapReason::UninitializedTableElement
+            | TrapReason::UnrepresentableResult
+            | TrapReason::BadConversionToInteger => NOT_FROM_THIS_COMPILER.to_string(),
+        }
+    }
+
+    /// The opening of the explanation of an exhausted stack: "`infs run`
+    /// gives the interpreter 1024 words of call stack", naming `embedder` and
+    /// the words the module was loaded with, and saying so when they are the
+    /// reference embedder's.
+    fn stack_given(&self, embedder: &str) -> String {
+        let reference = if self.stack_words == REFERENCE_STACK_WORDS {
+            ", as spacewasm_std does"
+        } else {
+            ""
+        };
+        let words = if self.stack_words == 1 { "word" } else { "words" };
+        format!(
+            "{embedder} gives the interpreter {} {words} of call stack{reference}",
+            self.stack_words
+        )
+    }
+
+    /// [`TrapReport::explanation`] of a call's trap.
+    fn call_explanation(&self, embedder: &str) -> Option<String> {
         let text = match self.reason {
             TrapReason::Unreachable => {
                 "Inference compiles each of its runtime checks to a WebAssembly `unreachable`, \
@@ -248,20 +361,11 @@ impl TrapReport {
                  cannot hold."
                     .to_string()
             }
-            TrapReason::StackOverflow => {
-                let reference = if self.stack_words == REFERENCE_STACK_WORDS {
-                    ", as spacewasm_std does"
-                } else {
-                    ""
-                };
-                let words = if self.stack_words == 1 { "word" } else { "words" };
-                format!(
-                    "{embedder} gives the interpreter {} {words} of call stack{reference}, and \
-                     this call chain's frames need more. Recursion is refused at compile time \
-                     (A035), so a deep chain of large frames is the cause.",
-                    self.stack_words
-                )
-            }
+            TrapReason::StackOverflow => format!(
+                "{}, and this call chain's frames need more. Recursion is refused at compile \
+                 time (A035), so a deep chain of large frames is the cause.",
+                self.stack_given(embedder)
+            ),
             TrapReason::MemoryOutOfBounds => {
                 "Code the compiler generates keeps its own accesses in bounds, so the address \
                  came from outside it: a command-line argument passed to an array or struct \
@@ -281,14 +385,19 @@ impl TrapReport {
             | TrapReason::MemoryRefNotUnique
             | TrapReason::GlobalGetFailed
             | TrapReason::GlobalSetFailed
-            | TrapReason::MalformedIr => format!(
-                "{embedder} loads no module that can raise this, so this is a defect in \
-                 {embedder} or the interpreter; please report it at \
-                 https://github.com/Inferara/inference/issues with the artifact."
-            ),
+            | TrapReason::MalformedIr => defect(embedder),
         };
         Some(text)
     }
+}
+
+/// The explanation of a trap no module `embedder` loads can raise.
+fn defect(embedder: &str) -> String {
+    format!(
+        "{embedder} loads no module that can raise this, so this is a defect in {embedder} or \
+         the interpreter; please report it at https://github.com/Inferara/inference/issues with \
+         the artifact."
+    )
 }
 
 /// The core of the report of a call to `entry` that ran out of fuel after
@@ -302,10 +411,24 @@ impl TrapReport {
 /// what to do about it, and with the host calls it logged before it stopped.
 #[must_use]
 pub fn out_of_fuel(entry: &str, budget: usize) -> String {
+    ran_out_of_fuel(&Ran::Export(entry.to_string()), budget)
+}
+
+/// [`out_of_fuel`] for a module's start function: the same sentence, opening
+/// "the module's start function ran out of fuel" where a call's opens with the
+/// export's name.
+#[must_use]
+pub fn start_out_of_fuel(budget: usize) -> String {
+    ran_out_of_fuel(&Ran::StartFunction, budget)
+}
+
+/// The out-of-fuel sentence's core, naming what ran.
+fn ran_out_of_fuel(ran: &Ran, budget: usize) -> String {
     let instructions = if budget == 1 { "instruction" } else { "instructions" };
     format!(
-        "`{entry}` ran out of fuel: the SpaceWasm interpreter stopped it after {budget} \
-         interpreter {instructions}"
+        "{} ran out of fuel: the SpaceWasm interpreter stopped it after {budget} interpreter \
+         {instructions}",
+        ran.subject()
     )
 }
 
@@ -678,6 +801,103 @@ mod tests {
         );
     }
 
+    /// What a start function's report says of `reason` with no host detail,
+    /// in the reference stack, with `` `embedder` `` as the embedder: the
+    /// phrase its first line gives, and its explanation.
+    ///
+    /// Spelled as a match with no wildcard, as [`row`] is, so a reason
+    /// upstream adds has to be given its start function's words here.
+    fn start_row(reason: TrapReason) -> (&'static str, &'static str) {
+        let not_ours = "Inference never emits a start function, so the code that trapped did not \
+                        come from this compiler.";
+        let defect = "`embedder` loads no module that can raise this, so this is a defect in \
+                      `embedder` or the interpreter; please report it at \
+                      https://github.com/Inferara/inference/issues with the artifact.";
+        match reason {
+            TrapReason::Host => ("a host function stopped it", not_ours),
+            TrapReason::StackOverflow => (
+                row(reason).0,
+                "`embedder` gives the interpreter 1024 words of call stack, as spacewasm_std \
+                 does, and the start function's call chain needs more.",
+            ),
+            TrapReason::OutOfMemory
+            | TrapReason::MemoryRefNotUnique
+            | TrapReason::GlobalGetFailed
+            | TrapReason::GlobalSetFailed
+            | TrapReason::MalformedIr => (row(reason).0, defect),
+            TrapReason::Unreachable
+            | TrapReason::DivideByZero
+            | TrapReason::IntegerOverflow
+            | TrapReason::MemoryOutOfBounds
+            | TrapReason::InvalidTableIndex
+            | TrapReason::InvalidTableFunctionType
+            | TrapReason::UninitializedTableElement
+            | TrapReason::UnrepresentableResult
+            | TrapReason::BadConversionToInteger => (row(reason).0, not_ours),
+        }
+    }
+
+    /// A start function's report names the start function where a call's
+    /// names its export, and explains only what stays true of code this
+    /// compiler never emits: the stack it was given when it ran out, the
+    /// defect sentence for a reason no loaded module can raise, and for every
+    /// other reason that the code did not come from this compiler.
+    ///
+    /// Fails if the start function is named as an export would be, in
+    /// backticks, if its explanation borrows a call's — which describes what
+    /// this compiler emits, a host's remedy included — if a host that stopped
+    /// it without recording why is said to have stopped a call, or if a
+    /// detail reaches the report of a trap that was not the host's.
+    #[test]
+    fn a_start_functions_report_names_it_and_explains_only_what_stays_true() {
+        for reason in EVERY_REASON {
+            let start = TrapReport::start_function(reason, None, REFERENCE_STACK_WORDS);
+            let (phrase, explanation) = start_row(reason);
+            assert_eq!(
+                start.headline(),
+                format!("the module's start function trapped: {phrase} ({reason:?}).")
+            );
+            let explained = start.explanation("`embedder`");
+            assert_eq!(explained.as_deref(), Some(explanation), "{reason:?}");
+            assert_ne!(start, report(reason), "{reason:?}");
+        }
+        assert_eq!(
+            report(TrapReason::Host).headline(),
+            "`main` trapped: a host function stopped the call (Host).",
+            "a call's words stay a call's"
+        );
+
+        let panic = HostTrap::Panic { host: host("panic") };
+        let stopped = TrapReport::start_function(TrapReason::Host, Some(panic), 1024);
+        assert_eq!(
+            stopped.headline(),
+            "the module's start function trapped: it called `fprime_core.panic`, which always \
+             stops the program; its message is the PANIC line above (Host)."
+        );
+        let short = HostTrap::ShortTime { host: host("telemetry"), time_len: 8 };
+        assert_eq!(
+            TrapReport::start_function(TrapReason::Host, Some(short), 1024)
+                .explanation("`embedder`")
+                .as_deref(),
+            Some(start_row(TrapReason::Host).1),
+            "a host's remedy is about Inference declarations"
+        );
+        assert_eq!(
+            TrapReport::start_function(TrapReason::Unreachable, Some(panic), 1024),
+            TrapReport::start_function(TrapReason::Unreachable, None, 1024)
+        );
+        for (stack_words, given) in [(512, "512 words of"), (1, "1 word of")] {
+            assert_eq!(
+                TrapReport::start_function(TrapReason::StackOverflow, None, stack_words)
+                    .explanation("`embedder`"),
+                Some(format!(
+                    "`embedder` gives the interpreter {given} call stack, and the start \
+                     function's call chain needs more."
+                ))
+            );
+        }
+    }
+
     /// The out-of-fuel sentence names the entry and the budget, in the
     /// grammar the count takes.
     #[test]
@@ -691,6 +911,22 @@ mod tests {
             out_of_fuel("spin", 1),
             "`spin` ran out of fuel: the SpaceWasm interpreter stopped it after 1 interpreter \
              instruction"
+        );
+    }
+
+    /// A start function's out-of-fuel sentence names the start function, not
+    /// an export, and the budget in the grammar the count takes.
+    #[test]
+    fn a_start_function_running_out_of_fuel_names_the_start_function() {
+        assert_eq!(
+            start_out_of_fuel(7),
+            "the module's start function ran out of fuel: the SpaceWasm interpreter stopped it \
+             after 7 interpreter instructions"
+        );
+        assert_eq!(
+            start_out_of_fuel(1),
+            "the module's start function ran out of fuel: the SpaceWasm interpreter stopped it \
+             after 1 interpreter instruction"
         );
     }
 

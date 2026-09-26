@@ -10,12 +10,13 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use inference_spacewasm_runner::fprime::{
-    self, HostedModule, LOWERING_NOTE, REFERENCE_HOSTS, ReferenceHost, check_imports,
+    self, HostedInstance, LOWERING_NOTE, REFERENCE_HOSTS, ReferenceHost, check_imports,
     reference_table_lines,
 };
 use inference_spacewasm_runner::{
-    EngineConfig, Fuel, HostLog, HostTrap, ImportProblem, Limit, LoadError, Outcome, Session,
-    TrapReason, UnsupportedImports, Value,
+    ArgumentError, EngineConfig, Fuel, HostLog, HostTrap, HostedStartError, ImportProblem,
+    InvokeError, Limit, LoadError, Outcome, Session, StartError, TrapReason, TrapReport,
+    UnsupportedImports, Value, coerce_arguments, ir_stats,
 };
 use inference_target_conformance::spacewasm::check;
 use spacewasm::{AllocError, MemoryError, ValidationError};
@@ -59,10 +60,13 @@ fn fprime_module(rest: &str) -> Vec<u8> {
     ))
 }
 
-/// `wasm` loaded against the reference hosts, logging to `log`.
-fn hosted<'s>(session: &'s mut Session, wasm: &[u8], log: &HostLog) -> HostedModule<'s> {
-    fprime::load(session, wasm, log.clone(), BUDGET, EngineConfig::REFERENCE)
+/// `wasm` loaded against the reference hosts, logging to `log`, and started
+/// under [`BUDGET`].
+fn hosted<'s>(session: &'s mut Session, wasm: &[u8], log: &HostLog) -> HostedInstance<'s> {
+    fprime::load(session, wasm, log.clone(), EngineConfig::REFERENCE)
         .unwrap_or_else(|e| panic!("the fixture loads: {e}"))
+        .start(BUDGET)
+        .unwrap_or_else(|e| panic!("the fixture starts: {e}"))
 }
 
 /// How one call to `export` ended: its outcome, the detail a host recorded,
@@ -83,10 +87,10 @@ fn call(wasm: &[u8], export: &str) -> Call {
 }
 
 /// The sixteen bytes at `address`, as two `peek`s of `module` read them.
-fn sixteen_bytes(module: &mut HostedModule<'_>, address: i32) -> Vec<u8> {
+fn sixteen_bytes(instance: &mut HostedInstance<'_>, address: i32) -> Vec<u8> {
     [address, address + 8]
         .into_iter()
-        .flat_map(|at| match module.invoke("peek", &[Value::I32(at)]) {
+        .flat_map(|at| match instance.invoke("peek", &[Value::I32(at)]) {
             Ok(Outcome::Returned(Some(Value::I64(word)))) => word.to_le_bytes(),
             other => panic!("`peek` reads memory: {other:?}"),
         })
@@ -163,34 +167,37 @@ fn command_and_telemetry_answer_zero() {
 /// `clock_ms` answers the milliseconds since its own load, never less than
 /// the time that has passed, and logs nothing.
 ///
-/// The first load is left for a second before its first read, and a second load
-/// is read at once. Fails if the clock counts from the first call rather than
-/// the load — the first read would be under 1000 — or from an epoch every load
-/// shares, whether the process's start or the first load's — the second load's
-/// first read would be 1000 or more. The pause is a whole second so that a busy
-/// machine cannot stretch a read taken at once past it. Fails too if it answers
-/// a clock of its own epoch — the wall clock would read above 1.7 trillion — if
-/// it runs backwards or stands still across a sleep, or if it starts logging.
+/// The first load is left for a second before it is started and read at once,
+/// and a second load is started and read at once. Fails if the clock counts
+/// from the start or from the first call rather than the load — the first read
+/// would be under 1000 — or from an epoch every load shares, whether the
+/// process's start or the first load's — the second load's first read would be
+/// 1000 or more. The pause is a whole second so that a busy machine cannot
+/// stretch a read taken at once past it. Fails too if it answers a clock of its
+/// own epoch — the wall clock would read above 1.7 trillion — if it runs
+/// backwards or stands still across a sleep, or if it starts logging.
 #[test]
 fn clock_ms_counts_milliseconds_since_the_load_and_logs_nothing() {
     const IDLE_MS: i64 = 1_000;
     let idle = Duration::from_millis(IDLE_MS.unsigned_abs());
     let wasm = fprime_module(r#"(func (export "now") (result i64) (call $clock_ms))"#);
-    let read = |module: &mut HostedModule<'_>| match module.invoke("now", &[]) {
+    let read = |instance: &mut HostedInstance<'_>| match instance.invoke("now", &[]) {
         Ok(Outcome::Returned(Some(Value::I64(millis)))) => millis,
         other => panic!("`clock_ms` answers an i64: {other:?}"),
     };
     let mut session = Session::acquire();
     let log = HostLog::recording();
-    let mut module = hosted(&mut session, &wasm, &log);
+    let loaded = fprime::load(&mut session, &wasm, log.clone(), EngineConfig::REFERENCE)
+        .expect("the fixture loads");
     std::thread::sleep(idle);
-    let first = read(&mut module);
+    let mut instance = loaded.start(BUDGET).expect("the fixture starts");
+    let first = read(&mut instance);
     std::thread::sleep(Duration::from_millis(25));
-    let second = read(&mut module);
+    let second = read(&mut instance);
     assert!((IDLE_MS..60_000).contains(&first), "{first} ms since a load {IDLE_MS} ms old");
     assert!(second - first >= 25, "{first} ms, then {second} ms after sleeping 25");
     assert_eq!(log.line_count(), 0, "`clock_ms` logs nothing: {:?}", log.recorded());
-    drop(module);
+    drop(instance);
 
     let mut reloaded = hosted(&mut session, &wasm, &log);
     let fresh = read(&mut reloaded);
@@ -547,12 +554,14 @@ fn a_loads_stack_is_the_one_its_engine_holds_and_its_report_names() {
     ] {
         let config = EngineConfig { stack_words, ..EngineConfig::REFERENCE };
         let mut session = Session::acquire();
-        let mut module = fprime::load(&mut session, &wasm, HostLog::recording(), BUDGET, config)
-            .unwrap_or_else(|e| panic!("the fixture loads with {stack_words} words: {e}"));
-        assert_eq!(module.invoke("wide", &[]), Ok(wide), "{stack_words} words");
-        assert_eq!(module.invoke("deep", &[]), Ok(overflows.clone()), "{stack_words} words");
+        let mut instance = fprime::load(&mut session, &wasm, HostLog::recording(), config)
+            .unwrap_or_else(|e| panic!("the fixture loads with {stack_words} words: {e}"))
+            .start(BUDGET)
+            .unwrap_or_else(|e| panic!("the fixture starts with {stack_words} words: {e}"));
+        assert_eq!(instance.invoke("wide", &[]), Ok(wide), "{stack_words} words");
+        assert_eq!(instance.invoke("deep", &[]), Ok(overflows.clone()), "{stack_words} words");
         assert_eq!(
-            module.trap_report("deep", TrapReason::StackOverflow).explanation("`embedder`"),
+            instance.trap_report("deep", TrapReason::StackOverflow).explanation("`embedder`"),
             Some(format!(
                 "`embedder` gives the interpreter {given} and this call chain's frames need \
                  more. Recursion is refused at compile time (A035), so a deep chain of large \
@@ -820,9 +829,10 @@ fn bytes_the_check_cannot_read_are_left_to_the_interpreter() {
 ///
 /// The module also uses `memory.grow`, which the decoder refuses, and has a
 /// start function that calls `message`: without the unsupported import it
-/// would be the decoder's refusal, and without either it runs and logs. Fails
-/// if the check stops running first — the refusal would be the decoder's — or
-/// if anything of the module runs.
+/// would be the decoder's refusal, and without either it loads, running
+/// nothing, and logs once it is started. Fails if the check stops running
+/// first — the refusal would be the decoder's — or if anything of the module
+/// runs before it is started.
 #[test]
 fn an_unsupported_import_is_refused_before_the_module_is_decoded() {
     let module = |beep: &str, grow: &str| {
@@ -842,20 +852,30 @@ fn an_unsupported_import_is_refused_before_the_module_is_decoded() {
 
     let log = HostLog::recording();
     let mut session = Session::acquire();
-    let mut load = |wasm: &[u8]| {
-        fprime::load(&mut session, wasm, log.clone(), BUDGET, EngineConfig::REFERENCE).map(drop)
+    let mut refuse = |wasm: &[u8]| {
+        fprime::load(&mut session, wasm, log.clone(), EngineConfig::REFERENCE)
+            .map(drop)
+            .expect_err("the module is refused")
     };
-    let refusal = load(&module(beep, grow)).expect_err("the import is unsupported");
+    let refusal = refuse(&module(beep, grow));
     assert!(matches!(refusal, LoadError::UnsupportedImports(_)), "{refusal:?}");
     assert_eq!(log.line_count(), 0, "nothing ran: {:?}", log.recorded());
 
-    let refusal = load(&module("", grow)).expect_err("the decoder refuses `memory.grow`");
+    let refusal = refuse(&module("", grow));
     let LoadError::Decode(verdict) = refusal else {
         panic!("the decoder's refusal: {refusal:?}");
     };
     assert_eq!(verdict.err.err, ValidationError::IllegalMemoryGrow);
 
-    load(&module("", "(i32.const 0)")).expect("the module loads");
+    let loaded = fprime::load(
+        &mut session,
+        &module("", "(i32.const 0)"),
+        log.clone(),
+        EngineConfig::REFERENCE,
+    )
+    .expect("the module loads");
+    assert_eq!(log.line_count(), 0, "a load runs nothing: {:?}", log.recorded());
+    loaded.start(BUDGET).expect("the start function returns");
     assert_eq!(log.recorded(), ["MESSAGE hi"], "the start function ran and logged");
 }
 
@@ -878,7 +898,7 @@ fn tall(peak: usize) -> String {
 /// Why `wasm` did not load against the reference hosts in `config`.
 fn load_error(wasm: &[u8], config: EngineConfig) -> LoadError {
     let mut session = Session::acquire();
-    match fprime::load(&mut session, wasm, HostLog::recording(), BUDGET, config) {
+    match fprime::load(&mut session, wasm, HostLog::recording(), config) {
         Ok(_) => panic!("the fixture must not load"),
         Err(error) => error,
     }
@@ -938,15 +958,16 @@ fn a_module_at_both_verifier_bounds_loads_and_runs() {
     for (body, export) in [(nested(63), "deep"), (tall(256), "tall")] {
         let wasm = wat(&format!("(module {body})"));
         let mut session = Session::acquire();
-        let mut module = fprime::load(
+        let mut instance = fprime::load(
             &mut session,
             &wasm,
             HostLog::recording(),
-            BUDGET,
             EngineConfig::REFERENCE,
         )
-        .unwrap_or_else(|e| panic!("`{export}` is at the bound and loads: {e}"));
-        assert_eq!(module.invoke(export, &[]), Ok(Outcome::Returned(None)), "{export}");
+        .unwrap_or_else(|e| panic!("`{export}` is at the bound and loads: {e}"))
+        .start(BUDGET)
+        .unwrap_or_else(|e| panic!("`{export}` has no start function to fail: {e}"));
+        assert_eq!(instance.invoke(export, &[]), Ok(Outcome::Returned(None)), "{export}");
     }
 }
 
@@ -979,7 +1000,6 @@ fn a_module_within_both_bounds_that_runs_out_of_memory_is_too_much_ir() {
         &mut session,
         &wat(&format!("(module {})", function.repeat(64))),
         HostLog::recording(),
-        BUDGET,
         one_page,
     )
     .expect("64 functions fill the one page exactly");
@@ -1037,7 +1057,7 @@ fn a_module_the_check_accepts_and_the_decoder_refuses_is_a_gap_in_the_check() {
         [r#"(memory 1) (data (i32.const 65535) "x")"#, r#"(memory 1) (data (i32.const 65536) "")"#]
     {
         let wasm = wat(&format!("(module {body})"));
-        fprime::load(&mut session, &wasm, HostLog::recording(), BUDGET, EngineConfig::REFERENCE)
+        fprime::load(&mut session, &wasm, HostLog::recording(), EngineConfig::REFERENCE)
             .unwrap_or_else(|e| panic!("`{body}` fits memory and loads: {e}"));
     }
 }
@@ -1098,19 +1118,19 @@ const SHARED: &str = r#"(func $s (call $rsleep (i64.const 1)))
    (start $s)
    (func (export "f") (drop (call $command (i32.const 42) (i32.const 7))))"#;
 
-/// The start function [`fprime::load`] runs and the call
-/// [`HostedModule::invoke`] makes share the load's one budget, and a line a
+/// The start function [`fprime::HostedModule::start`] runs and the call
+/// [`HostedInstance::invoke`] makes share the start's one budget, and a line a
 /// host logged stays logged when the run then runs out.
 ///
 /// Eight instructions run both to the end and seven stop the entry just before
 /// its return, after it called `command`; five stop it before that call, three
 /// leave it nothing; two stop the start function after it called `rsleep`,
-/// and one before. Fails if the loader drops the caller's budget — a limit
+/// and one before. Fails if the start drops the caller's budget — a limit
 /// ignored runs every row to the end — if the call is given a budget of its
 /// own instead of what the start function left, if running out reports only
 /// the call's share, or if the log loses or invents a line around it.
 #[test]
-fn the_start_function_and_the_entry_share_the_loads_budget() {
+fn the_start_function_and_the_entry_share_the_starts_budget() {
     let wasm = fprime_module(SHARED);
     let both = ["RSLEEP 1", "COMMAND 42 7"];
     for (fuel, ended, lines) in [
@@ -1123,26 +1143,26 @@ fn the_start_function_and_the_entry_share_the_loads_budget() {
     ] {
         let mut session = Session::acquire();
         let log = HostLog::recording();
-        let mut module =
-            fprime::load(&mut session, &wasm, log.clone(), fuel, EngineConfig::REFERENCE)
-                .unwrap_or_else(|e| panic!("the start function runs within {fuel:?}: {e}"));
-        assert_eq!(module.invoke("f", &[]), Ok(ended), "{fuel:?}");
+        let mut instance = fprime::load(&mut session, &wasm, log.clone(), EngineConfig::REFERENCE)
+            .expect("the module loads")
+            .start(fuel)
+            .unwrap_or_else(|e| panic!("the start function runs within {fuel:?}: {e}"));
+        assert_eq!(instance.invoke("f", &[]), Ok(ended), "{fuel:?}");
         assert_eq!(log.recorded(), lines, "{fuel:?}");
         assert_eq!(log.line_count(), lines.len(), "{fuel:?}");
-        assert_eq!(module.host_trap(), None, "no host stopped the run: {fuel:?}");
+        assert_eq!(instance.host_trap(), None, "no host stopped the run: {fuel:?}");
     }
 
     for (budget, lines) in [(2, &both[..1]), (1, &[][..])] {
         let mut session = Session::acquire();
         let log = HostLog::recording();
-        let refusal =
-            fprime::load(&mut session, &wasm, log.clone(), limited(budget), EngineConfig::REFERENCE)
-                .map(drop)
-                .expect_err("the start function needs three instructions");
-        assert!(
-            matches!(refusal, LoadError::StartOutOfFuel { budget: spent } if spent == budget),
-            "{refusal:?}"
-        );
+        let failure = fprime::load(&mut session, &wasm, log.clone(), EngineConfig::REFERENCE)
+            .expect("the module loads")
+            .start(limited(budget))
+            .map(drop)
+            .expect_err("the start function needs three instructions");
+        assert_eq!(failure.error(), &StartError::OutOfFuel { budget }, "a budget of {budget}");
+        assert_eq!(failure.host_trap(), None, "no host stopped the start function");
         assert_eq!(log.recorded(), lines, "a budget of {budget}");
     }
 }
@@ -1168,25 +1188,247 @@ fn an_entry_that_runs_out_of_fuel_keeps_the_host_calls_it_made() {
     );
     let mut session = Session::acquire();
     let log = HostLog::recording();
-    let mut module =
-        fprime::load(&mut session, &wasm, log.clone(), limited(1_000), EngineConfig::REFERENCE)
-            .expect("the module loads");
-    assert_eq!(module.invoke("go", &[]), Ok(Outcome::OutOfFuel { budget: 1_000 }));
+    let mut instance = fprime::load(&mut session, &wasm, log.clone(), EngineConfig::REFERENCE)
+        .expect("the module loads")
+        .start(limited(1_000))
+        .expect("the module has no start function");
+    assert_eq!(instance.invoke("go", &[]), Ok(Outcome::OutOfFuel { budget: 1_000 }));
     assert_eq!(log.recorded(), ["COMMAND 42 7"]);
     assert_eq!(log.line_count(), 1);
-    assert_eq!(module.host_trap(), None);
+    assert_eq!(instance.host_trap(), None);
     assert_eq!(
-        module.invoke("go", &[]),
+        instance.invoke("go", &[]),
         Ok(Outcome::OutOfFuel { budget: 1_000 }),
         "the engine is idle again, and a second call is given the same budget"
     );
     assert_eq!(log.line_count(), 2);
-    drop(module);
+    drop(instance);
 
     let log = HostLog::recording();
-    let mut module =
-        fprime::load(&mut session, &wasm, log.clone(), Fuel::Unbounded, EngineConfig::REFERENCE)
-            .expect("the module loads");
-    assert_eq!(module.invoke("go", &[]), Ok(Outcome::Returned(Some(Value::I32(1_000_000)))));
+    let mut instance = fprime::load(&mut session, &wasm, log.clone(), EngineConfig::REFERENCE)
+        .expect("the module loads")
+        .start(Fuel::Unbounded)
+        .expect("the module has no start function");
+    assert_eq!(instance.invoke("go", &[]), Ok(Outcome::Returned(Some(Value::I32(1_000_000)))));
     assert_eq!(log.recorded(), ["COMMAND 42 7"]);
+}
+
+// ---------------------------------------------------------------------------
+// The start function
+// ---------------------------------------------------------------------------
+
+/// `raw`, as the text arguments a command line carries.
+fn texts(raw: &[&str]) -> Vec<String> {
+    raw.iter().map(ToString::to_string).collect()
+}
+
+/// A load runs nothing: a caller can refuse an export the module does not
+/// have and arguments its function cannot take, list the exports and measure
+/// the IR, and no host has logged a line. The start function's line comes
+/// with the start, and the call's after it.
+///
+/// This is the order `infs run` takes, and the reason it can refuse a call
+/// with nothing executed whatever the module declares. Fails if a load runs
+/// the start function — its line would be logged before any refusal — if the
+/// start or the call stops logging, or if the two log out of order.
+#[test]
+fn a_hosted_module_runs_nothing_before_it_is_started() {
+    let wasm = fprime_module(
+        r#"(data (i32.const 16) "start") (data (i32.const 32) "go")
+           (func $s (call $message (i32.const 16) (i32.const 5)))
+           (start $s)
+           (func (export "go") (call $message (i32.const 32) (i32.const 2)))
+           (func (export "add") (param i32 i32) (result i32)
+             (i32.add (local.get 0) (local.get 1)))"#,
+    );
+    let mut session = Session::acquire();
+    let log = HostLog::recording();
+    let module = fprime::load(&mut session, &wasm, log.clone(), EngineConfig::REFERENCE)
+        .expect("the module loads");
+    assert_eq!(log.line_count(), 0, "the load ran the start function: {:?}", log.recorded());
+
+    let missing = module.module().function("missing");
+    assert!(matches!(missing, Err(InvokeError::NoSuchExport { .. })), "{missing:?}");
+    let add = module.module().function("add").expect("`add` exists");
+    let short = coerce_arguments(&add, &texts(&["1"]));
+    assert!(matches!(short, Err(ArgumentError::Count { .. })), "{short:?}");
+    let word = coerce_arguments(&add, &texts(&["x", "1"]));
+    assert!(matches!(word, Err(ArgumentError::NotAnInteger { position: 1, .. })), "{word:?}");
+    assert_eq!(module.module().exported_functions().len(), 3, "`peek`, `go` and `add`");
+    let stats = ir_stats(module.module(), wasm.len());
+    assert_eq!(log.line_count(), 0, "reading the loaded module ran it: {:?}", log.recorded());
+
+    let mut instance = module.start(BUDGET).expect("the start function returns");
+    assert_eq!(log.recorded(), ["MESSAGE start"]);
+    assert_eq!(instance.invoke("go", &[]), Ok(Outcome::Returned(None)));
+    assert_eq!(log.recorded(), ["MESSAGE start", "MESSAGE go"]);
+    assert_eq!(instance.log().line_count(), 2, "the instance logs to the load's log");
+    assert_eq!(ir_stats(instance.module(), wasm.len()), stats);
+}
+
+/// How the start of `wasm`, which loads against the reference hosts, failed,
+/// with the lines the hosts logged.
+fn start_failure(wasm: &[u8], config: EngineConfig) -> (HostedStartError, Vec<String>) {
+    let mut session = Session::acquire();
+    let log = HostLog::recording();
+    let failure = fprime::load(&mut session, wasm, log.clone(), config)
+        .expect("the module loads, since a load runs nothing")
+        .start(BUDGET)
+        .map(drop)
+        .expect_err("the start function does not return");
+    (failure, log.recorded())
+}
+
+/// The report of a start failure's trap, which a trap has.
+fn trapped(failure: &HostedStartError) -> TrapReport {
+    failure.trap_report().unwrap_or_else(|| panic!("a trap has a report: {failure:?}"))
+}
+
+/// The explanation of every start function's trap but an exhausted stack's
+/// and a defect's.
+const NOT_FROM_THIS_COMPILER: &str =
+    "Inference never emits a start function, so the code that trapped did not come from this \
+     compiler.";
+
+/// A start function a host stopped is reported by what the host recorded, as
+/// a call's trap is: the start failure keeps the detail, and its report names
+/// the start function and the host's fact — but not the host's remedy, which
+/// is about the Inference declaration of a host, while this compiler never
+/// emits a start function.
+///
+/// Fails if the detail is lost when the module goes with its failed start —
+/// the report would fall back to "a host function stopped it" — if the report
+/// names an export instead of the start function, if a detail reaches the
+/// report of a trap that was not the host's, or if a start function's trap is
+/// explained as a call's.
+#[test]
+fn a_start_function_a_host_stopped_is_reported_with_the_hosts_detail() {
+    let (panicked, log) = start_failure(
+        &fprime_module(
+            r#"(data (i32.const 0) "boom")
+               (func $s (call $panic (i32.const 0) (i32.const 4) (i32.const 3)))
+               (start $s)"#,
+        ),
+        EngineConfig::REFERENCE,
+    );
+    assert_eq!(panicked.error(), &StartError::Trapped(TrapReason::Host));
+    assert_eq!(panicked.host_trap(), Some(HostTrap::Panic { host: host("fprime_core.panic") }));
+    assert_eq!(log, ["PANIC boom:3"]);
+    let report = trapped(&panicked);
+    assert_eq!(
+        report.headline(),
+        "the module's start function trapped: it called `fprime_core.panic`, which always stops \
+         the program; its message is the PANIC line above (Host)."
+    );
+    assert_eq!(report.explanation("`embedder`").as_deref(), Some(NOT_FROM_THIS_COMPILER));
+    assert_eq!(panicked.to_string(), "the module's start function trapped: Host");
+
+    let (short, log) = start_failure(
+        &fprime_module(
+            r#"(func $s (drop (call $telemetry (i32.const 3) (i32.const 100) (i32.const 8)
+                                              (i32.const 0) (i32.const 4))))
+               (start $s)"#,
+        ),
+        EngineConfig::REFERENCE,
+    );
+    let detail = HostTrap::ShortTime { host: host("fprime_core.telemetry"), time_len: 8 };
+    assert_eq!(short.host_trap(), Some(detail));
+    assert!(log.is_empty(), "{log:?}");
+    let report = trapped(&short);
+    assert_eq!(
+        report.headline(),
+        "the module's start function trapped: `fprime_core.telemetry` writes an 11-byte F Prime \
+         time, and `time_len` is 8 (Host)."
+    );
+    assert_eq!(report.explanation("`embedder`").as_deref(), Some(NOT_FROM_THIS_COMPILER));
+
+    let (outside, _) = start_failure(
+        &fprime_module(r#"(func $s (call $message (i32.const 70000) (i32.const 5))) (start $s)"#),
+        EngineConfig::REFERENCE,
+    );
+    assert_eq!(
+        trapped(&outside).headline(),
+        "the module's start function trapped: `fprime_core.message` was given 5 bytes at address \
+         70000, outside the module's 65536-byte linear memory (Host)."
+    );
+
+    let (unreachable, log) = start_failure(
+        &fprime_module(r#"(func $s unreachable) (start $s)"#),
+        EngineConfig::REFERENCE,
+    );
+    assert_eq!(unreachable.error(), &StartError::Trapped(TrapReason::Unreachable));
+    assert_eq!(unreachable.host_trap(), None);
+    assert!(log.is_empty(), "{log:?}");
+    assert_eq!(
+        trapped(&unreachable).headline(),
+        "the module's start function trapped: a runtime check failed (Unreachable)."
+    );
+}
+
+/// A start failure that is no trap has no trap report: a start function that
+/// ran out of fuel, having made a host call first.
+///
+/// Fails if a report is made up for a failure that is not a trap, which would
+/// word an exhausted budget as a trap of some reason.
+#[test]
+fn a_start_failure_that_is_no_trap_has_no_trap_report() {
+    let (spun, log) = start_failure(
+        &fprime_module(
+            r#"(func $s (local $i i32)
+                 (call $rsleep (i64.const 1))
+                 (loop $again
+                   (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                   (br_if $again (i32.lt_u (local.get $i) (i32.const 1000000)))))
+               (start $s)"#,
+        ),
+        EngineConfig::REFERENCE,
+    );
+    assert_eq!(spun.error(), &StartError::OutOfFuel { budget: 1_000_000 });
+    assert_eq!(spun.host_trap(), None);
+    assert_eq!(spun.trap_report(), None);
+    assert_eq!(log, ["RSLEEP 1"]);
+}
+
+/// The report of a start function whose frames do not fit the stack names
+/// the words the module was loaded with, as a call's report does, and says
+/// the start function's call chain needs more — without a call's word on
+/// recursion in Inference, which never emits a start function.
+///
+/// `$s` keeps 2,000 words of locals: more than the reference embedder's
+/// 1,024, less than 4,096. Fails if the start failure reports another stack
+/// than the one its load was given, or if the start function is given
+/// another.
+#[test]
+fn a_start_function_that_overflows_the_stack_is_reported_with_the_loads_stack() {
+    let wasm = fprime_module(&format!(
+        r#"(func $s (local {}) (local.set 1999 (i32.const 7))) (start $s)"#,
+        "i32 ".repeat(2000)
+    ));
+    for (stack_words, given) in [
+        (512, "512 words of call stack,"),
+        (1024, "1024 words of call stack, as spacewasm_std does,"),
+    ] {
+        let config = EngineConfig { stack_words, ..EngineConfig::REFERENCE };
+        let (failure, _) = start_failure(&wasm, config);
+        assert_eq!(failure.error(), &StartError::Trapped(TrapReason::StackOverflow));
+        let report = trapped(&failure);
+        assert_eq!(
+            report.headline(),
+            "the module's start function trapped: the interpreter's call stack is full \
+             (StackOverflow)."
+        );
+        assert_eq!(
+            report.explanation("`embedder`"),
+            Some(format!(
+                "`embedder` gives the interpreter {given} and the start function's call chain \
+                 needs more."
+            ))
+        );
+    }
+    let mut session = Session::acquire();
+    let roomy = EngineConfig { stack_words: 4096, ..EngineConfig::REFERENCE };
+    fprime::load(&mut session, &wasm, HostLog::recording(), roomy)
+        .expect("the module loads")
+        .start(BUDGET)
+        .expect("2,000 words fit 4,096");
 }

@@ -1,8 +1,10 @@
-//! Every way loading a module, calling one of its functions, building a host
-//! set or reading an argument can fail.
+//! Every way loading a module, starting it, calling one of its functions,
+//! building a host set or reading an argument can fail.
 //!
-//! A trap and an exhausted instruction budget are not here: they are how a
-//! call ends, not a failure to make it, and [`crate::Outcome`] carries them.
+//! A trap and an exhausted instruction budget of a call are not here: they are
+//! how a call ends, not a failure to make it, and [`crate::Outcome`] carries
+//! them. A start function's are, since a module whose start function does not
+//! return has no instance to call.
 
 use std::fmt;
 
@@ -13,6 +15,7 @@ use thiserror::Error;
 
 use crate::args::{arguments_phrase, type_name};
 use crate::fprime::ReferenceHost;
+use crate::report::{HostTrap, TrapReport};
 
 /// Why a module did not load.
 #[derive(Debug, Error)]
@@ -105,15 +108,25 @@ pub enum LoadError {
         /// The interpreter's own error.
         error: MemoryError,
     },
+}
 
-    /// The module's start function trapped.
+/// Why a loaded module's start function did not return, which leaves the
+/// module without an instance to call.
+///
+/// Only [`crate::LoadedModule::start`] gives one: a load runs nothing, so no
+/// [`LoadError`] is about the start function.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum StartError {
+    /// The start function trapped. A start function the engine refuses to
+    /// begin because its frame does not fit the value stack is one of these,
+    /// with `StackOverflow`, as a call is.
     #[error("the module's start function trapped: {0:?}")]
-    StartTrapped(TrapReason),
+    Trapped(TrapReason),
 
-    /// The module's start function was still running when its instruction
-    /// budget ran out.
+    /// The start function was still running when its instruction budget ran
+    /// out.
     #[error("the module's start function was still running after {budget} instructions")]
-    StartOutOfFuel {
+    OutOfFuel {
         /// The budget it was given.
         budget: usize,
     },
@@ -124,10 +137,10 @@ pub enum LoadError {
         "the module's start function paused: a host function it called returned \
          `HostFunctionBreak::Pause`, and the runner never resumes a paused call"
     )]
-    StartPaused,
+    Paused,
 
     /// The engine refused to begin the start function, for a reason other
-    /// than the stack it needs, which is [`LoadError::StartTrapped`] with
+    /// than the stack it needs, which is [`StartError::Trapped`] with
     /// `StackOverflow`.
     ///
     /// No module that passed validation reaches this, since none of the
@@ -135,14 +148,65 @@ pub enum LoadError {
     /// holds a start function to the type `[] -> []` and the runner begins it
     /// with no arguments, so their count (`ParamLenMismatch`) and their types
     /// (`ParamTypeMismatch`) always match; and the engine was built for this
-    /// load and has run nothing before it, so it is idle (`Busy`). It is a
-    /// value rather than a panic so that an interpreter defect is reported by
-    /// name.
+    /// module, which runs nothing before its start function, so it is idle
+    /// (`Busy`). It is a value rather than a panic so that an interpreter
+    /// defect is reported by name.
     #[error("the SpaceWasm interpreter refused to invoke the module's start function: {refusal}")]
-    StartRefused {
+    Refused {
         /// The interpreter's refusal, spelled as its `Debug` form spells it.
         refusal: String,
     },
+}
+
+/// Why [`crate::fprime::HostedModule::start`] returned no instance: the
+/// [`StartError`], with what a report of it needs.
+///
+/// A host that stops the program records why before it traps, and the detail
+/// is read from the module's hosts, which go with the module when a start
+/// function does not return. So the detail is kept here, beside the stack the
+/// module was loaded with, and [`HostedStartError::trap_report`] words a start
+/// function's trap as specifically as
+/// [`crate::fprime::HostedInstance::trap_report`] words a call's.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{error}")]
+pub struct HostedStartError {
+    error: StartError,
+    host_trap: Option<HostTrap>,
+    stack_words: usize,
+}
+
+impl HostedStartError {
+    /// The failure, with the detail its hosts recorded and the words of value
+    /// stack the module was loaded with.
+    pub(crate) fn new(error: StartError, host_trap: Option<HostTrap>, stack_words: usize) -> Self {
+        Self { error, host_trap, stack_words }
+    }
+
+    /// Why the start function did not return.
+    #[must_use]
+    pub fn error(&self) -> &StartError {
+        &self.error
+    }
+
+    /// Why a host stopped the start function, when one did.
+    #[must_use]
+    pub fn host_trap(&self) -> Option<HostTrap> {
+        self.host_trap
+    }
+
+    /// The report of the start function's trap, with the host's detail when a
+    /// host stopped it and the stack the module was loaded with; `None` when
+    /// the start function did not trap but ran out of fuel, paused, or was
+    /// refused.
+    #[must_use]
+    pub fn trap_report(&self) -> Option<TrapReport> {
+        match self.error {
+            StartError::Trapped(reason) => {
+                Some(TrapReport::start_function(reason, self.host_trap, self.stack_words))
+            }
+            StartError::OutOfFuel { .. } | StartError::Paused | StartError::Refused { .. } => None,
+        }
+    }
 }
 
 /// Why a loaded module's function was not called, or a call to it did not end

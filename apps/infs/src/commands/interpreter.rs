@@ -9,22 +9,41 @@
 //! byte, so a program importing anything else, or a reference host at another
 //! signature, is refused with nothing executed.
 //!
+//! A run takes four steps, in this order: the load, which decodes the module
+//! and allocates its memory and runs nothing; the entry export, resolved on the
+//! loaded module, and the arguments, read against its compiled parameters; the
+//! start, which runs the module's start function, if it declares one; and the
+//! call. A refusal of the load, of the entry or of an argument therefore comes
+//! with nothing of the module executed and no host called. That holds by the
+//! runner's types, not by what its loader happens to do: a load runs nothing,
+//! a loaded module can only be read, and the one way to run any of it is to
+//! start it, which gives it up for the instance that calls an export. Every
+//! refusal here is made on the loaded module, before the start, so none can
+//! follow anything the module ran. Inference never emits a start function and
+//! the linker refuses one, so for an Inference build the start runs nothing
+//! either; a start function that does not return ends the run with the entry
+//! never called, which its report says.
+//!
 //! What a run prints follows the `wasmtime` route where the two can agree: the
 //! build log, then `Invoking '<entry>' with the SpaceWasm interpreter (…)...`,
-//! then the value the entry returned as the last line on stdout, and nothing for
-//! a function that returns nothing. The hosts log each call to stderr as it is
-//! made, in the style of the reference embedder's lines. A refused load, a
-//! refused argument, a trap and an exhausted `--fuel` budget are errors, which
-//! `infs` reports and exits with status 1; a call that returns exits 0, whatever
-//! it returned.
+//! printed after the refusals and before the start, then the value the entry
+//! returned as the last line on stdout, and nothing for a function that returns
+//! nothing. The hosts log each call to stderr as it is made, in the style of
+//! the reference embedder's lines. A refused load, a refused argument, a start
+//! function that does not return, a trap and an exhausted `--fuel` budget are
+//! errors, which `infs` reports and exits with status 1; a call that returns
+//! exits 0, whatever it returned.
 //!
 //! Every sentence here that the runner can state, it states: the import lines,
 //! the reference table, a trap's first line and its explanation, the over-limit
 //! facts, why a conformant module inside both verifier bounds did not load, the
 //! argument refusals, what a function takes and the core of the out-of-fuel
 //! sentence are the runner's, with `` `infs run` `` passed where a sentence names
-//! the program embedding it. What is composed here is the framing only `infs`
-//! knows — the artifact's path, the `--fuel` flag, project mode, and the remedy.
+//! the program embedding it. A start function that does not return is worded as
+//! a call's ending is, through the same report, naming the module's start
+//! function where a call's names the entry. What is composed here is the
+//! framing only `infs` knows — the artifact's path, the `--fuel` flag, project
+//! mode, and the remedy.
 //!
 //! The whole run is synchronous and happens under one [`Session`], which is
 //! acquired and released inside [`run`]: nothing awaits while it is held.
@@ -37,8 +56,9 @@ use inference_spacewasm_runner::fprime::{self, LOWERING_NOTE, reference_table_li
 use inference_spacewasm_runner::{
     ArgumentError, EngineConfig, ExportedFunction, Fuel, HostLog, ImportProblem, InvokeError,
     LIMITS_FROM, Limit, LoadError, Outcome, OverLimit, REFERENCE_MAX_CONTROL_FRAMES,
-    REFERENCE_MAX_STACK_DEPTH, Session, UnsupportedImports, code_pages_exhausted,
-    coerce_arguments, conformance_gap, out_of_fuel, render, type_name,
+    REFERENCE_MAX_STACK_DEPTH, Session, StartError, TrapReport, UnsupportedImports, Value,
+    code_pages_exhausted, coerce_arguments, conformance_gap, out_of_fuel, render,
+    start_out_of_fuel, type_name,
 };
 
 /// How the runner's sentences name the program embedding it.
@@ -83,21 +103,39 @@ pub(crate) enum Arguments<'a> {
 /// as declared, a module over the reference configuration, any other decoder
 /// verdict — or to call the entry point — an export it does not have, an
 /// argument its parameters cannot take, a function taking arguments in project
-/// mode — and every way the call can end other than returning: a trap, and an
-/// exhausted `--fuel` budget. Each is worded for the reader, and nothing is
-/// executed before any refusal of the first two kinds.
+/// mode — and every way the module's start function or the call can end other
+/// than returning: a trap and an exhausted `--fuel` budget, and for a start
+/// function a pause or the interpreter's refusal to begin it. Each is worded
+/// for the reader. Nothing is executed before a refusal of the first two
+/// kinds, by construction: the load runs nothing, and the module is started —
+/// its start function run — only once the entry and its arguments have been
+/// accepted and the announcement printed.
 pub(crate) fn run(invocation: &Invocation<'_>) -> Result<()> {
+    let returned = run_logging_to(invocation, &HostLog::stderr(), |line| println!("{line}"))?;
+    if let Some(value) = returned {
+        println!("{}", render(value));
+    }
+    Ok(())
+}
+
+/// [`run`] with the log the hosts write to supplied, and the announcement
+/// handed to `announce` rather than printed, answering what the entry
+/// returned; so a test can record both and see which came first.
+fn run_logging_to(
+    invocation: &Invocation<'_>,
+    log: &HostLog,
+    announce: impl FnOnce(&str),
+) -> Result<Option<Value>> {
     let fuel = match invocation.fuel {
         Some(budget) => Fuel::Limited(budget),
         None => Fuel::Unbounded,
     };
     let entry = invocation.entry_point;
     let mut session = Session::acquire();
-    let mut module = fprime::load(
+    let module = fprime::load(
         &mut session,
         invocation.wasm,
-        HostLog::stderr(),
-        fuel,
+        log.clone(),
         EngineConfig::REFERENCE,
     )
     .map_err(|error| load_refusal(error, invocation.shown_as))?;
@@ -119,32 +157,61 @@ pub(crate) fn run(invocation: &Invocation<'_>) -> Result<()> {
         }
     };
 
-    println!("{}", announcement(entry, invocation.fuel));
-    match module
+    announce(&announcement(entry, invocation.fuel));
+    let mut instance = module
+        .start(fuel)
+        .map_err(|failure| start_refusal(failure.error(), failure.trap_report(), entry, log))?;
+    match instance
         .invoke(entry, &args)
         .map_err(|error| invoke_refusal(error, invocation.shown_as))?
     {
-        Outcome::Returned(value) => {
-            if let Some(value) = value {
-                println!("{}", render(value));
-            }
-            Ok(())
-        }
+        Outcome::Returned(value) => Ok(value),
         Outcome::Trapped(reason) => {
-            let report = module.trap_report(entry, reason);
-            let mut message = report.headline();
-            if let Some(explanation) = report.explanation(EMBEDDER) {
-                message.push('\n');
-                message.push_str(&explanation);
-            }
-            Err(anyhow!(message))
+            Err(anyhow!(trap_message(&instance.trap_report(entry, reason))))
         }
-        Outcome::OutOfFuel { budget } => Err(anyhow!(out_of_fuel_refusal(
-            entry,
-            budget,
-            module.log()
-        ))),
+        Outcome::OutOfFuel { budget } => {
+            Err(anyhow!(out_of_fuel_refusal(&out_of_fuel(entry, budget), budget, log)))
+        }
     }
+}
+
+/// A trap's report as `infs` prints it: the first line, and the explanation
+/// under it when the reason has one.
+fn trap_message(report: &TrapReport) -> String {
+    let mut message = report.headline();
+    if let Some(explanation) = report.explanation(EMBEDDER) {
+        message.push('\n');
+        message.push_str(&explanation);
+    }
+    message
+}
+
+/// The error a start function that did not return with `error` is reported
+/// as: after the announcement, so worded as a call's ending is rather than as
+/// a refused load, naming the module's start function where a call's names
+/// the entry, and ending with the fact that `entry` was not called.
+///
+/// Every variant is named, so a way a start can end that the runner adds has
+/// to be worded here before `infs` compiles. A trap is worded by its `report`,
+/// which [`inference_spacewasm_runner::HostedStartError::trap_report`] gives
+/// every trap; the variant's own text would stand in for a report it did not
+/// give.
+fn start_refusal(
+    error: &StartError,
+    report: Option<TrapReport>,
+    entry: &str,
+    log: &HostLog,
+) -> anyhow::Error {
+    let ended = match (error, report) {
+        (StartError::Trapped(_), Some(report)) => trap_message(&report),
+        (StartError::OutOfFuel { budget }, _) => {
+            out_of_fuel_refusal(&start_out_of_fuel(*budget), *budget, log)
+        }
+        (error @ (StartError::Trapped(_) | StartError::Paused | StartError::Refused { .. }), _) => {
+            format!("{error}.")
+        }
+    };
+    anyhow!("{ended} `{entry}` was not called.")
 }
 
 /// The line printed before the call: which function, under which interpreter
@@ -198,13 +265,7 @@ fn load_refusal(error: LoadError, shown_as: &Path) -> anyhow::Error {
         LoadError::ConformanceGap(verdict) => {
             anyhow!("`infs run` cannot load {artifact}: {}.", conformance_gap(&verdict))
         }
-        error @ (LoadError::Hosts(_)
-        | LoadError::Decode(_)
-        | LoadError::Resource { .. }
-        | LoadError::StartTrapped(_)
-        | LoadError::StartOutOfFuel { .. }
-        | LoadError::StartPaused
-        | LoadError::StartRefused { .. }) => {
+        error @ (LoadError::Hosts(_) | LoadError::Decode(_) | LoadError::Resource { .. }) => {
             anyhow!("`infs run` cannot load {artifact}: {error}.")
         }
     }
@@ -335,28 +396,28 @@ fn looks_like_an_option(text: &str) -> bool {
     text.len() > 1 && text.starts_with('-') && text.parse::<i128>().is_err()
 }
 
-/// The error a call that ran out of fuel is reported as, saying that the host
-/// calls it logged were made when it logged any.
-fn out_of_fuel_refusal(entry: &str, budget: usize, log: &HostLog) -> String {
+/// The error a run that ran out of fuel is reported as, from the runner's
+/// `ran_out` sentence — a call's or the start function's — saying that the
+/// host calls it logged were made when it logged any.
+fn out_of_fuel_refusal(ran_out: &str, budget: usize, log: &HostLog) -> String {
     let logged = if log.line_count() > 0 {
         " The host calls logged above had already been made."
     } else {
         ""
     };
     format!(
-        "{} (`--fuel {budget}`) before it returned. Either it never returns or it needs a larger \
-         budget: raise `--fuel`, or leave it out to run without one.{logged}",
-        out_of_fuel(entry, budget)
+        "{ran_out} (`--fuel {budget}`) before it returned. Either it never returns or it needs a \
+         larger budget: raise `--fuel`, or leave it out to run without one.{logged}"
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inference_spacewasm_runner::{ExportKind, ValType};
+    use inference_spacewasm_runner::{ExportKind, TrapReason, ValType};
     use wasm_encoder::{
         BlockType, CodeSection, EntityType, ExportSection, Function, FunctionSection,
-        ImportSection, Instruction, MemorySection, MemoryType, Module, TypeSection,
+        ImportSection, Instruction, MemorySection, MemoryType, Module, StartSection, TypeSection,
         ValType as Wasm,
     };
 
@@ -374,6 +435,37 @@ mod tests {
     /// and defining `functions`, each exported under its name, with a one-page
     /// memory exported as `memory`.
     fn module(imports: &[(&str, &str, &[Wasm], &[Wasm])], functions: &[Defined<'_>]) -> Vec<u8> {
+        assemble(imports, functions, None)
+    }
+
+    /// A module's start function: the `i32` locals it declares, and its body,
+    /// `end` included.
+    struct Start<'a> {
+        locals: u32,
+        body: Vec<Instruction<'a>>,
+    }
+
+    /// A start function with one `i32` local running `body`.
+    fn start_running(body: Vec<Instruction<'static>>) -> Start<'static> {
+        Start { locals: 1, body }
+    }
+
+    /// [`module`] with `start` as its start function, declared after
+    /// `functions` and exported under no name.
+    fn module_starting(
+        imports: &[(&str, &str, &[Wasm], &[Wasm])],
+        start: &Start<'_>,
+        functions: &[Defined<'_>],
+    ) -> Vec<u8> {
+        assemble(imports, functions, Some(start))
+    }
+
+    /// The module [`module`] and [`module_starting`] describe.
+    fn assemble(
+        imports: &[(&str, &str, &[Wasm], &[Wasm])],
+        functions: &[Defined<'_>],
+        start: Option<&Start<'_>>,
+    ) -> Vec<u8> {
         let mut module = Module::new();
         let mut types = TypeSection::new();
         let mut import_section = ImportSection::new();
@@ -399,6 +491,16 @@ mod tests {
             code.function(&body);
             index += 1;
         }
+        let start = start.map(|start| {
+            types.ty().function([], []);
+            funcs.function(index);
+            let mut body = Function::new([(start.locals, Wasm::I32)]);
+            for instruction in &start.body {
+                body.instruction(instruction);
+            }
+            code.function(&body);
+            StartSection { function_index: index }
+        });
         exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
         module.section(&types);
         if !imports.is_empty() {
@@ -415,6 +517,9 @@ mod tests {
         });
         module.section(&memories);
         module.section(&exports);
+        if let Some(start) = &start {
+            module.section(start);
+        }
         module.section(&code);
         module.finish()
     }
@@ -444,6 +549,13 @@ mod tests {
     /// enough that any small budget runs out, and finite, so a run that is
     /// given no budget still ends.
     fn counting_loop() -> Vec<Instruction<'static>> {
+        let mut body = count_to_a_million();
+        body.extend([Instruction::LocalGet(0), Instruction::End]);
+        body
+    }
+
+    /// The loop [`counting_loop`] runs: local 0 counted up to a million.
+    fn count_to_a_million() -> Vec<Instruction<'static>> {
         vec![
             Instruction::Loop(BlockType::Empty),
             Instruction::LocalGet(0),
@@ -454,9 +566,27 @@ mod tests {
             Instruction::I32LtS,
             Instruction::BrIf(0),
             Instruction::End,
-            Instruction::LocalGet(0),
-            Instruction::End,
         ]
+    }
+
+    /// Hands `then` the run of `wasm`'s `entry` with `arguments` under `fuel`,
+    /// its artifact named as project mode names it, and answers what `then`
+    /// does with it.
+    fn invoking<T>(
+        wasm: &[u8],
+        entry: &str,
+        arguments: Arguments<'_>,
+        fuel: Option<usize>,
+        then: impl FnOnce(&Invocation<'_>) -> T,
+    ) -> T {
+        let shown_as = Path::new("out").join("main.wasm");
+        then(&Invocation {
+            wasm,
+            shown_as: &shown_as,
+            entry_point: entry,
+            arguments,
+            fuel: fuel.and_then(NonZeroUsize::new),
+        })
     }
 
     /// Runs `wasm`'s `entry` with `arguments` under `fuel`, named as project
@@ -467,14 +597,7 @@ mod tests {
         arguments: Arguments<'_>,
         fuel: Option<usize>,
     ) -> Result<()> {
-        let shown_as = Path::new("out").join("main.wasm");
-        run(&Invocation {
-            wasm,
-            shown_as: &shown_as,
-            entry_point: entry,
-            arguments,
-            fuel: fuel.and_then(NonZeroUsize::new),
-        })
+        invoking(wasm, entry, arguments, fuel, run)
     }
 
     /// The refusal a run of `wasm`'s `entry` ends in.
@@ -492,6 +615,73 @@ mod tests {
     /// `out/main.wasm`, as the refusals name it.
     fn artifact() -> String {
         Path::new("out").join("main.wasm").display().to_string()
+    }
+
+    /// `fprime_core.rsleep`, which logs `RSLEEP` and the number it is given.
+    const RSLEEP: (&str, &str, &[Wasm], &[Wasm]) = ("fprime_core", "rsleep", &[Wasm::I64], &[]);
+
+    /// A start function logging `RSLEEP 1`, `main` logging `RSLEEP 2` and
+    /// returning 7, and `add` taking two parameters.
+    fn logging_on_start() -> Vec<u8> {
+        let main = main_running(vec![
+            Instruction::I64Const(2),
+            Instruction::Call(0),
+            Instruction::I32Const(7),
+            Instruction::End,
+        ]);
+        let start = start_running(vec![
+            Instruction::I64Const(1),
+            Instruction::Call(0),
+            Instruction::End,
+        ]);
+        module_starting(&[RSLEEP], &start, &[main, add()])
+    }
+
+    /// What one run did: how it ended, each announcement with the number of
+    /// lines the hosts had logged when it was made, and every line they
+    /// logged.
+    struct Recorded {
+        ended: Result<Option<Value>>,
+        announced: Vec<(String, usize)>,
+        logged: Vec<String>,
+    }
+
+    impl Recorded {
+        /// The refusal the run ended in.
+        fn refusal(self) -> String {
+            self.ended.expect_err("the run is refused").to_string()
+        }
+    }
+
+    /// Runs `wasm`'s `entry` with `arguments` under `fuel`, as [`run`] does,
+    /// with the hosts logging to a recording and the announcement recorded
+    /// instead of printed.
+    fn recorded(
+        wasm: &[u8],
+        entry: &str,
+        arguments: Arguments<'_>,
+        fuel: Option<usize>,
+    ) -> Recorded {
+        invoking(wasm, entry, arguments, fuel, |invocation| {
+            let log = HostLog::recording();
+            let mut announced = Vec::new();
+            let ended = run_logging_to(invocation, &log, |line| {
+                announced.push((line.to_string(), log.line_count()));
+            });
+            Recorded { ended, announced, logged: log.recorded() }
+        })
+    }
+
+    /// The hosts a start function stops a program with: `panic` and
+    /// `telemetry`, imported as functions 0 and 1.
+    const STOPPING_HOSTS: [(&str, &str, &[Wasm], &[Wasm]); 2] = [
+        ("fprime_core", "panic", &[Wasm::I32, Wasm::I32, Wasm::I32], &[]),
+        ("fprime_core", "telemetry", &[Wasm::I32; 5], &[Wasm::I32]),
+    ];
+
+    /// A `main` that returns 0, for the rows about a module's start function.
+    fn returning_zero() -> Defined<'static> {
+        main_running(vec![Instruction::I32Const(0), Instruction::End])
     }
 
     /// The announcement names the entry and the interpreter release, and the
@@ -743,7 +933,7 @@ mod tests {
     /// A call that runs out of fuel names the flag that set the budget, and
     /// says the host calls it logged were made only when it logged any.
     ///
-    /// Fails if the budget is not forwarded to the load, if the flag is not
+    /// Fails if the budget is not forwarded to the start, if the flag is not
     /// named, or if the host-call clause appears without a host call or goes
     /// missing after one.
     #[test]
@@ -912,5 +1102,258 @@ mod tests {
                 text.replace("{}", &entry_file.display().to_string())
             );
         }
+    }
+
+    /// A run refused for its entry or its arguments has run nothing of a
+    /// module whose start function logs, and has announced nothing: an entry
+    /// the module does not export, one that is its memory, a count or a word
+    /// its parameters refuse, and a function taking arguments in project mode.
+    ///
+    /// Fails if the module is started before the entry and the arguments are
+    /// accepted — the start function's `RSLEEP 1` would be logged — if the
+    /// announcement is made before a refusal, or if a refusal's words change.
+    #[test]
+    fn a_refused_entry_or_argument_runs_nothing_and_announces_nothing() {
+        let wasm = logging_on_start();
+        let entry_file = Path::new("src").join("main.inf");
+        let project = Arguments::Project { entry_file: &entry_file };
+        let (one, word) = (given(&["2"]), given(&["2", "x"]));
+        let rows = [
+            (
+                "missing",
+                Arguments::Given(&[]),
+                format!(
+                    "{} exports no function named `missing`. It exports: `main`, `add`. A \
+                     function is exported when it is declared `pub` at the top level of the entry \
+                     file.",
+                    artifact()
+                ),
+            ),
+            (
+                "memory",
+                Arguments::Given(&[]),
+                format!(
+                    "`memory` is exported by {}, but it is the module's linear memory, not a \
+                     function.",
+                    artifact()
+                ),
+            ),
+            (
+                "add",
+                Arguments::Given(&one),
+                "`add` takes 2 arguments (i32, i32), and 1 was given: 2.".to_string(),
+            ),
+            (
+                "add",
+                Arguments::Given(&word),
+                "argument 2 for `add` is `x`, which is not a decimal integer; `add` takes (i32, \
+                 i32)."
+                    .to_string(),
+            ),
+            (
+                "add",
+                project,
+                format!(
+                    "`add` takes 2 arguments (i32, i32), and project mode passes none. Run the \
+                     entry file with its arguments after the path: `infs run {} <i32> <i32>`.",
+                    entry_file.display()
+                ),
+            ),
+        ];
+        for (entry, arguments, refusal) in rows {
+            for fuel in [None, Some(1_000)] {
+                let run = recorded(&wasm, entry, arguments, fuel);
+                assert_eq!(run.announced, Vec::new(), "{entry}: announced before its refusal");
+                assert_eq!(run.logged, Vec::<String>::new(), "{entry}: the start function ran");
+                assert_eq!(run.refusal(), refusal, "{entry} under {fuel:?}");
+            }
+        }
+    }
+
+    /// A call that is made is announced before the module is started, and the
+    /// start function's host call is logged before the call's.
+    ///
+    /// Fails if the start function runs before the announcement, is skipped,
+    /// runs twice, or logs after the call, or if the budget stops reaching the
+    /// announcement.
+    #[test]
+    fn a_call_is_announced_before_the_start_function_runs() {
+        let wasm = logging_on_start();
+        for fuel in [None, Some(1_000)] {
+            let run = recorded(&wasm, "main", Arguments::Given(&[]), fuel);
+            let budget = fuel.and_then(NonZeroUsize::new);
+            assert_eq!(run.announced, [(announcement("main", budget), 0)], "{fuel:?}");
+            assert_eq!(run.logged, ["RSLEEP 1", "RSLEEP 2"], "{fuel:?}");
+            assert_eq!(run.ended.expect("`main` returns"), Some(Value::I32(7)), "{fuel:?}");
+        }
+        let project = Arguments::Project { entry_file: Path::new("main.inf") };
+        let run = recorded(&wasm, "main", project, None);
+        assert_eq!(run.logged, ["RSLEEP 1", "RSLEEP 2"], "project mode starts the module too");
+        assert_eq!(run.ended.expect("`main` returns"), Some(Value::I32(7)));
+    }
+
+    /// A start function that traps ends the run after the announcement,
+    /// worded as a call's trap is and naming the start function: by its first
+    /// line, by what a host recorded when a host stopped it, and by the
+    /// explanation of a start function's trap — the words `infs run` gives
+    /// when its frame does not fit, and otherwise that the code did not come
+    /// from this compiler — and then that the entry was not called.
+    ///
+    /// Fails if a start trap is reported as a refused load, if the host's
+    /// detail or the explanation is dropped or is a call's, if the start
+    /// function is named as the entry, or if the entry's name is not the one
+    /// invoked.
+    #[test]
+    fn a_start_function_that_traps_ends_the_run_like_a_calls_trap() {
+        let unreachable = start_running(vec![Instruction::Unreachable, Instruction::End]);
+        let panic = start_running(vec![
+            Instruction::I32Const(0),
+            Instruction::I32Const(0),
+            Instruction::I32Const(7),
+            Instruction::Call(0),
+            Instruction::End,
+        ]);
+        let short_time = start_running(vec![
+            Instruction::I32Const(3),
+            Instruction::I32Const(100),
+            Instruction::I32Const(8),
+            Instruction::I32Const(0),
+            Instruction::I32Const(4),
+            Instruction::Call(1),
+            Instruction::Drop,
+            Instruction::End,
+        ]);
+        let wide = Start { locals: 2000, body: vec![Instruction::End] };
+        let boot = Defined { name: "boot", ..returning_zero() };
+        let not_ours = "Inference never emits a start function, so the code that trapped did not \
+                        come from this compiler.";
+        let rows = [
+            (
+                module_starting(&[], &unreachable, &[returning_zero(), boot]),
+                "boot",
+                format!(
+                    "the module's start function trapped: a runtime check failed (Unreachable).\n\
+                     {not_ours} `boot` was not called."
+                ),
+                &[][..],
+            ),
+            (
+                module_starting(&STOPPING_HOSTS, &panic, &[returning_zero()]),
+                "main",
+                format!(
+                    "the module's start function trapped: it called `fprime_core.panic`, which \
+                     always stops the program; its message is the PANIC line above (Host).\n\
+                     {not_ours} `main` was not called."
+                ),
+                &["PANIC :7"][..],
+            ),
+            (
+                module_starting(&STOPPING_HOSTS, &short_time, &[returning_zero()]),
+                "main",
+                format!(
+                    "the module's start function trapped: `fprime_core.telemetry` writes an \
+                     11-byte F Prime time, and `time_len` is 8 (Host).\n{not_ours} `main` was not \
+                     called."
+                ),
+                &[][..],
+            ),
+            (
+                module_starting(&[], &wide, &[returning_zero()]),
+                "main",
+                "the module's start function trapped: the interpreter's call stack is full \
+                 (StackOverflow).\n`infs run` gives the interpreter 1024 words of call stack, as \
+                 spacewasm_std does, and the start function's call chain needs more. `main` was \
+                 not called."
+                    .to_string(),
+                &[][..],
+            ),
+        ];
+        for (wasm, entry, refusal, logged) in rows {
+            let run = recorded(&wasm, entry, Arguments::Given(&[]), None);
+            assert_eq!(run.announced, [(announcement(entry, None), 0)], "{refusal}");
+            assert_eq!(run.logged, logged, "{refusal}");
+            assert_eq!(run.refusal(), refusal);
+        }
+    }
+
+    /// A start function still running when the `--fuel` budget runs out ends
+    /// the run as a call that ran out does, naming the start function and the
+    /// flag, and saying the host calls it made were made; and with no budget
+    /// it runs to its end and the call is made.
+    ///
+    /// Fails if `--fuel` stops reaching the start, if the start function is
+    /// named as the entry or its running out reported as a refused load, or if
+    /// the host-call clause is dropped after a call or appears without one.
+    #[test]
+    fn a_start_function_that_runs_out_of_fuel_ends_the_run_like_a_call() {
+        let counting = |logs_first: bool| {
+            let mut body = Vec::new();
+            if logs_first {
+                body.extend([Instruction::I64Const(1), Instruction::Call(0)]);
+            }
+            body.extend(count_to_a_million());
+            body.push(Instruction::End);
+            module_starting(&[RSLEEP], &start_running(body), &[returning_zero()])
+        };
+        let core = "the module's start function ran out of fuel: the SpaceWasm interpreter \
+                    stopped it after 100 interpreter instructions (`--fuel 100`) before it \
+                    returned. Either it never returns or it needs a larger budget: raise \
+                    `--fuel`, or leave it out to run without one.";
+        for (logs_first, refusal, logged) in [
+            (false, format!("{core} `main` was not called."), &[][..]),
+            (
+                true,
+                format!(
+                    "{core} The host calls logged above had already been made. `main` was not \
+                     called."
+                ),
+                &["RSLEEP 1"][..],
+            ),
+        ] {
+            let wasm = counting(logs_first);
+            let run = recorded(&wasm, "main", Arguments::Given(&[]), Some(100));
+            let budget = NonZeroUsize::new(100);
+            assert_eq!(run.announced, [(announcement("main", budget), 0)]);
+            assert_eq!(run.logged, logged);
+            assert_eq!(run.refusal(), refusal);
+
+            let unbounded = recorded(&wasm, "main", Arguments::Given(&[]), None);
+            assert_eq!(unbounded.ended.expect("the count ends"), Some(Value::I32(0)));
+        }
+    }
+
+    /// Every way a start function can fail to return ends the refusal with the
+    /// entry not called, the ones no reference host or validated module
+    /// brings about — a pause, a start the interpreter refuses to begin, a
+    /// trap the runner gives no report — in the runner's own words.
+    ///
+    /// Fails if a variant loses the closing sentence, names another entry
+    /// than the one invoked, or drops the runner's words.
+    #[test]
+    fn every_start_failure_ends_with_the_entry_not_called() {
+        let log = HostLog::recording();
+        let refused = |error: StartError, entry| start_refusal(&error, None, entry, &log);
+        assert_eq!(
+            refused(StartError::Paused, "main").to_string(),
+            "the module's start function paused: a host function it called returned \
+             `HostFunctionBreak::Pause`, and the runner never resumes a paused call. `main` was \
+             not called."
+        );
+        assert_eq!(
+            refused(StartError::Refused { refusal: "Busy".to_string() }, "add").to_string(),
+            "the SpaceWasm interpreter refused to invoke the module's start function: Busy. `add` \
+             was not called."
+        );
+        assert_eq!(
+            refused(StartError::Trapped(TrapReason::Unreachable), "main").to_string(),
+            "the module's start function trapped: Unreachable. `main` was not called."
+        );
+        assert_eq!(
+            refused(StartError::OutOfFuel { budget: 1 }, "spin").to_string(),
+            "the module's start function ran out of fuel: the SpaceWasm interpreter stopped it \
+             after 1 interpreter instruction (`--fuel 1`) before it returned. Either it never \
+             returns or it needs a larger budget: raise `--fuel`, or leave it out to run without \
+             one. `spin` was not called."
+        );
     }
 }
