@@ -234,11 +234,14 @@
 //! ## Limitations
 //!
 //! - **Analyze phase**: [`analyze`] runs the whole registered rule set, but
-//!   against the *default* memory layout. A caller that emits a different one
-//!   must use [`analyze_with_options`] and pass the matching stack budget, or
-//!   A036 measures cumulative call-chain frame usage against a shadow stack the
-//!   artifact does not have — accepting a program that overflows a smaller stack,
-//!   or rejecting one a larger stack accommodates.
+//!   against the *default* memory layout and the *default* target. A caller that
+//!   emits a different layout must use [`analyze_with_options`] and pass the
+//!   matching stack budget, or A036 measures cumulative call-chain frame usage
+//!   against a shadow stack the artifact does not have — accepting a program
+//!   that overflows a smaller stack, or rejecting one a larger stack
+//!   accommodates. A caller that builds for another target must pass that
+//!   target too, or A055 never measures a function against the parameter words
+//!   the `spacewasm` runtime accepts.
 //!
 //! ## CLI Tools
 //!
@@ -269,9 +272,10 @@
 pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
 
 /// Re-export of the analysis settings so a caller that configures code
-/// generation can hand [`analyze_with_options`] a budget matching the artifact
-/// it is about to emit, without a direct dependency on `inference-analysis`.
-pub use inference_analysis::AnalysisOptions;
+/// generation can hand [`analyze_with_options`] a budget and a target matching
+/// the artifact it is about to emit, without a direct dependency on
+/// `inference-analysis`.
+pub use inference_analysis::{AnalysisOptions, TargetName};
 use inference_ast::arena::AstArena;
 pub use inference_type_checker::typed_context::TypedContext;
 /// Re-export of the lossless type-check entry point and its result types so
@@ -685,10 +689,11 @@ pub fn type_check_with_diagnostics(arena: AstArena) -> TypeCheckOutcome {
 /// carries the catalogue rule by rule and is the list to consult; a summary
 /// repeated here would go stale as rules are added.
 ///
-/// This is the **default-layout** entry point: it measures A036 against the
-/// stack budget a default build emits. A caller that configures the memory
-/// layout must call [`analyze_with_options`] with the matching budget instead,
-/// or that rule polices a shadow stack the artifact does not have.
+/// This is the **default-artifact** entry point: it measures A036 against the
+/// stack budget a default build emits, and A055 for the default target, which
+/// sets no parameter-word limit. A caller that configures the memory layout or
+/// the target must call [`analyze_with_options`] with the matching settings
+/// instead, or those rules police an artifact that is not the one being built.
 ///
 /// # Examples
 ///
@@ -726,10 +731,12 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 
 /// Performs static analysis on the typed AST under the given artifact settings.
 ///
-/// [`analyze`] assumes the default memory layout. A caller that compiles with a
-/// different one must use this entry point and pass the matching stack budget,
-/// or A036 measures call-chain depth against a shadow stack the emitted module
-/// does not have.
+/// [`analyze`] assumes the default memory layout and the default target. A
+/// caller that compiles with a different layout must use this entry point and
+/// pass the matching stack budget, or A036 measures call-chain depth against a
+/// shadow stack the emitted module does not have; one that builds for another
+/// target must pass that target, or A055 measures the program for a runtime it
+/// is not built for.
 ///
 /// # Errors
 ///

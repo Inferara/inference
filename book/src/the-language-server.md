@@ -210,8 +210,9 @@ overlay-then-disk `Vfs` loader seam the compiler uses, which must stay
 Salsa-free so compiler and IDE share one import-resolution path. The database
 therefore represents change signals, not content, as inputs:
 
-- `EntryInput { path, src_root, evicted }` — a project entry's identity, plus
-  the eviction lever (below);
+- `EntryInput { path, root, evicted }` — a project entry's identity (its path,
+  and the source root and build target it is analyzed under), plus the
+  eviction lever (below);
 - `FileStamp { stamp }` — an opaque monotonic counter per reachable file,
   bumped on any overlay write to that path;
 - `AvailabilityEpoch` — a singleton bumped when a `didOpen` makes overlay
@@ -318,11 +319,22 @@ into one sorted, deduplicated list, each tagged with a stable `code`:
 | Parser | `syntax` | unterminated string, missing `;` |
 | Import resolution | `import` | unresolved `use`, broken imported file |
 | Type checker | `type` | mismatched types, unknown name |
-| Analysis rules | `A001`…`A054` | non-det block constraints (see [Static Analysis](static-analysis.md)) |
+| Analysis rules | `A001`…`A055` | non-det block constraints (see [Static Analysis](static-analysis.md)) |
 
 Only the entry document's own diagnostics are published — errors inside an
 imported file are that file's diagnostics when *it* is open, though a broken
 import is still summarized on the `use` directive that names it.
+
+Analysis runs for the target the project builds for. The server reads
+`[build] target` from the `Inference.toml` that governs the document — the same
+manifest that supplies its source root — so a rule that measures a program
+against its runtime reports what `infs build` would: in a `spacewasm` project,
+A055 underlines a function whose parameters exceed the 255 words SpaceWasm
+accepts. A document no manifest governs is analyzed for the default target,
+`wasm32`, and so is one whose manifest names no target or a target this
+compiler does not know. The manifest is read once per open document and its
+answer kept until the document is closed, so a `[build] target` changed while a
+document is open takes effect for it once it is reopened.
 
 The analysis model is **per-document**: each open file is analyzed as its own
 project entry together with its import closure, and there is no shared

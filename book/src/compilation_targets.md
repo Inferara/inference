@@ -558,7 +558,7 @@ why it is a sentence here rather than a row above.
 
 | Limit | Value | Where it comes from |
 |-------|-------|---------------------|
-| Parameter words per function | 255 | An `i64` is two words, so 128 `i64` parameters already exceed it |
+| Parameter words per function | 255 | An `i64` is two words, so 128 `i64` parameters already exceed it. Analysis rule A055 asks this of the source first — see [Conformance](#conformance) |
 | Local words per function | 65,535 | The same accounting |
 | Call frame per function | 65,535 words | Two words of header plus the locals plus the operand peak. It bites before the local-word limit does: a function with an empty operand stack may declare 65,533 local words and no more |
 | Import module and field name | 32 bytes each | `Module::MAX_NAME_LENGTH` |
@@ -697,6 +697,27 @@ them describe module shapes this compiler cannot produce; those say so, and ask
 you to rebuild the external module or report a compiler bug, because you did not
 write the file the shape is in — the two IR-immediate ones and the truncation
 one still name the edit that would shorten it, since for those there is one.
+
+**What is asked of the source first.** One limit in the table is also a
+property of a declaration: a function's parameter words follow from its
+signature. Analysis rule A055 asks it of every function the program defines,
+before code generation runs, and refuses one over 255 on its parameter list,
+saying where the words went — so many for each parameter type, one for a
+`self` receiver, one for the hidden pointer a struct or array result is
+written through. For a `wide.inf` declaring
+`fn wide(p0: u32, p1: u32, …, p255: u32) -> u32` on its first line:
+
+```text
+$ infc wide.inf --target spacewasm
+Parsed: wide.inf
+1:9: error[A055]: `wide` declares 256 parameter words, and SpaceWasm accepts at most 255 in one function: 256 for 256 `u32` parameters; SpaceWasm counts a function's parameters in four-byte words — two for an `i64` or `u64`, one for any other type, a struct or an array included, since it is passed as its address — and records the count in a single byte, so it refuses to load a module that declares more; pass related values together in a struct, which costs one word however many fields it has, or split the function
+```
+
+The conformance check still counts parameter words in the finished module,
+where it is the only check that sees a function a linked module brings in: such
+a function has no declaration in the program for a source-level rule to read.
+The editor reports A055 too, for a project whose `Inference.toml` names
+`target = "spacewasm"` under `[build]`.
 
 **What is reported.** Three numbers, and each carries its unit because two of
 them sound alike and are not the same quantity:

@@ -316,6 +316,29 @@ pub(crate) fn innermost_element(kind: &TypeInfoKind) -> &TypeInfoKind {
     }
 }
 
+/// The type as the source spells it.
+///
+/// A message that quotes a type back to its author — inside the `_: {ty}` A050
+/// recommends, or as the type A055 counts parameter words for — has to use a
+/// name the author can actually write. A builtin uses its source name, which is
+/// why `i32` and `bool` are not the checker's capitalized `Display` renderings;
+/// an array is rebuilt from its element so the same holds at every depth, since
+/// `Display` would descend into the capitalized form and render `[Bool; 2]`.
+/// Everything else keeps `Display`, which renders a struct or enum by its
+/// canonical key.
+#[must_use = "this is a pure rendering with no side effects"]
+pub(crate) fn render_type(kind: &TypeInfoKind) -> String {
+    if let Some(builtin) = kind.as_builtin_str() {
+        return builtin.to_string();
+    }
+    match kind {
+        TypeInfoKind::Array(elem, length) => {
+            format!("[{}; {length}]", render_type(&elem.kind))
+        }
+        _ => kind.to_string(),
+    }
+}
+
 /// Returns true if a *field's* type is compound: a struct, or an array whose
 /// innermost element type is compound. Scalar arrays like `[i32; 3]` and
 /// multidimensional scalar arrays like `[[i32; 3]; 2]` are not compound.

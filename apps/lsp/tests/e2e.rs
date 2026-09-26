@@ -379,6 +379,84 @@ fn duplicate_local_surfaces_as_an_a041_finding() {
     client.shutdown_exit_ok();
 }
 
+// --- 6b. the manifest's build target reaches analysis (A055) ----------------
+
+/// A well-formed manifest with no build settings.
+const PACKAGE_MANIFEST: &str = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n";
+
+/// A function of 256 `u32` parameters: 256 words, one over the most SpaceWasm
+/// accepts in one function, and nothing to any other target.
+fn wide_source() -> String {
+    let params = (0..256)
+        .map(|index| format!("p{index}: u32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("pub fn wide({params}) -> u32 {{ return p0; }}\n")
+}
+
+/// A project directory whose `src/main.inf` is `source`, with `manifest` as its
+/// `Inference.toml` when there is one, plus the entry's `file://` URI. The
+/// document is not opened yet.
+fn project_fixture(tag: &str, manifest: Option<&str>, source: &str) -> (TempDir, String) {
+    let dir = TempDir::new(tag);
+    if let Some(manifest) = manifest {
+        dir.write("Inference.toml", manifest);
+    }
+    let path = dir.write("src/main.inf", source);
+    let uri = path_to_uri(&path);
+    (dir, uri)
+}
+
+#[test]
+fn a_spacewasm_project_underlines_a_function_over_its_parameter_words() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let source = wide_source();
+    let manifest = format!("{PACKAGE_MANIFEST}\n[build]\ntarget = \"spacewasm\"\n");
+    let (_dir, uri) = project_fixture("a055-spacewasm", Some(&manifest), &source);
+    let published = client.did_open(&uri, &source, 1);
+
+    let finding = published.by_code("A055").expect("an A055 finding");
+    assert_eq!(finding["severity"], json!(1), "A055 is an Error");
+    assert!(
+        finding["message"].as_str().is_some_and(|m| m.starts_with(
+            "`wide` declares 256 parameter words, and SpaceWasm accepts at most 255"
+        )),
+        "the message names the function and both numbers, got {}",
+        finding["message"]
+    );
+    // Underlines the parameter list, from the first parameter to the last.
+    assert_eq!(finding["range"]["start"], pos_at(&source, "p0: u32"));
+    assert_eq!(finding["range"]["end"], pos_after(&source, "p255: u32"));
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn a_project_without_a_spacewasm_target_does_not_underline_it() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let source = wide_source();
+    let wasm32 = format!("{PACKAGE_MANIFEST}\n[build]\ntarget = \"wasm32\"\n");
+    for (tag, manifest) in [
+        ("a055-no-manifest", None),
+        ("a055-no-target", Some(PACKAGE_MANIFEST)),
+        ("a055-wasm32", Some(wasm32.as_str())),
+    ] {
+        let (_dir, uri) = project_fixture(tag, manifest, &source);
+        let published = client.did_open(&uri, &source, 1);
+        assert!(
+            published.by_code("A055").is_none(),
+            "{tag}: only a `spacewasm` build limits parameter words, got {:?}",
+            published.diagnostics
+        );
+    }
+
+    client.shutdown_exit_ok();
+}
+
 // --- 7. hover ---------------------------------------------------------------
 
 #[test]

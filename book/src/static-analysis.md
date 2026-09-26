@@ -297,11 +297,11 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-Fifty-one rules are registered in `all_rules()`. Forty-five are
+Fifty-two rules are registered in `all_rules()`. Forty-six are
 error-severity — they block compilation — and six are warnings; no
 info-severity rule has been defined yet. Three ids in the numbering range
 (A013, A021, A030) are currently unassigned, so the assigned ids run from
-A001 to A054. The tables below group the rules by the invariant family they
+A001 to A055. The tables below group the rules by the invariant family they
 protect; the descriptions are condensed from the rules' own doc comments.
 
 ### Control flow and termination
@@ -555,6 +555,36 @@ has to say `mut`, because the linker's write-set check is type-agnostic; what
 the exemption buys is that the *call site* is not held to a `mut` binding,
 since the argument is an integer rather than a region. Closing the gap the
 exemption leaves open is tracked in issue #420.
+
+### Target limits
+
+| ID | What it enforces |
+|----|------------------|
+| A055 | at the `spacewasm` target, a function declares at most 255 four-byte parameter words |
+
+A055 measures a program against the runtime it is built for rather than
+stating a property of the source alone — as A036 does against the shadow stack
+the build emits — and it is the one rule that reads the build target. SpaceWasm's interpreter counts a function's parameters in four-byte
+words — two for an `i64` or `u64`, one for any other type, a struct or an array
+being passed as its address — and keeps the count in a single byte, so it
+refuses to load a module whose function declares more than 255. The build's
+post-link conformance check (see
+[Compilation Targets](compilation_targets.md#conformance)) has always refused
+such a module, but it can only name the finished module's function and a
+number. The rule asks the same question of the source, underlines the
+declaration's parameter list, and itemizes where the words went: so many for
+so many parameters of each type, one for a `self` receiver, and one for the
+hidden pointer a struct or array result is written through — the word the
+parameter list does not show. The count is the signature code generation
+emits, held to it by a differential test over the corpus against the
+conformance checker's own reading of each module. A build for any other target
+is not measured, and neither is a `spec`, which a compile-mode build strips, or
+an `external fn`, which is an import. A function a linked module brings in is
+left to the post-link check, which is the only place its words exist.
+
+The editor measures a file for the target its project's `Inference.toml`
+names under `[build] target`, so a `spacewasm` project shows A055 where it is
+written (see [The Language Server](the-language-server.md)).
 
 ### Advisory rules
 

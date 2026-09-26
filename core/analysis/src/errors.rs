@@ -331,6 +331,112 @@ fn generic_not_supported_message(site: &GenericSite) -> String {
     }
 }
 
+/// The parameter words one function's lowered signature declares, itemized by
+/// where each word comes from, as [`AnalysisDiagnostic::ParamWordsExceeded`]
+/// reports them.
+///
+/// Every word the signature declares is in exactly one item, so the total is
+/// computed from the items rather than stored beside them and cannot disagree
+/// with them. `Display` renders the itemization, one clause per item, in the
+/// order a reader meets them in the declaration: the receiver, the declared
+/// parameters, and last the pointer the declaration does not show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamWords {
+    /// Whether the function takes a `self` receiver, which is passed as the
+    /// address of its struct: one word.
+    pub receiver: bool,
+    /// The declared parameters that have a lowering, grouped by type in the
+    /// order each type first appears.
+    pub params: Vec<ParamWordsGroup>,
+    /// The type of a struct or array result, which the caller receives through a
+    /// hidden pointer passed ahead of every declared parameter: one word.
+    pub result_pointer: Option<String>,
+}
+
+/// The declared parameters of one type, within a [`ParamWords`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamWordsGroup {
+    /// The type as the source spells it.
+    pub ty: String,
+    /// How many parameters are declared at it.
+    pub count: u32,
+    /// The words one of them occupies: two for `i64` and `u64`, one for every
+    /// other type.
+    pub words_each: u32,
+}
+
+impl ParamWords {
+    /// Every word the signature declares.
+    #[must_use = "returns the total without modifying the itemization"]
+    pub fn total(&self) -> u32 {
+        let params: u32 = self
+            .params
+            .iter()
+            .map(|group| group.count.saturating_mul(group.words_each))
+            .sum();
+        params
+            .saturating_add(u32::from(self.receiver))
+            .saturating_add(u32::from(self.result_pointer.is_some()))
+    }
+}
+
+impl Display for ParamWords {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut items = Vec::new();
+        if self.receiver {
+            items.push("1 for the `self` receiver".to_string());
+        }
+        for group in &self.params {
+            let words = group.count.saturating_mul(group.words_each);
+            items.push(if group.count == 1 {
+                format!("{words} for one `{}` parameter", group.ty)
+            } else {
+                format!("{words} for {} `{}` parameters", group.count, group.ty)
+            });
+        }
+        if let Some(ty) = &self.result_pointer {
+            items.push(format!(
+                "1 for the hidden pointer a `{ty}` result is written through"
+            ));
+        }
+        f.write_str(&join_with_and(&items))
+    }
+}
+
+/// `a`, `a and b`, `a, b and c`: a list read as one clause of a sentence.
+fn join_with_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// The message of [`AnalysisDiagnostic::ParamWordsExceeded`].
+///
+/// The itemization is the part a reader cannot recover from the declaration: that
+/// an `i64` costs two words, that a struct costs one however many fields it has,
+/// and that a struct or array *result* costs a word the parameter list does not
+/// show. The rest says why a byte is the limit and what to change.
+///
+/// The whole message is `SpaceWasm`'s — the runtime, the limit, and the word
+/// model it explains — because that is the only target with a parameter-word
+/// limit. A target that gains one needs its own sentence here, and the limit is
+/// read from the rule's constant rather than carried, so no finding can pair
+/// this explanation with another runtime's number.
+fn param_words_exceeded_message(function: &str, words: &ParamWords) -> String {
+    format!(
+        "`{function}` declares {total} parameter words, and SpaceWasm accepts at most {limit} in \
+         one function: {words}; SpaceWasm counts a function's parameters in four-byte words — \
+         two for an `i64` or `u64`, one for any other type, a struct or an array included, \
+         since it is passed as its address — and records the count in a single byte, so it \
+         refuses to load a module that declares more; pass related values together in a \
+         struct, which costs one word however many fields it has, or split the function",
+        total = words.total(),
+        limit = crate::rules::param_words_exceeded::SPACEWASM_MAX_PARAM_WORDS,
+    )
+}
+
 /// Severity level for analysis findings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
@@ -765,6 +871,17 @@ pub enum AnalysisDiagnostic {
         enclosure: RedundantArithMode,
         location: Location,
     },
+
+    /// A function whose lowered signature declares more parameter words than
+    /// `SpaceWasm` accepts, the one target with such a limit. `function` arrives
+    /// pre-rendered (`Struct::method` for a method) because the diagnostic has no
+    /// arena to resolve a receiver against.
+    #[error("{message}", message = param_words_exceeded_message(.function, .words))]
+    ParamWordsExceeded {
+        function: String,
+        words: ParamWords,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -822,7 +939,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::GenericNotSupported { location, .. }
             | AnalysisDiagnostic::ConstantArithmeticOverflow { location, .. }
             | AnalysisDiagnostic::ArithModeGovernsNothing { location, .. }
-            | AnalysisDiagnostic::ArithModeChangesNothing { location, .. } => location,
+            | AnalysisDiagnostic::ArithModeChangesNothing { location, .. }
+            | AnalysisDiagnostic::ParamWordsExceeded { location, .. } => location,
         }
     }
 
@@ -884,6 +1002,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::ConstantArithmeticOverflow { .. } => "A052",
             AnalysisDiagnostic::ArithModeGovernsNothing { .. } => "A053",
             AnalysisDiagnostic::ArithModeChangesNothing { .. } => "A054",
+            AnalysisDiagnostic::ParamWordsExceeded { .. } => "A055",
         }
     }
 }
@@ -2938,5 +3057,126 @@ mod tests {
             location: test_location(),
         };
         assert_eq!(a, b);
+    }
+
+    fn group(ty: &str, count: u32, words_each: u32) -> ParamWordsGroup {
+        ParamWordsGroup {
+            ty: ty.to_string(),
+            count,
+            words_each,
+        }
+    }
+
+    /// The whole A055 message, every kind of item in it, pinned byte for byte:
+    /// the finding opens on the function and both numbers, the itemization
+    /// accounts for every word in the order a reader meets them, and the reason
+    /// and the remedy close it.
+    #[test]
+    fn display_param_words_exceeded() {
+        let err = AnalysisDiagnostic::ParamWordsExceeded {
+            function: "Mixer::blend".to_string(),
+            words: ParamWords {
+                receiver: true,
+                params: vec![group("i64", 127, 2), group("u8", 1, 1)],
+                result_pointer: Some("Frame".to_string()),
+            },
+            location: test_location(),
+        };
+        assert_eq!(err.rule_id(), "A055");
+        assert_eq!(err.location(), &test_location());
+        assert_eq!(
+            err.to_string(),
+            "`Mixer::blend` declares 257 parameter words, and SpaceWasm accepts at most 255 in \
+             one function: 1 for the `self` receiver, 254 for 127 `i64` parameters, 1 for one \
+             `u8` parameter and 1 for the hidden pointer a `Frame` result is written through; \
+             SpaceWasm counts a function's parameters in four-byte words — two for an `i64` or \
+             `u64`, one for any other type, a struct or an array included, since it is passed \
+             as its address — and records the count in a single byte, so it refuses to load a \
+             module that declares more; pass related values together in a struct, which costs \
+             one word however many fields it has, or split the function"
+        );
+    }
+
+    /// The message is one sentence however its literal is wrapped in the
+    /// source, so no run of the source's indentation may reach it.
+    #[test]
+    fn display_param_words_exceeded_has_no_indentation_runs() {
+        let text = AnalysisDiagnostic::ParamWordsExceeded {
+            function: "wide".to_string(),
+            words: ParamWords {
+                receiver: false,
+                params: vec![group("u32", 256, 1)],
+                result_pointer: None,
+            },
+            location: test_location(),
+        }
+        .to_string();
+        assert!(!text.contains("  "), "got: {text}");
+        assert!(
+            text.starts_with(
+                "`wide` declares 256 parameter words, and SpaceWasm accepts at most 255 in one \
+                 function: 256 for 256 `u32` parameters; "
+            ),
+            "a lone item is the whole itemization, with no `and` before it, got: {text}"
+        );
+    }
+
+    /// Every word is in exactly one item: a group costs its count times its
+    /// width, and the receiver and the hidden result pointer one each.
+    #[test]
+    fn param_words_total_sums_every_item() {
+        let mut words = ParamWords {
+            receiver: false,
+            params: Vec::new(),
+            result_pointer: None,
+        };
+        assert_eq!(words.total(), 0);
+        words.receiver = true;
+        assert_eq!(words.total(), 1);
+        words.result_pointer = Some("[i32; 4]".to_string());
+        assert_eq!(words.total(), 2);
+        words.params = vec![group("i64", 3, 2), group("bool", 2, 1)];
+        assert_eq!(words.total(), 10);
+        words.receiver = false;
+        assert_eq!(words.total(), 9);
+    }
+
+    /// The itemization reads as one clause: one item alone, two joined by
+    /// `and`, three or more separated by commas with `and` before the last. A
+    /// single parameter of a type is `one`, never `1 parameters`.
+    #[test]
+    fn param_words_itemization_joins_as_one_clause() {
+        let only = ParamWords {
+            receiver: true,
+            params: Vec::new(),
+            result_pointer: None,
+        };
+        assert_eq!(only.to_string(), "1 for the `self` receiver");
+
+        let two = ParamWords {
+            receiver: false,
+            params: vec![group("u64", 1, 2)],
+            result_pointer: Some("Pair".to_string()),
+        };
+        assert_eq!(
+            two.to_string(),
+            "2 for one `u64` parameter and 1 for the hidden pointer a `Pair` result is written \
+             through"
+        );
+
+        let three = ParamWords {
+            receiver: false,
+            params: vec![
+                group("Point", 2, 1),
+                group("[i64; 4]", 3, 1),
+                group("i16", 1, 1),
+            ],
+            result_pointer: None,
+        };
+        assert_eq!(
+            three.to_string(),
+            "2 for 2 `Point` parameters, 3 for 3 `[i64; 4]` parameters and 1 for one `i16` \
+             parameter"
+        );
     }
 }

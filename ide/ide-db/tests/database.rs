@@ -1457,6 +1457,215 @@ fn closing_a_document_drops_its_sticky_source_root() {
     assert_eq!(analysis.import_problems()[0].referenced_as, "lib::b");
 }
 
+// The build target a project's manifest names reaches analysis, so a rule that
+// measures a program against its runtime reports in the editor what `infs build`
+// would. A055 is that rule: it refuses a function over SpaceWasm's 255 parameter
+// words, and only at the `spacewasm` target.
+
+/// A function of 256 `u32` parameters: 256 words, one over SpaceWasm's limit.
+fn wide_source() -> String {
+    let params = (0..256)
+        .map(|index| format!("p{index}: u32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("pub fn wide({params}) -> u32 {{ return p0; }}\n")
+}
+
+/// A well-formed manifest naming `target` under `[build]`.
+fn manifest_with_target(target: &str) -> String {
+    format!("{MANIFEST}\n[build]\ntarget = \"{target}\"\n")
+}
+
+/// The A055 findings of `path`'s analysis, as `(module path, message)`.
+fn a055_findings(db: &mut RootDatabase, path: &Path) -> Vec<(Vec<String>, String)> {
+    db.analysis(path)
+        .findings()
+        .iter()
+        .filter(|finding| finding.rule_id == "A055")
+        .map(|finding| {
+            (
+                finding.labeled.module_path.clone(),
+                finding.labeled.diagnostic.to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_spacewasm_manifest_reaches_analysis() {
+    let tree = TempTree::new("target-spacewasm");
+    tree.write("Inference.toml", &manifest_with_target("spacewasm"));
+    let source = wide_source();
+    let main = tree.write("src/main.inf", &source);
+    let mut db = RootDatabase::default();
+    db.open_document(&main, source.as_str());
+
+    let findings = a055_findings(&mut db, &main);
+    assert_eq!(findings.len(), 1, "one function is over the limit: {findings:?}");
+    let (module_path, message) = &findings[0];
+    assert!(module_path.is_empty(), "the finding is the entry file's own");
+    assert!(
+        message.starts_with("`wide` declares 256 parameter words, and SpaceWasm accepts at most"),
+        "got: {message}"
+    );
+    let severity = db
+        .analysis(&main)
+        .findings()
+        .iter()
+        .find(|finding| finding.rule_id == "A055")
+        .map(|finding| finding.severity);
+    assert_eq!(severity, Some(Severity::Error));
+}
+
+#[test]
+fn a_project_without_a_spacewasm_target_is_analyzed_as_before() {
+    let source = wide_source();
+    for manifest in [
+        None,
+        Some(MANIFEST.to_string()),
+        Some(format!("{MANIFEST}\n[build]\nmode = \"compile\"\n")),
+        Some(manifest_with_target("wasm32")),
+        Some(manifest_with_target("stellar")),
+        // A name `infs` would refuse to build leaves the default in force.
+        Some(manifest_with_target("wasm64")),
+    ] {
+        let tree = TempTree::new("target-default");
+        if let Some(manifest) = &manifest {
+            tree.write("Inference.toml", manifest);
+        }
+        let main = tree.write("src/main.inf", &source);
+        let mut db = RootDatabase::default();
+        db.open_document(&main, source.as_str());
+
+        assert_eq!(
+            a055_findings(&mut db, &main),
+            Vec::new(),
+            "no SpaceWasm limit under manifest {manifest:?}"
+        );
+    }
+}
+
+#[test]
+fn a_file_outside_the_manifest_source_root_is_not_given_its_target() {
+    // The manifest governs `src/` only, so a scratch file beside it takes the
+    // own-directory tier and the default target, as it takes that tier's root.
+    let tree = TempTree::new("target-outside-src");
+    tree.write("Inference.toml", &manifest_with_target("spacewasm"));
+    let source = wide_source();
+    let scratch = tree.write("scratch/wide.inf", &source);
+    let mut db = RootDatabase::default();
+    db.open_document(&scratch, source.as_str());
+
+    assert_eq!(a055_findings(&mut db, &scratch), Vec::new());
+}
+
+#[test]
+fn a_closure_donor_lends_its_target_with_its_root() {
+    // `src/lib/Inference.toml` is malformed, so it governs `src/lib/wide.inf` and
+    // stops the walk from reaching the project manifest: that file has no tier-1
+    // root of its own. Once the entry `src/main.inf`, which imports it, has been
+    // analyzed under the project manifest, the file adopts the entry's root —
+    // and must adopt its target with it, or the entry reports A055 on the file's
+    // function while the file opened on its own reports nothing.
+    let tree = TempTree::new("target-donor");
+    tree.write("Inference.toml", &manifest_with_target("spacewasm"));
+    tree.write("src/lib/Inference.toml", "not = = toml");
+    let main = tree.write("src/main.inf", "use lib::wide;\npub fn main() -> i32 { return 0; }");
+    let wide = tree.write("src/lib/wide.inf", &wide_source());
+    let mut db = RootDatabase::default();
+
+    let from_entry = a055_findings(&mut db, &main);
+    assert_eq!(from_entry.len(), 1, "the entry's closure reaches the wide function");
+    assert_eq!(from_entry[0].0, vec!["lib".to_string(), "wide".to_string()]);
+
+    // As if the user navigated into the file: a request against it, with the
+    // entry's analysis still memoized to donate.
+    let own = a055_findings(&mut db, &wide);
+    assert_eq!(own.len(), 1, "the file is analyzed for the donor's target: {own:?}");
+    assert!(own[0].0.is_empty(), "opened on its own, the file is the entry");
+}
+
+#[test]
+fn a_file_without_a_donor_or_a_manifest_gets_the_default_target() {
+    // The negative of the test above: the same tree, with the file opened before
+    // any entry that imports it is analyzed, takes the own-directory tier.
+    let tree = TempTree::new("target-no-donor");
+    tree.write("Inference.toml", &manifest_with_target("spacewasm"));
+    tree.write("src/lib/Inference.toml", "not = = toml");
+    tree.write("src/main.inf", "use lib::wide;\npub fn main() -> i32 { return 0; }");
+    let wide = tree.write("src/lib/wide.inf", &wide_source());
+    let mut db = RootDatabase::default();
+
+    assert_eq!(a055_findings(&mut db, &wide), Vec::new());
+}
+
+#[test]
+fn a_spacewasm_manifest_over_a_broken_signature_still_analyzes() {
+    // The editor runs the rule on every keystroke, so it meets signatures no
+    // build would: one parameter here has no type. The file must still be
+    // analyzed, report its syntax error, and count the parameters it can.
+    let tree = TempTree::new("target-broken");
+    tree.write("Inference.toml", &manifest_with_target("spacewasm"));
+    let params = (0..256)
+        .map(|index| format!("p{index}: u32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!("pub fn wide({params}, broken: ) -> u32 {{ return p0; }}\n");
+    let main = tree.write("src/main.inf", &source);
+    let mut db = RootDatabase::default();
+    db.open_document(&main, source.as_str());
+
+    assert!(
+        !db.analysis(&main).parse_errors().is_empty(),
+        "the missing type is a syntax error"
+    );
+    let findings = a055_findings(&mut db, &main);
+    assert_eq!(findings.len(), 1, "the 256 typed parameters still count: {findings:?}");
+    let (_, message) = &findings[0];
+    assert!(
+        message.starts_with("`wide` declares 256 parameter words"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_changed_manifest_target_is_observed_only_after_a_reopen() {
+    // The v1 limitation, pinned: the target travels with the cached root, so a
+    // manifest edited while the document is open does not move it — even across
+    // a recompute — until the document is closed and reopened.
+    let tree = TempTree::new("target-sticky");
+    tree.write("Inference.toml", &manifest_with_target("spacewasm"));
+    let source = wide_source();
+    let main = tree.write("src/main.inf", &source);
+    let mut db = RootDatabase::default();
+    db.open_document(&main, source.as_str());
+    assert_eq!(a055_findings(&mut db, &main).len(), 1);
+
+    let before = db.analysis(&main).generation();
+
+    tree.write("Inference.toml", &manifest_with_target("wasm32"));
+    let edited = format!("{source}\n");
+    db.change_document(&main, edited.as_str());
+    assert_eq!(
+        a055_findings(&mut db, &main).len(),
+        1,
+        "a recompute reuses the cached root, and the target with it"
+    );
+    assert_ne!(
+        db.analysis(&main).generation(),
+        before,
+        "the edit recomputed the analysis, so the finding is not a stale memo"
+    );
+
+    db.close_document(&main);
+    db.open_document(&main, edited.as_str());
+    assert_eq!(
+        a055_findings(&mut db, &main),
+        Vec::new(),
+        "a reopen reads the manifest again"
+    );
+}
+
 #[test]
 fn never_opened_analyses_are_capped_with_fifo_eviction() {
     // The cap is a small constant (8). Memoizing analyses for ten never-opened

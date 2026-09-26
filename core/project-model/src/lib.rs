@@ -7,8 +7,10 @@
 //! that walk: given an entry file and a [`FileLoader`], it discovers the
 //! import-reachable closure, reads and parses each file exactly once, and lowers
 //! them all into one [`AstArena`]. It also owns the small pieces of project
-//! structure the walk needs — reading a source file (stripping a UTF-8 BOM) and
-//! deriving a project's source root from its `Inference.toml` manifest.
+//! structure around the walk — reading a source file (stripping a UTF-8 BOM),
+//! and reading what a project's `Inference.toml` manifest says about analyzing
+//! one of its files: the source root the walk resolves against, and the target
+//! a build names.
 //!
 //! # Why a leaf crate
 //!
@@ -46,7 +48,7 @@ pub mod manifest;
 mod project;
 
 pub use errors::InferenceError;
-pub use manifest::manifest_source_root;
+pub use manifest::{ManifestSettings, manifest_settings, manifest_source_root};
 pub use project::{
     DiskLoader, FileLoader, FileParseErrors, ImportProblem, LoadedFile, ProjectParse,
     ProjectWarning, ResilientProjectParse, load_project_resilient,

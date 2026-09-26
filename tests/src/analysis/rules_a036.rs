@@ -72,6 +72,7 @@ mod analysis_rules_tests {
             &ctx,
             inference_analysis::AnalysisOptions {
                 stack_budget_bytes: 32_768,
+                ..inference_analysis::AnalysisOptions::default()
             },
         );
         let reported = stack_depth_errors(&over)
@@ -134,6 +135,7 @@ mod analysis_rules_tests {
             &ctx,
             inference_analysis::AnalysisOptions {
                 stack_budget_bytes: 131_072,
+                ..inference_analysis::AnalysisOptions::default()
             },
         );
         assert!(

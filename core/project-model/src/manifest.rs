@@ -1,4 +1,4 @@
-//! Minimal manifest discovery for deriving a project's analysis source root.
+//! Minimal manifest discovery for deriving how the IDE analyzes a project file.
 //!
 //! An Inference project is rooted at an `Inference.toml` manifest. The compiler
 //! front end (`infs`) compiles the conventional `src/main.inf` entry point, so a
@@ -6,23 +6,30 @@
 //! against — is `<manifest_dir>/src`. The IDE, by contrast, opens individual
 //! files as their own analysis entries; to resolve a non-entry file's imports
 //! exactly as the compiler would, it must use that same source root rather than
-//! the opened file's own directory.
+//! the opened file's own directory. And to report what a build of the file would
+//! report, it must analyze for the target the manifest's `[build] target` names,
+//! since an analysis rule can measure a program against the runtime it is built
+//! for.
 //!
-//! This module gives ide-db just enough to derive that root: walk up to the
-//! nearest manifest, confirm it is a well-formed Inference manifest, and return
-//! `<manifest_dir>/src` when the opened file lives under it. It deliberately does
-//! not model the whole manifest — `infs` owns the full `InferenceToml`, and a
-//! future change can let `infs` and this helper converge on one implementation.
-//! Until then this small piece keeps the IDE and CLI agreeing on what a manifest
-//! means without ide-db depending on `apps/infs`.
+//! This module gives ide-db just enough to derive both: walk up to the nearest
+//! manifest, confirm it is a well-formed Inference manifest, and return
+//! `<manifest_dir>/src` and the `[build] target` value when the opened file lives
+//! under that root. It deliberately does not model the whole manifest — `infs`
+//! owns the full `InferenceToml`, and a future change can let `infs` and this
+//! helper converge on one implementation. Until then this small piece keeps the
+//! IDE and CLI agreeing on what a manifest means without ide-db depending on
+//! `apps/infs`.
 //!
 //! # v1 limitation
 //!
-//! Discovery reads the manifest from disk at the moment a file is analyzed. There
-//! is no filesystem watch, so a manifest created or edited *after* a file was
-//! opened is not observed until that file's analysis is next recomputed for
-//! another reason (a `didChange`, or a closure event that evicts it). This
-//! matches the rest of ide-db, which observes only the files an editor opens.
+//! Discovery reads the manifest from disk each time it is asked, and there is no
+//! filesystem watch, so what a caller sees is the manifest as it was when it
+//! asked. How often it asks is the caller's decision: ide-db asks when a
+//! document's analysis has to be computed and keeps a manifest's answer until
+//! the document is closed, so a manifest edited after that — a changed
+//! `[build] target` included — is not observed until the document is closed and
+//! reopened. This matches the rest of ide-db, which observes only the files an
+//! editor opens.
 
 use std::path::{Path, PathBuf};
 
@@ -38,28 +45,65 @@ pub const MANIFEST_FILE_NAME: &str = "Inference.toml";
 /// is no configurable source directory today; the convention is fixed.
 const SOURCE_DIR_NAME: &str = "src";
 
-/// Derives the analysis source root for `file` from the nearest ancestor
-/// manifest, or `None` when no manifest governs it.
+/// What the manifest governing a file says about analyzing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestSettings {
+    /// `<manifest_dir>/src`, the directory every path-form `use` in the project
+    /// resolves against.
+    pub src_root: PathBuf,
+    /// The `[build] target` value as written, or `None` when the manifest sets
+    /// no string there.
+    ///
+    /// Not validated: the target vocabulary belongs to
+    /// `inference-compiler-interface`, which this leaf crate does not depend
+    /// on, so the caller resolves the name and decides what an unknown one
+    /// means for it.
+    pub build_target: Option<String>,
+}
+
+/// Reads the settings that govern `file` from the nearest ancestor manifest, or
+/// `None` when no manifest governs it.
 ///
 /// Walks up from `file`'s directory to the nearest `Inference.toml` (nearest
 /// wins, mirroring `infs` project discovery). When that manifest is a well-formed
 /// Inference manifest and `file` lives under its source root
-/// (`<manifest_dir>/src`), returns that root so a resilient walk resolves
-/// `file`'s imports as the compiler would. Returns `None` when no manifest is
-/// found, the nearest manifest is malformed, or `file` lies outside the source
+/// (`<manifest_dir>/src`), returns that root and the manifest's build target, so
+/// a resilient walk resolves `file`'s imports as the compiler would and analysis
+/// measures it against the target a build would. Returns `None` when no manifest
+/// is found, the nearest manifest is malformed, or `file` lies outside the source
 /// root — leaving the caller to fall back to another strategy.
-#[must_use = "the derived source root is the reason to call this"]
-pub fn manifest_source_root(file: &Path) -> Option<PathBuf> {
+#[must_use = "the derived settings are the reason to call this"]
+pub fn manifest_settings(file: &Path) -> Option<ManifestSettings> {
     let manifest_dir = find_manifest_dir(file)?;
     // A file whose nearest manifest cannot be loaded is one `infs` could not build
     // from, so the IDE treats it as project-less rather than inventing a root from
     // an unusable file. The nearest manifest wins even when malformed — the walk
     // does not climb past it to an outer manifest, matching `infs`.
-    if !manifest_declares_package(&manifest_dir.join(MANIFEST_FILE_NAME)) {
+    let manifest = read_package_manifest(&manifest_dir.join(MANIFEST_FILE_NAME))?;
+    let src_root = manifest_dir.join(SOURCE_DIR_NAME);
+    if !file.starts_with(&src_root) {
         return None;
     }
-    let source_root = manifest_dir.join(SOURCE_DIR_NAME);
-    file.starts_with(&source_root).then_some(source_root)
+    let build_target = manifest
+        .get("build")
+        .and_then(toml::Value::as_table)
+        .and_then(|build| build.get("target"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string);
+    Some(ManifestSettings {
+        src_root,
+        build_target,
+    })
+}
+
+/// Derives the analysis source root for `file` from the nearest ancestor
+/// manifest, or `None` when no manifest governs it.
+///
+/// The source-root half of [`manifest_settings`], which decides when a manifest
+/// governs a file.
+#[must_use = "the derived source root is the reason to call this"]
+pub fn manifest_source_root(file: &Path) -> Option<PathBuf> {
+    manifest_settings(file).map(|settings| settings.src_root)
 }
 
 /// Walks up from `start`'s directory to the nearest directory containing an
@@ -69,7 +113,7 @@ pub fn manifest_source_root(file: &Path) -> Option<PathBuf> {
 /// manifest found.
 ///
 /// Presence is decided by an `is_file` probe alone; validity is a separate
-/// concern (see [`manifest_source_root`]). Mirrors `infs`'s
+/// concern (see [`manifest_settings`]). Mirrors `infs`'s
 /// `manifest::find_manifest_dir`.
 fn find_manifest_dir(start: &Path) -> Option<PathBuf> {
     let mut dir = if start.is_dir() {
@@ -86,26 +130,22 @@ fn find_manifest_dir(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Whether `manifest_path` reads as a well-formed Inference manifest: valid TOML
-/// declaring a `[package]` table with string `name` and `version` keys.
+/// The manifest at `manifest_path` as a TOML table, when it reads as a
+/// well-formed Inference manifest: valid TOML declaring a `[package]` table with
+/// string `name` and `version` keys.
 ///
 /// This is the minimum `infs`'s `InferenceToml::from_toml` requires to load a
 /// project, so a file failing it is one `infs` could not build from. An
 /// unreadable file, invalid TOML, or a missing/partial `[package]` table all read
 /// as "not a usable manifest here". Unknown extra keys are ignored, so a manifest
 /// carrying newer fields still validates.
-fn manifest_declares_package(manifest_path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(manifest_path) else {
-        return false;
-    };
-    let Ok(table) = text.parse::<toml::Table>() else {
-        return false;
-    };
-    let Some(package) = table.get("package").and_then(toml::Value::as_table) else {
-        return false;
-    };
-    package.get("name").and_then(toml::Value::as_str).is_some()
-        && package.get("version").and_then(toml::Value::as_str).is_some()
+fn read_package_manifest(manifest_path: &Path) -> Option<toml::Table> {
+    let text = std::fs::read_to_string(manifest_path).ok()?;
+    let table = text.parse::<toml::Table>().ok()?;
+    let package = table.get("package").and_then(toml::Value::as_table)?;
+    let declares_package = package.get("name").and_then(toml::Value::as_str).is_some()
+        && package.get("version").and_then(toml::Value::as_str).is_some();
+    declares_package.then_some(table)
 }
 
 #[cfg(test)]
@@ -335,5 +375,101 @@ mod tests {
             manifest_source_root(&file).is_none(),
             "a directory named Inference.toml must not count as a manifest"
         );
+    }
+
+    /// `[build] target` comes back exactly as written, beside the source root
+    /// the same manifest supplies.
+    #[test]
+    fn settings_carry_the_build_target_as_written() {
+        let tree = TempTree::new("settings-target");
+        tree.write(
+            MANIFEST_FILE_NAME,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[build]\ntarget = \"spacewasm\"\n",
+        );
+        let file = tree.write("src/lib/a.inf", "pub fn a() {}");
+
+        assert_eq!(
+            manifest_settings(&file),
+            Some(ManifestSettings {
+                src_root: tree.path("src"),
+                build_target: Some("spacewasm".to_string()),
+            })
+        );
+    }
+
+    /// A manifest that names no target, whether it has no `[build]` table or a
+    /// `[build]` table without the key, leaves the choice to the caller.
+    #[test]
+    fn settings_have_no_target_when_the_manifest_names_none() {
+        for manifest in [
+            VALID_MANIFEST.to_string(),
+            format!("{VALID_MANIFEST}\n[build]\nmode = \"compile\"\n"),
+        ] {
+            let tree = TempTree::new("settings-no-target");
+            tree.write(MANIFEST_FILE_NAME, &manifest);
+            let file = tree.write("src/a.inf", "pub fn a() {}");
+
+            let settings = manifest_settings(&file).expect("the manifest governs the file");
+            assert_eq!(settings.src_root, tree.path("src"));
+            assert_eq!(settings.build_target, None, "for manifest:\n{manifest}");
+        }
+    }
+
+    /// The name is not validated here — the vocabulary is not this crate's —
+    /// so an unknown one is returned as written. A target that is not a string
+    /// at all is no name, and reads as none.
+    #[test]
+    fn settings_return_the_target_unvalidated() {
+        for (value, expected) in [("\"wasm64\"", Some("wasm64")), ("7", None), ("[]", None)] {
+            let tree = TempTree::new("settings-unvalidated");
+            tree.write(
+                MANIFEST_FILE_NAME,
+                &format!("{VALID_MANIFEST}\n[build]\ntarget = {value}\n"),
+            );
+            let file = tree.write("src/a.inf", "pub fn a() {}");
+
+            let settings = manifest_settings(&file).expect("the manifest governs the file");
+            assert_eq!(settings.build_target.as_deref(), expected, "`target = {value}`");
+        }
+    }
+
+    /// The nearest manifest wins for the target as it does for the source root:
+    /// a nearer manifest naming none does not inherit an outer one's, and a
+    /// nearer malformed one governs nothing rather than handing the file to the
+    /// outer project.
+    #[test]
+    fn settings_come_from_the_nearest_manifest_only() {
+        let spacewasm = format!("{VALID_MANIFEST}\n[build]\ntarget = \"spacewasm\"\n");
+
+        let tree = TempTree::new("settings-nearest");
+        tree.write(MANIFEST_FILE_NAME, &spacewasm);
+        tree.write(&format!("inner/{MANIFEST_FILE_NAME}"), VALID_MANIFEST);
+        let file = tree.write("inner/src/a.inf", "pub fn a() {}");
+        assert_eq!(
+            manifest_settings(&file),
+            Some(ManifestSettings {
+                src_root: tree.path("inner/src"),
+                build_target: None,
+            })
+        );
+
+        let tree = TempTree::new("settings-nearest-malformed");
+        tree.write(MANIFEST_FILE_NAME, &spacewasm);
+        tree.write(&format!("src/lib/{MANIFEST_FILE_NAME}"), "not = = toml");
+        let file = tree.write("src/lib/a.inf", "pub fn a() {}");
+        assert_eq!(manifest_settings(&file), None);
+    }
+
+    /// A file under the project but outside its source root is not governed by
+    /// the manifest, so it gets neither the root nor the target.
+    #[test]
+    fn settings_none_outside_the_source_root() {
+        let tree = TempTree::new("settings-outside-src");
+        tree.write(
+            MANIFEST_FILE_NAME,
+            &format!("{VALID_MANIFEST}\n[build]\ntarget = \"spacewasm\"\n"),
+        );
+        let file = tree.write("scratch/a.inf", "pub fn a() {}");
+        assert_eq!(manifest_settings(&file), None);
     }
 }

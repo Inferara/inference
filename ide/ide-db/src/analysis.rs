@@ -7,9 +7,9 @@ use std::sync::Arc;
 use inference_project_model::{
     FileParseErrors, ImportProblem, LoadedFile, load_project_resilient_with_root,
 };
-use inference_analysis::AnalysisOptions;
 use inference_analysis::errors::{LabeledDiagnostic, Severity};
 use inference_analysis::rules::all_rules;
+use inference_analysis::{AnalysisOptions, TargetName};
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{DefId, SourceFileId};
 use inference_base_db::LineIndex;
@@ -84,6 +84,21 @@ impl ClosureFile {
     }
 }
 
+/// Where an entry's project roots its analysis: the source root its imports
+/// resolve against, and the target a build of it names.
+///
+/// One value because one resolution produces both. The manifest that supplies a
+/// source root supplies the target, and a closure donor lends the two together,
+/// so no entry is analyzed against one project's root and another's target.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct EntryRoot {
+    /// The directory every path-form `use` in the closure resolves against.
+    pub(crate) src_root: PathBuf,
+    /// The runtime the build targets, which a rule such as A055 measures the
+    /// program against. The default target when no manifest names one.
+    pub(crate) target: TargetName,
+}
+
 /// The memoized analysis of one file treated as its own project entry.
 ///
 /// Construction resolves the file's import closure through an overlay-then-disk
@@ -109,10 +124,11 @@ pub struct FileAnalysis {
     /// Always includes the entry path itself, even when the entry could not be
     /// read, so any event touching the entry can invalidate this analysis.
     closure_paths: FxHashSet<PathBuf>,
-    /// The source root this analysis resolved imports against. Recorded so the
-    /// database can reuse it for another file this closure covers (the closure
-    /// fallback in `RootDatabase`'s source-root resolution).
-    src_root: PathBuf,
+    /// The source root this analysis resolved imports against and the target
+    /// it analyzed for. Recorded so the database can lend both to another file
+    /// this closure covers (the closure fallback in `RootDatabase`'s root
+    /// resolution).
+    root: EntryRoot,
     /// Whether any import went unresolved, so a newly-opened file might fix it.
     had_missing_import: bool,
     /// Monotonic stamp identifying this computation, so tests (and callers) can
@@ -122,13 +138,16 @@ pub struct FileAnalysis {
 
 impl FileAnalysis {
     /// Analyzes `entry` as its own project entry, resolving its import closure
-    /// against `src_root` and reading it through `vfs` (overlay first, then disk).
+    /// against `root`'s source root, reading it through `vfs` (overlay first,
+    /// then disk), and running the analysis rules for `root`'s target.
     ///
-    /// `src_root` is the directory every path-form `use` in the closure resolves
-    /// against — the project's real source root, not necessarily `entry`'s parent
-    /// directory — so a non-entry file opened standalone resolves its imports
-    /// exactly as the compiler would. The database derives it (see
-    /// [`RootDatabase`](crate::RootDatabase)) and records it on the result.
+    /// The source root is the directory every path-form `use` in the closure
+    /// resolves against — the project's real source root, not necessarily
+    /// `entry`'s parent directory — so a non-entry file opened standalone
+    /// resolves its imports exactly as the compiler would. The target is the one
+    /// the project's build names, so a rule that measures the program against
+    /// its runtime reports what the build would. The database derives both (see
+    /// [`RootDatabase`](crate::RootDatabase)) and records them on the result.
     ///
     /// `generation` stamps the result; the database bumps it on every compute so
     /// a recompute is observable.
@@ -141,12 +160,12 @@ impl FileAnalysis {
     pub(crate) fn compute(
         vfs: &Vfs,
         entry: &Path,
-        src_root: &Path,
+        root: &EntryRoot,
         generation: u64,
         checkpoint: &dyn Fn(),
     ) -> Self {
         let loader = VfsLoader::new(vfs);
-        let parse = load_project_resilient_with_root(entry, src_root, &loader);
+        let parse = load_project_resilient_with_root(entry, &root.src_root, &loader);
         checkpoint();
 
         // The entry is always part of its own closure, even when its read failed
@@ -189,7 +208,7 @@ impl FileAnalysis {
         checkpoint();
 
         let files = build_closure_files(typed_context.arena(), &path_by_module);
-        let findings = run_analysis_rules(&typed_context);
+        let findings = run_analysis_rules(&typed_context, root.target);
 
         FileAnalysis {
             typed: typed_context,
@@ -199,7 +218,7 @@ impl FileAnalysis {
             findings,
             files,
             closure_paths,
-            src_root: src_root.to_path_buf(),
+            root: root.clone(),
             had_missing_import,
             generation,
         }
@@ -324,10 +343,11 @@ impl FileAnalysis {
         self.closure_paths.contains(path)
     }
 
-    /// The source root this analysis resolved its imports against, so the
-    /// database can reuse it for another file this closure covers.
-    pub(crate) fn source_root(&self) -> &Path {
-        &self.src_root
+    /// The source root this analysis resolved its imports against and the
+    /// target it analyzed for, so the database can lend both to another file
+    /// this closure covers.
+    pub(crate) fn root(&self) -> &EntryRoot {
+        &self.root
     }
 
     /// Whether any import in this analysis went unresolved.
@@ -372,13 +392,17 @@ fn build_closure_files(
 /// still valid. A rule is trusted not to panic on partial data; a panic here is
 /// a compiler bug to surface, not to suppress.
 ///
-/// The settings are the defaults: the editor reports on a program, not on a
-/// configured build, so a rule that measures the program against the artifact
-/// (A036 against the shadow stack) answers for a default-layout build. A file
-/// whose project configures a different layout would want that layout threaded
-/// in here.
-fn run_analysis_rules(typed_context: &TypedContext) -> Vec<AnalysisFinding> {
-    let options = AnalysisOptions::default();
+/// The target is the one the entry's project names, so a rule that measures the
+/// program against its runtime (A055 against `SpaceWasm`'s parameter words)
+/// reports in the editor what a build of the project would. The rest of the
+/// settings are the defaults: A036 answers for a default-layout build, and a
+/// file whose project configures a different `[memory]` layout would want that
+/// layout threaded in here too.
+fn run_analysis_rules(typed_context: &TypedContext, target: TargetName) -> Vec<AnalysisFinding> {
+    let options = AnalysisOptions {
+        target,
+        ..AnalysisOptions::default()
+    };
     let mut findings = Vec::new();
     for rule in all_rules() {
         let rule_id = rule.id();

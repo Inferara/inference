@@ -19,7 +19,7 @@ analyze()
     |
     +-- rules::all_rules()  (static slice of &dyn Rule)
          |
-         +-- Rule::check(&TypedContext) -> Vec<AnalysisDiagnostic>
+         +-- Rule::check(&TypedContext, AnalysisOptions) -> Vec<LabeledDiagnostic>
                   |
                   +-- walker::walk_function_bodies()  (shared traversal)
                   |        visits every Stmt in every function body
@@ -31,6 +31,8 @@ analyze()
 Each rule is a zero-sized struct implementing the `Rule` trait. Rules are stateless and `Send + Sync`, which keeps the door open for parallel execution in the future. The `rule!` macro generates the struct and trait implementation from a compact attribute syntax, eliminating boilerplate.
 
 Errors, warnings, and informational findings are partitioned by severity. The `analyze()` function returns `Err(AnalysisErrors)` only when at least one `Error`-severity finding exists; `Warning` and `Info` findings are always returned via the success path or bundled inside `AnalysisErrors`.
+
+`AnalysisOptions` carries the facts about the artifact that some rules measure a program against: the shadow-stack size A036 clears a call chain against, and the target A055 measures parameter words for. `analyze()` uses the defaults — the stack a default build emits and the default target — and a caller that configures either for code generation passes the matching settings to `analyze_with_options()`.
 
 ## Module Organization
 
@@ -292,6 +294,16 @@ A054 is the redundancy: the mode the annotation names is already the mode in for
 
 Both rules read one definition of which operators an annotation governs, and so does code generation's guard classifier, so what a rule calls a governed operator and what the emitter puts a guard on are one set. The definition is in three pieces, each where it can see what it needs: `GuardedOp` in `inference-ast` names the four operators; `AstArena::guarded_operator`, beside it, is the one place an expression node is turned into a `GuardedOp` and its operand; and `NumberType::has_operator(GuardedOp)` in `inference-type-checker` decides whether a type has that operator at all — the one asymmetry being unary `-`, which an unsigned type does not have, so `wrapping(-x)` at a `u32` is a type error rather than an operator to govern. A rule that counted an operator the emitter never guards would call an annotation meaningful on the strength of arithmetic that does not exist.
 
+### Target Limits (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A055 | `ParamWordsExceeded` | error | at the `spacewasm` target, a function's lowered signature declares more than 255 four-byte parameter words |
+
+A055 is the rule that reads the build target, from `AnalysisOptions::target`. SpaceWasm's interpreter counts a function's parameters in four-byte words — two for `i64` and `u64`, one for any other type, a struct or an array being passed as its address — and keeps the count in a single byte, so it refuses to load a module whose function declares more than 255. The post-link conformance check in `inference-target-conformance` has always refused such a module, naming the WebAssembly function; this rule asks the same question of the source, reports it on the declaration's parameter list, and itemizes where the words went: each parameter type's count and cost, a `self` receiver, and the hidden pointer a struct or array result is written through. Every other target sets no such limit, and the rule is silent for it.
+
+The count mirrors code generation's signature lowering rather than calling it, since that lowering lives in `inference-wasm-codegen`, a later phase. `param_words` exports the count for the differential test in `inference-tests`, which holds it to the parameter words the conformance checker reads off every function of every corpus module built for the target, and to the words in the checker's own refusal at the boundary. The functions measured are the ones a compile-mode artifact defines: top-level functions and struct methods, not a `spec`, which a compile-mode build strips, and not an `external fn`, which is an import. A function a linked module brings into the artifact has no declaration here, and the post-link check is what measures it.
+
 ## Diagnostic Output Format
 
 ```
@@ -416,6 +428,7 @@ Test files are organized by rule group:
 | `rules_a052.rs` | A052 (constant arithmetic that overflows its type) |
 | `rules_a053.rs` | A053 (arithmetic-mode annotation with nothing to govern) |
 | `rules_a054.rs` | A054 (arithmetic-mode annotation that changes nothing) |
+| `rules_a055.rs` | A055 (parameter words over SpaceWasm's limit), and the differential test that holds its count to the words code generation emits |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies
@@ -424,6 +437,7 @@ Test files are organized by rule group:
 |-------|------|
 | `inference-ast` | AST arena types, node kinds, `Location` |
 | `inference-type-checker` | `TypedContext` input to every rule |
+| `inference-compiler-interface` | `TargetName`, the build target A055 reads, and `FRAME_ALIGNMENT`, the frame rounding A036's estimate uses |
 | `inference-fn-key` | `FnKey` — shared canonical function identity used to key the call graph |
 | `thiserror` | Derive `Error` for `AnalysisDiagnostic` |
 

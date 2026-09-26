@@ -451,9 +451,7 @@ mod gate {
         };
         if let Err(errors) = inference_analysis::analyze_with_options(
             &typed_context,
-            inference_analysis::AnalysisOptions {
-                stack_budget_bytes: options.layout.stack_size(),
-            },
+            crate::utils::analysis_options(&options),
         ) {
             return Outcome::AnalysisFailed(errors.errors().iter().map(|d| d.rule_id()).collect());
         }

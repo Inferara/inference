@@ -1477,45 +1477,81 @@ fn a_spacewasm_build_past_the_reference_budget_warns_and_still_builds() {
     );
 }
 
+/// A foreign module whose own internal function takes 256 parameter words, and
+/// exports one entry point that calls it with 256 constants.
+///
+/// The program never declares the wide function, so nothing about it is
+/// visible to analysis: its words arrive in the artifact with the merge.
+fn wide_internal_external() -> String {
+    let params = " i32".repeat(256);
+    let args = "      i32.const 7\n".repeat(256);
+    format!(
+        "(module\n  (func $wide (param{params}) (result i32)\n    local.get 0)\n  \
+         (func (export \"entry\") (result i32)\n{args}      call $wide))\n"
+    )
+}
+
+/// A program binding that entry point.
+const CALLS_WIDE_INTERNAL_EXTERNAL: &str = "\
+external fn entry() -> i32;
+use { entry } from widelib;
+
+pub fn run() -> i32 {
+    return entry();
+}
+";
+
+/// Stages the wide external under a `-L` directory beside a program that binds
+/// it, returning the temp directory, the entry path and the search directory.
+fn wide_internal_project() -> (assert_fs::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", CALLS_WIDE_INTERNAL_EXTERNAL);
+    let lib = temp.child("lib");
+    std::fs::create_dir_all(lib.path()).unwrap();
+    let bytes = wat::parse_str(wide_internal_external()).expect("the external is valid WAT");
+    std::fs::write(lib.child("widelib.wasm").path(), bytes).unwrap();
+    let dir = lib.path().to_path_buf();
+    (temp, entry, dir)
+}
+
 /// A module outside the target's envelope is refused after linking, and the
 /// build writes nothing.
 ///
 /// The per-external gate below catches an instruction set; this catches a
-/// *size*, which no external can be blamed for and which only the finished
-/// module can be measured for. 256 parameter words is the one such shape a
-/// source file can reach on its own — the decoder holds a function's parameter
-/// size in a single byte — so it is what makes the post-link arm reachable at
-/// all.
+/// *size*, which only the finished module can be measured for. A function the
+/// program itself declares over the parameter-word limit is analysis rule A055's
+/// finding and never reaches here, so the one route left to a parameter-word
+/// refusal from a build is a linked module: its functions arrive with the
+/// merge, and a function it defines without exporting has no declaration
+/// anywhere in the program for a source-level rule to read.
 ///
 /// The refusal has to arrive before anything is on disk: an artifact a flight
 /// computer cannot load is worse company for a build log than no artifact, and
 /// a reader who saw one written would reasonably try to fly it.
 ///
 /// Fails if the check moves after the write, if the refusal stops naming the
-/// artifact it is about, or if it stops carrying the number and the remedy.
+/// artifact it is about and the linked function in it, or if it stops carrying
+/// the number and the remedy.
 #[test]
 fn a_module_outside_the_spacewasm_envelope_is_refused_after_linking() {
-    let params = (0..256)
-        .map(|index| format!("p{index}: u32"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source = format!("fn wide({params}) -> u32 {{\n    return p0;\n}}\n");
+    let (temp, entry, lib) = wide_internal_project();
 
-    let temp = assert_fs::TempDir::new().unwrap();
-    let entry = write_source(temp.path(), "prog.inf", &source);
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.current_dir(temp.path())
         .arg(&entry)
+        .arg("-L")
+        .arg(&lib)
         .arg("--target")
         .arg("spacewasm");
     let assert = cmd.assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
 
     for fragment in [
         "SpaceWasm conformance failed",
         "prog.wasm",
         "No file was written.",
-        "function `wide` declares 256 parameter words",
+        "function `widelib::#wide` declares 256 parameter words",
         "at most 255",
         "collect them into a struct",
     ] {
@@ -1525,9 +1561,107 @@ fn a_module_outside_the_spacewasm_envelope_is_refused_after_linking() {
         );
     }
     assert!(
+        !stderr.contains("error[A055]"),
+        "the program declares nothing over the limit, so analysis has nothing to say: {stderr}"
+    );
+    assert!(
+        stdout.contains("Analyzed:"),
+        "the program passes analysis and reaches the link: {stdout}"
+    );
+    assert!(
         !temp.child("out").child("prog.wasm").path().exists(),
         "a module the target cannot load must leave nothing behind"
     );
+}
+
+/// The same program and external at the default target link and write the
+/// artifact, which is what makes the refusal above the target's rather than
+/// the linker's.
+#[test]
+fn a_linked_module_over_the_spacewasm_envelope_links_at_the_default_target() {
+    let (temp, entry, lib) = wide_internal_project();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-L").arg(&lib);
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("Linked 1 external module(s)"),
+        "the default target must link the very same module: {stdout}"
+    );
+    assert!(
+        temp.child("out").child("prog.wasm").path().exists(),
+        "a `wasm32` build sets no parameter-word limit and writes the artifact"
+    );
+}
+
+/// A source with one function declaring 256 `u32` parameters: 256 words.
+fn wide_program() -> String {
+    let params = (0..256)
+        .map(|index| format!("p{index}: u32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("fn wide({params}) -> u32 {{\n    return p0;\n}}\n")
+}
+
+/// A function the program declares over SpaceWasm's parameter words is refused
+/// by analysis, at its parameter list, before code generation — and the build
+/// writes nothing.
+///
+/// The error is A055's rather than the post-link check's, which is the point of
+/// the rule: it names a line and a column in the source and says where the
+/// words went, where the post-link refusal can only name the finished module's
+/// function.
+///
+/// Fails if the target stops reaching analysis, if the refusal moves to the
+/// finished module, or if the build leaves an artifact behind.
+#[test]
+fn a_function_over_the_spacewasm_parameter_words_is_refused_at_its_declaration() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", &wide_program());
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--target")
+        .arg("spacewasm");
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    assert!(
+        stderr.contains(
+            "1:9: error[A055]: `wide` declares 256 parameter words, and SpaceWasm accepts at \
+             most 255 in one function: 256 for 256 `u32` parameters; SpaceWasm counts a \
+             function's parameters in four-byte words"
+        ),
+        "the refusal is A055's, at the first parameter: {stderr}"
+    );
+    assert!(
+        !stderr.contains("SpaceWasm conformance failed"),
+        "analysis refuses the program before any module exists: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Analyzed:") && !stdout.contains("Codegen complete"),
+        "the build stops at analysis: {stdout}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a refused build must leave nothing behind"
+    );
+}
+
+/// The same program at the default target builds: the limit is SpaceWasm's,
+/// and a `wasm32` build is not held to it.
+#[test]
+fn a_function_over_the_spacewasm_parameter_words_builds_at_the_default_target() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", &wide_program());
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+    let assert = cmd.assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(!stderr.contains("A055"), "{stderr}");
+    assert!(temp.child("out").child("prog.wasm").path().exists());
 }
 
 /// The same sign-extending external, refused at this target too, by the same

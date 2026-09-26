@@ -71,9 +71,10 @@
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
 use inference_ast::nodes::{ArgData, ArgKind, Def};
-use inference_type_checker::type_info::{TypeInfo, TypeInfoKind};
+use inference_type_checker::type_info::TypeInfo;
 
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
+use crate::walker::render_type;
 
 crate::rule! {
     /// A parameter of a defined function must be named, or written `_`.
@@ -160,26 +161,5 @@ fn report_unnamed(
             ));
         }
         index += 1;
-    }
-}
-
-/// The type as the source spells it.
-///
-/// The message quotes this back inside the `_: {ty}` it recommends, so every
-/// part of it has to be a name the author can actually write. A builtin uses its
-/// source name, which is why `i32` and `bool` are not the checker's capitalized
-/// `Display` renderings; an array is rebuilt from its element so the same holds
-/// at every depth, since `Display` would descend into the capitalized form and
-/// recommend `_: [Bool; 2]`. Everything else keeps `Display`, which renders a
-/// struct or enum by its canonical key.
-fn render_type(kind: &TypeInfoKind) -> String {
-    if let Some(builtin) = kind.as_builtin_str() {
-        return builtin.to_string();
-    }
-    match kind {
-        TypeInfoKind::Array(elem, length) => {
-            format!("[{}; {length}]", render_type(&elem.kind))
-        }
-        _ => kind.to_string(),
     }
 }

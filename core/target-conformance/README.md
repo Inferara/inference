@@ -198,10 +198,16 @@ imposes the cap, and one thing to change:
 SpaceWasm conformance failed: out/main.wasm is not a module a SpaceWasm embedder can load and run as written.
 No file was written.
 
-  parameter words exceeded: function `mix_channels` declares 260 parameter words; SpaceWasm accepts at most 255.
+  parameter words exceeded: function `dsp::#mix_channels` declares 260 parameter words; SpaceWasm accepts at most 255.
     SpaceWasm stores a function's parameter size in a single byte. An i64 or f64 parameter counts as 2 words, every other parameter as 1.
     Pass fewer parameters, or collect them into a struct: a struct or array parameter is one i32 pointer, which is 1 word.
 ```
+
+The function in the example came from a linked module, as its `dsp::#` name
+says. A function the program itself declares over the limit never gets this
+far: analysis rule A055 refuses it at its declaration, before code generation,
+so on a build's path this refusal is reached by a linked module's function or a
+post-build step's output.
 
 The two strings are the caller's because this crate is handed findings and
 nothing else: only `infc` knows it was about to write `out/main.wasm`, and only
