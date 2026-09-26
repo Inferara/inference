@@ -19,6 +19,11 @@
 //! every `Cargo.toml` in the working tree rather than the root's member list,
 //! so a package no member glob matches is held to the same rule. Only files in
 //! the checkout are read, so the test runs offline and on every platform.
+//!
+//! The scan passes as long as no member declares a profile, so it passes too
+//! when the root's `[profile.release.package.infs]` loses the settings that
+//! build `infs` for size. A second test holds the root to those settings, and
+//! its `[profile.release]` to leaving out the two its comment explains.
 
 use std::path::{Path, PathBuf};
 
@@ -90,6 +95,14 @@ fn manifest(path: &Path) -> toml::Table {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
     toml::from_str(&text).unwrap_or_else(|e| panic!("{} is not TOML: {e}", path.display()))
+}
+
+/// The value `manifest` holds at `dotted`, a key such as `profile.release.lto`,
+/// if every table on the way declares it.
+fn setting<'a>(manifest: &'a toml::Table, dotted: &str) -> Option<&'a toml::Value> {
+    let mut keys = dotted.split('.');
+    let first = manifest.get(keys.next()?)?;
+    keys.try_fold(first, |value, key| value.get(key))
 }
 
 /// No manifest in the checkout declares a profile Cargo ignores, but the one
@@ -206,6 +219,55 @@ fn the_rule_tells_a_root_from_a_member() {
         assert!(
             !declares_ignored_profiles(&table(&applied)),
             "no ignored profile: {applied:?}"
+        );
+    }
+}
+
+/// The root manifest builds the released `infs` for size, and its release
+/// profile leaves out `panic = "abort"` and `lto`, as the comment above
+/// `[profile.release.package.infs]` explains.
+///
+/// Fails when that table stops setting `opt-level = "z"` or `strip = true`,
+/// which leaves the scan above green while the released `infs` grows again;
+/// when `[profile.release]` sets `panic = "abort"`, which removes the unwinding
+/// three of the workspace's binaries rely on; and when it sets `lto`, which no
+/// package can override, so it would apply to every released binary rather
+/// than tune `infs` alone.
+#[test]
+fn the_root_builds_the_released_infs_for_size() {
+    let checkout = manifest(&repository().join("Cargo.toml"));
+    let comment = "the comment above `[profile.release.package.infs]` in the root Cargo.toml";
+
+    let opt_level = setting(&checkout, "profile.release.package.infs.opt-level");
+    assert_eq!(
+        opt_level.and_then(toml::Value::as_str),
+        Some("z"),
+        "the root Cargo.toml no longer sets `opt-level = \"z\"` in \
+         `[profile.release.package.infs]`, so the released `infs` is optimized for speed and \
+         grows again; {comment} says why the table sets it"
+    );
+    let strip = setting(&checkout, "profile.release.package.infs.strip");
+    assert_eq!(
+        strip.and_then(toml::Value::as_bool),
+        Some(true),
+        "the root Cargo.toml no longer sets `strip = true` in `[profile.release.package.infs]`, \
+         so the released `infs` keeps its symbol table and grows again; {comment} says why the \
+         table sets it"
+    );
+
+    let panic_strategy = setting(&checkout, "profile.release.panic");
+    assert_ne!(
+        panic_strategy.and_then(toml::Value::as_str),
+        Some("abort"),
+        "the root Cargo.toml sets `panic = \"abort\"` in `[profile.release]`, which removes the \
+         unwinding that `infs`'s terminal guard, `inference-lsp`'s request cancellation and \
+         `infc`'s compiler-thread hand-off rely on; {comment} says why the profile leaves it out"
+    );
+    if let Some(lto) = setting(&checkout, "profile.release.lto") {
+        panic!(
+            "the root Cargo.toml sets `lto = {lto}` in `[profile.release]`, which no package can \
+             override, so it applies to every released binary rather than tuning `infs` alone; \
+             {comment} says the tuning goes only as far as a package override"
         );
     }
 }
