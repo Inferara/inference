@@ -36,9 +36,16 @@
 //!   fallback value, as the `--version` probes do — there is no error to key on.
 //!   Call [`settle_executable`] right after writing the stub instead, which
 //!   blocks until the file can be executed at all.
+//!
+//! # Directory trees
+//!
+//! The release-archive tests and the `infs self update` tests both hold a
+//! directory on disk against the repository's `licenses/`, which CI copies
+//! into every release archive. They share the listing of a tree
+//! ([`tree_entries`]), the path of a `/`-separated member ([`member_path`])
+//! and the location of that directory ([`repository_licenses`]).
 
-#[cfg(unix)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -218,6 +225,66 @@ pub(crate) fn module_exporting(
     module.section(&exports);
     module.section(&code);
     module.finish()
+}
+
+/// One member of a directory tree: a directory, or a file and its bytes. The
+/// name is the member's path from where the tree is listed, `/`-separated as
+/// both archive formats spell a member.
+pub(crate) enum TreeEntry {
+    Dir(String),
+    File(String, Vec<u8>),
+}
+
+/// The repository's `licenses/` directory, which CI copies into every release
+/// archive beside the binaries.
+pub(crate) fn repository_licenses() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("licenses")
+}
+
+/// `dir` as the member `name`, then everything under it: parents before their
+/// children, and siblings in name order.
+///
+/// # Panics
+///
+/// Panics if a member cannot be read or its name is not UTF-8.
+pub(crate) fn tree_entries(dir: &Path, name: &str) -> Vec<TreeEntry> {
+    let mut entries = Vec::new();
+    push_tree(&mut entries, dir, name);
+    entries
+}
+
+/// Appends `dir` as the member `name`, then everything under it, to `entries`.
+fn push_tree(entries: &mut Vec<TreeEntry>, dir: &Path, name: &str) {
+    entries.push(TreeEntry::Dir(name.to_string()));
+    let mut children: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{} must be readable: {e}", dir.display()))
+        .map(|entry| entry.expect("Should read directory entry").path())
+        .collect();
+    children.sort();
+    for child in children {
+        let child_name = child
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("a member's name is UTF-8");
+        let member = format!("{name}/{child_name}");
+        if child.is_dir() {
+            push_tree(entries, &child, &member);
+        } else {
+            let bytes = std::fs::read(&child)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", child.display()));
+            entries.push(TreeEntry::File(member, bytes));
+        }
+    }
+}
+
+/// The path of the `/`-separated member `name` under `dir`.
+pub(crate) fn member_path(dir: &Path, name: &str) -> PathBuf {
+    let mut path = dir.to_path_buf();
+    path.extend(name.split('/'));
+    path
 }
 
 /// How many times [`retry_while_exec_busy`] runs its operation before giving up.

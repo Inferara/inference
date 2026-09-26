@@ -20,7 +20,18 @@ derives from.
 
 Every release archive carries this directory as `licenses/`, next to the
 binaries: the `infs` archive, and the `infc` archive as well, although neither
-`infc` nor `inference-lsp` links either crate.
+`infc` nor `inference-lsp` links either crate. Installed, the copies live in
+the toolchain home, `~/.inference` (`%APPDATA%\inference` on Windows, or
+`INFERENCE_HOME` when set): `infs self update` replaces its `licenses/` with the
+one the `infs` archive it installs carries, and `infs install` leaves each
+toolchain's in `toolchains/<version>/licenses/`. The VS Code extension unpacks
+the `infs` archive into the home's `bin/`, so its copy is `bin/licenses/`, and
+an archive unpacked by hand leaves one beside `infs` too; `infs self update`
+refreshes such a `licenses/` beside the running `infs` as well, but only when it
+already holds one of the files here other than this `README.md`, at the same
+path, and it never creates one there. A `licenses/` holding none of them belongs
+to another program sharing the directory, as in `/usr/local/bin`, and the update
+leaves it alone.
 
 This directory holds the texts for these two crates only. The release binaries
 link other third-party crates, whose license texts are not collected here.

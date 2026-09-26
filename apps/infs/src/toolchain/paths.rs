@@ -19,6 +19,7 @@
 //!   bin/                      # Symlink to default toolchain binary
 //!   downloads/                # Download cache
 //!   cache/                    # Cached data (manifest, etc.)
+//!   licenses/                 # Third-party notices of infs (written by `infs self update`)
 //!   default                   # File containing default version string
 //! ```
 //!
@@ -355,6 +356,18 @@ impl ToolchainPaths {
     #[must_use = "returns the path without side effects"]
     pub fn binaryen_dir(&self, version: &str) -> PathBuf {
         self.tools_dir().join("binaryen").join(version)
+    }
+
+    /// Returns the directory holding the third-party notices of the `infs`
+    /// binary (`<root>/licenses`).
+    ///
+    /// `infs self update` replaces it with the `licenses/` of the release
+    /// archive it installs, when that archive carries one. Each toolchain
+    /// keeps the notices its own archive carried in
+    /// `toolchains/<version>/licenses`.
+    #[must_use = "returns the path without side effects"]
+    pub fn licenses_dir(&self) -> PathBuf {
+        self.root.join("licenses")
     }
 
     /// Returns the path to the file storing the default toolchain version.
@@ -814,6 +827,13 @@ mod tests {
         let (temp, paths) = temp_paths();
 
         assert_eq!(paths.tools_dir(), temp.path().join("tools"));
+    }
+
+    #[test]
+    fn licenses_dir_constructs_correct_path() {
+        let (temp, paths) = temp_paths();
+
+        assert_eq!(paths.licenses_dir(), temp.path().join("licenses"));
     }
 
     #[test]

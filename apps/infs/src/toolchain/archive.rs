@@ -451,6 +451,7 @@ pub fn set_executable_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{TreeEntry, member_path, repository_licenses, tree_entries};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::io::Write;
@@ -820,65 +821,23 @@ mod tests {
         );
     }
 
-    /// One member of a release package as `.github/workflows/reusable-build.yml`
-    /// stages it: a directory, or a file and its bytes. The name is the archive
-    /// member name relative to the package root, `/`-separated as both archive
-    /// formats spell it.
-    enum PackageEntry {
-        Dir(String),
-        File(String, Vec<u8>),
-    }
-
-    /// The repository's `licenses/` directory, which CI copies into every
-    /// release package beside the binaries.
-    fn repository_licenses() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("licenses")
-    }
-
     /// What CI stages for a release package: each of `binaries` at the root,
     /// then `cp -R licenses` — the repository's notices, read from the
-    /// checkout, so the fixture follows the directory as it grows.
-    fn ci_package(binaries: &[&str]) -> Vec<PackageEntry> {
-        let mut entries: Vec<PackageEntry> = binaries
+    /// checkout, so the fixture follows the directory as it grows. A member's
+    /// name is its archive member name relative to the package root.
+    fn ci_package(binaries: &[&str]) -> Vec<TreeEntry> {
+        let mut entries: Vec<TreeEntry> = binaries
             .iter()
-            .map(|name| PackageEntry::File((*name).to_string(), format!("{name} binary").into()))
+            .map(|name| TreeEntry::File((*name).to_string(), format!("{name} binary").into()))
             .collect();
-        push_tree(&mut entries, &repository_licenses(), "licenses");
+        entries.extend(tree_entries(&repository_licenses(), "licenses"));
         entries
-    }
-
-    /// Appends `dir` as the member `name` and then everything under it,
-    /// parents before children and siblings in name order.
-    fn push_tree(entries: &mut Vec<PackageEntry>, dir: &Path, name: &str) {
-        entries.push(PackageEntry::Dir(name.to_string()));
-        let mut children: Vec<PathBuf> = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("{} must be readable: {e}", dir.display()))
-            .map(|entry| entry.expect("Should read directory entry").path())
-            .collect();
-        children.sort();
-        for child in children {
-            let child_name = child
-                .file_name()
-                .and_then(|n| n.to_str())
-                .expect("a notice's name is UTF-8");
-            let member = format!("{name}/{child_name}");
-            if child.is_dir() {
-                push_tree(entries, &child, &member);
-            } else {
-                let bytes = std::fs::read(&child)
-                    .unwrap_or_else(|e| panic!("{} must be readable: {e}", child.display()));
-                entries.push(PackageEntry::File(member, bytes));
-            }
-        }
     }
 
     /// Packs `entries` as `tar -czf ARCHIVE -C STAGING .` does on the Linux and
     /// macOS runners: a `./` member first and every other member under `./`,
     /// a directory as a member of its own, binaries executable and notices not.
-    fn create_tar_gz_like_ci(archive_path: &Path, entries: &[PackageEntry]) {
+    fn create_tar_gz_like_ci(archive_path: &Path, entries: &[TreeEntry]) {
         fn append_dir<W: Write>(builder: &mut Builder<W>, member: &str) {
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(tar::EntryType::Directory);
@@ -897,8 +856,8 @@ mod tests {
         append_dir(&mut builder, "./");
         for entry in entries {
             match entry {
-                PackageEntry::Dir(name) => append_dir(&mut builder, &format!("./{name}/")),
-                PackageEntry::File(name, bytes) => {
+                TreeEntry::Dir(name) => append_dir(&mut builder, &format!("./{name}/")),
+                TreeEntry::File(name, bytes) => {
                     let mut header = tar::Header::new_gnu();
                     header.set_size(u64::try_from(bytes.len()).expect("a member fits in a tar header"));
                     header.set_mode(if name.contains('/') { 0o644 } else { 0o755 });
@@ -916,16 +875,16 @@ mod tests {
     /// Packs `entries` as `7z a -tzip ARCHIVE .\STAGING\*` does on the Windows
     /// runner: every member at its name under the staging directory, with no
     /// `./` and no root member, a directory as a member of its own.
-    fn create_zip_like_ci(archive_path: &Path, entries: &[PackageEntry]) {
+    fn create_zip_like_ci(archive_path: &Path, entries: &[TreeEntry]) {
         let file = std::fs::File::create(archive_path).expect("Should create file");
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
         for entry in entries {
             match entry {
-                PackageEntry::Dir(name) => zip
+                TreeEntry::Dir(name) => zip
                     .add_directory(format!("{name}/"), options)
                     .expect("Should add directory"),
-                PackageEntry::File(name, bytes) => {
+                TreeEntry::File(name, bytes) => {
                     zip.start_file(name.as_str(), options)
                         .expect("Should start file");
                     zip.write_all(bytes).expect("Should write");
@@ -935,23 +894,18 @@ mod tests {
         zip.finish().expect("Should finish");
     }
 
-    /// The path of the archive member `name` under `dir`.
-    fn member_path(dir: &Path, name: &str) -> PathBuf {
-        name.split('/').fold(dir.to_path_buf(), |path, part| path.join(part))
-    }
-
     /// Asserts that `dest` holds exactly what `entries` staged, where an install
     /// looks for it: each binary at the root and each notice under `licenses/`,
     /// byte for byte, and nothing else at the root — no `.` directory, no
     /// stripped or doubled `licenses` level.
-    fn assert_extracted_as_staged(dest: &Path, entries: &[PackageEntry]) {
+    fn assert_extracted_as_staged(dest: &Path, entries: &[TreeEntry]) {
         for entry in entries {
             match entry {
-                PackageEntry::Dir(name) => assert!(
+                TreeEntry::Dir(name) => assert!(
                     member_path(dest, name).is_dir(),
                     "{name}/ must be extracted as a directory"
                 ),
-                PackageEntry::File(name, bytes) => assert_eq!(
+                TreeEntry::File(name, bytes) => assert_eq!(
                     std::fs::read(member_path(dest, name))
                         .unwrap_or_else(|e| panic!("{name} must be extracted: {e}")),
                     *bytes,
@@ -973,7 +927,7 @@ mod tests {
         let mut staged: Vec<String> = entries
             .iter()
             .filter_map(|entry| match entry {
-                PackageEntry::Dir(name) | PackageEntry::File(name, _) => {
+                TreeEntry::Dir(name) | TreeEntry::File(name, _) => {
                     (!name.contains('/')).then(|| name.clone())
                 }
             })
@@ -1019,7 +973,7 @@ mod tests {
         assert!(
             entries.iter().any(|entry| matches!(
                 entry,
-                PackageEntry::File(name, _) if name == "licenses/spacewasm/NOTICE"
+                TreeEntry::File(name, _) if name == "licenses/spacewasm/NOTICE"
             )),
             "the fixture must carry the nested notices it is about"
         );
