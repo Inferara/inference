@@ -25,35 +25,6 @@ This document contains tests that require manual verification or are not yet aut
 
 ---
 
-### TC-4.1: Verify Command - Basic Verification
-**Category:** Verify Command
-**Reason:** Requires coqc installed
-
-**Steps:**
-1. Run `infs verify trivial.inf`
-
-**Expected Result:**
-- Exit code: 0
-- Generates `.v` file
-- `coqc` processes file successfully
-
----
-
-### TC-4.3: Verify Command - Missing coqc Error
-**Category:** Verify Command
-**Reason:** Requires coqc NOT in PATH
-
-**Steps:**
-1. Ensure `coqc` is NOT in PATH
-2. Run `infs verify trivial.inf`
-
-**Expected Result:**
-- Exit code: Non-zero
-- Error indicates coqc not found
-- Suggests installation
-
----
-
 ### TC-6.16: Toolchain Directory Permissions
 **Category:** Toolchain Management
 **Reason:** Requires specific filesystem permission setup
