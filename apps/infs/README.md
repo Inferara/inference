@@ -50,7 +50,7 @@ cargo build -p infs --release
 | `infs versions` | List available toolchain versions from server |
 | `infs default <version>` | Set the default toolchain |
 | `infs doctor` | Check installation health with intelligent recommendations |
-| `infs self update` | Update infs itself |
+| `infs self update` | Update infs itself, and keep the third-party notices its release archive carries in the toolchain home's `licenses/` (e.g. `~/.inference/licenses`), replacing the previous ones |
 | `infs component add <name>` | Install a managed component (currently `wasm-opt`, the Binaryen optimizer behind `[build.wasm-opt]`) |
 | `infs component list` | List managed components and their install state |
 | `infs component remove <name>` | Remove an installed managed component |
