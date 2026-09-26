@@ -34,7 +34,7 @@ inference-type-checker = { workspace = true, features = ["test-utils"] }
 inference.workspace = true
 inf-wasmparser.workspace = true
 rustc-hash.workspace = true
-wasmprinter = "0.245.1"
+wasmprinter.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
@@ -44,8 +44,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 cov-mark = { workspace = true, features = ["enable"] }
-wasmparser = "0.245.1"
-wat = "1.225.0"
+wasmparser.workspace = true
+wat.workspace = true
 wasm-encoder.workspace = true
 
 # The Soroban contract host, used only by the `stellar` integration binary to

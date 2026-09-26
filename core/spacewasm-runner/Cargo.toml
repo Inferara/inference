@@ -28,4 +28,4 @@ wasmparser.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-wat = "1.225.0"
+wat.workspace = true
