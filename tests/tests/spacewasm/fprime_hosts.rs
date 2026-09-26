@@ -22,6 +22,7 @@ use inference_spacewasm_runner::{
 use inference_tests::corpus::wasm_for_target;
 use inference_wasm_codegen::Target;
 
+use crate::fprime_programs::{DOWNLINK, EVERY_CALL, SPIN};
 use crate::support::SpaceWasmSession;
 
 /// The committed F´ fixture, read rather than copied so that this module, the
@@ -29,33 +30,6 @@ use crate::support::SpaceWasmSession;
 const FPRIME_SOURCE: &str = include_str!(
     "../../test_data/codegen/wasm/extern_import/host_import_fprime/host_import_fprime.inf"
 );
-
-/// A program calling all six reference hosts and ending in `panic`:
-/// `command`'s answer is `telemetry`'s id, and `rsleep` sleeps for the clock
-/// reading pushed past `u32::MAX`.
-const EVERY_CALL: &str = r"external fn panic(text: [u8; 4], len: i32, line: i32);
-external fn rsleep(ticks: i64);
-external fn command(opcode: i32, arg: i32) -> i32;
-external fn message(text: [u8; 2], len: i32);
-external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; 4], value_len: i32) -> i32;
-use { panic, rsleep, command, message, telemetry } from host::fprime_core;
-
-external fn clock_ms() -> i64;
-use { clock_ms } from host::env;
-
-pub fn go() -> i64 {
-    let hi: [u8; 2] = [104, 105];
-    message(hi, 2);
-    let id: i32 = command(42, 7);
-    let mut time: [u8; 11] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let value: [u8; 4] = [21, 0, 0, 0];
-    let status: i32 = telemetry(id, time, 11, value, 4);
-    let now: i64 = clock_ms();
-    rsleep(now + 5000000000);
-    let boom: [u8; 4] = [98, 111, 111, 109];
-    panic(boom, 4, 17);
-    return now;
-}";
 
 /// Payloads handed to `message` and `panic` from an eleven-byte array, with
 /// the length each function passes beside it.
@@ -96,23 +70,6 @@ pub fn forged_panic() {
 pub fn panic_not_text() {
     let text: [u8; 11] = [111, 107, 128, 0, 0, 0, 0, 0, 0, 0, 0];
     panic(text, 3, 5);
-}";
-
-/// A downlink whose time the caller seeded with the bytes 1 to 11, answering
-/// the sum of those bytes after the call: 66 if the host wrote nothing, 0 if
-/// it wrote the whole time, and 255 if it refused the downlink.
-const DOWNLINK: &str = r"external fn telemetry(id: i32, mut time: [u8; 11], time_len: i32, value: [u8; 4], value_len: i32) -> i32;
-use { telemetry } from host::fprime_core;
-
-pub fn downlink(time_len: i32) -> u8 {
-    let mut time: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-    let value: [u8; 4] = [21, 0, 0, 0];
-    let status: i32 = telemetry(3, time, time_len, value, 4);
-    if status != 0 {
-        return 255;
-    }
-    return time[0] + time[1] + time[2] + time[3] + time[4] + time[5] + time[6] + time[7]
-        + time[8] + time[9] + time[10];
 }";
 
 /// Each program compiled once at the SpaceWasm target.
@@ -378,19 +335,7 @@ fn telemetry_overwrites_a_time_declared_without_mut() {
 /// if running out is recorded as a host's trap.
 #[test]
 fn a_compiled_program_that_runs_out_of_fuel_keeps_the_host_calls_it_made() {
-    let wasm = compiled(
-        r"external fn command(opcode: i32, arg: i32) -> i32;
-use { command } from host::fprime_core;
-
-pub fn spin(to: i32) -> i32 {
-    let id: i32 = command(42, 7);
-    let mut i: i32 = 0;
-    loop i < to {
-        i = i + 1;
-    }
-    return i + id;
-}",
-    );
+    let wasm = compiled(SPIN);
     let thousand = Fuel::Limited(NonZeroUsize::new(1_000).expect("the budget is not zero"));
     let mut session = SpaceWasmSession::acquire();
     for (to, ended) in [

@@ -27,9 +27,11 @@
 //! they answer through the program and back out. `fprime_hosts` runs compiled
 //! programs against the F´ reference hosts the runner itself registers, through
 //! the one loader it offers for them, and pins what those hosts log, read, write
-//! and refuse. The CLI matrix runs the same program only against `--host` stubs
-//! that answer zero, the oracle registers a host only so that a hand-written
-//! module can load, and the sweeps register none.
+//! and refuse; three of the programs it runs live in `fprime_programs`, where
+//! a binary other than this one can include them. The CLI matrix runs the
+//! same program only against `--host` stubs that answer zero, the oracle
+//! registers a host only so that a hand-written module can load, and the
+//! sweeps register none.
 //!
 //! The interpreter is embedded through `inference-spacewasm-runner`, which
 //! defines the interpreter's allocator symbols once for every program that
@@ -43,5 +45,6 @@ mod conformance_oracle;
 mod decode_sweep;
 mod differential;
 mod fprime_hosts;
+mod fprime_programs;
 mod host_imports;
 mod support;

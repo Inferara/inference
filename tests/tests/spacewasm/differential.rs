@@ -18,8 +18,8 @@
 use std::path::Path;
 
 use inference_tests::corpus::{
-    carries_verification_operator, codegen_for_target_no_analysis, has_import_section,
-    relative_to_test_data, single_file_corpus_sources,
+    SpaceWasmBuild, codegen_for_target_no_analysis, relative_to_test_data,
+    single_file_corpus_sources, spacewasm_build,
 };
 use inference_wasm_codegen::Target;
 
@@ -241,9 +241,9 @@ fn the_two_engines_agree_on_every_zero_parameter_export() {
 
     for (label, source) in &sources {
         let name = relative_to_test_data(Path::new(label));
-        let output = match codegen_for_target_no_analysis(source, Target::SpaceWasm) {
-            Ok(output) => output,
-            Err(e) => {
+        let output = match spacewasm_build(source) {
+            SpaceWasmBuild::Runnable(output) => output,
+            SpaceWasmBuild::Refused(e) => {
                 // The target's own envelope refused it, and the message has to
                 // say so: a fixture that stopped compiling for an unrelated
                 // reason would otherwise slide out of the compared set and make
@@ -258,29 +258,23 @@ fn the_two_engines_agree_on_every_zero_parameter_export() {
                 refused.push(name);
                 continue;
             }
+            SpaceWasmBuild::CarriesOperators => {
+                // No source the target accepts can reach here: the gate is
+                // total over a definition's whole body, so a module carrying
+                // the compiler's custom `0xfc` operators is refused before it
+                // is emitted. The arm is kept because that is a claim and not a
+                // guarantee — if a hole opens, this classifies the fixture into
+                // `OPERATOR_EMITTING`, whose committed emptiness then turns
+                // red, rather than handing bytes that are not WebAssembly to an
+                // engine.
+                with_operators.push(name);
+                continue;
+            }
+            SpaceWasmBuild::DeclaresImports => {
+                with_imports.push(name);
+                continue;
+            }
         };
-        if carries_verification_operator(output.wasm()) {
-            // Checked before imports, the reverse of the sibling sweep's order,
-            // and for the reason that sweep states its own: there, a module that
-            // is both comes back with the verdict the decoder reaches first;
-            // here no verdict is taken at all, and the reason to report is the
-            // one about the module rather than the one about this sweep's empty
-            // host set.
-            //
-            // No source the target accepts can reach here: the gate is total
-            // over a definition's whole body, so a module carrying the
-            // compiler's custom `0xfc` operators is refused before it is
-            // emitted. The arm is kept because that is a claim and not a
-            // guarantee — if a hole opens, this classifies the fixture into
-            // `OPERATOR_EMITTING`, whose committed emptiness then turns red,
-            // rather than handing bytes that are not WebAssembly to an engine.
-            with_operators.push(name);
-            continue;
-        }
-        if has_import_section(output.wasm()) {
-            with_imports.push(name);
-            continue;
-        }
 
         let module = wasmtime::Module::new(&wasmtime_engine, output.wasm())
             .unwrap_or_else(|e| panic!("{label} is not a valid module for wasmtime: {e}"));

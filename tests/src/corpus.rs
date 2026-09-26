@@ -81,6 +81,50 @@ pub fn codegen_for_target_no_analysis(
     crate::utils::codegen_with_target_mode_no_analysis(source, target, CompilationMode::Compile)
 }
 
+/// The `spacewasm` build of one single-file fixture, as the SpaceWasm tier's
+/// run sweeps take it: a module to run with no host registered, or the reason
+/// there is none.
+pub enum SpaceWasmBuild {
+    /// The target refused the source, with its refusal.
+    Refused(anyhow::Error),
+    /// The module carries a verification operator, which is not WebAssembly,
+    /// so no engine can be asked about it.
+    CarriesOperators,
+    /// The module declares an import, which a sweep registering no host
+    /// cannot bind.
+    DeclaresImports,
+    /// The module can be run, and this is its build, export descriptor and
+    /// all.
+    Runnable(CodegenOutput),
+}
+
+/// Builds `source` at [`Target::SpaceWasm`] with analysis skipped, as
+/// [`codegen_for_target_no_analysis`] explains a corpus sweep must, and says
+/// whether the module can be run with no host registered.
+///
+/// This is the one selection of the fixtures the differential sweep runs, so
+/// that another caller running the same fixtures cannot drift from it. A module
+/// carrying a verification operator is classified before one declaring an
+/// import, the reverse of the decode sweep's order, and for the reason that
+/// sweep states its own: there, a module that is both comes back with the
+/// verdict the decoder reaches first; here no verdict is taken at all, and the
+/// reason to report is the one about the module rather than the one about an
+/// empty host set.
+#[must_use]
+pub fn spacewasm_build(source: &str) -> SpaceWasmBuild {
+    let output = match codegen_for_target_no_analysis(source, Target::SpaceWasm) {
+        Ok(output) => output,
+        Err(refusal) => return SpaceWasmBuild::Refused(refusal),
+    };
+    if carries_verification_operator(output.wasm()) {
+        SpaceWasmBuild::CarriesOperators
+    } else if has_import_section(output.wasm()) {
+        SpaceWasmBuild::DeclaresImports
+    } else {
+        SpaceWasmBuild::Runnable(output)
+    }
+}
+
 /// Compiles `source` into an uploadable Soroban contract, by the same route
 /// `infc --target stellar` takes: code generation at [`Target::Stellar`], the
 /// link step, then the Val-ABI rewrite.
