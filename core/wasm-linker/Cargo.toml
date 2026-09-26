@@ -17,7 +17,7 @@ inference-hassert.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-wat = "1.225.0"
+wat.workspace = true
 inf-wasmparser = { workspace = true }
 inference-wasm-to-v-translator = { workspace = true }
 rustc-hash = { workspace = true }

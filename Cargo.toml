@@ -67,9 +67,24 @@ wasm-encoder = "0.254.0"
 # Distinct from `inf-wasmparser` above and not a replacement for it: the fork
 # accepts the custom non-deterministic opcodes unconditionally, so only the
 # stock decoder can answer "is this WebAssembly 1.0?". Default features are off
-# because the only consumer parses and validates a core module: no component
-# model, no serde, no SIMD.
+# because the compiler's consumers parse and validate a core module: no
+# component model, no serde, no SIMD. The test code that reads modules with it
+# takes the same set; `wasmprinter` below adds SIMD and the component model to
+# any build that links it, which only test code does.
 wasmparser = { version = "0.254.0", default-features = false, features = ["std", "validate", "features", "hash-collections"] }
+# The text printer the test suites render modules with. The `.wat` goldens under
+# `tests/test_data` are its output and are compared against it, so a bump that
+# changes its text fails them. Held at the version `wasm-encoder` is held at, so
+# it reads through the `wasmparser` above rather than a copy of its own.
+wasmprinter = "0.254.0"
+# The text assembler the test suites build hand-written modules with, held at
+# the release that goes with `wasm-encoder` above: `wat` 1.254 parses through
+# `wast` 254, which encodes with `wasm-encoder` 0.254, so no second encoder comes
+# with it. A tilde, not a caret: `wat` is past 1.0, so a caret requirement floats
+# to the newest 1.x, whose `wast` brings the newest `wasm-encoder`. Wasmtime's
+# `wat` resolves to this one too, so a Wasmtime that needs a newer `wat` does not
+# resolve until this entry moves with `wasm-encoder`.
+wat = "~1.254.0"
 # The SpaceWasm flight interpreter, the runtime the `spacewasm` target is named
 # for: a `no_std` WebAssembly 1.0 decoder with no post-MVP proposal support.
 # The `=`-pin is the point rather than caution — its acceptance set is what

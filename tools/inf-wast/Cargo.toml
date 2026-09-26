@@ -37,7 +37,7 @@ gimli = { version = "0.31.1", optional = true }
 anyhow.workspace = true
 inf-wasmparser.workspace = true
 libtest-mimic = "0.8.1"
-wat = "1.225.0"
+wat.workspace = true
 rand = { version = "0.9.0", features = ["small_rng"] }
 
 [features]
