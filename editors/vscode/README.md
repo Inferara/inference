@@ -8,10 +8,11 @@ Official VS Code extension for the [Inference](https://github.com/Inferara/infer
 
 Full syntax highlighting support for Inference language constructs:
 
-- **Keywords**: `fn`, `struct`, `enum`, `type`, `const`, `let`, `pub`, `mut`, `spec`, `external`
+- **Keywords**: `fn`, `struct`, `enum`, `const`, `let`, `pub`, `mut`, `spec`, `external`, `use`, `from`
+- **Arithmetic modes**: `checked`, `wrapping`
 - **Control Flow**: `if`, `else`, `loop`, `break`, `return`, `assert`
 - **Non-deterministic Constructs**: `forall`, `exists`, `assume`, `unique`, `@` (uzumaki)
-- **Primitive Types**: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `bool`
+- **Primitive Types**: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `bool`, and the unit type `()`; `unit` is highlighted as a reserved word
 - **Literals**: strings, numbers (decimal, hex, binary, octal), booleans
 - **Comments**: line (`//`), documentation (`///`), and block (`/* */`)
 
