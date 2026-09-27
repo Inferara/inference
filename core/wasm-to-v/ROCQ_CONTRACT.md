@@ -2058,9 +2058,12 @@ entries are matched by name, not position.
   The attribution in every message names the *contract*, not WasmCert:
   vanilla WasmCert-Coq does model floats and conversions (which is why
   the old float relop emission was *ill-typed* rather than unbound),
-  but the wasm-verifier program logic covers none of that surface, so
-  no such term can be verified. The stub mirrors the contract subset,
-  not all of WasmCert.
+  and so does the wasm-verifier program logic, which is generic over
+  WasmCert's number types, floats included; only its `testop` rule is
+  integer-only. The narrowing is Inference's: the language has no
+  floating-point or vector types, so the contract declares none of that
+  surface and the translator refuses it. The stub mirrors the contract
+  subset, not all of WasmCert.
 
 ## Migration
 
