@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### IDE / LSP
+
+- VS Code extension 0.0.6: syntax highlighting follows the v0.0.6 language. `checked` and `wrapping` are highlighted as keywords instead of as function calls, `unit` as a reserved word, and `type` is no longer highlighted, since type aliases were removed from the language. The extension's README and manual QA guide list the same keywords ([#495])
+
 ## [0.0.6] - 2026-09-27
 
 ### Breaking
@@ -855,3 +859,4 @@ Initial tagged release.
 [#466]: https://github.com/Inferara/inference/issues/466
 [#485]: https://github.com/Inferara/inference/issues/485
 [#408]: https://github.com/Inferara/inference/issues/408
+[#495]: https://github.com/Inferara/inference/pull/495

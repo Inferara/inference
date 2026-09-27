@@ -1,8 +1,7 @@
 # Inference VS Code Extension -- Manual QA Guide
 
-**Version:** 0.0.5
-**Branch:** `33-feature-lsp-server`
-**Date:** 2026-07-04
+**Version:** 0.0.6
+**Date:** 2026-09-27
 
 ---
 
@@ -54,7 +53,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 0.2 | `npm run build` | Builds `dist/extension.js` without errors |
 | 0.3 | `npm run build:prod` | Production build succeeds |
 | 0.4 | `npm test` | All 291 tests pass, 0 failures |
-| 0.5 | `npm run package` | Produces `inference-0.0.5.vsix` without errors (bundled; no `node_modules` inside the VSIX) |
+| 0.5 | `npm run package` | Produces `inference-0.0.6.vsix` without errors (bundled; no `node_modules` inside the VSIX) |
 
 ---
 
@@ -217,7 +216,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
 | 5.1 | Open a `.inf` file | Language mode shows "Inference" in status bar | |
-| 5.2 | Keywords `fn`, `struct`, `enum`, `type`, `const`, `let`, `pub`, `mut`, `spec`, `external` | Highlighted as keywords | |
+| 5.2 | Keywords `fn`, `struct`, `enum`, `const`, `let`, `pub`, `mut`, `spec`, `external`, `use`, `from` | Highlighted as keywords | |
 | 5.3 | Control flow `if`, `else`, `loop`, `break`, `return`, `assert` | Highlighted as control keywords | |
 | 5.4 | Non-det constructs `forall`, `exists`, `assume`, `unique` | Highlighted distinctly | |
 | 5.5 | Uzumaki symbol `@` | Highlighted as a special symbol | |
@@ -228,6 +227,9 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 5.10 | Doc comment `///` | Highlighted as doc comment | |
 | 5.11 | Block comment `/* ... */` | Highlighted as comment | |
 | 5.12 | Function names in declarations | Highlighted as function definitions | |
+| 5.13 | `checked(a + b)` and `wrapping(a + b)` | `checked` and `wrapping` highlighted as keywords, not as function calls | |
+| 5.14 | `fn unit() {` and `-> unit` | `unit` highlighted as a reserved word, not as a function or type name; `unit_count` stays an ordinary name | |
+| 5.15 | `type A = i32;` | `type` is NOT highlighted as a keyword (type aliases were removed from the language) | |
 
 ---
 
