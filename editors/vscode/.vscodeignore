@@ -1,0 +1,14 @@
+# The package carries the bundled extension and the assets package.json
+# declares. esbuild bundles every runtime dependency into dist/extension.js,
+# so sources, tests, build config and source maps stay out.
+.vscode/**
+node_modules/**
+src/**
+test/**
+dist/**/*.map
+esbuild.mjs
+tsconfig.json
+package-lock.json
+QA_GUIDE.md
+*.vsix
+**/.DS_Store

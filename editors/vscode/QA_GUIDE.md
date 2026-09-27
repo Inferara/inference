@@ -53,7 +53,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 0.2 | `npm run build` | Builds `dist/extension.js` without errors |
 | 0.3 | `npm run build:prod` | Production build succeeds |
 | 0.4 | `npm test` | All 291 tests pass, 0 failures |
-| 0.5 | `npm run package` | Produces `inference-0.0.6.vsix` without errors (bundled; no `node_modules` inside the VSIX) |
+| 0.5 | `npm run package` | Runs `build:prod` first (the `vscode:prepublish` script), then produces `inference-0.0.6.vsix` without errors. `npx vsce ls --no-dependencies` lists only `package.json`, `README.md`, `LICENSE`, `dist/extension.js`, `icons/`, `language-configuration.json` and `syntaxes/`: no `node_modules`, sources, tests or source map |
 
 ---
 
