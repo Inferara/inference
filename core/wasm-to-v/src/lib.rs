@@ -89,9 +89,11 @@
 //! | `funcref` | `T_ref T_funcref` |
 //! | `externref` | `T_ref T_externref` |
 //!
-//! The wasm-verifier proof contract admits only `T_i32 | T_i64` of `number_type`
-//! and no vector type, so `f32`, `f64`, and `v128` have nothing verifiable to map
-//! to. The rejection covers
+//! The proof contract (`ROCQ_CONTRACT.md`) declares only `T_i32 | T_i64` of
+//! `number_type` and no vector type, because Inference has no floating-point or
+//! vector types, so `f32`, `f64`, and `v128` have nothing in the contract to map
+//! to. The narrowing is Inference's: the wasm-verifier program logic itself is
+//! generic over WasmCert's number types, floats included. The rejection covers
 //! function parameters and results, locals, globals, and block result types
 //! through one chokepoint, so a float in a *signature* is refused even when no
 //! float instruction appears in any body.

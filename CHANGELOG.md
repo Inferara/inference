@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- `core/wasm-to-v`'s crate docs and `ROCQ_CONTRACT.md` no longer say the wasm-verifier program logic cannot verify floating-point terms. It is generic over WasmCert's number types, floats included, and only its `testop` rule is integer-only. Both now say the narrowing is Inference's: the language has no floating-point or vector types, so the contract declares none and the translator refuses them ([#496])
+
 ### IDE / LSP
 
 - VS Code extension 0.0.6: syntax highlighting follows the v0.0.6 language. `checked` and `wrapping` are highlighted as keywords instead of as function calls, `unit` as a reserved word, and `type` is no longer highlighted, since type aliases were removed from the language. The extension's README and manual QA guide list the same keywords ([#495])
@@ -860,3 +864,4 @@ Initial tagged release.
 [#485]: https://github.com/Inferara/inference/issues/485
 [#408]: https://github.com/Inferara/inference/issues/408
 [#495]: https://github.com/Inferara/inference/pull/495
+[#496]: https://github.com/Inferara/inference/pull/496
