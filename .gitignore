@@ -58,6 +58,7 @@ cobertura.xml
 !.github/workflows/
 !.cargo/
 !.gitattributes
+!editors/vscode/.vscodeignore
 
 external/
 /*.md
@@ -67,6 +68,7 @@ external/
 *.vsix
 editors/vscode/package-lock.json
 editors/vscode/node_modules/
+editors/vscode/dist/
 
 # mdBook render output
 /book/book/

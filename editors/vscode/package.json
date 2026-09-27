@@ -255,6 +255,7 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "build:prod": "node esbuild.mjs --production",
+    "vscode:prepublish": "npm run build:prod",
     "watch": "node esbuild.mjs --watch",
     "test": "node --import tsx --test src/test/**/*.test.ts",
     "package": "vsce package --no-dependencies",
