@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### IDE / LSP
 
 - VS Code extension 0.0.6: syntax highlighting follows the v0.0.6 language. `checked` and `wrapping` are highlighted as keywords instead of as function calls, `unit` as a reserved word, and `type` is no longer highlighted, since type aliases were removed from the language. The extension's README and manual QA guide list the same keywords ([#495])
-- The VS Code extension package carries only what the extension runs: a new `.vscodeignore` keeps its TypeScript sources, tests, build configuration, QA guide and source map out, taking the package from 478 KB to 127 KB. `npm run package` now builds the production bundle itself (`vscode:prepublish`), and `editors/vscode/dist/` is no longer tracked, since it held a development build that packaging would otherwise ship or dirty ([#497])
+- The VS Code extension package carries only what the extension runs: a new `.vscodeignore` keeps its TypeScript sources, tests, build configuration, QA guide and source map out, taking the package from 478 KB to 127 KB. `npm run package` now builds the production bundle itself (`vscode:prepublish`), and `editors/vscode/dist/` is no longer tracked, since it held a development build that packaging would otherwise ship or dirty. A new `VS Code Extension` workflow type-checks, tests and packages the extension on every pull request and `main` push that touches it, and fails when the package's file list changes or its bundle is a development build ([#497])
 
 ## [0.0.6] - 2026-09-27
 
