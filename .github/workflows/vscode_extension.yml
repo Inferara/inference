@@ -1,0 +1,97 @@
+name: VS Code Extension
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'editors/vscode/**'
+      - '.github/workflows/vscode_extension.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'editors/vscode/**'
+      - '.github/workflows/vscode_extension.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  # Type-checks, tests and packages the extension the way a release does, then
+  # checks what the package carries. `dist/` is not committed: `npm run package`
+  # builds it through the `vscode:prepublish` script, so a broken build or a
+  # missing entry point fails here rather than at release time. The file list
+  # is exact, so a file that starts or stops shipping fails the job until the
+  # list below is updated on purpose.
+  extension:
+    name: Test and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.1.3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # package-lock.json is not committed, so this resolves the newest
+      # releases the ranges allow, the same install a release build does.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Type-check
+        run: npx tsc --noEmit -p .
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Grammar and language-configuration tests
+        run: npm run "test syntax"
+
+      - name: Package
+        run: npm run package
+
+      - name: Check the package contents
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          vsix=(inference-*.vsix)
+          if [ "${#vsix[@]}" -ne 1 ]; then
+            echo "::error::Expected one inference-*.vsix, found ${#vsix[@]}"
+            exit 1
+          fi
+
+          expected=$(LC_ALL=C sort <<'EOF'
+          [Content_Types].xml
+          extension.vsixmanifest
+          extension/LICENSE.txt
+          extension/dist/extension.js
+          extension/icons/file_icon.svg
+          extension/icons/inference-file.png
+          extension/icons/inference.png
+          extension/language-configuration.json
+          extension/package.json
+          extension/readme.md
+          extension/syntaxes/inference.tmLanguage.json
+          EOF
+          )
+          actual=$(unzip -Z1 "${vsix[0]}" | LC_ALL=C sort)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::The files in ${vsix[0]} changed. If that is intended, update the list in this step:"
+            diff -u --label expected --label packaged <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+            exit 1
+          fi
+
+          # The production build writes no source map; a development build
+          # ends with a sourceMappingURL comment.
+          if unzip -p "${vsix[0]}" extension/dist/extension.js | grep -q 'sourceMappingURL'; then
+            echo "::error::extension/dist/extension.js in ${vsix[0]} is a development build"
+            exit 1
+          fi
+          echo "${vsix[0]} carries the expected $(printf '%s\n' "$actual" | wc -l) files and a production bundle."
