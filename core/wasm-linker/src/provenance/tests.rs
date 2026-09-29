@@ -721,65 +721,92 @@ fn g4_global_set_between_address_and_load() {
 // catch-all of `step_straight_line`
 //
 // `safety::check_operator` and the interpreter's arms are two lists, and
-// `global.set` sat in the first and not the second until issue #430. The corpus
-// below spells one instance of every operator the allow-list admits; the test
-// steps each one that can reach provenance and fails if it lands in the
-// catch-all. An operator family added to the allow-list belongs here as well as
-// in `tests/v_alignment.rs`.
+// `global.set` sat in the first and not the second until issue #430. The test
+// below builds one instance of every operator the parser defines, keeps the ones
+// the allow-list admits and that can reach provenance, and fails if any of them
+// lands in the catch-all. The candidates come from the parser's own operator
+// list, not from a hand-kept one, so a family newly admitted by the allow-list is
+// covered without anyone remembering to add it here.
 // ===========================================================================
 
-/// One body holding every operator `safety::check_operator` admits. It is
-/// assembled, never validated, so it need not type-check: each operator is
-/// stepped on its own. Function 0 is the body itself, so `call 0` resolves to a
-/// two-parameter signature.
-const ADMITTED_OPERATORS_WAT: &str = r#"
-(module
-  (type (;0;) (func (param i32 i32)))
-  (memory 1)
-  (global (mut i32) (i32.const 0))
-  (table 1 funcref)
-  (elem declare func 0)
-  (data "")
-  (func (;0;) (type 0) (param i32 i32) (local i32)
-    ;; control; the structured openers and closers are walked by `interpret`
-    unreachable nop
-    block br 0 br_if 0 br_table 0 0 end
-    loop end
-    if else end
-    return
-    ;; calls, parametric, locals, globals
-    call 0 call_indirect (type 0)
-    drop select
-    local.get 0 local.set 0 local.tee 0
-    global.get 0 global.set 0
-    ;; integer loads and stores
-    i32.load i64.load
-    i32.load8_s i32.load8_u i32.load16_s i32.load16_u
-    i64.load8_s i64.load8_u i64.load16_s i64.load16_u i64.load32_s i64.load32_u
-    i32.store i64.store i32.store8 i32.store16 i64.store8 i64.store16 i64.store32
-    ;; memory and bulk memory
-    memory.size memory.grow memory.fill memory.copy memory.init 0 data.drop 0
-    ;; tables
-    table.get 0 table.set 0 table.grow 0 table.size 0 table.fill 0 ref.func 0
-    ;; constants
-    i32.const 0 i64.const 0
-    ;; i32 comparisons, arithmetic and bitwise
-    i32.eqz i32.eq i32.ne i32.lt_s i32.lt_u i32.gt_s i32.gt_u
-    i32.le_s i32.le_u i32.ge_s i32.ge_u
-    i32.clz i32.ctz i32.popcnt i32.add i32.sub i32.mul
-    i32.div_s i32.div_u i32.rem_s i32.rem_u i32.and i32.or i32.xor
-    i32.shl i32.shr_s i32.shr_u i32.rotl i32.rotr
-    ;; i64 comparisons, arithmetic and bitwise
-    i64.eqz i64.eq i64.ne i64.lt_s i64.lt_u i64.gt_s i64.gt_u
-    i64.le_s i64.le_u i64.ge_s i64.ge_u
-    i64.clz i64.ctz i64.popcnt i64.add i64.sub i64.mul
-    i64.div_s i64.div_u i64.rem_s i64.rem_u i64.and i64.or i64.xor
-    i64.shl i64.shr_s i64.shr_u i64.rotl i64.rotr
-    ;; sign extension and integer width conversions
-    i32.extend8_s i32.extend16_s i64.extend8_s i64.extend16_s i64.extend32_s
-    i32.wrap_i64 i64.extend_i32_s i64.extend_i32_u)
-  (export "f" (func 0)))
-"#;
+/// One value of an operator immediate's type, for building an instance of every
+/// operator. Each is zero or empty. The only immediate the allow-list inspects
+/// is a memory index, which it admits only when zero, so these samples reach
+/// every operator it admits. A new immediate type in the parser's operator list
+/// fails to compile here rather than going unexercised.
+trait Sample {
+    fn sample() -> Self;
+}
+
+macro_rules! sample {
+    ($($ty:ty => $value:expr),* $(,)?) => {
+        $(impl Sample for $ty { fn sample() -> Self { $value } })*
+    };
+}
+
+/// Decodes one operator from `bytes`, for the immediates the parser gives no
+/// public constructor.
+fn decoded(bytes: &'static [u8]) -> Operator<'static> {
+    BinaryReader::new(bytes, 0)
+        .read_operator()
+        .expect("a sample operator decodes")
+}
+
+sample! {
+    u8 => 0,
+    u32 => 0,
+    i32 => 0,
+    i64 => 0,
+    [u8; 16] => [0; 16],
+    inf_wasmparser::MemArg => inf_wasmparser::MemArg {
+        align: 0,
+        max_align: 0,
+        offset: 0,
+        memory: 0,
+    },
+    BlockType => BlockType::Empty,
+    inf_wasmparser::Ordering => inf_wasmparser::Ordering::SeqCst,
+    inf_wasmparser::HeapType => inf_wasmparser::HeapType::Abstract {
+        shared: false,
+        ty: inf_wasmparser::AbstractHeapType::Func,
+    },
+    inf_wasmparser::RefType => inf_wasmparser::RefType::FUNCREF,
+    inf_wasmparser::ValType => inf_wasmparser::ValType::I32,
+    inf_wasmparser::Ieee32 => inf_wasmparser::Ieee32::from(0.0f32),
+    inf_wasmparser::Ieee64 => inf_wasmparser::Ieee64::from(0.0f64),
+    inf_wasmparser::TryTable => inf_wasmparser::TryTable {
+        ty: BlockType::Empty,
+        catches: Vec::new(),
+    },
+    inf_wasmparser::ResumeTable => inf_wasmparser::ResumeTable { handlers: Vec::new() },
+    // `v128.const 0`: the opcode prefix and sub-opcode, then sixteen zero bytes
+    inf_wasmparser::V128 => match decoded(&[
+        0xfd, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]) {
+        Operator::V128Const { value } => value,
+        other => panic!("expected v128.const, decoded {other:?}"),
+    },
+    // `br_table` with no targets and default depth 0
+    inf_wasmparser::BrTable<'static> => match decoded(&[0x0e, 0x00, 0x00]) {
+        Operator::BrTable { targets } => targets,
+        other => panic!("expected br_table, decoded {other:?}"),
+    },
+}
+
+/// Expands the parser's operator list into one instance of each operator.
+macro_rules! operator_instances {
+    ($(
+        @$proposal:ident $op:ident $({ $($arg:ident: $argty:ty),* })?
+            => $visit:ident ($($ann:tt)*)
+    )*) => {
+        vec![$( Operator::$op $({ $($arg: Sample::sample()),* })? ),*]
+    };
+}
+
+/// One instance of every operator the parser defines, every proposal included.
+fn every_operator() -> Vec<Operator<'static>> {
+    inf_wasmparser::for_each_operator!(operator_instances)
+}
 
 #[test]
 fn every_admitted_operator_reaching_provenance_is_modeled() {
@@ -788,16 +815,15 @@ fn every_admitted_operator_reaching_provenance_is_modeled() {
     // stack, can leave it empty.
     const DEPTH: usize = 8;
 
-    let m = module(ADMITTED_OPERATORS_WAT);
-    let body = &m.local_funcs[0].body;
-    let ops = collect_operators(&FunctionBody::new(BinaryReader::new(body, 0)))
-        .expect("the corpus decodes");
+    // Resolves `call 0` to a two-parameter signature.
+    let m = module(r#"(module (type (func (param i32 i32))) (func (type 0)))"#);
 
     let mut stepped = Vec::new();
-    for op in &ops {
-        let effect = crate::safety::check_operator(op).unwrap_or_else(|e| {
-            panic!("the corpus must hold only operators the allow-list admits: {op:?}: {e:?}")
-        });
+    for op in every_operator() {
+        let Ok(effect) = crate::safety::check_operator(&op) else {
+            // Not admitted: no closure carrying it gets this far.
+            continue;
+        };
         if matches!(
             op,
             Operator::Block { .. }
@@ -821,8 +847,8 @@ fn every_admitted_operator_reaching_provenance_is_modeled() {
         };
         let mut summary = FunctionSummary::default();
         let mut branch_acc = Vec::new();
-        Interp::step_straight_line(&m, &mut summary, op, &mut state, &mut branch_acc)
-            .expect("a corpus operator steps");
+        Interp::step_straight_line(&m, &mut summary, &op, &mut state, &mut branch_acc)
+            .expect("an admitted operator steps");
         assert!(
             !state.stack.is_empty(),
             "`{op:?}` passes the safety allow-list with no Tier-C flag, so it reaches \
@@ -832,11 +858,14 @@ fn every_admitted_operator_reaching_provenance_is_modeled() {
         stepped.push(format!("{op:?}"));
     }
 
-    assert!(
-        stepped.iter().any(|op| op.starts_with("GlobalSet")),
-        "`global.set` must be among the operators stepped, or this test no longer \
-         covers the one issue #430 found unmodeled: {stepped:?}"
-    );
+    // Non-vacuity: the enumeration must actually reach the admitted set, and
+    // `global.set` in particular, the operator issue #430 found unmodeled.
+    for expected in ["GlobalSet", "I32Store {", "I64Extend32S", "MemoryCopy"] {
+        assert!(
+            stepped.iter().any(|op| op.starts_with(expected)),
+            "`{expected}` must be among the operators stepped: {stepped:?}"
+        );
+    }
 }
 
 // ===========================================================================
