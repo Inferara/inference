@@ -26,8 +26,8 @@
 //! other caller can still pass an index the guard traps on.
 //!
 //! The accesses this rule proves are also what code generation reads to omit
-//! the guard: [`prove`] runs the same analysis and keeps each access whose
-//! index it bounded within `0..length`, through the one [`verdict`] this rule
+//! the guard: `prove` runs the same analysis and keeps each access whose
+//! index it bounded within `0..length`, through the one `verdict` this rule
 //! reports from, so the set a build elides and the set this rule accepts
 //! cannot drift apart. An access proven only by never being reached keeps its
 //! guard; it costs nothing at run time.

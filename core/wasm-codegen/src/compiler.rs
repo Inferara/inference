@@ -1021,7 +1021,9 @@ impl Compiler {
     /// — Compile and Proof, Debug and Release alike, and nothing on the emission
     /// path reads a target. A dynamic out-of-range access therefore traps
     /// cleanly instead of corrupting adjacent frame slots, and the artifact a
-    /// proof is written about is byte-for-byte the artifact that ships.
+    /// proof is written about is byte-for-byte the artifact that ships. An
+    /// access analysis proved in bounds carries no guard in any build
+    /// ([`Self::set_proven_in_bounds`]); this flag does not change that.
     ///
     /// Proof mode used to be the one unguarded build, which made its `.v` weaker
     /// than the deployed module on exactly the property the language exists to

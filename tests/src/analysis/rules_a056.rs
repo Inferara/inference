@@ -2,9 +2,9 @@
 ///
 /// - A056: ArrayIndexNotProvenInBounds — every array access whose index is not
 ///   a bare literal must be proven, from the code the programmer wrote, to index
-///   within `0..length` on every run that reaches it. The runtime guard stays,
-///   but an out-of-range index has to be a path the program handles, never an
-///   implicit trap.
+///   within `0..length` on every run that reaches it, so an out-of-range index
+///   is a path the program handles, never an implicit trap. The accesses it
+///   proves are handed to code generation, which omits their runtime guard.
 ///
 /// Each test runs the real parse -> type-check -> analyze pipeline and compares
 /// the A056 findings against the accesses expected to be unproven.

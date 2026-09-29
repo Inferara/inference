@@ -1358,7 +1358,7 @@ sixth in `core/wasm-codegen/src/overflow_guard.rs`:
 | `visit_function_definition_body`, tail of a value-returning function | Dead tail: every path already exited through its own epilogue, and `unreachable` is stack-polymorphic, so the implicit `end` still validates | Never, given analysis rule A007 — which an entry point that skips analysis does not run |
 | `lower_assert_statement` in an executable function | An ordinary `assert(c)`. Trapping when `c` is false is the statement's entire purpose | Whenever the program asserts something false |
 | `lower_assert_statement` inside a retained `exists`/`unique` body | A reachability filter: the body's `assert`s and those of its `assume` blocks compile to trap-on-false, and the judgment counts only choice vectors that reduce normally | On exactly the choice vectors the specification filters out — the mechanism its obligation is built on |
-| `emit_bounds_check_guard` | `index >=u length`, before a dynamic array element's offset multiply. Emitted in **both** modes | Only on an out-of-range index |
+| `emit_bounds_check_guard` | `index >=u length`, before a dynamic array element's offset multiply. Emitted in **both** modes, except at an access analysis proved in bounds, which carries none in either | Only on an out-of-range index |
 | `emit_narrow_div_overflow_guard` | Signed `i8`/`i16` division at the one quotient the narrow width cannot hold. Emitted in **both** modes, and never was mode-gated | Only at `MIN / -1` |
 | `emit_entry_enum_tag_guard` | An exported entry's `enum` parameter carrying a tag outside the declared variant range — a host may pass any `i32` | Only on an out-of-range host argument; on *every* call for a variantless enum, which is uninhabited |
 | `overflow_guard::emit` | A source-level `+`, `-`, `*` or unary `-` at a result the operand type cannot hold — every one of them the source did not write inside a `wrapping(...)`. Emitted in **both** modes | Only on an operand pair whose true result leaves the type |
@@ -1694,9 +1694,10 @@ Two boundaries. The first is what "constant" means to code generation,
 which is narrower than it sounds: `try_const_index_byte_offset` folds a
 **direct number literal** and nothing else, so `a[3]` is guarded in no
 mode, while `a[K]` for a `const K` and `a[1 + 1]` both take the dynamic
-branch and are guarded in both. The obligation's reach follows that
-boundary rather than the source's idea of a constant, and the emitted
-`.v` shows it: `a[K] + a[1 + 1] + a[3]` over an `[i32; 4]` prints two
+branch and are guarded in both unless analysis proved them (below).
+The obligation's reach follows that boundary rather than the source's
+idea of a constant, and the emitted `.v` of a build without analysis
+shows it: `a[K] + a[1 + 1] + a[3]` over an `[i32; 4]` prints two
 guards, the third access having folded to `BI_const_num (Vi32 12)`.
 
 The static story differs on the same boundary. A037 matches only a
@@ -1705,16 +1706,22 @@ computed constants — runs on specification bodies. In an *executable*
 function the rest falls to A056, which requires every guarded access to
 be proven in bounds by a range analysis over the source: `const K: i32 =
 5; a[K]` over an `[i32; 3]` is rejected there, and so is any index no
-guard in the function proves. The runtime guard stays under each proven
-access, dead in every accepted executable function; a module compiled
-without analysis still carries it live, which is what the obligation
-below is stated against.
+guard in the function proves. Code generation omits the guard of each
+access A056 proves, so a module built after analysis carries no guard —
+and so no `index <u length` side condition — at a proven access: the
+bound was discharged from the source, by A056, and it is that analysis
+rather than the obligation which is trusted for it. A module compiled
+without analysis still carries every guard live, which is what the
+obligation below is stated against; the Rocq gate compiles
+`spec_bounds_realization.inf` that way, since A056 refuses its indices.
 
 The same gap reaches inside an `exists`/`unique` body, where a live trap
 would be fatal (see [Why a reachability body refuses a dynamic
 index](#why-a-reachability-body-refuses-a-dynamic-index)). `P016` fires
 on what the *translator* cannot fold, so `a[K]` there passes it and is
-then guarded anyway. That guard is dead rather than live: `P014` has
+then guarded anyway — in a build without analysis; A056 examines a
+reachability body too, so after analysis `a[K]` is proven and carries no
+guard. Where it is emitted, that guard is dead rather than live: `P014` has
 already checked the folded index against the array's declared length,
 and the guard compares against that same length, so no entry can trip
 it. The two rules agree by construction, not by luck — which is why the

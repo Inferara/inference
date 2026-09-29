@@ -478,8 +478,10 @@ check. Both rules are intraprocedural, because the language has no
 preconditions: a parameter can hold any value of its type, and a function that
 indexes with one guards it itself. A specification's envelope does not stand in
 for that guard, since it describes only the calls the specification makes.
-The runtime guard stays in every build; A056 proves it dead rather than
-removing it.
+Code generation omits the runtime guard of every access A056 proves, since it
+can never fire there, in every build and compilation mode alike. An access A056
+accepts only because no run reaches it keeps its guard, and so does every
+access in a build that skips analysis.
 
 ### Language restrictions
 
