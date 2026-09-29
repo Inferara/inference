@@ -33,7 +33,7 @@
 //! generation lowers, since a `forall` body never runs.
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{ExprId, NodeId};
+use inference_ast::ids::{BlockId, ExprId, NodeId};
 use inference_ast::nodes::Expr;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
@@ -56,32 +56,51 @@ crate::rule! {
         for source_file in ctx.source_files() {
             let module_path = &source_file.module_path;
             walker::for_each_lowered_function_body(arena, &source_file.defs, &mut |body_id| {
+                let accesses = covered_accesses(ctx, body_id);
+                // A body with nothing to prove is not analyzed at all.
+                if accesses.is_empty() {
+                    return;
+                }
                 let ranges = range::analyze_body(ctx, body_id);
-                walker::walk_block_stmts(arena, body_id, &mut |stmt_id| {
-                    walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
-                        walker::walk_expr(arena, expr_id, &mut |node| {
-                            if let Some(diagnostic) = unproven_access(ctx, &ranges, node) {
-                                errors.push(LabeledDiagnostic::new(module_path.clone(), diagnostic));
-                            }
-                        });
-                    });
-                });
+                for access in accesses {
+                    if let Some(diagnostic) = unproven(arena, &ranges, &access) {
+                        errors.push(LabeledDiagnostic::new(module_path.clone(), diagnostic));
+                    }
+                }
             });
         }
         errors
     }
 }
 
-/// The diagnostic for `node` when it is an array access this rule covers and
-/// the analysis did not prove its index in bounds.
+/// An array access this rule covers: its index is neither a bare literal
+/// (A037's) nor 64-bit (A019's), and its array has a length the type checker
+/// accepted.
+struct CoveredAccess {
+    node: ExprId,
+    index: ExprId,
+    number: NumberType,
+    length: u32,
+}
+
+/// Every access in `body` this rule covers, in source order.
 ///
 /// The accesses are enumerated here, independently of the analysis, so an
 /// access the analysis never reached is reported rather than silently passed.
-fn unproven_access(
-    ctx: &TypedContext,
-    ranges: &BodyRanges,
-    node: ExprId,
-) -> Option<AnalysisDiagnostic> {
+fn covered_accesses(ctx: &TypedContext, body: BlockId) -> Vec<CoveredAccess> {
+    let arena = ctx.arena();
+    let mut accesses = Vec::new();
+    walker::walk_block_stmts(arena, body, &mut |stmt_id| {
+        walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
+            walker::walk_expr(arena, expr_id, &mut |node| {
+                accesses.extend(covered_access(ctx, node));
+            });
+        });
+    });
+    accesses
+}
+
+fn covered_access(ctx: &TypedContext, node: ExprId) -> Option<CoveredAccess> {
     let arena = ctx.arena();
     let Expr::ArrayIndexAccess { array, index } = &arena[node].kind else {
         return None;
@@ -102,19 +121,34 @@ fn unproven_access(
     if matches!(number, NumberType::I64 | NumberType::U64) {
         return None;
     }
-    let range = match ranges.indices.get(&node) {
-        Some(IndexReach::Unreachable) => return None,
-        Some(IndexReach::Within(range)) => *range,
-        None => Interval::of_type(number),
-    };
-    let in_bounds = range.lo >= 0 && range.hi < i128::from(length);
-    (!in_bounds).then(|| AnalysisDiagnostic::ArrayIndexNotProvenInBounds {
-        index: local_name(arena, *index),
+    Some(CoveredAccess {
+        node,
+        index: *index,
         number,
         length,
+    })
+}
+
+/// The diagnostic for `access` when the analysis did not prove its index in
+/// bounds.
+fn unproven(
+    arena: &AstArena,
+    ranges: &BodyRanges,
+    access: &CoveredAccess,
+) -> Option<AnalysisDiagnostic> {
+    let range = match ranges.indices.get(&access.node) {
+        Some(IndexReach::Unreachable) => return None,
+        Some(IndexReach::Within(range)) => *range,
+        None => Interval::of_type(access.number),
+    };
+    let in_bounds = range.lo >= 0 && range.hi < i128::from(access.length);
+    (!in_bounds).then(|| AnalysisDiagnostic::ArrayIndexNotProvenInBounds {
+        index: local_name(arena, access.index),
+        number: access.number,
+        length: access.length,
         lo: range.lo,
         hi: range.hi,
-        location: arena[node].location,
+        location: arena[access.node].location,
     })
 }
 

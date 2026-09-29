@@ -18,6 +18,10 @@
 //! what the specification states, and an `assume` block's `assert` filters the
 //! choices it admits by design.
 
+use inference_ast::arena::AstArena;
+use inference_ast::ids::BlockId;
+use inference_ast::nodes::Stmt;
+
 use crate::{
     errors::{AnalysisDiagnostic, LabeledDiagnostic},
     range, walker,
@@ -35,6 +39,10 @@ crate::rule! {
         for source_file in ctx.source_files() {
             let module_path = &source_file.module_path;
             walker::for_each_executable_function_body(arena, &source_file.defs, &mut |body_id| {
+                // A body with no `assert` has nothing to judge and is not analyzed.
+                if !contains_assert(arena, body_id) {
+                    return;
+                }
                 for stmt_id in range::analyze_body(ctx, body_id).failing_asserts {
                     errors.push(LabeledDiagnostic::new(
                         module_path.clone(),
@@ -47,4 +55,13 @@ crate::rule! {
         }
         errors
     }
+}
+
+/// Whether `body` holds an `assert` statement at any depth.
+fn contains_assert(arena: &AstArena, body: BlockId) -> bool {
+    let mut found = false;
+    walker::walk_block_stmts(arena, body, &mut |stmt_id| {
+        found = found || matches!(arena[stmt_id].kind, Stmt::Assert { .. });
+    });
+    found
 }
