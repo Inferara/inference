@@ -4557,6 +4557,49 @@ fn a_host_import_program_builds_and_keeps_its_import() {
     );
 }
 
+/// The program #481 was filed with builds: a host import whose parameter names a
+/// struct from an imported file, written the way the function beside it writes
+/// its own.
+///
+/// It failed twice over. Type checking refused `geo::Point` with "namespace
+/// `geo` is not imported; add `use geo;`", naming the import on the first line;
+/// past that, external resolution refused the type as unsupported in an extern
+/// signature. This is the whole `infc` pipeline, so it also runs the check that
+/// holds the artifact's import to the declaration it was emitted from.
+#[test]
+fn a_host_import_naming_a_struct_from_an_imported_file_builds() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    write_source(temp.path(), "geo.inf", "pub struct Point { x: i32; }\n");
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "use geo;\n\
+         pub fn take(p: geo::Point) -> i32 { return p.x; }\n\
+         external fn send(p: geo::Point) -> i32;\n\
+         use { send } from host::io;\n\
+         pub fn run(p: geo::Point) -> i32 { return send(p); }\n",
+    );
+
+    let built = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .current_dir(temp.path())
+        .arg(&entry)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&built.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("host imports (no allowlist): io.send\n"),
+        "the declared host import is reported:\n{stdout}"
+    );
+
+    let artifact = temp.child("out").child("main.wasm");
+    let printed = wasmprinter::print_bytes(std::fs::read(artifact.path()).unwrap())
+        .expect("the artifact is a decodable module");
+    assert!(
+        printed.contains("(import \"io\" \"send\""),
+        "the import survives into the artifact:\n{printed}"
+    );
+}
+
 // Host-import policy ---
 
 /// The one-extern host program every test in this section builds on: no `-L`,

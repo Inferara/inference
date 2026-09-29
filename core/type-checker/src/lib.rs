@@ -76,12 +76,14 @@
 //!
 //! 1. **Process Directives** - Register raw import statements in scope tree
 //! 2. **Register Types** - Collect struct, enum, and spec definitions
-//! 3. **Resolve Imports** - Bind import paths to symbols in symbol table
-//! 4. **Register Functions** - Collect function and method signatures
+//! 3. **Register Functions** - Collect function and method signatures
+//! 4. **Resolve Imports** - Bind import paths to symbols in symbol table
 //! 5. **Infer Variables** - Type-check function bodies and variable declarations
 //!
 //! This ordering ensures that types are available before functions reference them,
-//! and imports are resolved before symbol lookup.
+//! and imports are resolved before symbol lookup. Signature types are validated
+//! only once imports are resolved, not as they are registered, so a type an import
+//! brings into scope is recognized in every signature, an `external fn`'s included.
 //!
 //! ## Public Modules
 //!

@@ -7,9 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference::wasm_link::lower_extern_signature` takes the program's `TypedContext` and the declaring file's module path: `lower_extern_signature(arena, args, returns)` becomes `lower_extern_signature(typed_context, module_path, args, returns)`. A `::`-qualified type in an `external fn` signature names something only against the imports of the file it is written in, so the arena alone no longer carries enough to lower one. Migration: type-check the program first, pass the typed context together with the module path of the file that declares the extern (`&[]` for the entry file), and read `args` and `returns` from `typed_context.arena()` ([#481])
+
 ### Documentation
 
 - `core/wasm-to-v`'s crate docs and `ROCQ_CONTRACT.md` no longer say the wasm-verifier program logic cannot verify floating-point terms. It is generic over WasmCert's number types, floats included, and only its `testop` rule is integer-only. Both now say the narrowing is Inference's: the language has no floating-point or vector types, so the contract declares none and the translator refuses them ([#496])
+
+### Fixed
+
+- An `external fn` may name a struct or enum from an imported file in its signature, as any function may: `external fn send(p: geo::Point) -> geo::Level;` under `use geo;`, or `external fn send(p: Point) -> i32;` under `use geo::{Point};`. Both were refused at type checking, the first with "namespace `geo` is not imported; add `use geo;` to reach `geo::Point`" — prescribing the import the file already had — and the second as an unknown type, because an extern's signature types alone were validated while it was registered, before any import was bound. They are now validated after imports resolve, with every other signature's, and a genuinely missing import is still reported, now truthfully. The link driver lowers the qualified form as code generation does, to an `i32` — a struct's address, an enum's tag — resolved against the declaring file's imports; it used to refuse the form as an unsupported type, so fixing the type checker alone would only have moved the refusal one stage later. Host imports and linked externs are both fixed ([#481], [#425])
 
 ### IDE / LSP
 
@@ -867,3 +875,5 @@ Initial tagged release.
 [#497]: https://github.com/Inferara/inference/pull/497
 [#495]: https://github.com/Inferara/inference/pull/495
 [#496]: https://github.com/Inferara/inference/pull/496
+[#481]: https://github.com/Inferara/inference/issues/481
+[#425]: https://github.com/Inferara/inference/issues/425

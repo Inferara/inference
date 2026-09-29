@@ -50,7 +50,12 @@ mod analysis_rules_tests {
     /// never be bound) or A012 (a compound literal as an argument), and neither
     /// may perturb the result.
     fn a047_diags(source: &str) -> Vec<AnalysisDiagnostic> {
-        match analyze(source) {
+        a047_diags_in(&type_check(source))
+    }
+
+    /// [`a047_diags`] for a program already type-checked, which may span files.
+    fn a047_diags_in(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+        match inference_analysis::analyze(ctx) {
             Ok(_) => Vec::new(),
             Err(errors) => errors
                 .errors()
@@ -361,6 +366,46 @@ pub fn main() {
     paint(c);
 }
 ",
+        );
+    }
+
+    /// A struct named by a `::`-qualified path passes a region exactly as its bare
+    /// spelling does, and an enum named that way is still a value.
+    ///
+    /// Until #481 an extern could not name another file's type by qualifier —
+    /// the type checker refused the declaration — so the rule's qualified arm had
+    /// never run against a program. These are the first that reach it, and they
+    /// must get the verdicts the bare spellings above get: the immutable binding
+    /// rejected, the `mut` one accepted, the enum left alone.
+    #[test]
+    fn a047_reads_a_qualified_parameter_type_as_its_bare_spelling() {
+        const GEO: &str = "pub struct Point { x: i32; } pub enum Level { Low, High }";
+        let diags = |body: &str| {
+            let entry = format!(
+                "use geo; \
+                 external fn fill(mut p: geo::Point); \
+                 external fn paint(mut l: geo::Level); \
+                 use {{ fill, paint }} from host::io; \
+                 pub fn main() {{ {body} }}"
+            );
+            let arena = crate::utils::build_multi_file_ast(&[(vec![], &entry), (vec!["geo"], GEO)]);
+            let ctx = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+                .expect("an extern may name a type from an imported file")
+                .typed_context();
+            a047_diags_in(&ctx)
+        };
+
+        assert!(
+            !diags("let p: geo::Point = geo::Point { x: 1 }; fill(p);").is_empty(),
+            "a qualified struct passes a region, so an immutable binding is reported"
+        );
+        assert!(
+            diags("let mut p: geo::Point = geo::Point { x: 1 }; fill(p);").is_empty(),
+            "a `mut` binding says the value may change"
+        );
+        assert!(
+            diags("let l: geo::Level = geo::Level::Low; paint(l);").is_empty(),
+            "a qualified enum is a tag, passed by value, with nothing to write into"
         );
     }
 

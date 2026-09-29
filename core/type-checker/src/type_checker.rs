@@ -15,9 +15,15 @@
 //! `collect_function_and_constant_definitions` registers, and imports must be
 //! resolved before name lookup runs during body inference. This is what lets
 //! Inference support forward references — a function can refer to a type or
-//! another function defined later in the source file. The constraints are stated
-//! against the passes rather than their positions, so a later reordering cannot
-//! leave this paragraph disagreeing with the list above it.
+//! another function defined later in the source file. A third constraint cuts
+//! across the list: every signature type — a function's, a method's, a struct
+//! field's and an `external fn`'s alike — is validated after `resolve_imports`
+//! rather than while it is registered, because a type an import brings into
+//! scope names nothing until the import is bound. An extern's types were once
+//! the exception, and were refused under the very `use` that licensed them
+//! (#425, #481). The constraints are stated against the passes rather than
+//! their positions, so a later reordering cannot leave this paragraph
+//! disagreeing with the list above it.
 //!
 //! The list is a summary, not the whole of `check_collecting`: signatures are
 //! also re-normalized and validated by later statements of that function, so
@@ -360,8 +366,10 @@ impl TypeChecker {
         // files is caught here (before codegen) and same-named structs in
         // different files are not mistaken for one (#63).
         self.check_recursive_struct_definitions(ctx);
-        // Function signature types are validated only now, after imports resolve,
-        // so an item-imported type works in a param/return position (#63).
+        // Signature types — of functions, methods, struct fields and externs
+        // alike — are validated only now, after imports resolve, so an
+        // item-imported or `::`-qualified type works in a param/return position
+        // (#63, #481).
         self.validate_signatures(ctx);
         let has_value_cycle = self.check_definition_cycles(ctx);
         // Const initializers are checked after cycles are detected: a value cycle
@@ -1081,13 +1089,16 @@ impl TypeChecker {
         self.exit_files();
     }
 
-    /// Validates function and method signature types, run after import resolution.
+    /// Validates function, method and `external fn` signature types, run after
+    /// import resolution.
     ///
     /// Each file is entered before its functions are checked, so a type named in a
     /// param or return position resolves against that file's imports — an
-    /// item-imported struct (`use a::b::{T};`) is recognized in a signature
-    /// exactly as in a `let` binding (#63). Methods inside a struct, and functions
-    /// inside a spec, are validated in the same defining scope they register in.
+    /// item-imported struct (`use a::b::{T};`) or a `::`-qualified one
+    /// (`geo::Point` under `use geo;`) is recognized in a signature exactly as in a
+    /// `let` binding (#63, #481). Methods inside a struct, and functions and
+    /// externs inside a spec, are validated in the same defining scope they
+    /// register in.
     fn validate_signatures(&mut self, ctx: &mut TypedContext) {
         for (module_path, defs) in Self::files_with_defs(ctx) {
             self.enter_file(&module_path);
@@ -1145,27 +1156,22 @@ impl TypeChecker {
                     .iter()
                     .map(|p| ctx.arena()[*p].name.clone())
                     .collect();
-                for arg in args {
-                    match &arg.kind {
-                        ArgKind::Named { ty, .. }
-                        | ArgKind::Ignored { ty }
-                        | ArgKind::TypeOnly(ty) => {
-                            self.validate_type(ctx.arena(), *ty, &tp_names);
-                        }
-                        ArgKind::SelfRef { .. } => {}
-                    }
-                }
-                if let Some(return_type_id) = returns {
-                    self.validate_type(ctx.arena(), *return_type_id, &tp_names);
-                }
+                self.validate_signature_types(ctx.arena(), args, *returns, &tp_names);
             }
-            // Signature *types* of an extern are validated in `collect_for_def`,
-            // which has no type parameters to thread and so needs no second pass;
-            // only the parameter names are checked here, where every function-like
-            // declaration is reached.
-            Def::ExternFunction { name, args, .. } => {
+            // An extern's signature is validated here as a function's is, after
+            // imports resolve, so a type an import brings into scope is
+            // recognized in it exactly as in any other signature (#425, #481).
+            // It declares no type parameters, so every name it writes must
+            // resolve against the scope it is written in.
+            Def::ExternFunction {
+                name,
+                args,
+                returns,
+                ..
+            } => {
                 let func_name = ctx.arena()[*name].name.clone();
                 self.report_duplicate_parameters(args, &func_name, ctx);
+                self.validate_signature_types(ctx.arena(), args, *returns, &[]);
             }
             Def::Struct {
                 name,
@@ -1196,6 +1202,36 @@ impl TypeChecker {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Validates each parameter type and the return type of one function-like
+    /// signature against the current scope, treating `type_param_names` as
+    /// declared type parameters.
+    ///
+    /// The function and `external fn` arms of [`Self::validate_signature_for_def`]
+    /// both call this, so the two are one check and cannot drift apart. They did
+    /// once: an extern's types were validated by a copy of this loop that ran
+    /// before imports resolved, and refused a type the same signature on a
+    /// function accepted (#425, #481). A receiver writes no type and is skipped;
+    /// a misplaced one is reported by the diagnostics that own it.
+    fn validate_signature_types(
+        &mut self,
+        arena: &AstArena,
+        args: &[ArgData],
+        returns: Option<TypeId>,
+        type_param_names: &[String],
+    ) {
+        for arg in args {
+            match &arg.kind {
+                ArgKind::Named { ty, .. } | ArgKind::Ignored { ty } | ArgKind::TypeOnly(ty) => {
+                    self.validate_type(arena, *ty, type_param_names);
+                }
+                ArgKind::SelfRef { .. } => {}
+            }
+        }
+        if let Some(return_type_id) = returns {
+            self.validate_type(arena, return_type_id, type_param_names);
         }
     }
 
@@ -1394,31 +1430,28 @@ impl TypeChecker {
                 ..
             } => {
                 let func_name = ctx.arena()[*name].name.clone();
-                // Externs declare no type parameters, so every type in the
-                // signature must resolve against the surrounding scope. Validate
-                // them up front (mirroring `Def::Function`): an undeclared
-                // `Custom` type would otherwise pass the signature-only extern
-                // validator and reach code generation, which has no lowering for
-                // it and can only refuse it there (H6). A `self` receiver
-                // is meaningless on an extern and is rejected here (H7), matching
-                // how standalone functions reject it.
+                // Signature types are validated in `validate_signatures`, after
+                // imports resolve, exactly as a function's are (`Def::Function`
+                // above). Validated here instead, before any `use` is bound, a
+                // type an import brings into scope — `geo::Point` under
+                // `use geo;`, `Point` under `use geo::{Point};` — was refused
+                // with a diagnostic prescribing the import the file already had
+                // (#425, #481). Registration below keeps the unresolved names,
+                // which `renormalize_signatures` canonicalizes once imports are
+                // bound. The validation pass still runs before code generation,
+                // so an undeclared type is still refused by the type checker
+                // rather than passing the signature-only extern validator and
+                // reaching code generation, which has no lowering for it (H6). A
+                // `self` receiver is meaningless on an extern whatever the imports
+                // say, and is rejected here (H7), matching how standalone
+                // functions reject it.
                 for arg in args {
-                    match &arg.kind {
-                        ArgKind::SelfRef { .. } => {
-                            self.push_error(TypeCheckError::SelfReferenceInFunction {
-                                function_name: func_name.clone(),
-                                location: arg.location,
-                            });
-                        }
-                        ArgKind::Named { ty, .. }
-                        | ArgKind::Ignored { ty }
-                        | ArgKind::TypeOnly(ty) => {
-                            self.validate_type(ctx.arena(), *ty, &[]);
-                        }
+                    if let ArgKind::SelfRef { .. } = arg.kind {
+                        self.push_error(TypeCheckError::SelfReferenceInFunction {
+                            function_name: func_name.clone(),
+                            location: arg.location,
+                        });
                     }
-                }
-                if let Some(return_type_id) = returns {
-                    self.validate_type(ctx.arena(), *return_type_id, &[]);
                 }
                 // Types and names are produced by one pass so a (rejected)
                 // receiver is dropped from both, keeping them index-aligned with

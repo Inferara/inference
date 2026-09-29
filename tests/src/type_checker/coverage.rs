@@ -1470,8 +1470,9 @@ mod extern_signature_validation {
 
     #[test]
     fn spec_inner_undeclared_param_type_is_rejected() {
-        // Spec-inner externs recurse back through the same collection arm, so
-        // the validation must hold inside a `spec` body too.
+        // Spec-inner externs are validated by recursing through the same
+        // signature-validation arm, so the check must hold inside a `spec` body
+        // too.
         let source = r#"spec S { external fn f(a: Undeclared) -> i32; }"#;
         let result = try_type_check(source);
         assert!(

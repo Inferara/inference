@@ -21,6 +21,20 @@ module. The declaration looks like an ordinary function signature without a body
 external fn sum(a: i32, b: i32) -> i32;
 ```
 
+Its parameter and return types may be any a function signature can name,
+including a struct or enum declared in another file, written the same way:
+`geo::Point` under `use geo;`, or `Point` under `use geo::{Point};`. A struct or
+an array reaches the foreign function as the `i32` address of the caller's
+value and an enum as its `i32` tag, so at the WebAssembly level
+
+```inference
+use geo;
+
+external fn send(p: geo::Point, l: geo::Level) -> i32;
+```
+
+is a function of two `i32` parameters returning an `i32`.
+
 A named parameter may be declared `mut`:
 
 ```inference
