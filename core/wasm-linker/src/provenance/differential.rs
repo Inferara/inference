@@ -149,6 +149,23 @@ fn fixtures() -> Vec<Fixture> {
             fabricates: false,
         },
         Fixture {
+            // A counter bump between the address and the value: the global is
+            // written, and the store still lands at the caller's pointer.
+            name: "global_write_between_address_and_store",
+            wat: r#"(module (memory (export "mem") 1)
+                     (global (mut i32) (i32.const 0))
+                     (func (export "f") (param i32)
+                       local.get 0
+                       global.get 0 i32.const 1 i32.add global.set 0
+                       i32.const 170 i32.store8))"#
+                .to_string(),
+            func_indices: vec![0],
+            root: 0,
+            args: [vec![100], vec![5000]],
+            expect_accept: true,
+            fabricates: false,
+        },
+        Fixture {
             name: "base_plus_shifted_index",
             wat: r#"(module (memory (export "mem") 1)
                      (func (export "f") (param i32 i32)

@@ -661,6 +661,185 @@ fn s7_memory_size_result_is_not_an_address() {
 }
 
 // ===========================================================================
+// 8d' — `global.set` pops exactly its operand, and a global is never an address
+//
+// A write to a global may sit between an address and the access that uses it.
+// It must leave that address where it is: clearing the stack over-rejects a
+// sound closure (issue #430), popping too little hands the access the wrong
+// operand. Each row pins one of the two, and `g3` pins that the value written
+// is not carried into the global for a later `global.get` to read back.
+// ===========================================================================
+
+#[test]
+fn g1_global_set_between_address_and_value_keeps_the_address() {
+    // The issue's reproducer: [p0, g] -> set -> [p0] -> [p0, p1] -> store at p0.
+    // A cleared stack or a two-slot pop leaves the store's address to underflow.
+    assert!(accepts(
+        r#"(module (memory 1) (global (mut i32) (i32.const 0)) (func (param i32 i32)
+             local.get 0 global.get 0 global.set 0 local.get 1 i32.store)
+             (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+#[test]
+fn g2_global_set_consumes_its_operand() {
+    // [1024, p0] -> set -> [1024] -> [1024, p1] -> store at 1024. An arm that
+    // left `p0` on the stack would store at `p0` instead and accept.
+    assert!(!accepts(
+        r#"(module (memory 1) (global (mut i32) (i32.const 0)) (func (param i32 i32)
+             i32.const 1024 local.get 0 global.set 0 local.get 1 i32.store)
+             (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+#[test]
+fn g3_param_round_tripped_through_a_global_is_not_an_address() {
+    // The analysis keeps no per-global state: every `global.get` reads
+    // `NotParam`, so a parameter written to a global does not come back as one.
+    assert!(!accepts(
+        r#"(module (memory 1) (global (mut i32) (i32.const 0)) (func (param i32) (result i32)
+             local.get 0 global.set 0 global.get 0 i32.load)
+             (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+#[test]
+fn g4_global_set_between_address_and_load() {
+    assert!(accepts(
+        r#"(module (memory 1) (global (mut i32) (i32.const 0)) (func (param i32 i32) (result i32)
+             local.get 0 local.get 1 global.set 0 i32.load)
+             (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+// ===========================================================================
+// Coverage — no operator that can reach this pass falls through to the
+// catch-all of `step_straight_line`
+//
+// `safety::check_operator` and the interpreter's arms are two lists, and
+// `global.set` sat in the first and not the second until issue #430. The corpus
+// below spells one instance of every operator the allow-list admits; the test
+// steps each one that can reach provenance and fails if it lands in the
+// catch-all. An operator family added to the allow-list belongs here as well as
+// in `tests/v_alignment.rs`.
+// ===========================================================================
+
+/// One body holding every operator `safety::check_operator` admits. It is
+/// assembled, never validated, so it need not type-check: each operator is
+/// stepped on its own. Function 0 is the body itself, so `call 0` resolves to a
+/// two-parameter signature.
+const ADMITTED_OPERATORS_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32)))
+  (memory 1)
+  (global (mut i32) (i32.const 0))
+  (table 1 funcref)
+  (elem declare func 0)
+  (data "")
+  (func (;0;) (type 0) (param i32 i32) (local i32)
+    ;; control; the structured openers and closers are walked by `interpret`
+    unreachable nop
+    block br 0 br_if 0 br_table 0 0 end
+    loop end
+    if else end
+    return
+    ;; calls, parametric, locals, globals
+    call 0 call_indirect (type 0)
+    drop select
+    local.get 0 local.set 0 local.tee 0
+    global.get 0 global.set 0
+    ;; integer loads and stores
+    i32.load i64.load
+    i32.load8_s i32.load8_u i32.load16_s i32.load16_u
+    i64.load8_s i64.load8_u i64.load16_s i64.load16_u i64.load32_s i64.load32_u
+    i32.store i64.store i32.store8 i32.store16 i64.store8 i64.store16 i64.store32
+    ;; memory and bulk memory
+    memory.size memory.grow memory.fill memory.copy memory.init 0 data.drop 0
+    ;; tables
+    table.get 0 table.set 0 table.grow 0 table.size 0 table.fill 0 ref.func 0
+    ;; constants
+    i32.const 0 i64.const 0
+    ;; i32 comparisons, arithmetic and bitwise
+    i32.eqz i32.eq i32.ne i32.lt_s i32.lt_u i32.gt_s i32.gt_u
+    i32.le_s i32.le_u i32.ge_s i32.ge_u
+    i32.clz i32.ctz i32.popcnt i32.add i32.sub i32.mul
+    i32.div_s i32.div_u i32.rem_s i32.rem_u i32.and i32.or i32.xor
+    i32.shl i32.shr_s i32.shr_u i32.rotl i32.rotr
+    ;; i64 comparisons, arithmetic and bitwise
+    i64.eqz i64.eq i64.ne i64.lt_s i64.lt_u i64.gt_s i64.gt_u
+    i64.le_s i64.le_u i64.ge_s i64.ge_u
+    i64.clz i64.ctz i64.popcnt i64.add i64.sub i64.mul
+    i64.div_s i64.div_u i64.rem_s i64.rem_u i64.and i64.or i64.xor
+    i64.shl i64.shr_s i64.shr_u i64.rotl i64.rotr
+    ;; sign extension and integer width conversions
+    i32.extend8_s i32.extend16_s i64.extend8_s i64.extend16_s i64.extend32_s
+    i32.wrap_i64 i64.extend_i32_s i64.extend_i32_u)
+  (export "f" (func 0)))
+"#;
+
+#[test]
+fn every_admitted_operator_reaching_provenance_is_modeled() {
+    // Every modeled arm pops at most three operands (a `call` pops its callee's
+    // two parameters), so from this depth only the catch-all, which clears the
+    // stack, can leave it empty.
+    const DEPTH: usize = 8;
+
+    let m = module(ADMITTED_OPERATORS_WAT);
+    let body = &m.local_funcs[0].body;
+    let ops = collect_operators(&FunctionBody::new(BinaryReader::new(body, 0)))
+        .expect("the corpus decodes");
+
+    let mut stepped = Vec::new();
+    for op in &ops {
+        let effect = crate::safety::check_operator(op).unwrap_or_else(|e| {
+            panic!("the corpus must hold only operators the allow-list admits: {op:?}: {e:?}")
+        });
+        if matches!(
+            op,
+            Operator::Block { .. }
+                | Operator::Loop { .. }
+                | Operator::If { .. }
+                | Operator::Else
+                | Operator::End
+        ) {
+            // Walked by `interpret`, never handed to `step_straight_line`.
+            continue;
+        }
+        if effect.uses_tables || effect.uses_data_segments {
+            // `tier::classify` rejects the closure as Tier C before provenance
+            // runs, so the operator never reaches this pass.
+            continue;
+        }
+
+        let mut state = State {
+            locals: vec![Prov::NotParam; 3],
+            stack: vec![Prov::NotParam; DEPTH],
+        };
+        let mut summary = FunctionSummary::default();
+        let mut branch_acc = Vec::new();
+        Interp::step_straight_line(&m, &mut summary, op, &mut state, &mut branch_acc)
+            .expect("a corpus operator steps");
+        assert!(
+            !state.stack.is_empty(),
+            "`{op:?}` passes the safety allow-list with no Tier-C flag, so it reaches \
+             provenance, but it fell through to the catch-all of `step_straight_line`, \
+             which clears the operand stack: give it an arm that models its stack effect"
+        );
+        stepped.push(format!("{op:?}"));
+    }
+
+    assert!(
+        stepped.iter().any(|op| op.starts_with("GlobalSet")),
+        "`global.set` must be among the operators stepped, or this test no longer \
+         covers the one issue #430 found unmodeled: {stepped:?}"
+    );
+}
+
+// ===========================================================================
 // 8e — C-3 call boundaries: the SOUND interprocedural analysis. A constant
 // laundered through a `call` rejects (the callee's param is untrusted at that
 // site); a param-derived argument threaded through a `call` is accepted (the

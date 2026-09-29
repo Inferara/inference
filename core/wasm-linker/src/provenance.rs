@@ -1525,6 +1525,18 @@ impl<'a, 'b> Interp<'a, 'b> {
                 state.stack.push(Prov::NotParam);
             }
 
+            // -- A global write consumes its operand and nothing else. The value
+            //    is discarded rather than tracked into the global: every
+            //    `global.get` above reads `NotParam`, so a parameter stored into
+            //    a global and read back can never be laundered into an address.
+            //    The pop is what matters — it leaves every operand below exactly
+            //    where WebAssembly leaves it, so an address already on the stack
+            //    keeps its provenance across the write. It contributes nothing to
+            //    the write set, which is about linear memory, not globals. --
+            GlobalSet { .. } => {
+                pop(state);
+            }
+
             // -- Loads: pop the address, record its mask, push NotParam contents.
             //    `f32.load`/`f64.load` are listed for exhaustiveness only: the
             //    Inference language has no float types and `safety::check_operator`
@@ -1731,17 +1743,23 @@ impl<'a, 'b> Interp<'a, 'b> {
             //    model: widen the stack to empty so later pops read the
             //    fail-closed NotParam default.
             //
-            //    This is reached, not dead. The safety allow-list confines the
-            //    operator set, but it is a *different* list from the arms above:
-            //    it admits several operators this interpreter has no arm for,
-            //    `global.set` among them — globals are deliberately not a Tier-C
-            //    signal, so a body that writes one passes `check_operator` and
-            //    arrives here. The consequence is fail-closed over-rejection: the
-            //    cleared stack makes every operand after the unmodeled operator
-            //    read `NotParam`, so an address that was in fact parameter-derived
-            //    is no longer provably so and the closure is refused as Tier C. A
-            //    body storing through its parameter links, and the same body with
-            //    a `global.set` between the address and the value does not. --
+            //    The safety allow-list is a *different* list from the arms above,
+            //    and it does admit operators that have no arm here: the table
+            //    accessors (`table.get`/`set`/`grow`/`size`/`fill`), `ref.func`,
+            //    and `data.drop`. Each of those sets `uses_tables` or
+            //    `uses_data_segments`, so `tier::classify` rejects the closure as
+            //    Tier C before this pass runs, and no closure this pass analyzes
+            //    contains one. That is a property of two lists kept apart, so it is
+            //    enforced rather than asserted: the provenance test
+            //    `every_admitted_operator_reaching_provenance_is_modeled` fails
+            //    if an operator the allow-list admits without a Tier-C flag falls
+            //    through to this arm.
+            //
+            //    The arm stays as defense in depth. Were it reached, the cleared
+            //    stack would make a parameter-derived address already on it read
+            //    `NotParam`, so the failure is over-rejection, never an admitted
+            //    unproven address. `global.set` used to arrive here, and a store
+            //    with one between its address and its value was refused for it. --
             _ => {
                 state.stack.clear();
             }
