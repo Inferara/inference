@@ -1437,6 +1437,10 @@ fn run() {
     };
 
     let mut typed_context = None;
+    // The array accesses the analysis proved in bounds, whose runtime guard
+    // code generation omits. Set only by a passing analysis, which every path
+    // that reaches code generation runs first.
+    let mut proven_in_bounds = None;
 
     if need_codegen || need_analyze {
         match type_check(arena) {
@@ -1466,6 +1470,7 @@ fn run() {
                         if result.has_findings() {
                             eprintln!("{result}");
                         }
+                        proven_in_bounds = Some(result.proven_in_bounds().clone());
                     }
                 }
                 typed_context = Some(tctx);
@@ -1595,12 +1600,16 @@ fn run() {
             eprintln!("Internal error: type check phase did not produce typed context");
             process::exit(1);
         };
+        let Some(proven_in_bounds) = proven_in_bounds else {
+            eprintln!("Internal error: analysis phase did not produce its bounds proofs");
+            process::exit(1);
+        };
         let profile = BuildProfile::default();
         let mode: inference_wasm_codegen::CompilationMode =
             args.mode.unwrap_or(CliMode::Compile).into();
         let opt_level = profile.resolve_opt_level(target, mode);
         let source_fname = source_fname.as_str();
-        let codegen_output = match inference_wasm_codegen::codegen(
+        let codegen_output = match inference_wasm_codegen::codegen_with_proven_in_bounds(
             &tctx,
             source_fname,
             inference_wasm_codegen::CodegenOptions {
@@ -1610,6 +1619,7 @@ fn run() {
                 features: emit_features,
                 layout,
             },
+            proven_in_bounds.accesses(),
         ) {
             Ok(o) => o,
             Err(e) => {

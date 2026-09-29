@@ -107,8 +107,11 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<Fixture>) {
 /// target's compile mode, MVP features, bounds checks on, module name
 /// `output`.
 ///
-/// Analysis is not run. It does not reach the emitter, and several corpus
-/// fixtures exist precisely because a rule refuses them.
+/// Analysis reaches the emitter in one way only: the array accesses it proves
+/// in bounds carry no guard. A fixture analysis accepts is compiled with those
+/// proofs, as `infc` compiles it; one a rule refuses — several corpus fixtures
+/// exist precisely because a rule refuses them — is compiled with none, which
+/// keeps every guard.
 fn compile_under(source: &str, mode: ArithMode) -> Option<Vec<u8>> {
     let parsed = inference_parser::parse(source);
     if !parsed.errors.is_empty() {
@@ -117,9 +120,13 @@ fn compile_under(source: &str, mode: ArithMode) -> Option<Vec<u8>> {
     let ctx = TypeCheckerBuilder::build_typed_context(parsed.arena)
         .ok()?
         .typed_context();
+    let proven_in_bounds = inference_analysis::analyze(&ctx)
+        .map(|analysis| analysis.proven_in_bounds().accesses().clone())
+        .unwrap_or_default();
     let mut compiler = Compiler::new("output");
     compiler.set_emit_features(EmitFeatures::default());
     compiler.set_emit_bounds_checks(true);
+    compiler.set_proven_in_bounds(proven_in_bounds);
     compiler.set_default_arith_mode(mode);
     let hspecs =
         traverse_t_ast_with_compiler(&ctx, &mut compiler, CompilationMode::Compile).ok()?;

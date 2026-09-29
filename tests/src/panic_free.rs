@@ -455,13 +455,23 @@ mod gate {
             opt_level: target.default_opt_level(),
             ..Default::default()
         };
-        if let Err(errors) = inference_analysis::analyze_with_options(
+        let analysis = match inference_analysis::analyze_with_options(
             &typed_context,
             crate::utils::analysis_options(&options),
         ) {
-            return Outcome::AnalysisFailed(errors.errors().iter().map(|d| d.rule_id()).collect());
-        }
-        match inference_wasm_codegen::codegen(&typed_context, name, options) {
+            Ok(analysis) => analysis,
+            Err(errors) => {
+                return Outcome::AnalysisFailed(
+                    errors.errors().iter().map(|d| d.rule_id()).collect(),
+                );
+            }
+        };
+        match inference_wasm_codegen::codegen_with_proven_in_bounds(
+            &typed_context,
+            name,
+            options,
+            analysis.proven_in_bounds().accesses(),
+        ) {
             Ok(_) => Outcome::Module,
             Err(error) => Outcome::CodegenFailed(error.to_string()),
         }

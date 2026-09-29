@@ -16,7 +16,7 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $grid_read (;0;) (type 0) (param $i i32) (param $j i32) (result i32)
-    (local $g i32) (local $__frame_ptr i32) (local i32)
+    (local $g i32) (local $__frame_ptr i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -100,24 +100,10 @@
     end
     local.get $g
     local.get $i
-    local.tee 4
-    local.get 4
-    i32.const 2
-    i32.ge_u
-    if ;; label = @1
-      unreachable
-    end
     i32.const 12
     i32.mul
     i32.add
     local.get $j
-    local.tee 4
-    local.get 4
-    i32.const 3
-    i32.ge_u
-    if ;; label = @1
-      unreachable
-    end
     i32.const 4
     i32.mul
     i32.add

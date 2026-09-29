@@ -907,29 +907,29 @@
     unreachable
   )
   (func $fill_read_dynamic (;5;) (type 5) (param $i i32) (result i64)
-    (local $g i32) (local $__frame_ptr i32) (local i32 i32)
+    (local $g i32) (local $__frame_ptr i32) (local i32)
     global.get 0
     i32.const 160
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     i32.const 0
-    local.set 4
+    local.set 3
     loop ;; label = @1
       local.get $__frame_ptr
-      local.get 4
+      local.get 3
       i32.add
       i64.const 0
       i64.store
       local.get $__frame_ptr
-      local.get 4
+      local.get 3
       i32.add
       i64.const 0
       i64.store offset=8
-      local.get 4
+      local.get 3
       i32.const 16
       i32.add
-      local.tee 4
+      local.tee 3
       i32.const 160
       i32.ne
       br_if 0 (;@1;)
@@ -966,13 +966,6 @@
     end
     local.get $g
     local.get $i
-    local.tee 3
-    local.get 3
-    i32.const 20
-    i32.ge_u
-    if ;; label = @1
-      unreachable
-    end
     i32.const 8
     i32.mul
     i32.add

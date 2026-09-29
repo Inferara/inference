@@ -84,6 +84,10 @@ pub(crate) fn build_multi_file_ast(files: &[(Vec<&str>, &str)]) -> AstArena {
 }
 
 /// Controls whether the analysis pass runs during codegen.
+///
+/// A run hands code generation the array accesses it proved in bounds, as
+/// `infc` does, so their runtime guards are omitted; a skipped one proves
+/// nothing, and every dynamic access keeps its guard.
 #[derive(Clone, Copy, Default)]
 pub(crate) enum AnalysisMode {
     /// Run the analysis pass (default for production-like tests).
@@ -163,12 +167,21 @@ fn codegen_impl_with_options(
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
-    if let AnalysisMode::Run = analysis {
-        let _analysis_result =
+    let proven_in_bounds = match analysis {
+        AnalysisMode::Run => {
             inference_analysis::analyze_with_options(&typed_context, analysis_options(&options))
-                .unwrap();
-    }
-    inference_wasm_codegen::codegen(&typed_context, "output", options)
+                .unwrap()
+                .proven_in_bounds()
+                .clone()
+        }
+        AnalysisMode::Skip => inference_analysis::ProvenInBounds::default(),
+    };
+    inference_wasm_codegen::codegen_with_proven_in_bounds(
+        &typed_context,
+        "output",
+        options,
+        proven_in_bounds.accesses(),
+    )
 }
 
 /// The analysis settings that describe the artifact `options` builds: its
@@ -476,13 +489,18 @@ fn codegen_output_multi_file_impl(
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .expect("multi-file type check should succeed")
         .typed_context();
-    if let AnalysisMode::Run = analysis {
-        inference_analysis::analyze(&typed_context).expect("multi-file analysis should succeed");
-    }
-    inference_wasm_codegen::codegen(
+    let proven_in_bounds = match analysis {
+        AnalysisMode::Run => inference_analysis::analyze(&typed_context)
+            .expect("multi-file analysis should succeed")
+            .proven_in_bounds()
+            .clone(),
+        AnalysisMode::Skip => inference_analysis::ProvenInBounds::default(),
+    };
+    inference_wasm_codegen::codegen_with_proven_in_bounds(
         &typed_context,
         "output",
         inference_wasm_codegen::CodegenOptions::default(),
+        proven_in_bounds.accesses(),
     )
     .expect("multi-file codegen should succeed")
 }
@@ -544,15 +562,16 @@ pub(crate) fn wasm_codegen_project_with_features(
         .unwrap_or_else(|e| panic!("parse_project failed for {}: {e}", entry.display()));
     let typed_context = inference::type_check(parse.arena)
         .unwrap_or_else(|e| panic!("multi-file project type check failed for {test_name}: {e}"));
-    inference::analyze(&typed_context)
+    let analysis = inference::analyze(&typed_context)
         .unwrap_or_else(|e| panic!("multi-file project analysis failed for {test_name}: {e:?}"));
-    inference_wasm_codegen::codegen(
+    inference_wasm_codegen::codegen_with_proven_in_bounds(
         &typed_context,
         "output",
         inference_wasm_codegen::CodegenOptions {
             features,
             ..Default::default()
         },
+        analysis.proven_in_bounds().accesses(),
     )
     .unwrap_or_else(|e| panic!("multi-file project codegen failed for {test_name}: {e}"))
     .wasm()
@@ -598,14 +617,16 @@ pub(crate) fn proof_wasm_codegen_project(module_path: &str, test_name: &str) -> 
 pub(crate) fn proof_wasm_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> Vec<u8> {
     let typed_context = try_type_check_multi_file(files)
         .expect("multi-file proof-mode test source should type-check");
-    inference_analysis::analyze(&typed_context).expect("multi-file proof analysis should succeed");
-    inference_wasm_codegen::codegen(
+    let analysis = inference_analysis::analyze(&typed_context)
+        .expect("multi-file proof analysis should succeed");
+    inference_wasm_codegen::codegen_with_proven_in_bounds(
         &typed_context,
         "output",
         inference_wasm_codegen::CodegenOptions {
             mode: inference_wasm_codegen::CompilationMode::Proof,
             ..Default::default()
         },
+        analysis.proven_in_bounds().accesses(),
     )
     .expect("multi-file proof codegen should succeed")
     .wasm()
@@ -645,8 +666,12 @@ pub(crate) fn try_codegen_project(
     let entry = get_project_entry_path(module_path, test_name);
     let parse = inference::parse_project(&entry)?;
     let typed_context = inference::type_check(parse.arena)?;
-    inference::analyze(&typed_context).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    Ok(inference::codegen(&typed_context, "output")?.wasm().to_vec())
+    let analysis = inference::analyze(&typed_context).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    Ok(
+        inference::codegen_with_analysis(&typed_context, "output", &analysis)?
+            .wasm()
+            .to_vec(),
+    )
 }
 
 /// Reads the golden `.wasm` for a multi-file fixture (sits directly in `<test>/`).
@@ -1367,19 +1392,22 @@ pub(crate) fn codegen_attempt_with_mode(
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
-    if let AnalysisMode::Run = analysis
-        && let Err(errors) = inference_analysis::analyze(&typed_context)
-    {
-        return CodegenAttempt::Rejected(errors.to_string());
-    }
+    let proven_in_bounds = match analysis {
+        AnalysisMode::Run => match inference_analysis::analyze(&typed_context) {
+            Ok(result) => result.proven_in_bounds().clone(),
+            Err(errors) => return CodegenAttempt::Rejected(errors.to_string()),
+        },
+        AnalysisMode::Skip => inference_analysis::ProvenInBounds::default(),
+    };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        inference_wasm_codegen::codegen(
+        inference_wasm_codegen::codegen_with_proven_in_bounds(
             &typed_context,
             "output",
             inference_wasm_codegen::CodegenOptions {
                 mode,
                 ..Default::default()
             },
+            proven_in_bounds.accesses(),
         )
     }));
     match outcome {
