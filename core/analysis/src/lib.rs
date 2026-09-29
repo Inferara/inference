@@ -108,12 +108,23 @@
 //!   over-approximates each frame to stay sound against codegen; see
 //!   [`rules::stack_depth`].
 //!
-//! ### Array Bounds (A037)
+//! ### Array Bounds (A037, A056, A057)
 //!
 //! - A037: A constant array index must be in bounds. When `arr[c]` has a literal
 //!   index `c` and the array's type is `[T; length]`, the access is rejected if
 //!   `c < 0` or `c >= length`. This is a compile-time check with zero runtime
 //!   cost; dynamic (non-literal) indices are out of scope for this rule.
+//! - A056: A dynamic array index must be proven in bounds. The runtime guard
+//!   every such access carries traps on an out-of-range index, and a trap is a
+//!   halt rather than a recovery, so a value-range analysis over the body must
+//!   prove from the code the programmer wrote — an enclosing `if` or loop
+//!   condition, an early exit, the index's initializer and arithmetic — that
+//!   the guard is unreachable. An `assert` is not a source of facts. See
+//!   [`rules::array_index_not_proven`].
+//! - A057: An `assert` in executable code must not fail on every run that
+//!   reaches it; such an `assert` is an unconditional halt written as a check,
+//!   and would otherwise stand in for the recovery A056 asks a guard's failing
+//!   branch to perform. See [`rules::assert_always_fails`].
 //!
 //! ### Duplicate Local Names (A041)
 //!
@@ -299,6 +310,7 @@ use inference_type_checker::typed_context::TypedContext;
 
 mod call_graph;
 pub mod errors;
+mod range;
 pub mod rule;
 pub mod rules;
 mod walker;
@@ -471,6 +483,8 @@ mod tests {
             AnalysisDiagnostic::ArithModeGovernsNothing { mode: inference_ast::nodes::ArithMode::Wrapping, location: dummy_location() },
             AnalysisDiagnostic::ArithModeChangesNothing { mode: inference_ast::nodes::ArithMode::Wrapping, enclosure: errors::RedundantArithMode::AgainstTheDefault, location: dummy_location() },
             AnalysisDiagnostic::ParamWordsExceeded { function: "f".to_string(), words: errors::ParamWords { receiver: false, params: Vec::new(), result_pointer: None }, location: dummy_location() },
+            AnalysisDiagnostic::ArrayIndexNotProvenInBounds { index: Some("i".to_string()), number: inference_type_checker::type_info::NumberType::I32, length: 8, lo: -1, hi: 7, location: dummy_location() },
+            AnalysisDiagnostic::AssertAlwaysFails { location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

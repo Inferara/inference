@@ -1,5 +1,6 @@
 struct HasArray { arr: [i32; 3]; val: i32;
     fn get_arr_elem(self, idx: i32) -> i32 {
+        if idx < 0 || idx >= 3 { return -1; }
         return self.arr[idx];
     }
     fn sum_arr(self) -> i32 {

@@ -631,6 +631,25 @@ pub(crate) fn for_each_lowered_function_body(
     });
 }
 
+/// [`for_each_function_body`], restricted to the bodies declared outside every
+/// `spec` block.
+///
+/// These are the program's own code: every one of them is lowered and runs as
+/// written. A specification body that is lowered too — an `exists` or `unique`
+/// one — is still a specification, where an `assert` is part of what the
+/// specification claims rather than a check the program makes.
+pub(crate) fn for_each_executable_function_body(
+    arena: &AstArena,
+    def_ids: &[DefId],
+    callback: &mut dyn FnMut(BlockId),
+) {
+    for_each_function_body_in_scope(arena, def_ids, BodyScope::Executable, &mut |body, scope| {
+        if scope == BodyScope::Executable {
+            callback(body);
+        }
+    });
+}
+
 /// The one descent over definitions, carrying the scope each body was found in.
 fn for_each_function_body_in_scope(
     arena: &AstArena,

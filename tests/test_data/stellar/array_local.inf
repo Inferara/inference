@@ -5,5 +5,6 @@
 // scalar-only fixture beside it leaves out.
 pub fn pick(index: i32) -> u32 {
     let table: [u32; 4] = [10, 20, 30, 40];
+    if index < 0 || index >= 4 { return 0; }
     return table[index];
 }

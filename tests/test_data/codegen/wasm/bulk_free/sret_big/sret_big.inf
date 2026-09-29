@@ -33,6 +33,7 @@ pub fn read_20_last() -> i64 {
 
 pub fn read_20_dynamic(i: i32) -> i64 {
     let e: [i64; 20] = make_20();
+    if i < 0 || i >= 20 { return 0; }
     return e[i];
 }
 

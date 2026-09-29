@@ -23,36 +23,43 @@
 
 pub fn at_129(mut data: [u8; 129], i: i32) -> u8 {
     data[0] = data[0];
+    if i < 0 || i >= 129 { return 0; }
     return data[i];
 }
 
 pub fn at_130(mut data: [u8; 130], i: i32) -> u8 {
     data[0] = data[0];
+    if i < 0 || i >= 130 { return 0; }
     return data[i];
 }
 
 pub fn at_131(mut data: [u8; 131], i: i32) -> u8 {
     data[0] = data[0];
+    if i < 0 || i >= 131 { return 0; }
     return data[i];
 }
 
 pub fn at_135(mut data: [u8; 135], i: i32) -> u8 {
     data[0] = data[0];
+    if i < 0 || i >= 135 { return 0; }
     return data[i];
 }
 
 pub fn at_u32_33(mut data: [u32; 33], i: i32) -> u32 {
     data[0] = data[0];
+    if i < 0 || i >= 33 { return 0; }
     return data[i];
 }
 
 pub fn at_u16_67(mut data: [u16; 67], i: i32) -> u16 {
     data[0] = data[0];
+    if i < 0 || i >= 67 { return 0; }
     return data[i];
 }
 
 // The callee writes its own copy; the caller's bytes must be untouched.
 pub fn clobber_135(mut data: [u8; 135], i: i32) -> u8 {
+    if i < 0 || i >= 135 { return 0; }
     data[i] = 255;
     return data[i];
 }

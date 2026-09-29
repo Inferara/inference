@@ -6,6 +6,7 @@ struct MixedGrid { tag: i32; grid: [[i32; 2]; 2]; total: i32; }
 
 pub fn grid_read(i: i32, j: i32) -> i32 {
     let g: HasGrid = HasGrid { grid: [[1, 2, 3], [4, 5, 6]] };
+    if i < 0 || i >= 2 || j < 0 || j >= 3 { return -1; }
     return g.grid[i][j];
 }
 

@@ -27,8 +27,8 @@ mod algo_array_tests {
 
     #[test]
     fn algo_array_test() {
-        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 45);
-        cov_mark::check_count!(wasm_codegen_emit_if_statement, 8);
+        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 53);
+        cov_mark::check_count!(wasm_codegen_emit_if_statement, 10);
         cov_mark::check_count!(wasm_codegen_emit_if_with_else, 1);
         cov_mark::check_count!(wasm_codegen_emit_function_params, 6);
         cov_mark::check_count!(wasm_codegen_emit_variable_definition, 45);
@@ -40,7 +40,7 @@ mod algo_array_tests {
         cov_mark::check_count!(wasm_codegen_emit_array_index_read, 24);
         cov_mark::check_count!(wasm_codegen_emit_array_index_write, 3);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 12);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 12);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 14);
         let test_name = "algo_array";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)

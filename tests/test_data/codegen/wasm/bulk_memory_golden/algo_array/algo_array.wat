@@ -505,6 +505,24 @@
         br 0 (;@2;)
       end
     end
+    local.get $idx
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $idx
+      i32.const 6
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const -1
+      local.get $__frame_ptr
+      i32.const 32
+      i32.add
+      global.set 0
+      return
+    end
     local.get $arr
     local.get $idx
     local.tee 7
@@ -759,6 +777,13 @@
         local.get $i
         local.get $n
         i32.lt_s
+        if (result i32) ;; label = @3
+          local.get $i
+          i32.const 8
+          i32.lt_s
+        else
+          i32.const 0
+        end
         i32.eqz
         br_if 1 (;@1;)
         local.get $arr
@@ -940,6 +965,24 @@
         local.set $i
         br 0 (;@2;)
       end
+    end
+    local.get $idx
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $idx
+      i32.const 6
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const -1
+      local.get $__frame_ptr
+      i32.const 32
+      i32.add
+      global.set 0
+      return
     end
     local.get $arr
     local.get $idx

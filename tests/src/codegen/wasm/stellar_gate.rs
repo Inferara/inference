@@ -518,7 +518,7 @@ mod stellar_gate_tests {
             "pub fn flag(b: bool) -> bool { return !b; }",
             "pub fn mixed(a: u32, b: i32, c: bool) -> i32 { if c { return b; } return 0; }",
             "pub fn arithmetic(a: u32, b: u32) -> u32 { return a + b * 2; }",
-            "pub fn indexed(i: u32) -> i32 { let xs: [i32; 4] = [1, 2, 3, 4]; return xs[i]; }",
+            "pub fn indexed(i: u32) -> i32 { let xs: [i32; 4] = [1, 2, 3, 4]; if i >= 4 { return 0; } return xs[i]; }",
             "struct P { x: i32; y: i32; } \
              pub fn sum(a: i32, b: i32) -> i32 { let p: P = P { x: a, y: b }; return p.x + p.y; }",
             "fn helper(x: u32) -> u32 { return x + 1; } \

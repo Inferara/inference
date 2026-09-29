@@ -74,6 +74,24 @@
     local.get $data
     i32.load8_u
     i32.store8
+    local.get $i
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $i
+      i32.const 129
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const 0
+      local.get $__frame_ptr
+      i32.const 144
+      i32.add
+      global.set 0
+      return
+    end
     local.get $data
     local.get $i
     local.tee 3
@@ -151,6 +169,24 @@
     local.get $data
     i32.load8_u
     i32.store8
+    local.get $i
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $i
+      i32.const 130
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const 0
+      local.get $__frame_ptr
+      i32.const 144
+      i32.add
+      global.set 0
+      return
+    end
     local.get $data
     local.get $i
     local.tee 3
@@ -232,6 +268,24 @@
     local.get $data
     i32.load8_u
     i32.store8
+    local.get $i
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $i
+      i32.const 131
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const 0
+      local.get $__frame_ptr
+      i32.const 144
+      i32.add
+      global.set 0
+      return
+    end
     local.get $data
     local.get $i
     local.tee 3
@@ -317,6 +371,24 @@
     local.get $data
     i32.load8_u
     i32.store8
+    local.get $i
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $i
+      i32.const 135
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const 0
+      local.get $__frame_ptr
+      i32.const 144
+      i32.add
+      global.set 0
+      return
+    end
     local.get $data
     local.get $i
     local.tee 3
@@ -394,6 +466,24 @@
     local.get $data
     i32.load
     i32.store
+    local.get $i
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $i
+      i32.const 33
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const 0
+      local.get $__frame_ptr
+      i32.const 144
+      i32.add
+      global.set 0
+      return
+    end
     local.get $data
     local.get $i
     local.tee 3
@@ -475,6 +565,24 @@
     local.get $data
     i32.load16_u
     i32.store16
+    local.get $i
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $i
+      i32.const 67
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const 0
+      local.get $__frame_ptr
+      i32.const 144
+      i32.add
+      global.set 0
+      return
+    end
     local.get $data
     local.get $i
     local.tee 3
@@ -556,6 +664,24 @@
     i32.store8 offset=134
     local.get $__frame_ptr
     local.set $data
+    local.get $i
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $i
+      i32.const 135
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const 0
+      local.get $__frame_ptr
+      i32.const 144
+      i32.add
+      global.set 0
+      return
+    end
     local.get $data
     local.get $i
     local.tee 3

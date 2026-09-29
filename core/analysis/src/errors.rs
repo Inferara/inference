@@ -437,6 +437,57 @@ fn param_words_exceeded_message(function: &str, words: &ParamWords) -> String {
     )
 }
 
+/// The message of [`AnalysisDiagnostic::ArrayIndexNotProvenInBounds`].
+///
+/// An index whose every value is out of range has no in-bounds run to guard,
+/// so it is reported as such and offered no guard. Otherwise the help names the
+/// guard that proves the access: both bounds when the analysis could not rule
+/// out a negative value, the upper one alone when it could. An index that is
+/// not a plain local cannot be narrowed by a guard written on it, so the help
+/// binds it to one first.
+fn array_index_not_proven_message(
+    index: Option<&str>,
+    number: NumberType,
+    length: u32,
+    lo: i128,
+    hi: i128,
+) -> String {
+    let subject = index.map_or_else(
+        || "array index".to_string(),
+        |name| format!("array index `{name}`"),
+    );
+    let value = if lo == hi {
+        format!("it is always {lo}")
+    } else {
+        format!("it can be any value in {lo}..={hi}")
+    };
+    let last = i128::from(length) - 1;
+    if hi < 0 || lo > last {
+        return format!(
+            "{subject} is always out of bounds for an array of length {length}: {value} here, \
+             and only 0..={last} is in bounds"
+        );
+    }
+    let name = index.unwrap_or("k");
+    let guard = if lo < 0 {
+        format!("{name} >= 0 && {name} < {length}")
+    } else {
+        format!("{name} < {length}")
+    };
+    let (advice, binding) = match index {
+        Some(_) => ("", String::new()),
+        None => (
+            "bind the index to a local, then ",
+            format!("let k: {} = …; ", number.as_str()),
+        ),
+    };
+    format!(
+        "{subject} is not proven to be in bounds for an array of length {length}: {value} \
+         here, and only 0..={last} is in bounds\nhelp: {advice}guard the access so an \
+         out-of-range index takes a path you wrote: `{binding}if {guard} {{ … }} else {{ … }}`"
+    )
+}
+
 /// Severity level for analysis findings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
@@ -882,6 +933,33 @@ pub enum AnalysisDiagnostic {
         words: ParamWords,
         location: Location,
     },
+
+    /// An array access whose index is not a bare literal and is not proven to
+    /// lie in `0..length` on every run that reaches it. `index` is the index as
+    /// written when it is a plain local — the one shape a guard can narrow —
+    /// and `number` its type. `lo..=hi` is the interval the range analysis
+    /// established for it there.
+    #[error(
+        "{message}",
+        message = array_index_not_proven_message(.index.as_deref(), *.number, *.length, *.lo, *.hi)
+    )]
+    ArrayIndexNotProvenInBounds {
+        index: Option<String>,
+        number: NumberType,
+        length: u32,
+        lo: i128,
+        hi: i128,
+        location: Location,
+    },
+
+    /// An `assert` in executable code whose condition is false on every run
+    /// that reaches it.
+    #[error(
+        "this `assert` fails on every run that reaches it, so it halts the program \
+         unconditionally; handle this case with code that recovers instead of asserting that \
+         it cannot happen"
+    )]
+    AssertAlwaysFails { location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -940,7 +1018,9 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::ConstantArithmeticOverflow { location, .. }
             | AnalysisDiagnostic::ArithModeGovernsNothing { location, .. }
             | AnalysisDiagnostic::ArithModeChangesNothing { location, .. }
-            | AnalysisDiagnostic::ParamWordsExceeded { location, .. } => location,
+            | AnalysisDiagnostic::ParamWordsExceeded { location, .. }
+            | AnalysisDiagnostic::ArrayIndexNotProvenInBounds { location, .. }
+            | AnalysisDiagnostic::AssertAlwaysFails { location } => location,
         }
     }
 
@@ -1003,6 +1083,8 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::ArithModeGovernsNothing { .. } => "A053",
             AnalysisDiagnostic::ArithModeChangesNothing { .. } => "A054",
             AnalysisDiagnostic::ParamWordsExceeded { .. } => "A055",
+            AnalysisDiagnostic::ArrayIndexNotProvenInBounds { .. } => "A056",
+            AnalysisDiagnostic::AssertAlwaysFails { .. } => "A057",
         }
     }
 }
@@ -1924,6 +2006,71 @@ mod tests {
             "A037 diagnostic must include the array length, got: {text}"
         );
         assert_eq!(err.rule_id(), "A037");
+    }
+
+    #[test]
+    fn display_array_index_not_proven_names_the_range_and_both_bounds_of_the_guard() {
+        let err = AnalysisDiagnostic::ArrayIndexNotProvenInBounds {
+            index: Some("i".to_string()),
+            number: NumberType::I32,
+            length: 8,
+            lo: -2_147_483_648,
+            hi: 7,
+            location: test_location(),
+        };
+        assert_eq!(err.rule_id(), "A056");
+        assert_eq!(
+            err.to_string(),
+            "array index `i` is not proven to be in bounds for an array of length 8: it can be \
+             any value in -2147483648..=7 here, and only 0..=7 is in bounds\nhelp: guard the \
+             access so an out-of-range index takes a path you wrote: \
+             `if i >= 0 && i < 8 { … } else { … }`"
+        );
+    }
+
+    #[test]
+    fn display_array_index_not_proven_binds_an_index_that_is_not_a_local() {
+        let err = AnalysisDiagnostic::ArrayIndexNotProvenInBounds {
+            index: None,
+            number: NumberType::U32,
+            length: 4,
+            lo: 0,
+            hi: 4_294_967_295,
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "array index is not proven to be in bounds for an array of length 4: it can be any \
+             value in 0..=4294967295 here, and only 0..=3 is in bounds\nhelp: bind the index to \
+             a local, then guard the access so an out-of-range index takes a path you wrote: \
+             `let k: u32 = …; if k < 4 { … } else { … }`"
+        );
+    }
+
+    #[test]
+    fn display_array_index_not_proven_that_is_always_out_of_bounds_offers_no_guard() {
+        let err = AnalysisDiagnostic::ArrayIndexNotProvenInBounds {
+            index: Some("K".to_string()),
+            number: NumberType::I32,
+            length: 4,
+            lo: 9,
+            hi: 9,
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "array index `K` is always out of bounds for an array of length 4: it is always 9 \
+             here, and only 0..=3 is in bounds"
+        );
+    }
+
+    #[test]
+    fn display_assert_always_fails() {
+        let err = AnalysisDiagnostic::AssertAlwaysFails {
+            location: test_location(),
+        };
+        assert_eq!(err.rule_id(), "A057");
+        assert!(err.to_string().contains("fails on every run that reaches it"));
     }
 
     #[test]

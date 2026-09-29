@@ -1980,7 +1980,7 @@ mod base_codegen_tests {
         cov_mark::check_count!(wasm_codegen_emit_array_index_read, 6);
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 6);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 6);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 8);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 9);
         let test_name = "array_index";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -2133,7 +2133,7 @@ mod base_codegen_tests {
         cov_mark::check_count!(wasm_codegen_emit_array_index_read, 14);
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 7);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 6);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 7);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 8);
         let test_name = "array_assign";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -6694,6 +6694,7 @@ mod base_codegen_tests {
                 return v.y;
             }
             fn get_at(arr: [Vec2; 3], idx: i32) -> Vec2 {
+                if idx < 0 || idx >= 3 { return Vec2 { x: 0, y: 0 }; }
                 return arr[idx];
             }
         "#;

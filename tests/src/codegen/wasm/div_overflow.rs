@@ -16,11 +16,15 @@
 
 #[cfg(test)]
 mod div_overflow_tests {
-    use crate::utils::wasm_codegen;
+    use crate::utils::{wasm_codegen, wasm_codegen_no_analysis};
     use wasmtime::{Engine, Instance, Module, Store, Trap, TypedFunc};
 
     fn instantiate(source: &str) -> (Store<()>, Instance) {
-        let wasm = wasm_codegen(source);
+        instantiate_wasm(&wasm_codegen(source))
+    }
+
+    fn instantiate_wasm(wasm: &[u8]) -> (Store<()>, Instance) {
+        let wasm = wasm.to_vec();
         inf_wasmparser::validate(&wasm)
             .unwrap_or_else(|e| panic!("generated module is invalid: {e}"));
         let engine = Engine::default();
@@ -138,6 +142,10 @@ pub fn loopdiv(a: i8, b: i8, n: i32) -> i8 {
     /// and a narrow signed division (overflow guard). Each guard owns a distinct
     /// scratch local; both fire independently. If they shared a scratch, one
     /// would clobber the other and these executions would misbehave.
+    ///
+    /// The index is deliberately unguarded so the bounds guard can be made to
+    /// trap; analysis rule A056 rejects such a program, so the build skips
+    /// analysis.
     #[test]
     fn bounds_and_division_guards_coexist() {
         const SOURCE: &str = r#"
@@ -148,7 +156,7 @@ pub fn coexist(i: u32, a: i8, b: i8) -> i8 {
     return x + y;
 }
 "#;
-        let (mut store, instance) = instantiate(SOURCE);
+        let (mut store, instance) = instantiate_wasm(&wasm_codegen_no_analysis(SOURCE));
         let coexist: TypedFunc<(u32, i32, i32), i32> = instance
             .get_typed_func(&mut store, "coexist")
             .expect("get coexist");

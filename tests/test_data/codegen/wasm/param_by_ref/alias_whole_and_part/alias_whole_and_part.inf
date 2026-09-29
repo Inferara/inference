@@ -53,6 +53,7 @@ pub fn call_whole_and_element(i: i32) -> i32 {
         Item { a: 3, b: 4 },
         Item { a: 5, b: 6 },
     ];
+    if i < 0 || i >= 3 { return -1; }
     let inner: i32 = whole_and_element(items, items[i]);
     return inner * 1000 + items[0].a * 100 + items[2].b * 10 + items[i].a;
 }

@@ -433,7 +433,7 @@ pub fn run() -> i32 { let c: Counter = Counter { v: 1 }; return c.bump(); }
         for source in [
             ORDINARY,
             "pub fn nothing() {}",
-            "pub fn indexed(i: u32) -> i32 { let xs: [i32; 4] = [1, 2, 3, 4]; return xs[i]; }",
+            "pub fn indexed(i: u32) -> i32 { let xs: [i32; 4] = [1, 2, 3, 4]; if i >= 4 { return 0; } return xs[i]; }",
             "pub fn guarded(x: i32) -> i32 { assert(x > 0); return x; }",
         ] {
             let wasm = codegen_with_target_mode(source, Target::SpaceWasm, CompilationMode::Compile)

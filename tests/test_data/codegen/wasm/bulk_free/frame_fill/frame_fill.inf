@@ -37,5 +37,6 @@ pub fn fill_multi_slot() -> i64 {
 // never wrote.
 pub fn fill_read_dynamic(i: i32) -> i64 {
     let g: [i64; 20] = [4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+    if i < 0 || i >= 20 { return 0; }
     return g[i];
 }

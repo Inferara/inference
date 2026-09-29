@@ -43,6 +43,7 @@ pub fn bubble_sort_element(idx: i32) -> i32 {
         }
         i = i + 1;
     }
+    if idx < 0 || idx >= 6 { return -1; }
     return arr[idx];
 }
 
@@ -62,7 +63,7 @@ pub fn array_max(n: i32) -> i32 {
     let arr: [i32; 8] = [3, 7, 1, 9, 4, 6, 8, 2];
     let mut max_val: i32 = arr[0];
     let mut i: i32 = 1;
-    loop i < n {
+    loop i < n && i < 8 {
         if arr[i] > max_val {
             max_val = arr[i];
         }
@@ -80,6 +81,7 @@ pub fn prefix_sum_element(idx: i32) -> i32 {
         arr[i] = running;
         i = i + 1;
     }
+    if idx < 0 || idx >= 6 { return -1; }
     return arr[idx];
 }
 
