@@ -2213,7 +2213,7 @@ impl Compiler {
                     return Err(CodegenError::UnsupportedConstruct {
                         construct: format!(
                             "a parameter declared by its type alone (`{}`)",
-                            Self::render_source_type(&TypeInfo::from_type_id(arena, *ty).kind)
+                            TypeInfo::from_type_id(arena, *ty)
                         ),
                         rule: "A050",
                         location: Some(arg.location),
@@ -4096,25 +4096,6 @@ impl Compiler {
         Ok(())
     }
 
-    /// Renders a type the way the source spells it, for a diagnostic whose fix
-    /// is a type the reader has to be able to write down.
-    ///
-    /// A builtin uses its source name rather than the type checker's capitalized
-    /// `Display`, and an array is rebuilt from its element so the same holds at
-    /// every depth. Everything else keeps `Display`, which names a struct or enum
-    /// by its canonical key.
-    fn render_source_type(kind: &TypeInfoKind) -> String {
-        if let Some(builtin) = kind.as_builtin_str() {
-            return builtin.to_string();
-        }
-        match kind {
-            TypeInfoKind::Array(elem, length) => {
-                format!("[{}; {length}]", Self::render_source_type(&elem.kind))
-            }
-            other => other.to_string(),
-        }
-    }
-
     /// Lowers an AST statement to WASM instructions.
     #[allow(clippy::too_many_lines)]
     fn lower_statement(
@@ -4943,8 +4924,7 @@ impl Compiler {
                         };
                         self.poison(CodegenError::UnsupportedConstruct {
                             construct: format!(
-                                "an `@` over `{}`, a type with no value representation",
-                                Self::render_source_type(other)
+                                "an `@` over `{other}`, a type with no value representation"
                             ),
                             rule,
                             location: Some(arena[expr_id].location),
@@ -8213,10 +8193,7 @@ impl Compiler {
         else {
             cov_mark::hit!(wasm_codegen_member_access_on_non_struct_rejected);
             return Err(CodegenError::UnsupportedConstruct {
-                construct: format!(
-                    "a field access on `{}`, a type with no fields",
-                    Self::render_source_type(&struct_type.kind)
-                ),
+                construct: format!("a field access on `{struct_type}`, a type with no fields"),
                 rule: "the type checker",
                 location: Some(arena[struct_expr_id].location),
             });

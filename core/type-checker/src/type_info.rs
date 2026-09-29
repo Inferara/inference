@@ -224,12 +224,18 @@ impl std::hash::Hash for TypeInfoKind {
     }
 }
 
+/// Renders a type as the source spells it, because every diagnostic that quotes
+/// a type quotes it through here: a reader who copies the type out of a message
+/// has to get something the language accepts. A builtin uses the spelling
+/// [`TypeInfoKind::as_builtin_str`] gives it (`()`, `bool`, `string`, the
+/// integer names), an array renders its element the same way at every depth,
+/// and a struct or enum is named by its canonical key.
 impl Display for TypeInfoKind {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            TypeInfoKind::Unit => write!(f, "Unit"),
-            TypeInfoKind::Bool => write!(f, "Bool"),
-            TypeInfoKind::String => write!(f, "String"),
+            TypeInfoKind::Unit => write!(f, "()"),
+            TypeInfoKind::Bool => write!(f, "bool"),
+            TypeInfoKind::String => write!(f, "string"),
             TypeInfoKind::Number(number_type) => write!(f, "{}", number_type.as_str()),
             TypeInfoKind::Array(ty, length) => write!(f, "[{ty}; {length}]"),
             // Render structs and enums by their canonical key so a cross-file type
@@ -309,18 +315,20 @@ impl Default for TypeInfo {
     }
 }
 
+/// Renders the kind as its own [`Display`] does, followed by each type parameter
+/// primed. A generic *application* (`Array u32'`) is lowered to a
+/// [`Generic`](TypeInfoKind::Generic) kind carrying its arguments, so its base is
+/// named unprimed: only a bare type-parameter reference (`T'`) takes the prime.
 impl Display for TypeInfo {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        if self.type_params.is_empty() {
-            return write!(f, "{}", self.kind);
+        match &self.kind {
+            TypeInfoKind::Generic(base) if !self.type_params.is_empty() => write!(f, "{base}")?,
+            kind => write!(f, "{kind}")?,
         }
-        let type_params = self
-            .type_params
-            .iter()
-            .map(|tp| format!("{tp}'"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        write!(f, "{} {}", self.kind, type_params)
+        for type_param in &self.type_params {
+            write!(f, " {type_param}'")?;
+        }
+        Ok(())
     }
 }
 
@@ -409,14 +417,11 @@ impl TypeInfo {
                     .unwrap_or_default();
                 let params = param_types
                     .iter()
-                    .map(source_like_spelling)
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
                 Self {
-                    kind: TypeInfoKind::Function(format!(
-                        "fn({params}) -> {}",
-                        source_like_spelling(&return_type)
-                    )),
+                    kind: TypeInfoKind::Function(format!("fn({params}) -> {return_type}")),
                     type_params: vec![],
                 }
             }
@@ -551,19 +556,6 @@ impl TypeInfo {
             SimpleTypeKind::U32 => TypeInfoKind::Number(NumberType::U32),
             SimpleTypeKind::U64 => TypeInfoKind::Number(NumberType::U64),
         }
-    }
-}
-
-/// A source-like spelling of `ty` for embedding in a function-type carrier
-/// (`fn(i32, bool) -> ()`). Built-in scalars use their source spellings, so the
-/// carrier reads as it was written rather than as the checker's
-/// capitalized [`Display`] (`Bool`/`Unit`/`String`); every other kind uses its
-/// `Display`, which already reads as source (a struct/enum by its canonical key,
-/// a generic primed, a nested function type by this same spelling).
-fn source_like_spelling(ty: &TypeInfo) -> String {
-    match ty.kind.as_builtin_str() {
-        Some(builtin) => builtin.to_string(),
-        None => ty.to_string(),
     }
 }
 

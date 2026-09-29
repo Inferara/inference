@@ -46,7 +46,6 @@ mod hover;
 mod inlay_hints;
 mod nondet_docs;
 mod syntax;
-mod type_render;
 
 #[cfg(test)]
 mod test_utils;

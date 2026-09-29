@@ -393,7 +393,7 @@ TypeCheckError::TypeMismatch {
     context: TypeMismatchContext::Return,
     location: Location { ... }
 }
-// Message: "1:5: type mismatch in return statement: expected `i32`, found `Bool`"
+// Message: "1:5: type mismatch in return statement: expected `i32`, found `bool`"
 
 // 2. Unknown Identifier
 TypeCheckError::UnknownIdentifier {

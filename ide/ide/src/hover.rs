@@ -12,7 +12,6 @@ use crate::syntax::{
     def_is_public, def_name_ident, def_signature, find_def_by_name, find_free_def_by_name,
     find_method, is_call_callee, resolve_qualified_module, text_range,
 };
-use crate::type_render::render_type;
 
 /// The information shown in a hover popover: markdown contents plus the source
 /// range they describe (so the editor can underline the hovered token).
@@ -47,14 +46,14 @@ pub(crate) fn hover(file: &FileAnalysis, offset: u32) -> Option<Hover> {
     }
     if let NodeId::Type(ty) = hit.node {
         return Some(Hover {
-            contents_markdown: code_block(&render_type(&TypeInfo::from_type_id(arena, ty))),
+            contents_markdown: code_block(&TypeInfo::from_type_id(arena, ty).to_string()),
             range: text_range(arena[ty].location),
         });
     }
     if let NodeId::Expr(expr) = hit.node {
         let type_info = ctx.get_node_typeinfo(NodeId::Expr(expr))?;
         return Some(Hover {
-            contents_markdown: code_block(&render_type(&type_info)),
+            contents_markdown: code_block(&type_info.to_string()),
             range: text_range(arena[expr].location),
         });
     }
@@ -256,7 +255,7 @@ fn ident_in_stmt(
 }
 
 fn named_type(name: &str, type_info: &TypeInfo) -> String {
-    code_block(&format!("{name}: {}", render_type(type_info)))
+    code_block(&format!("{name}: {type_info}"))
 }
 
 /// The signature of the function a call resolves to, in the callee's own file.

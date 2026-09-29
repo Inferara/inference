@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 
 - `inference::wasm_link::lower_extern_signature` takes the program's `TypedContext` and the declaring file's module path: `lower_extern_signature(arena, args, returns)` becomes `lower_extern_signature(typed_context, module_path, args, returns)`. A `::`-qualified type in an `external fn` signature names something only against the imports of the file it is written in, so the arena alone no longer carries enough to lower one. Migration: type-check the program first, pass the typed context together with the module path of the file that declares the extern (`&[]` for the entry file), and read `args` and `returns` from `typed_context.arena()` ([#481])
+- `Display` for `TypeInfo` and `TypeInfoKind` prints the source spelling of a type: `()`, `bool` and `string` instead of `Unit`, `Bool` and `String`, at every depth (`[bool; 2]`), and a generic application with its base unprimed (`Array u32'`, not `Array' u32'`). A function type's carrier string (`TypeInfoKind::Function`) follows, so `fn([bool; 2]) -> ()` is stored as written. Migration: code that matched on the old text should match on the kind, and code that rendered a type for a reader can drop its own renderer and use `Display` ([#476])
 
 ### Documentation
 
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - An `external fn` may name a struct or enum from an imported file in its signature, as any function may: `external fn send(p: geo::Point) -> geo::Level;` under `use geo;`, or `external fn send(p: Point) -> i32;` under `use geo::{Point};`. Both were refused at type checking, the first with "namespace `geo` is not imported; add `use geo;` to reach `geo::Point`" — prescribing the import the file already had — and the second as an unknown type, because an extern's signature types alone were validated while it was registered, before any import was bound. They are now validated after imports resolve, with every other signature's, and a genuinely missing import is still reported, now truthfully. The link driver lowers the qualified form as code generation does, to an `i32` — a struct's address, an enum's tag — resolved against the declaring file's imports; it used to refuse the form as an unsupported type, so fixing the type checker alone would only have moved the refusal one stage later. Host imports and linked externs are both fixed ([#481], [#425])
+- Diagnostics quote types in a spelling the language accepts. `fn g() { } fn f() -> i32 { return g(); }` reported ``expected `i32`, found `Unit` ``, and a reader who wrote `Unit` back was told it is an unknown type, since the unit type's only spelling is `()`; `bool` and `string` were quoted as `Bool` and `String` the same way. Every type-checker message that quotes a type now uses its source spelling, and so does every analysis finding, proof-translation message and code-generation refusal that quotes one. The analysis rules, code generation and the editor had each grown their own renderer to avoid the checker's spelling; those renderers are deleted in favor of the one `Display` ([#476])
 
 ### IDE / LSP
 
@@ -877,3 +879,4 @@ Initial tagged release.
 [#496]: https://github.com/Inferara/inference/pull/496
 [#481]: https://github.com/Inferara/inference/issues/481
 [#425]: https://github.com/Inferara/inference/issues/425
+[#476]: https://github.com/Inferara/inference/issues/476

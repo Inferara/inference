@@ -155,7 +155,7 @@ mod one_diagnostic_per_mismatch {
         assert_eq!(errors.len(), 1, "expected one diagnostic, got: {errors:?}");
         assert!(
             errors[0]
-                .contains("type mismatch in variable definition: expected `Bool`, found `i32`"),
+                .contains("type mismatch in variable definition: expected `bool`, found `i32`"),
             "unexpected diagnostic: {errors:?}"
         );
     }
@@ -176,7 +176,7 @@ mod one_diagnostic_per_mismatch {
         let errors = diagnostics("pub fn f() { let mut b: bool = true; b = 5; }");
         assert_eq!(errors.len(), 1, "expected one diagnostic, got: {errors:?}");
         assert!(
-            errors[0].contains("type mismatch in assignment: expected `Bool`, found `i32`"),
+            errors[0].contains("type mismatch in assignment: expected `bool`, found `i32`"),
             "unexpected diagnostic: {errors:?}"
         );
     }
@@ -187,7 +187,7 @@ mod one_diagnostic_per_mismatch {
         assert_eq!(errors.len(), 1, "expected one diagnostic, got: {errors:?}");
         assert!(
             errors[0]
-                .contains("type mismatch in variable definition: expected `Bool`, found `i32`"),
+                .contains("type mismatch in variable definition: expected `bool`, found `i32`"),
             "unexpected diagnostic: {errors:?}"
         );
     }
@@ -198,7 +198,7 @@ mod one_diagnostic_per_mismatch {
         assert_eq!(errors.len(), 1, "expected one diagnostic, got: {errors:?}");
         assert!(
             errors[0]
-                .contains("type mismatch in variable definition: expected `Bool`, found `i32`"),
+                .contains("type mismatch in variable definition: expected `bool`, found `i32`"),
             "unexpected diagnostic: {errors:?}"
         );
     }
@@ -211,7 +211,7 @@ mod one_diagnostic_per_mismatch {
         assert_eq!(errors.len(), 1, "expected one diagnostic, got: {errors:?}");
         assert!(
             errors[0]
-                .contains("type mismatch in field `b` of struct `P`: expected `Bool`, found `i32`"),
+                .contains("type mismatch in field `b` of struct `P`: expected `bool`, found `i32`"),
             "unexpected diagnostic: {errors:?}"
         );
     }
@@ -224,7 +224,7 @@ mod one_diagnostic_per_mismatch {
         let errors = diagnostics("pub fn f() -> bool { return 5; }");
         assert_eq!(errors.len(), 1, "expected one diagnostic, got: {errors:?}");
         assert!(
-            errors[0].contains("type mismatch in return statement: expected `Bool`, found `i32`"),
+            errors[0].contains("type mismatch in return statement: expected `bool`, found `i32`"),
             "unexpected diagnostic: {errors:?}"
         );
     }
@@ -240,7 +240,7 @@ mod one_diagnostic_per_mismatch {
         assert_eq!(errors.len(), 1, "expected one diagnostic, got: {errors:?}");
         assert!(
             errors[0].contains(
-                "type mismatch in variable definition: expected `[Bool; 2]`, found `[i32; 2]`"
+                "type mismatch in variable definition: expected `[bool; 2]`, found `[i32; 2]`"
             ),
             "unexpected diagnostic: {errors:?}"
         );
@@ -536,7 +536,7 @@ mod peer_typing {
         let errors = diagnostics(source);
         assert!(
             errors.iter().any(|e| e.contains(
-                "cannot apply operator `Eq` to operands of different types: `Bool` and `i32`"
+                "cannot apply operator `Eq` to operands of different types: `bool` and `i32`"
             )),
             "unexpected diagnostics: {errors:?}"
         );
@@ -751,7 +751,7 @@ mod call_arguments {
         let err =
             rejection("fn g(v: bool) -> bool { return v; } pub fn f() -> bool { return g(5); }");
         assert!(
-            err.contains("expected `Bool`, found `i32`"),
+            err.contains("expected `bool`, found `i32`"),
             "unexpected error: {err}"
         );
     }
@@ -783,7 +783,7 @@ mod stop_list {
     fn a_comparison_result_is_bool_whatever_is_expected() {
         let err = rejection("pub fn f(a: i64) -> i64 { let x: i64 = a < 65536; return x; }");
         assert!(
-            err.contains("type mismatch in variable definition: expected `i64`, found `Bool`"),
+            err.contains("type mismatch in variable definition: expected `i64`, found `bool`"),
             "unexpected error: {err}"
         );
     }
@@ -948,7 +948,7 @@ mod generic_calls_with_concrete_parameters {
              pub fn f(x: i64) -> i64 { return take(x, 5); }",
         );
         assert!(
-            err.contains("expected `Bool`, found `i32`"),
+            err.contains("expected `bool`, found `i32`"),
             "unexpected error: {err}"
         );
     }
@@ -1227,7 +1227,7 @@ mod diagnostic_text {
 
     /// A non-numeric peer refuses to type its literal-built neighbour, so this
     /// error *is* reachable with a literal operand — and the note is still
-    /// true of it: no cast makes a `Bool` and an `i32` comparable.
+    /// true of it: no cast makes a `bool` and an `i32` comparable.
     ///
     /// FIXME: the note's help ("change one of the two declarations") is
     /// unactionable here — the `1` has no declaration to change, and the fix is
@@ -1238,7 +1238,7 @@ mod diagnostic_text {
         let errors = diagnostics("pub fn f(b: bool) -> bool { return b == 1; }");
         let mismatch = operand_mismatch(&errors);
         assert!(
-            mismatch.contains("so `Bool` and `i32` never combine"),
+            mismatch.contains("so `bool` and `i32` never combine"),
             "unexpected note: {mismatch}"
         );
     }
@@ -1251,7 +1251,7 @@ mod diagnostic_text {
         assert_eq!(errors.len(), 1, "expected one diagnostic, got: {errors:?}");
         assert!(
             errors[0]
-                .contains("type mismatch in field `x` of struct `P`: expected `i32`, found `Bool`"),
+                .contains("type mismatch in field `x` of struct `P`: expected `i32`, found `bool`"),
             "unexpected diagnostic: {errors:?}"
         );
     }
@@ -1266,7 +1266,7 @@ mod diagnostic_text {
         );
         assert!(
             errors.iter().any(|e| e.contains(
-                "type mismatch in field `v` of struct `Inner`: expected `Bool`, found `i32`"
+                "type mismatch in field `v` of struct `Inner`: expected `bool`, found `i32`"
             )),
             "unexpected diagnostics: {errors:?}"
         );
@@ -1281,7 +1281,7 @@ mod diagnostic_text {
         assert_eq!(errors.len(), 1, "expected one diagnostic, got: {errors:?}");
         assert!(
             errors[0]
-                .contains("array elements must be of the same type: expected `i64`, found `Bool`"),
+                .contains("array elements must be of the same type: expected `i64`, found `bool`"),
             "unexpected diagnostic: {errors:?}"
         );
     }

@@ -76,13 +76,12 @@ for the query-checkpoint mechanics.
 |---|---|---|
 | `diagnostics.rs` | Merged, sorted `Diagnostic`s: syntax, import, type, and analysis-rule findings | `FileAnalysis` |
 | `document_symbols.rs` | The definition hierarchy (functions, structs with fields/methods, enums with variants, specs) | `FileAnalysis`, `syntax.rs` |
-| `hover.rs` | Type and documentation for the position under the cursor | `type_render.rs`, `nondet_docs.rs`, `syntax.rs` |
+| `hover.rs` | Type and documentation for the position under the cursor | `nondet_docs.rs`, `syntax.rs` |
 | `goto_definition.rs` | Resolves an identifier to its declaration, possibly in another file | `syntax.rs` |
-| `completions.rs` | Keyword / local / top-level-def / imported-module suggestions, or struct-member-only after `.` | `type_render.rs`, `syntax.rs` |
+| `completions.rs` | Keyword / local / top-level-def / imported-module suggestions, or struct-member-only after `.` | `syntax.rs` |
 | `inlay_hints.rs` | Non-det block and uzumaki (`@`) annotations | `nondet_docs.rs`, `syntax.rs` |
 | `nondet_docs.rs` | The verbatim hover/inlay text for `forall`/`exists`/`unique`/`assume`/`@` | — |
 | `syntax.rs` | Shared per-file AST navigation: child enumeration, name lookup, signature extraction | `ide-db` (`NodeHit`, `file_defs`) |
-| `type_render.rs` | Renders a checked `TypeInfo` as a source-like string for hovers and completions | `inference-type-checker` |
 
 `lib.rs` wires these together: `AnalysisHost` owns the `RootDatabase`;
 `Analysis<'_>` is a thin borrowing façade — now a shared `&self` borrow over the
@@ -124,7 +123,7 @@ misplaced if surfaced directly.
   struct-literal name or field shows the struct's signature or the field's
   type.
 - A type annotation or a typed expression falls back to rendering its checked
-  `TypeInfo` (`type_render.rs`).
+  `TypeInfo` through its `Display`, which spells the type as the source does.
 
 ### Goto Definition
 
@@ -201,4 +200,4 @@ cargo test -p inference-ide
 - [`ide/ide-db`](../ide-db/README.md) — `RootDatabase`, `FileAnalysis`, `hit_test`, `file_defs`
 - [`ide/base-db`](../base-db/README.md) — `LineIndex`, `TextRange`, re-exported here
 - [`apps/lsp`](../../apps/lsp/README.md) — the protocol layer that maps this crate's PODs onto LSP
-- [`core/type-checker`](../../core/type-checker/README.md) — `TypeInfo`, rendered by `type_render.rs`
+- [`core/type-checker`](../../core/type-checker/README.md) — `TypeInfo`, whose `Display` hovers, completions and inlay hints show

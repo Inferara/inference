@@ -53,7 +53,7 @@ mod statement_coverage {
         if let Err(error) = result {
             let error_msg = error.to_string();
             assert!(
-                error_msg.contains("type mismatch") || error_msg.contains("expected Bool"),
+                error_msg.contains("type mismatch") || error_msg.contains("expected `bool`"),
                 "Error should mention type mismatch for condition: {}",
                 error_msg
             );

@@ -115,9 +115,9 @@ fn an_array_operand_is_refused() {
 fn a_unit_operand_is_refused() {
     let err = rejection("fn g() { } pub fn f() -> i32 { let n: i32 = wrapping(g()); return n; }");
     assert!(
-        err.contains("`wrapping(...)` cannot be applied to `Unit`")
+        err.contains("`wrapping(...)` cannot be applied to `()`")
             && err.contains(
-                "`Unit` is the unit value, which those operators never combine and which has no \
+                "`()` is the unit value, which those operators never combine and which has no \
                  value in expression position here"
             ),
         "the unit arm must name the unit value rather than call it an aggregate: {err}"
