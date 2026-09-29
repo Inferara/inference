@@ -313,8 +313,8 @@
 
 use inf_wasmparser::{BinaryReader, BlockType, FunctionBody, Operator};
 
-use crate::parse::{FuncSig, ParsedModule};
 use crate::LinkError;
+use crate::parse::{FuncSig, ParsedModule};
 
 mod attribution;
 
@@ -771,7 +771,10 @@ pub(crate) fn verify_param_addressing(
                     "closure function {func_idx} is out of range for provenance analysis"
                 ))
             })?;
-        summaries.insert(func_idx, summarize_function(module, &local.body, param_count)?);
+        summaries.insert(
+            func_idx,
+            summarize_function(module, &local.body, param_count)?,
+        );
     }
 
     // The root's arity names the coordinate space the write set is phrased in.
@@ -1205,8 +1208,7 @@ impl<'a, 'b> Interp<'a, 'b> {
                 | Operator::Unique { blockty } => {
                     let body_end = self.match_end(i, end)?;
                     if reachable {
-                        let outcome =
-                            self.run_block(*blockty, i + 1, body_end, &state, depth)?;
+                        let outcome = self.run_block(*blockty, i + 1, body_end, &state, depth)?;
                         let Some((exit, inner_acc)) = outcome else {
                             return Ok(None);
                         };
@@ -1219,8 +1221,7 @@ impl<'a, 'b> Interp<'a, 'b> {
                 Operator::Loop { blockty } => {
                     let body_end = self.match_end(i, end)?;
                     if reachable {
-                        let outcome =
-                            self.run_loop(*blockty, i + 1, body_end, &state, depth)?;
+                        let outcome = self.run_loop(*blockty, i + 1, body_end, &state, depth)?;
                         let Some((exit, inner_acc)) = outcome else {
                             return Ok(None);
                         };
@@ -1351,7 +1352,8 @@ impl<'a, 'b> Interp<'a, 'b> {
         let mut final_region;
         let mut rounds = 0;
         loop {
-            let Some(region) = self.interpret(body_start, body_end, header_in.clone(), depth + 1)?
+            let Some(region) =
+                self.interpret(body_start, body_end, header_in.clone(), depth + 1)?
             else {
                 return Ok(None);
             };
@@ -1424,7 +1426,8 @@ impl<'a, 'b> Interp<'a, 'b> {
             None => ((body_start, if_end), None),
         };
 
-        let Some(true_region) = self.interpret(true_range.0, true_range.1, entry.clone(), depth + 1)?
+        let Some(true_region) =
+            self.interpret(true_range.0, true_range.1, entry.clone(), depth + 1)?
         else {
             return Ok(None);
         };
@@ -1542,10 +1545,19 @@ impl<'a, 'b> Interp<'a, 'b> {
             //    Inference language has no float types and `safety::check_operator`
             //    rejects every float instruction before a body reaches this pass,
             //    so no input can produce a float access here. --
-            I32Load { .. } | I64Load { .. } | F32Load { .. } | F64Load { .. }
-            | I32Load8S { .. } | I32Load8U { .. } | I32Load16S { .. }
-            | I32Load16U { .. } | I64Load8S { .. } | I64Load8U { .. }
-            | I64Load16S { .. } | I64Load16U { .. } | I64Load32S { .. }
+            I32Load { .. }
+            | I64Load { .. }
+            | F32Load { .. }
+            | F64Load { .. }
+            | I32Load8S { .. }
+            | I32Load8U { .. }
+            | I32Load16S { .. }
+            | I32Load16U { .. }
+            | I64Load8S { .. }
+            | I64Load8U { .. }
+            | I64Load16S { .. }
+            | I64Load16U { .. }
+            | I64Load32S { .. }
             | I64Load32U { .. } => {
                 let addr = pop(state);
                 record_address(summary, AccessKind::Load, addr);
@@ -1555,9 +1567,15 @@ impl<'a, 'b> Interp<'a, 'b> {
             // -- Stores: pop value then address, record the address mask.
             //    `f32.store`/`f64.store` are unreachable for the same reason as
             //    the float loads above. --
-            I32Store { .. } | I64Store { .. } | F32Store { .. } | F64Store { .. }
-            | I32Store8 { .. } | I32Store16 { .. } | I64Store8 { .. }
-            | I64Store16 { .. } | I64Store32 { .. } => {
+            I32Store { .. }
+            | I64Store { .. }
+            | F32Store { .. }
+            | F64Store { .. }
+            | I32Store8 { .. }
+            | I32Store16 { .. }
+            | I64Store8 { .. }
+            | I64Store16 { .. }
+            | I64Store32 { .. } => {
                 pop(state); // the stored value
                 let addr = pop(state);
                 record_address(summary, AccessKind::Store, addr);
@@ -2262,17 +2280,66 @@ fn is_unary(op: &Operator) -> bool {
     use Operator::*;
     matches!(
         op,
-        I32Eqz | I64Eqz | I32Clz | I32Ctz | I32Popcnt | I64Clz | I64Ctz | I64Popcnt | F32Abs
-            | F32Neg | F32Ceil | F32Floor | F32Trunc | F32Nearest | F32Sqrt | F64Abs | F64Neg
-            | F64Ceil | F64Floor | F64Trunc | F64Nearest | F64Sqrt | I32WrapI64 | I32TruncF32S
-            | I32TruncF32U | I32TruncF64S | I32TruncF64U | I64ExtendI32S | I64ExtendI32U
-            | I64TruncF32S | I64TruncF32U | I64TruncF64S | I64TruncF64U | F32ConvertI32S
-            | F32ConvertI32U | F32ConvertI64S | F32ConvertI64U | F32DemoteF64 | F64ConvertI32S
-            | F64ConvertI32U | F64ConvertI64S | F64ConvertI64U | F64PromoteF32
-            | I32ReinterpretF32 | I64ReinterpretF64 | F32ReinterpretI32 | F64ReinterpretI64
-            | I32Extend8S | I32Extend16S | I64Extend8S | I64Extend16S | I64Extend32S
-            | I32TruncSatF32S | I32TruncSatF32U | I32TruncSatF64S | I32TruncSatF64U
-            | I64TruncSatF32S | I64TruncSatF32U | I64TruncSatF64S | I64TruncSatF64U
+        I32Eqz
+            | I64Eqz
+            | I32Clz
+            | I32Ctz
+            | I32Popcnt
+            | I64Clz
+            | I64Ctz
+            | I64Popcnt
+            | F32Abs
+            | F32Neg
+            | F32Ceil
+            | F32Floor
+            | F32Trunc
+            | F32Nearest
+            | F32Sqrt
+            | F64Abs
+            | F64Neg
+            | F64Ceil
+            | F64Floor
+            | F64Trunc
+            | F64Nearest
+            | F64Sqrt
+            | I32WrapI64
+            | I32TruncF32S
+            | I32TruncF32U
+            | I32TruncF64S
+            | I32TruncF64U
+            | I64ExtendI32S
+            | I64ExtendI32U
+            | I64TruncF32S
+            | I64TruncF32U
+            | I64TruncF64S
+            | I64TruncF64U
+            | F32ConvertI32S
+            | F32ConvertI32U
+            | F32ConvertI64S
+            | F32ConvertI64U
+            | F32DemoteF64
+            | F64ConvertI32S
+            | F64ConvertI32U
+            | F64ConvertI64S
+            | F64ConvertI64U
+            | F64PromoteF32
+            | I32ReinterpretF32
+            | I64ReinterpretF64
+            | F32ReinterpretI32
+            | F64ReinterpretI64
+            | I32Extend8S
+            | I32Extend16S
+            | I64Extend8S
+            | I64Extend16S
+            | I64Extend32S
+            | I32TruncSatF32S
+            | I32TruncSatF32U
+            | I32TruncSatF64S
+            | I32TruncSatF64U
+            | I64TruncSatF32S
+            | I64TruncSatF32U
+            | I64TruncSatF64S
+            | I64TruncSatF64U
     )
 }
 

@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 
 use inf_wasmparser::{
     CompositeInnerType, CustomSectionReader, Export, ExternalKind, FuncType, GlobalType, Import,
-    KnownCustom, MemoryType, Name, Operator, Parser, Payload, RecGroup, TableType, TypeRef, ValType,
+    KnownCustom, MemoryType, Name, Operator, Parser, Payload, RecGroup, TableType, TypeRef,
+    ValType,
 };
 
 use crate::LinkError;
@@ -109,7 +110,9 @@ enum ModuleRole {
     /// An external, carrying whether the caller asked to adopt its verification
     /// sections — which is what decides whether they are decoded or merely
     /// noted.
-    External { decode_specs: bool },
+    External {
+        decode_specs: bool,
+    },
 }
 
 /// The subset of a WASM module the static-merge linker manipulates.
@@ -545,7 +548,9 @@ fn collect_custom_section(
                     let Ok(naming) = naming else {
                         continue;
                     };
-                    module.func_names.insert(naming.index, naming.name.to_string());
+                    module
+                        .func_names
+                        .insert(naming.index, naming.name.to_string());
                 }
             }
             Name::Local(indirect) => {
@@ -645,9 +650,7 @@ fn collect_import(import: &Import, module: &mut ParsedModule) {
 
 fn collect_global(global: &inf_wasmparser::Global) -> Result<GlobalDef, LinkError> {
     let mut ops = global.init_expr.get_operators_reader();
-    let first = ops
-        .read()
-        .map_err(|e| LinkError::Parse(e.to_string()))?;
+    let first = ops.read().map_err(|e| LinkError::Parse(e.to_string()))?;
     let init = match first {
         Operator::I32Const { value } => GlobalInit::I32(value),
         Operator::I64Const { value } => GlobalInit::I64(value),
@@ -762,7 +765,10 @@ mod tests {
         let local_sig = module.func_sig(1).expect("local function has a type");
         assert_eq!(import_sig.params, vec![ValType::I32]);
         assert_eq!(import_sig.results, vec![ValType::I32]);
-        assert_eq!(import_sig, local_sig, "import and local share one type here");
+        assert_eq!(
+            import_sig, local_sig,
+            "import and local share one type here"
+        );
         assert!(
             module.func_sig(99).is_none(),
             "an out-of-range function index has no signature"
@@ -831,7 +837,11 @@ mod tests {
               (export "f" (func 0)))
             "#,
         );
-        assert_eq!(module.start, Some(1), "the start function index is captured");
+        assert_eq!(
+            module.start,
+            Some(1),
+            "the start function index is captured"
+        );
     }
 
     #[test]
@@ -863,8 +873,14 @@ mod tests {
             "#,
         );
         assert_eq!(module.local_funcs.len(), 2);
-        assert_eq!(module.local_funcs[0].type_idx, 0, "first body -> function 0");
-        assert_eq!(module.local_funcs[1].type_idx, 1, "second body -> function 1");
+        assert_eq!(
+            module.local_funcs[0].type_idx, 0,
+            "first body -> function 0"
+        );
+        assert_eq!(
+            module.local_funcs[1].type_idx, 1,
+            "second body -> function 1"
+        );
         assert!(
             module.local_funcs.iter().all(|f| !f.body.is_empty()),
             "every function received a body"
@@ -875,8 +891,8 @@ mod tests {
     /// section with the given payload.
     fn module_with_spec_section(payload: &[u8]) -> Vec<u8> {
         use wasm_encoder::{
-            CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection, Module,
-            TypeSection,
+            CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection,
+            Module, TypeSection,
         };
         let mut module = Module::new();
         let mut types = TypeSection::new();

@@ -81,7 +81,10 @@ fn wasm(src: &str) -> Vec<u8> {
 
 /// Links a decoded seed exactly as the fuzz target would: external `i` is tagged
 /// with `MODULE_NAMES[i % 4]`.
-fn link_like_fuzzer(main: &[u8], externals: &[Vec<u8>]) -> Result<Vec<u8>, inference_wasm_linker::LinkError> {
+fn link_like_fuzzer(
+    main: &[u8],
+    externals: &[Vec<u8>],
+) -> Result<Vec<u8>, inference_wasm_linker::LinkError> {
     let pairs: Vec<(&str, &[u8])> = externals
         .iter()
         .enumerate()
@@ -255,12 +258,27 @@ fn seeds() -> Vec<Seed> {
         ),
         // H-3: a deeply-nested external body the merge must reject before it can
         // abort the wasm-to-v translator.
-        mk("h3_deep_nesting", &main_sum, deep_lib, Some("nests structured control flow")),
+        mk(
+            "h3_deep_nesting",
+            &main_sum,
+            deep_lib,
+            Some("nests structured control flow"),
+        ),
         // M-1: an over-declared locals count, rejected by the pre-validation gate
         // before any per-local allocation.
-        mk("m1_over_declared_locals", &main_sum, over_declared_locals_external(u32::MAX), Some("parse")),
+        mk(
+            "m1_over_declared_locals",
+            &main_sum,
+            over_declared_locals_external(u32::MAX),
+            Some("parse"),
+        ),
         // M-2: a main module carrying an active data segment.
-        mk("m2_main_data_segment", &m2_main, pure_lib.clone(), Some("data segment")),
+        mk(
+            "m2_main_data_segment",
+            &m2_main,
+            pure_lib.clone(),
+            Some("data segment"),
+        ),
         // Positive control: a genuinely-pure external that must merge into a
         // valid module, so the corpus is never vacuously all-rejection.
         mk("pure_control_merges", &main_sum, pure_lib, None),
@@ -303,7 +321,10 @@ fn committed_fuzz_seeds_reach_link_cleanly() {
             link_like_fuzzer(&main, &externals)
         }));
         let result = outcome.unwrap_or_else(|_| {
-            panic!("seed `{}`: link panicked — it must return an Err", seed.name)
+            panic!(
+                "seed `{}`: link panicked — it must return an Err",
+                seed.name
+            )
         });
 
         match (result, seed.rejection_needle) {

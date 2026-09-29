@@ -22,8 +22,8 @@
 use inf_wasmparser::{BinaryReader, FunctionBody, Operator, ValType};
 use wasm_encoder::{Encode, Function, Instruction};
 
-use crate::safety::{check_operator, is_verification_only, opens_control_frame, MAX_CONTROL_DEPTH};
 use crate::LinkError;
+use crate::safety::{MAX_CONTROL_DEPTH, check_operator, is_verification_only, opens_control_frame};
 
 /// Where a body being re-encoded comes from, which decides how the
 /// verification-only non-det/uzumaki opcodes are treated.
@@ -282,9 +282,7 @@ fn emit_operator(
         // form. Inference codegen only emits the empty and value block types,
         // but a Tier-A/B external body could use a function block type, so
         // re-encode those defensively rather than copy a now-stale index.
-        Operator::Block { blockty }
-        | Operator::Loop { blockty }
-        | Operator::If { blockty } => {
+        Operator::Block { blockty } | Operator::Loop { blockty } | Operator::If { blockty } => {
             emit_block(function, op, *blockty, map)?;
         }
         // The Inference non-det block operators carry the identical `blockty`
@@ -378,9 +376,7 @@ fn map_block_type(
         // A value block type maps to a single result. A reference-typed result
         // is an unsupported construct (surfaced by `map_val_type`), not a silent
         // fallback to `Empty` — eliding a block's result would corrupt the body.
-        inf_wasmparser::BlockType::Type(ty) => {
-            wasm_encoder::BlockType::Result(map_val_type(ty)?)
-        }
+        inf_wasmparser::BlockType::Type(ty) => wasm_encoder::BlockType::Result(map_val_type(ty)?),
         inf_wasmparser::BlockType::FuncType(type_idx) => {
             wasm_encoder::BlockType::FunctionType((map.ty)(type_idx)?)
         }
@@ -526,13 +522,17 @@ mod tests {
         let body = body_bytes(&module, 0);
 
         let map = shifting_map();
-        let out = reencode_body(&body, &map, BodyOrigin::External).expect("re-encode call_indirect");
+        let out =
+            reencode_body(&body, &map, BodyOrigin::External).expect("re-encode call_indirect");
         let wrapped = wrap(&out);
 
-        let has_remapped = operators(&wrapped, 0).into_iter().any(|op| {
-            matches!(op, Operator::CallIndirect { type_index, .. } if type_index == 100)
-        });
-        assert!(has_remapped, "call_indirect type index must be remapped to 100");
+        let has_remapped = operators(&wrapped, 0)
+            .into_iter()
+            .any(|op| matches!(op, Operator::CallIndirect { type_index, .. } if type_index == 100));
+        assert!(
+            has_remapped,
+            "call_indirect type index must be remapped to 100"
+        );
     }
 
     #[test]
@@ -557,7 +557,10 @@ mod tests {
         let has_remapped = operators(&wrapped, 0)
             .into_iter()
             .any(|op| matches!(op, Operator::RefFunc { function_index } if function_index == 10));
-        assert!(has_remapped, "ref.func function index must be remapped to 10");
+        assert!(
+            has_remapped,
+            "ref.func function index must be remapped to 10"
+        );
     }
 
     #[test]
@@ -629,7 +632,11 @@ mod tests {
                 "unmapped global {idx}"
             )))
         };
-        let map = IndexMap { func: &func, ty: &ty, global: &global };
+        let map = IndexMap {
+            func: &func,
+            ty: &ty,
+            global: &global,
+        };
         let err = reencode_body(&body, &map, BodyOrigin::External)
             .expect_err("an unmapped global must error");
         assert!(
@@ -862,7 +869,10 @@ mod tests {
                 } if t == 101
             )
         });
-        assert!(has_remapped, "function-typed block index must be remapped to 101");
+        assert!(
+            has_remapped,
+            "function-typed block index must be remapped to 101"
+        );
     }
 
     #[test]
@@ -888,14 +898,20 @@ mod tests {
 
         let ops = operators(&wrapped, 0);
         assert!(
-            ops.iter()
-                .any(|op| matches!(op, Operator::Block { blockty: inf_wasmparser::BlockType::Empty })),
+            ops.iter().any(|op| matches!(
+                op,
+                Operator::Block {
+                    blockty: inf_wasmparser::BlockType::Empty
+                }
+            )),
             "an empty block must round-trip"
         );
         assert!(
             ops.iter().any(|op| matches!(
                 op,
-                Operator::Block { blockty: inf_wasmparser::BlockType::Type(ValType::I32) }
+                Operator::Block {
+                    blockty: inf_wasmparser::BlockType::Type(ValType::I32)
+                }
             )),
             "an i32-result block must round-trip"
         );
@@ -953,7 +969,11 @@ mod tests {
             )))
         };
         let global = |idx: u32| Ok(idx);
-        let map = IndexMap { func: &func, ty: &ty, global: &global };
+        let map = IndexMap {
+            func: &func,
+            ty: &ty,
+            global: &global,
+        };
         let err = reencode_body(&body, &map, BodyOrigin::External)
             .expect_err("unmapped block type must error");
         assert!(
@@ -1071,12 +1091,13 @@ mod tests {
     /// empty locals vector, the non-det opcode with a single-byte positive `s33`
     /// type index, the block-closing `end`, and the function-closing `end`.
     fn nondet_block_body(sub_opcode: u8, type_idx: u8) -> Vec<u8> {
-        assert!(type_idx < 0x40, "type index must be a single positive s33 byte");
+        assert!(
+            type_idx < 0x40,
+            "type index must be a single positive s33 byte"
+        );
         vec![
             0x00, // zero locals
-            0xfc,
-            sub_opcode,
-            type_idx, // s33-encoded function block-type index
+            0xfc, sub_opcode, type_idx, // s33-encoded function block-type index
             0x0b,     // end (closes the non-det block)
             0x0b,     // end (closes the function)
         ]
@@ -1098,8 +1119,8 @@ mod tests {
         vec![
             0x00, // zero locals
             0xfc, sub_opcode, // i32/i64.uzumaki
-            0x1a, // drop
-            0x0b, // end (closes the function)
+            0x1a,       // drop
+            0x0b,       // end (closes the function)
         ]
     }
 
@@ -1205,11 +1226,13 @@ mod tests {
             let out = reencode_body(&body, &map, BodyOrigin::Main)
                 .unwrap_or_else(|e| panic!("main {name}: {e:?}"));
             let wrapped = wrap(&out);
-            let survives = operators(&wrapped, 0)
-                .into_iter()
-                .any(|op| matches!(op, Operator::I32Uzumaki { .. } | Operator::I64Uzumaki { .. }));
+            let survives = operators(&wrapped, 0).into_iter().any(|op| {
+                matches!(
+                    op,
+                    Operator::I32Uzumaki { .. } | Operator::I64Uzumaki { .. }
+                )
+            });
             assert!(survives, "main {name} must survive re-encoding verbatim");
         }
     }
 }
-

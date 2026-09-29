@@ -977,8 +977,9 @@ fn ip1_sort_calls_swap_with_param_derived_pointer_accepts() {
     // param-derived `ptr` argument; `swap` dereferences its pointer param.
     // `swap`'s param 0 is trusted at the only call site (it is `sort`'s ptr), so
     // the whole closure is accepted.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32 i32)))
@@ -990,10 +991,11 @@ fn ip1_sort_calls_swap_with_param_derived_pointer_accepts() {
             local.get 0 local.get 2 i32.store)
           (export "sort" (func 0)))
         "#,
-        &[0, 1],
-        0,
-    )
-    .is_ok());
+            &[0, 1],
+            0,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1001,8 +1003,9 @@ fn ip2_helper_called_with_constant_address_rejects() {
     // Case (b): a helper `g(addr)` that loads through its param, called with a
     // *constant* argument. `g`'s param 0 is untrusted (the const arg), so its
     // load is rejected.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (result i32)))
@@ -1013,10 +1016,11 @@ fn ip2_helper_called_with_constant_address_rejects() {
             local.get 0 i32.load)
           (export "root" (func 0)))
         "#,
-        &[0, 1],
-        0,
-    )
-    .is_err());
+            &[0, 1],
+            0,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1024,8 +1028,9 @@ fn ip3_helper_called_from_two_sites_one_const_rejects() {
     // Case (c): a helper called from two sites — one param-derived, one constant.
     // The must-join over call sites demotes the helper's param to untrusted, so
     // its dereference is rejected.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32)))
@@ -1039,18 +1044,20 @@ fn ip3_helper_called_from_two_sites_one_const_rejects() {
             local.get 0 i32.const 0 i32.store)
           (export "root" (func 0)))
         "#,
-        &[0, 1, 2],
-        0,
-    )
-    .is_err());
+            &[0, 1, 2],
+            0,
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn ip3b_helper_called_from_two_param_derived_sites_accepts() {
     // Control for (c): the same two-call-site shape, but *both* sites pass a
     // param-derived argument. The helper's param stays trusted; accepted.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32 i32)))
@@ -1062,10 +1069,11 @@ fn ip3b_helper_called_from_two_param_derived_sites_accepts() {
             local.get 0 i32.const 0 i32.store)
           (export "root" (func 0)))
         "#,
-        &[0, 1],
-        0,
-    )
-    .is_ok());
+            &[0, 1],
+            0,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1073,8 +1081,9 @@ fn ip4a_self_recursion_passing_param_accepts() {
     // Case (d): self-recursion passing a param-derived argument (`f(p)` calls
     // `f(p+1)`), dereferencing its param. The greatest fixpoint keeps the param
     // trusted across the back-edge; accepted.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32)))
@@ -1083,10 +1092,11 @@ fn ip4a_self_recursion_passing_param_accepts() {
             local.get 0 i32.const 1 i32.add call 0)
           (export "f" (func 0)))
         "#,
-        &[0],
-        0,
-    )
-    .is_ok());
+            &[0],
+            0,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1094,8 +1104,9 @@ fn ip4b_self_recursion_passing_const_rejects() {
     // Case (d): self-recursion passing a *constant* argument that the function
     // dereferences. The fixpoint removes the param from the trusted set (a const
     // reaches it on the recursive path), so its dereference is rejected.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32)))
@@ -1104,10 +1115,11 @@ fn ip4b_self_recursion_passing_const_rejects() {
             i32.const 2048 call 0)
           (export "f" (func 0)))
         "#,
-        &[0],
-        0,
-    )
-    .is_err());
+            &[0],
+            0,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1115,8 +1127,9 @@ fn ip5_mutual_recursion_param_derived_accepts() {
     // Case (e): mutual recursion `a(p) -> b(p) -> a(p)`, each dereferencing its
     // param, every call threading a param-derived argument. The fixpoint keeps
     // both params trusted; accepted.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32)))
@@ -1128,18 +1141,20 @@ fn ip5_mutual_recursion_param_derived_accepts() {
             local.get 0 call 0)
           (export "a" (func 0)))
         "#,
-        &[0, 1],
-        0,
-    )
-    .is_ok());
+            &[0, 1],
+            0,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn ip5b_mutual_recursion_one_const_arg_rejects() {
     // Case (e): mutual recursion where one leg passes a constant to the other,
     // which dereferences it. The const poisons the callee's param; rejected.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32)))
@@ -1150,10 +1165,11 @@ fn ip5b_mutual_recursion_one_const_arg_rejects() {
             local.get 0 call 0)
           (export "a" (func 0)))
         "#,
-        &[0, 1],
-        0,
-    )
-    .is_err());
+            &[0, 1],
+            0,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1184,8 +1200,9 @@ fn ip7_root_param_is_trusted_even_when_a_callsite_passes_const() {
     // param, never the root's own dereference. Here the root dereferences its own
     // param 0 directly and also calls a const-fed helper that does NOT touch
     // memory — the root access stays accepted.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32) (result i32)))
@@ -1197,10 +1214,11 @@ fn ip7_root_param_is_trusted_even_when_a_callsite_passes_const() {
             local.get 0 i32.const 1 i32.add)
           (export "root" (func 0)))
         "#,
-        &[0, 1],
-        0,
-    )
-    .is_ok());
+            &[0, 1],
+            0,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1210,8 +1228,9 @@ fn ip8_callee_reached_only_via_table_param_is_untrusted() {
     // call site to justify trusting its param, the param defaults untrusted and
     // its dereference is rejected. Modeled here as an inner function present in
     // the closure with no direct caller.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32)))
@@ -1221,10 +1240,11 @@ fn ip8_callee_reached_only_via_table_param_is_untrusted() {
             local.get 0 i32.load drop)
           (export "root" (func 0)))
         "#,
-        &[0, 1],
-        0,
-    )
-    .is_err());
+            &[0, 1],
+            0,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1232,8 +1252,9 @@ fn ip9_diamond_all_param_derived_accepts() {
     // A diamond: root calls two mids, both of which call one shared leaf with a
     // param-derived pointer; the leaf dereferences its param. Every call site is
     // param-derived, so the leaf's param is trusted; accepted.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32)))
@@ -1248,18 +1269,20 @@ fn ip9_diamond_all_param_derived_accepts() {
             local.get 0 i32.const 0 i32.store)
           (export "root" (func 0)))
         "#,
-        &[0, 1, 2, 3],
-        0,
-    )
-    .is_ok());
+            &[0, 1, 2, 3],
+            0,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn ip10_diamond_one_leg_const_rejects() {
     // The same diamond, but one mid passes a constant to the shared leaf. The
     // must-join over the leaf's two call sites demotes its param; rejected.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32)))
@@ -1274,10 +1297,11 @@ fn ip10_diamond_one_leg_const_rejects() {
             local.get 0 i32.const 0 i32.store)
           (export "root" (func 0)))
         "#,
-        &[0, 1, 2, 3],
-        0,
-    )
-    .is_err());
+            &[0, 1, 2, 3],
+            0,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1286,8 +1310,9 @@ fn ip11_non_root_export_position_seeds_only_the_root() {
     // function 1 is the root; it calls function 0 (the helper) with a constant.
     // The helper's param is untrusted; its dereference is rejected — proving the
     // seed follows the `root` argument, not the lowest index.
-    assert!(verify(
-        r#"
+    assert!(
+        verify(
+            r#"
         (module
           (memory (;0;) 1)
           (type (;0;) (func (param i32)))
@@ -1297,10 +1322,11 @@ fn ip11_non_root_export_position_seeds_only_the_root() {
             i32.const 7 call 0)
           (export "root" (func 1)))
         "#,
-        &[0, 1],
-        1,
-    )
-    .is_err());
+            &[0, 1],
+            1,
+        )
+        .is_err()
+    );
 }
 
 // ===========================================================================
@@ -2080,7 +2106,7 @@ fn over_declared_locals_body(count: u32) -> Vec<u8> {
     body.push(0x01); // one locals group
     write_leb_u32(&mut body, count);
     body.push(0x7F); // i32
-                     // i32.const 0
+    // i32.const 0
     body.push(0x41);
     body.push(0x00);
     // i32.load (align=2, offset=0)
@@ -2108,7 +2134,6 @@ fn write_leb_u32(out: &mut Vec<u8>, mut value: u32) {
         }
     }
 }
-
 
 // ===========================================================================
 // Root write set — which of the root's parameters a closure may STORE through.

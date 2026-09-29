@@ -67,11 +67,9 @@ use wasm_encoder::{
 use crate::checked::CheckedGuards;
 use crate::closure;
 use crate::parse::{FuncSig, GlobalDef, GlobalInit, ParsedModule, TypeEntry};
-use crate::rewrite::{call_edges, reencode_body, BodyOrigin, IndexMap};
+use crate::rewrite::{BodyOrigin, IndexMap, call_edges, reencode_body};
 use crate::tier::{self, Tier, WriteContract};
-use crate::{
-    ExternalSpecPolicy, ImportWriteSet, LinkError, LinkOptions, LinkOutput, LinkWarning,
-};
+use crate::{ExternalSpecPolicy, ImportWriteSet, LinkError, LinkOptions, LinkOutput, LinkWarning};
 
 /// Resolves and merges every satisfiable import of `main` from the supplied
 /// external modules, returning the unified module bytes and everything the
@@ -158,8 +156,7 @@ pub(crate) fn link(
     // final check ensures the merge never persists a structurally-invalid
     // artifact (the input to formal verification), converting every effect-
     // scanner gap into a clean diagnostic instead of a silent miscompile.
-    inf_wasmparser::validate(&merged)
-        .map_err(|e| LinkError::InvalidMergedModule(e.to_string()))?;
+    inf_wasmparser::validate(&merged).map_err(|e| LinkError::InvalidMergedModule(e.to_string()))?;
 
     Ok(LinkOutput {
         wasm: merged,
@@ -250,7 +247,9 @@ fn validate_contracts(contracts: Option<&[ImportWriteSet]>) -> Result<(), LinkEr
 /// classifies version.
 pub(crate) fn validate_external(logical_module: &str, bytes: &[u8]) -> Result<(), LinkError> {
     inf_wasmparser::validate(bytes).map_err(|e| {
-        LinkError::Parse(format!("external module `{logical_module}` is invalid WASM: {e}"))
+        LinkError::Parse(format!(
+            "external module `{logical_module}` is invalid WASM: {e}"
+        ))
     })?;
 
     inf_wasmparser::Validator::new_with_features(crate::SUPPORTED_WASM_FEATURES)
@@ -510,7 +509,11 @@ impl Plan {
                 "main module imports {} non-function (global/memory/table) entit{} from its \
                  environment; the static merge models function imports only",
                 main.non_func_imports,
-                if main.non_func_imports == 1 { "y" } else { "ies" }
+                if main.non_func_imports == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
             )));
         }
         // `emit` writes no `TableSection`, so a main-side table is silently
@@ -573,8 +576,7 @@ impl Plan {
         // front also lets every main local function start at index 0.
         let mut satisfied: Vec<(usize, u32)> = Vec::with_capacity(main_import_count as usize);
         for import in &main.imported_funcs {
-            let Some((ext_idx, root)) =
-                find_export(externals, &import.module, &import.field)?
+            let Some((ext_idx, root)) = find_export(externals, &import.module, &import.field)?
             else {
                 return Err(LinkError::UnsatisfiedImport {
                     field: import.field.clone(),
@@ -680,9 +682,11 @@ impl Plan {
                 // Allocate the output type for this function (deduped).
                 let sig = external
                     .func_sig(src_func)
-                    .ok_or_else(|| LinkError::Parse(format!(
-                        "external function {src_func} has no function type"
-                    )))?
+                    .ok_or_else(|| {
+                        LinkError::Parse(format!(
+                            "external function {src_func} has no function type"
+                        ))
+                    })?
                     .clone();
                 let out_type_idx = intern_sig(&mut out_types, &mut sig_to_out, &sig)?;
                 let local = external
@@ -951,8 +955,7 @@ impl Plan {
                 continue;
             }
             for (source_idx, global) in external.globals.iter().enumerate() {
-                external_global_remap[ext_idx]
-                    .insert(source_idx as u32, out_globals.len() as u32);
+                external_global_remap[ext_idx].insert(source_idx as u32, out_globals.len() as u32);
                 out_globals.push(global.clone());
             }
         }
@@ -1016,11 +1019,7 @@ impl Plan {
     }
 
     /// Emits the unified module bytes.
-    fn emit(
-        &self,
-        main: &ParsedModule,
-        externals: &[ParsedModule],
-    ) -> Result<Vec<u8>, LinkError> {
+    fn emit(&self, main: &ParsedModule, externals: &[ParsedModule]) -> Result<Vec<u8>, LinkError> {
         let mut module = Module::new();
 
         // Type section.
@@ -1855,11 +1854,7 @@ impl Plan {
         }
     }
 
-    fn reencode_main_body(
-        &self,
-        main: &ParsedModule,
-        body: &[u8],
-    ) -> Result<Function, LinkError> {
+    fn reencode_main_body(&self, main: &ParsedModule, body: &[u8]) -> Result<Function, LinkError> {
         // A re-encode failure inside the `func` closure cannot be returned
         // through `IndexMap`'s `Fn` signature, so it is captured in a `RefCell`
         // (keeping the closure `Fn`) and surfaced after `reencode_body` returns.
@@ -1876,7 +1871,9 @@ impl Plan {
                 .get(idx as usize)
                 .copied()
                 .ok_or_else(|| {
-                    LinkError::Parse(format!("main body references type index {idx} out of range"))
+                    LinkError::Parse(format!(
+                        "main body references type index {idx} out of range"
+                    ))
                 })
         };
         // Identity: main's globals are emitted first and keep their source
@@ -1916,9 +1913,11 @@ impl Plan {
         let func = |idx: u32| match self.merged_index.get(&(external_idx, idx)) {
             Some(&mapped) => mapped,
             None => {
-                func_err.borrow_mut().get_or_insert(LinkError::Parse(format!(
-                    "merged body references function index {idx} not in its closure"
-                )));
+                func_err
+                    .borrow_mut()
+                    .get_or_insert(LinkError::Parse(format!(
+                        "merged body references function index {idx} not in its closure"
+                    )));
                 0
             }
         };
@@ -2348,8 +2347,7 @@ fn spec_name_problem(name: &str) -> Option<String> {
     }
     if name.ends_with('_') {
         return Some(
-            "it ends with `_`, which the generated `<module>__<spec>` grammar reserves"
-                .to_string(),
+            "it ends with `_`, which the generated `<module>__<spec>` grammar reserves".to_string(),
         );
     }
     None
@@ -2618,7 +2616,8 @@ fn adopt_external_specs(
             }
 
             for entry in &mut universal {
-                let symbol = inference_fn_key::merged_name::adopted_spec(module, &entry.fn_symbol.0);
+                let symbol =
+                    inference_fn_key::merged_name::adopted_spec(module, &entry.fn_symbol.0);
                 if carried.contains(symbol.as_str()) {
                     return Err(LinkError::AdoptedSpecSymbolCollision {
                         module: module.to_string(),
@@ -3135,15 +3134,22 @@ mod tests {
         let err = r
             .fold(None, true, false, "f")
             .expect_err("a memory-using closure with no memory must be rejected");
-        assert!(matches!(err, LinkError::IncompatibleMemory { .. }), "got {err:?}");
+        assert!(
+            matches!(err, LinkError::IncompatibleMemory { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn pure_closure_without_memory_is_fine() {
         // No memory effect, no memory declared: a pure merge needs no memory.
         let mut r = MemoryReconciler::new(None).expect("a memoryless main is supported");
-        r.fold(None, false, false, "f").expect("pure closure needs no memory");
-        assert!(r.finish().is_none(), "no memory is emitted for a pure merge");
+        r.fold(None, false, false, "f")
+            .expect("pure closure needs no memory");
+        assert!(
+            r.finish().is_none(),
+            "no memory is emitted for a pure merge"
+        );
     }
 
     #[test]
@@ -3153,7 +3159,10 @@ mod tests {
         r.fold(Some(&mem(10, Some(20))), true, false, "f")
             .expect("compatible memories reconcile");
         let out = r.finish().expect("a memory is emitted");
-        assert_eq!(out.minimum, 10, "reconciled minimum is the larger of 1 and 10");
+        assert_eq!(
+            out.minimum, 10,
+            "reconciled minimum is the larger of 1 and 10"
+        );
         assert_eq!(out.maximum, Some(20));
     }
 
@@ -3173,7 +3182,10 @@ mod tests {
             Some(5),
             "the output maximum stays the main's declared cap, not unbounded"
         );
-        assert_eq!(out.minimum, 2, "the minimum widens to the external's larger footprint");
+        assert_eq!(
+            out.minimum, 2,
+            "the minimum widens to the external's larger footprint"
+        );
     }
 
     #[test]
@@ -3187,7 +3199,11 @@ mod tests {
         r.fold(Some(&mem(1, Some(9))), true, false, "f")
             .expect("a larger external maximum is clamped to the main's cap");
         let out = r.finish().expect("a memory is emitted");
-        assert_eq!(out.maximum, Some(5), "the output maximum stays the main's declared cap");
+        assert_eq!(
+            out.maximum,
+            Some(5),
+            "the output maximum stays the main's declared cap"
+        );
     }
 
     #[test]
@@ -3200,7 +3216,10 @@ mod tests {
         let err = r
             .fold(Some(&mem(9, None)), true, false, "f")
             .expect_err("an external footprint above the main's cap must be rejected");
-        assert!(matches!(err, LinkError::IncompatibleMemory { .. }), "got {err:?}");
+        assert!(
+            matches!(err, LinkError::IncompatibleMemory { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -3210,7 +3229,10 @@ mod tests {
         let err = r
             .fold(Some(&mem(1, Some(1))), true, true, "f")
             .expect_err("growth against a pinned memory must reject");
-        assert!(matches!(err, LinkError::IncompatibleMemory { .. }), "got {err:?}");
+        assert!(
+            matches!(err, LinkError::IncompatibleMemory { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -3225,7 +3247,11 @@ mod tests {
             .expect("a smaller external maximum keeps the memory valid");
         let out = r.finish().expect("a memory is emitted");
         assert_eq!(out.minimum, 10);
-        assert_eq!(out.maximum, Some(10), "the main's declared maximum is preserved");
+        assert_eq!(
+            out.maximum,
+            Some(10),
+            "the main's declared maximum is preserved"
+        );
     }
 
     #[test]
@@ -3247,15 +3273,24 @@ mod tests {
     }
 
     fn memory64(initial: u64, maximum: Option<u64>) -> MemoryType {
-        MemoryType { memory64: true, ..mem(initial, maximum) }
+        MemoryType {
+            memory64: true,
+            ..mem(initial, maximum)
+        }
     }
 
     fn shared(initial: u64, maximum: Option<u64>) -> MemoryType {
-        MemoryType { shared: true, ..mem(initial, maximum) }
+        MemoryType {
+            shared: true,
+            ..mem(initial, maximum)
+        }
     }
 
     fn custom_page(initial: u64, maximum: Option<u64>) -> MemoryType {
-        MemoryType { page_size_log2: Some(0), ..mem(initial, maximum) }
+        MemoryType {
+            page_size_log2: Some(0),
+            ..mem(initial, maximum)
+        }
     }
 
     /// Asserts the reconciler's `new` rejected the main memory by shape. `new`
@@ -3296,7 +3331,10 @@ mod tests {
         let err = r
             .fold(Some(&memory64(1, Some(1))), true, false, "f")
             .expect_err("a memory64 external must be rejected on adoption");
-        assert!(matches!(err, LinkError::IncompatibleMemory { .. }), "got {err:?}");
+        assert!(
+            matches!(err, LinkError::IncompatibleMemory { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -3307,7 +3345,10 @@ mod tests {
         let err = r
             .fold(Some(&shared(1, Some(1))), true, false, "f")
             .expect_err("a shared external must be rejected on adoption");
-        assert!(matches!(err, LinkError::IncompatibleMemory { .. }), "got {err:?}");
+        assert!(
+            matches!(err, LinkError::IncompatibleMemory { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -3316,7 +3357,10 @@ mod tests {
         let err = r
             .fold(Some(&custom_page(1, Some(1))), true, false, "f")
             .expect_err("a custom-page external must be rejected on adoption");
-        assert!(matches!(err, LinkError::IncompatibleMemory { .. }), "got {err:?}");
+        assert!(
+            matches!(err, LinkError::IncompatibleMemory { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -3331,7 +3375,10 @@ mod tests {
         let LinkError::IncompatibleMemory { reason, .. } = &err else {
             panic!("got {err:?}");
         };
-        assert!(reason.contains("memory64"), "reason names the unsupported shape: {reason}");
+        assert!(
+            reason.contains("memory64"),
+            "reason names the unsupported shape: {reason}"
+        );
     }
 
     #[test]
@@ -3368,7 +3415,10 @@ mod tests {
             matches!(err, LinkError::UnsupportedConstruct(_)),
             "expected an UnsupportedConstruct, got {err:?}"
         );
-        assert!(out_types.is_empty(), "no signature is committed on rejection");
+        assert!(
+            out_types.is_empty(),
+            "no signature is committed on rejection"
+        );
     }
 
     #[test]
@@ -3402,7 +3452,10 @@ mod tests {
             matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("v128")),
             "expected an UnsupportedConstruct naming v128, got {err:?}"
         );
-        assert!(out_types.is_empty(), "no signature is committed on rejection");
+        assert!(
+            out_types.is_empty(),
+            "no signature is committed on rejection"
+        );
     }
     /// The table the three identifier-rule pins share: names the linker admits,
     /// one name per structural clause it refuses, and the reserved names whose
@@ -3598,8 +3651,9 @@ mod tests {
             },
         ];
         let merged_base = 0;
-        let merged_index: BTreeMap<(usize, u32), u32> =
-            [((0, 4), 0), ((0, 5), 1), ((1, 2), 2)].into_iter().collect();
+        let merged_index: BTreeMap<(usize, u32), u32> = [((0, 4), 0), ((0, 5), 1), ((1, 2), 2)]
+            .into_iter()
+            .collect();
 
         let section = name_section_entries(&main, merged_base, &merged);
         for (key, out_idx) in &merged_index {

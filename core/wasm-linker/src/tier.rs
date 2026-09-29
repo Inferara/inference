@@ -104,10 +104,10 @@
 //! on top of it — either by teaching the linker to read a region claim out of a
 //! global's initializer, or by keeping the two mutually exclusive on purpose.
 
+use crate::LinkError;
 use crate::closure::{Closure, ClosureEffects};
 use crate::parse::ParsedModule;
 use crate::provenance::{self, RootWriteSet};
-use crate::LinkError;
 
 /// What a closure's may-write set is checked against.
 ///

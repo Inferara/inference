@@ -7,9 +7,8 @@
 
 use inf_wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef};
 use inference_wasm_linker::{
-    link as raw_link, link_with_options as raw_link_with_options,
-    link_with_warnings as raw_link_with_warnings, ExternalSpecPolicy, LinkError, LinkOptions,
-    LinkOutput, LinkWarning,
+    ExternalSpecPolicy, LinkError, LinkOptions, LinkOutput, LinkWarning, link as raw_link,
+    link_with_options as raw_link_with_options, link_with_warnings as raw_link_with_warnings,
 };
 
 /// Assembles a `.wasm` binary from WAT source, panicking with the WAT on error.
@@ -1265,8 +1264,7 @@ fn only_the_memory_using_external_contributes_its_declaration() {
         "#,
     );
 
-    let linked = link(&main, &[&lld_shaped_lib(), &store_lib])
-        .expect("both externals must merge");
+    let linked = link(&main, &[&lld_shaped_lib(), &store_lib]).expect("both externals must merge");
     assert_valid(&linked);
     assert!(function_imports(&linked).is_empty());
     assert_eq!(
@@ -2334,8 +2332,8 @@ fn tier_c_subtraction_fabricated_absolute_address_requires_relocatable_build() {
         "#,
     );
 
-    let err = link(&main, &[&lib])
-        .expect_err("a fabricated absolute store address must be rejected");
+    let err =
+        link(&main, &[&lib]).expect_err("a fabricated absolute store address must be rejected");
     assert!(
         matches!(err, LinkError::RequiresRelocatableBuild { .. }),
         "expected RequiresRelocatableBuild, got {err:?}"
@@ -2491,8 +2489,7 @@ fn type_signatures(bytes: &[u8]) -> Vec<(Vec<String>, Vec<String>)> {
             for group in reader {
                 let group = group.unwrap();
                 for sub in group.types() {
-                    if let inf_wasmparser::CompositeInnerType::Func(ft) =
-                        &sub.composite_type.inner
+                    if let inf_wasmparser::CompositeInnerType::Func(ft) = &sub.composite_type.inner
                     {
                         let params = ft.params().iter().map(|t| format!("{t:?}")).collect();
                         let results = ft.results().iter().map(|t| format!("{t:?}")).collect();
@@ -2562,9 +2559,7 @@ fn lib_exporting_funcref_param_entry() -> Vec<u8> {
     let mut module = Module::new();
 
     let mut types = TypeSection::new();
-    types
-        .ty()
-        .function([ValType::Ref(RefType::FUNCREF)], []);
+    types.ty().function([ValType::Ref(RefType::FUNCREF)], []);
     module.section(&types);
 
     let mut funcs = FunctionSection::new();
@@ -2636,7 +2631,11 @@ fn merged_body_with_locals_and_value_block_survives_reencode() {
     // The value-typed `if` block re-encodes to an i32-result block; the body
     // must still validate and produce its i32 result (asserted by assert_valid).
     let calls = body_call_targets(&linked, 0);
-    assert_eq!(calls, vec![1], "run's call now targets the merged body at 1");
+    assert_eq!(
+        calls,
+        vec![1],
+        "run's call now targets the merged body at 1"
+    );
 }
 
 #[test]
@@ -2940,7 +2939,10 @@ fn invalid_main_bytes_are_a_parse_error() {
     // `raw_link` directly: the `link` test helper parses `main` to derive the
     // import module, so garbage main bytes must go straight to the linker.
     let err = raw_link(b"not a wasm module", &[], None).expect_err("garbage must not parse");
-    assert!(matches!(err, LinkError::Parse(_)), "expected Parse, got {err:?}");
+    assert!(
+        matches!(err, LinkError::Parse(_)),
+        "expected Parse, got {err:?}"
+    );
 }
 
 #[test]
@@ -2948,7 +2950,10 @@ fn invalid_external_bytes_are_a_parse_error() {
     let main = main_with_sum_and_sub();
     let err = raw_link(&main, &[("mathlib", b"\0asm broken")], None)
         .expect_err("garbage external must not parse");
-    assert!(matches!(err, LinkError::Parse(_)), "expected Parse, got {err:?}");
+    assert!(
+        matches!(err, LinkError::Parse(_)),
+        "expected Parse, got {err:?}"
+    );
 }
 
 // -- Adversarial / malformed external bodies (robustness audit issues) -------
@@ -3064,7 +3069,10 @@ fn function_typed_block_over_an_out_of_range_type_is_a_clean_error() {
     let err =
         link(&main, &[&lib]).expect_err("out-of-range block type index must be a clean error");
     assert!(
-        matches!(err, LinkError::Parse(_) | LinkError::UnsupportedConstruct(_)),
+        matches!(
+            err,
+            LinkError::Parse(_) | LinkError::UnsupportedConstruct(_)
+        ),
         "expected a clean Parse/UnsupportedConstruct for the out-of-range type, got {err:?}"
     );
 }
@@ -3939,8 +3947,8 @@ fn corrupt_main_hspecs_section_is_a_clean_link_error() {
     .append_to(&mut main);
 
     let lib = mathlib_pure();
-    let err = link(&main, &[&lib])
-        .expect_err("a corrupt main hspecs section must be a clean rejection");
+    let err =
+        link(&main, &[&lib]).expect_err("a corrupt main hspecs section must be a clean rejection");
     assert!(
         matches!(&err, LinkError::Parse(msg) if msg.contains("hspecs")),
         "expected a Parse error naming the hspecs section, got {err:?}"
@@ -5303,8 +5311,12 @@ fn memoryless_main_with_param_addressed_external_synthesizes_memory() {
 
     let linked = link(&main, &[&lib]).expect("memoryless main + memory external must reconcile");
     assert_valid(&linked);
-    let (initial, _max) = memory_limits(&linked).expect("output must declare the synthesized memory");
-    assert_eq!(initial, 3, "the external's minimum must be carried into the output");
+    let (initial, _max) =
+        memory_limits(&linked).expect("output must declare the synthesized memory");
+    assert_eq!(
+        initial, 3,
+        "the external's minimum must be carried into the output"
+    );
 }
 
 #[test]
@@ -5341,8 +5353,15 @@ fn external_minimum_is_reconciled_so_no_out_of_bounds() {
     let linked = link(&main, &[&lib]).expect("memory minimums must reconcile");
     assert_valid(&linked);
     let (initial, maximum) = memory_limits(&linked).expect("output declares a memory");
-    assert_eq!(initial, 10, "reconciled minimum is the max of both module minimums");
-    assert_eq!(maximum, Some(20), "reconciled maximum widens to admit both ranges");
+    assert_eq!(
+        initial, 10,
+        "reconciled minimum is the max of both module minimums"
+    );
+    assert_eq!(
+        maximum,
+        Some(20),
+        "reconciled maximum widens to admit both ranges"
+    );
 }
 
 #[test]
@@ -5589,7 +5608,10 @@ fn seed_probes() -> Vec<Probe> {
         ),
     );
     // H12/H13: typed-reference operators.
-    push("H12 ref.null", sum_lib("ref.null func drop local.get 0 local.get 1 i32.add"));
+    push(
+        "H12 ref.null",
+        sum_lib("ref.null func drop local.get 0 local.get 1 i32.add"),
+    );
     // H17: shared-memory atomic op into a memoryless main.
     push(
         "H17 atomic rmw",
@@ -5715,7 +5737,12 @@ fn round2_probes() -> Vec<Probe> {
     // wrong machine, so the only correct outcome is a clean rejection.
     let mut push = |label: &'static str, main: Option<Vec<u8>>, lib: Option<Vec<u8>>| {
         if let (Some(main), Some(lib)) = (main, lib) {
-            probes.push(Probe { label, main, externals: vec![lib], expect: Expect::Rejected });
+            probes.push(Probe {
+                label,
+                main,
+                externals: vec![lib],
+                expect: Expect::Rejected,
+            });
         }
     };
 
@@ -5978,7 +6005,10 @@ fn adversarial_corpus_never_panics_and_only_emits_valid_modules() {
         }));
 
         let result = outcome.unwrap_or_else(|_| {
-            panic!("`{}`: link panicked on adversarial input — it must return an Err", probe.label)
+            panic!(
+                "`{}`: link panicked on adversarial input — it must return an Err",
+                probe.label
+            )
         });
 
         match (&result, probe.expect) {
@@ -6043,9 +6073,7 @@ fn deep_nesting_main_and_lib(depth: usize) -> (Vec<u8>, Vec<u8>) {
     for _ in 0..depth {
         body.push_str("end ");
     }
-    let lib = wasm(&format!(
-        r#"(module (func (;0;) (export "deep") {body}))"#
-    ));
+    let lib = wasm(&format!(r#"(module (func (;0;) (export "deep") {body}))"#));
     (main, lib)
 }
 
@@ -6351,8 +6379,8 @@ fn external_nondet_functype_block_is_rejected_as_non_executable() {
 /// `sum` must strip both the spec function and the spec section, with no error.
 fn lib_with_spec_function_and_section() -> Vec<u8> {
     use wasm_encoder::{
-        CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
-        Module, TypeSection, ValType,
+        CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection,
+        Instruction, Module, TypeSection, ValType,
     };
 
     let mut module = Module::new();
@@ -6413,7 +6441,8 @@ fn external_spec_function_and_section_are_stripped_when_building_an_executable()
     let main = main_importing_sum();
     let lib = lib_with_spec_function_and_section();
 
-    let linked = link(&main, &[&lib]).expect("an external with specs must link, with specs stripped");
+    let linked =
+        link(&main, &[&lib]).expect("an external with specs must link, with specs stripped");
     assert_valid(&linked);
     assert!(function_imports(&linked).is_empty());
 
@@ -6453,8 +6482,8 @@ fn external_malformed_spec_section_does_not_fail_the_link() {
     // executable `sum` external, then append a garbage `inference.spec_funcs`
     // section (a bogus version byte the main-module decoder would reject).
     use wasm_encoder::{
-        CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
-        Module, TypeSection, ValType,
+        CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection,
+        Instruction, Module, TypeSection, ValType,
     };
 
     let lib = {
@@ -6520,8 +6549,8 @@ fn malformed_main_spec_section_fails_the_link() {
     .append_to(&mut main);
 
     let lib = mathlib_pure();
-    let err = link(&main, &[&lib])
-        .expect_err("a malformed main spec section must be a hard link error");
+    let err =
+        link(&main, &[&lib]).expect_err("a malformed main spec section must be a hard link error");
     assert!(
         matches!(&err, LinkError::Parse(_)),
         "expected a Parse error for the malformed main spec section, got {err:?}"
@@ -6535,8 +6564,8 @@ fn malformed_main_spec_section_fails_the_link() {
 /// hand-encoded.
 fn proof_mode_main_with_nondet_and_uzumaki() -> Vec<u8> {
     use wasm_encoder::{
-        CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
-        Instruction, Module, TypeSection, ValType,
+        CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
+        ImportSection, Instruction, Module, TypeSection, ValType,
     };
 
     let mut module = Module::new();
@@ -7363,8 +7392,8 @@ fn malformed_post_1_0_external_is_parse_not_unsupported_feature() {
 
     // And through the full `link` path: the same structural-first ordering holds.
     let main = main_importing_f();
-    let via_link = link(&main, &[&lib])
-        .expect_err("a structurally-broken external must fail the link");
+    let via_link =
+        link(&main, &[&lib]).expect_err("a structurally-broken external must fail the link");
     assert!(
         matches!(&via_link, LinkError::Parse(_)),
         "the link entry must report the structural defect as Parse, not a feature name, got {via_link:?}"
@@ -7439,10 +7468,7 @@ mod declared_write_sets {
             module: "memlib".to_string(),
             field: "store_at".to_string(),
             mut_params: mut_params.to_vec(),
-            param_names: param_names
-                .iter()
-                .map(|n| n.map(str::to_string))
-                .collect(),
+            param_names: param_names.iter().map(|n| n.map(str::to_string)).collect(),
         }]
     }
 
@@ -7467,7 +7493,6 @@ mod declared_write_sets {
             "the rejection must name the import and the offending parameter, got {err:?}"
         );
     }
-
 
     /// The same signature writing through the **second** parameter, so a
     /// rejection that names parameter 0 has read nothing.
@@ -7601,8 +7626,12 @@ mod declared_write_sets {
         // is what makes the two modes distinguishable rather than a nullable
         // spelling of one: the verdict differs on identical input, so `None`
         // cannot be reconstructed from an empty list.
-        raw_link(&main_calling_store_at(), &[("memlib", &storing_lib())], None)
-            .expect("the unchecked mode performs merge mechanics only");
+        raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &storing_lib())],
+            None,
+        )
+        .expect("the unchecked mode performs merge mechanics only");
     }
 
     #[test]
@@ -8316,7 +8345,10 @@ fn ignore_is_silent_and_byte_identical_to_warn() {
     let ignored =
         link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Ignore).expect("ignore");
 
-    assert_eq!(warned.wasm, ignored.wasm, "the two policies emit one artifact");
+    assert_eq!(
+        warned.wasm, ignored.wasm,
+        "the two policies emit one artifact"
+    );
     assert!(ignored.warnings.is_empty(), "`Ignore` says nothing");
     assert_eq!(warned.warnings.len(), 1, "`Warn` says it once");
 }
@@ -8360,7 +8392,8 @@ fn adopt_over_section_free_externals_is_byte_identical_to_warn() {
     let main = adoption_main(&[]);
 
     let warned = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Warn).expect("warn");
-    let adopted = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    let adopted =
+        link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
 
     assert_eq!(warned.wasm, adopted.wasm);
     assert!(adopted.warnings.is_empty());
@@ -8373,10 +8406,7 @@ fn adopt_over_section_free_externals_is_byte_identical_to_warn() {
 /// to key on the section's presence, never on the entry list being non-empty.
 #[test]
 fn a_main_carrying_an_empty_spec_funcs_section_re_emits_it_under_every_policy() {
-    let main = adoption_main(&[(
-        "inference.spec_funcs".to_string(),
-        encode_spec_funcs(&[]),
-    )]);
+    let main = adoption_main(&[("inference.spec_funcs".to_string(), encode_spec_funcs(&[]))]);
     let lib = plain_library(&[]);
 
     for policy in [
@@ -8548,7 +8578,8 @@ fn adoption_leaves_every_other_section_byte_identical() {
 
     let ignored =
         link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Ignore).expect("ignore");
-    let adopted = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    let adopted =
+        link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
 
     let executable = |bytes: &[u8]| -> Vec<(u8, String, Vec<u8>)> {
         raw_sections(bytes)
@@ -8779,8 +8810,7 @@ fn two_libraries_folding_to_one_adopted_key_are_refused() {
     );
     let first = adoption_library(&["double"], false, &LIBRARY_NAMES, &sections);
     let second = adoption_library(&["triple"], false, &LIBRARY_NAMES, &sections);
-    let main =
-        adoption_main_importing(&[("math_lib", "double"), ("math::lib", "triple")], &[]);
+    let main = adoption_main_importing(&[("math_lib", "double"), ("math::lib", "triple")], &[]);
 
     let err = link_under(
         &main,
@@ -9126,7 +9156,11 @@ fn a_malformed_external_hspecs_section_is_refused_only_under_adopt() {
 
     let warned = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Warn)
         .expect("a malformed section nothing reads must not fail the link");
-    assert_eq!(warned.warnings.len(), 1, "the section's presence is still noted");
+    assert_eq!(
+        warned.warnings.len(),
+        1,
+        "the section's presence is still noted"
+    );
 
     let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
         .expect_err("adopting from a malformed section must be refused");
