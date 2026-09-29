@@ -2076,6 +2076,77 @@ fn a_global_used_to_address_memory_is_still_rejected() {
 }
 
 #[test]
+fn a_global_write_between_an_address_and_its_store_links() {
+    // The other side of that boundary: a global's *value* is never an address,
+    // but a global *write* is no reason to forget one. Here the address is the
+    // caller's `ptr`, already on the stack when the external bumps its global,
+    // and the store still lands at `ptr`.
+    //
+    // Provenance once had no transfer function for `global.set`, so its
+    // catch-all cleared the operand stack and the store read a fail-closed
+    // address; this closure was refused as needing a relocatable build (#430).
+    // The third body swaps the write for a `drop` with the same stack effect,
+    // which always linked: all three must now agree.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = |body: &str| {
+        wasm(&format!(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32)))
+              (memory (;0;) 1)
+              (global (;0;) (mut i32) (i32.const 0))
+              (func (;0;) (type 0) (param i32 i32)
+                {body})
+              (export "store_at" (func 0)))
+            "#
+        ))
+    };
+
+    let linked: Vec<Vec<u8>> = [
+        ("no global", "local.get 0 local.get 1 i32.store"),
+        (
+            "global.set before the value",
+            "local.get 0 global.get 0 global.set 0 local.get 1 i32.store",
+        ),
+        (
+            "drop before the value",
+            "local.get 0 global.get 0 drop local.get 1 i32.store",
+        ),
+    ]
+    .into_iter()
+    .map(|(label, body)| {
+        let linked = link(&main, &[&lib(body)])
+            .unwrap_or_else(|e| panic!("{label}: a store at the caller's pointer must link: {e}"));
+        assert_valid(&linked);
+        assert!(
+            body_has_i32_store(&linked, 1),
+            "{label}: the merged body must keep its store"
+        );
+        linked
+    })
+    .collect();
+
+    assert_eq!(
+        body_global_indices(&linked[1], 1),
+        vec![("get", 0), ("set", 0)],
+        "the merged write must name the external's own global"
+    );
+}
+
+#[test]
 fn tier_c_element_segment_requires_relocatable_build() {
     // A *bare* table is inert and links; an element segment does not, even
     // though nothing in the closure reads the table. That rejection is
@@ -7469,6 +7540,57 @@ mod declared_write_sets {
             &main_calling_store_at(),
             &[("memlib", &storing_lib())],
             Some(&contracts),
+        )
+        .expect("declaring `mut ptr` covers the only store the body performs");
+    }
+
+    /// [`storing_lib`] bumping a global between pushing `ptr` and pushing `val`,
+    /// so the store's address sits under a `global.set` when it executes.
+    fn storing_lib_writing_a_global_first() -> Vec<u8> {
+        wasm(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32)))
+              (memory (;0;) 1)
+              (global (;0;) (mut i32) (i32.const 0))
+              (func (;0;) (type 0) (param i32 i32)
+                local.get 0
+                global.get 0
+                global.set 0
+                local.get 1
+                i32.store)
+              (export "store_at" (func 0)))
+            "#,
+        )
+    }
+
+    #[test]
+    fn a_global_write_before_the_store_leaves_it_attributed_to_its_parameter() {
+        // Before #430 this closure never reached the contract: provenance lost the
+        // address at the `global.set` and rejected it as needing a relocatable
+        // build. It must now be held to the declaration like `storing_lib` —
+        // refused as an undeclared write through `ptr`, and admitted by `mut ptr`.
+        let lib = storing_lib_writing_a_global_first();
+
+        let err = raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &lib)],
+            Some(&contract(&[], &[Some("ptr"), Some("val")])),
+        )
+        .expect_err("a declaration claiming no write must not admit a storing body");
+        assert!(
+            matches!(
+                &err,
+                LinkError::UndeclaredExternWrite { param_index, param_name, .. }
+                    if *param_index == 0 && param_name.as_deref() == Some("ptr")
+            ),
+            "the store must be attributed to `ptr`, got {err:?}"
+        );
+
+        raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &lib)],
+            Some(&contract(&[0], &[Some("ptr"), Some("val")])),
         )
         .expect("declaring `mut ptr` covers the only store the body performs");
     }
