@@ -394,10 +394,10 @@ fn map_block_type(
 /// merge models. The feature gate rejects a float-using external before its body
 /// is re-encoded, but the main-module re-encode path bypasses that gate, so this
 /// is the float backstop on the value-type axis (the operator-stream backstop is
-/// [`crate::safety::is_float`]). `v128` is rejected for the same reason: the
-/// language has no SIMD types and every SIMD operator is rejected, so the type
-/// axis must stay consistent. Reference types are likewise unsupported; only the
-/// integer value types map through.
+/// `safety::is_float`, applied by [`crate::safety::check_operator`]). `v128` is
+/// rejected for the same reason: the language has no SIMD types and every SIMD
+/// operator is rejected, so the type axis must stay consistent. Reference types
+/// are likewise unsupported; only the integer value types map through.
 fn map_val_type(ty: ValType) -> Result<wasm_encoder::ValType, LinkError> {
     Ok(match ty {
         ValType::I32 => wasm_encoder::ValType::I32,

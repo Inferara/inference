@@ -130,7 +130,7 @@ enum WriteTargets {
 ///   from the parameter set being empty. It is the fact that licenses eliding a
 ///   caller's defensive copy, and that licence must not depend on the
 ///   attribution below being right.
-/// - [`RootWriteSet::may_store_through`] — the whole attributed parameter set,
+/// - `RootWriteSet::may_store_through` — the whole attributed parameter set,
 ///   in the root's own coordinates. An over-approximation, and the shape the
 ///   attribution's own tests assert on; the merge reads the two answers above
 ///   plus [`RootWriteSet::first_undeclared`] instead, so it is test-only.

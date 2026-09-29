@@ -16,7 +16,7 @@
 //!    matching logical module,
 //! 2. computes the **transitive closure** of that export inside its module (the
 //!    functions it calls, the types they reference),
-//! 3. classifies the closure into a **feasibility tier** (see [`tier`]),
+//! 3. classifies the closure into a **feasibility tier** (see the `tier` module),
 //! 4. **dedups** the closure's function types into the output type section,
 //! 5. **appends** the closure's bodies after the main module's, rewriting every
 //!    internal index reference (`call`, `call_indirect` type, …) into the
@@ -35,7 +35,7 @@
 //!   merge does not consume, so it is **rejected** with
 //!   [`LinkError::RequiresRelocatableBuild`] rather than producing an unsound
 //!   module. A table the module merely *declares* and no body touches is inert
-//!   and is not a reason; see [`tier`].
+//!   and is not a reason; see the `tier` module.
 //!
 //! Globals are classified on use, not declaration: a closure that reads or
 //! writes one is Tier A — or Tier B if it also touches memory — and the
@@ -139,16 +139,16 @@ use thiserror::Error;
 /// **not** admit the GC *proposal*: a GC reference type (`externref`/`anyref`)
 /// additionally requires `REFERENCE_TYPES` *and* `GC` (`1 << 19`), neither of
 /// which is in this set, and no GC/reference *instruction* survives the allow-list
-/// in [`safety`] — every one rejects as an [`LinkError::UnsupportedConstruct`] if
-/// it reaches the merge.
+/// in the `safety` module — every one rejects as an
+/// [`LinkError::UnsupportedConstruct`] if it reaches the merge.
 /// `STACK_SWITCHING` is likewise off (and defaults off in the fork).
 ///
 /// `SIGN_EXTENSION` is on because the Rocq translator lowers all five of its
 /// opcodes (as `BI_unop t (Unop_extend n)` — the proof model treats them as
 /// unops, not conversions). Inference codegen still emits none of them, but a
 /// real toolchain emits them constantly, and without the flag the validator
-/// refuses such an external at this gate *before* the allow-list in [`safety`]
-/// ever sees the body. The three integer-to-integer width conversions
+/// refuses such an external at this gate *before* the `safety` module's
+/// allow-list ever sees the body. The three integer-to-integer width conversions
 /// (`i32.wrap_i64`, `i64.extend_i32_s/u`) need no flag: they are MVP
 /// instructions, gated only by the allow-list.
 ///
@@ -225,8 +225,8 @@ pub enum LinkError {
     /// accessors remapped, an admission kept sound by address provenance tagging
     /// a global-derived value `NotParam`, so a closure that computes a memory
     /// address through a global is still rejected. Such a rejection arrives
-    /// through the provenance clause of [`crate::tier`] and never names a global
-    /// in `reasons`.
+    /// through the provenance clause of the `tier` module and never names a
+    /// global in `reasons`.
     #[error(
         "external function `{field}` requires a relocatable build: {}",
         .reasons.join("; ")
@@ -836,9 +836,9 @@ pub enum LinkWarning {
     /// reserving more than one 64 KiB page.
     ///
     /// Tier B carries no sizes, so it cannot show an access *stays within* the
-    /// buffer the caller granted (see [`provenance`]). With a single page, an
-    /// address past that buffer is usually past the memory too and traps; that
-    /// backstop is incidental, and a larger memory removes it.
+    /// buffer the caller granted (see the `provenance` module). With a single
+    /// page, an address past that buffer is usually past the memory too and
+    /// traps; that backstop is incidental, and a larger memory removes it.
     ///
     /// `fields` names the satisfied import fields, which is how the user knows
     /// these functions.
