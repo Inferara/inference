@@ -25,4 +25,4 @@ rustc-hash = { workspace = true }
 # against the addresses a module actually touches. The comparison needs the
 # crate-private `verify_param_addressing`, so it lives in an in-crate test module
 # rather than an integration test.
-wasmtime = "47.0.3"
+wasmtime = "48.0.3"
