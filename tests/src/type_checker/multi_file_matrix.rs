@@ -3390,6 +3390,127 @@ mod tests {
         );
     }
 
+    /// An `external fn` names a cross-file struct or enum by qualifier exactly as
+    /// the function beside it does, at a parameter and at the return, whether it
+    /// is bound to a host module, bound to a linked one, or not bound at all, and
+    /// a call to it unifies with the qualified values it is passed (#481).
+    ///
+    /// Its signature types were once validated while it was registered, before
+    /// any `use` was bound, so each of these was refused with "namespace `geo` is
+    /// not imported; add `use geo;`" — prescribing the import the file already
+    /// had, while `take`, whose parameter is written the same way, compiled.
+    #[test]
+    fn qualified_types_in_extern_signature_resolve() {
+        for binding in ["use { send } from host::io;", "use { send } from io;", ""] {
+            assert_ok(&[
+                (
+                    vec![],
+                    &format!(
+                        "use geo; \
+                         pub fn take(p: geo::Point) -> i32 {{ return p.x; }} \
+                         external fn send(p: geo::Point, l: geo::Level) -> geo::Level; \
+                         {binding} \
+                         pub fn run(p: geo::Point) -> geo::Level {{ \
+                           return send(p, geo::Level::Low); }}"
+                    ),
+                ),
+                (vec!["geo"], "pub struct Point { x: i32; } pub enum Level { Low, High }"),
+            ]);
+        }
+    }
+
+    /// The reproduction #425 was filed with: a 3-segment qualified type in an
+    /// extern's parameter, under the `use` that licenses it.
+    #[test]
+    fn three_segment_qualified_type_in_extern_signature_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom; \
+                 external fn area(p: lib::geom::Pair) -> i32; \
+                 pub fn run() -> i32 { return 0; }",
+            ),
+            (vec!["lib", "geom"], "pub struct Pair { x: i32; y: i32; }"),
+        ]);
+    }
+
+    /// An item-imported type is recognized in an extern's signature too. Before
+    /// imports were bound it was a bare name nothing declared, and the extern
+    /// was refused with `unknown type `Point`` — the second face of the defect
+    /// the qualified form showed (#481).
+    #[test]
+    fn item_imported_type_in_extern_signature_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use geo::{Point}; \
+                 external fn send(p: Point) -> i32; \
+                 use { send } from host::io; \
+                 pub fn run(p: Point) -> i32 { return send(p); }",
+            ),
+            (vec!["geo"], "pub struct Point { x: i32; }"),
+        ]);
+    }
+
+    /// A spec-inner extern is validated in the spec's scope, which sees the
+    /// imports of the file around it.
+    #[test]
+    fn qualified_type_in_spec_extern_signature_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use geo; \
+                 spec S { external fn probe(p: geo::Point) -> i32; } \
+                 pub fn run() -> i32 { return 0; }",
+            ),
+            (vec!["geo"], "pub struct Point { x: i32; }"),
+        ]);
+    }
+
+    /// When the import really is missing, an extern's qualified type is still
+    /// refused, and the message names the `use` to add — true, now, when it is
+    /// read. `geo` is in the program, imported by the entry file; `other` names
+    /// `geo::Point` without importing it. The refusal is reported once, in
+    /// `other`, at the type.
+    #[test]
+    fn qualified_type_in_extern_signature_without_its_import_is_rejected() {
+        let msg = assert_err(&[
+            (vec![], "use geo; use other; pub fn run() -> i32 { return 0; }"),
+            (vec!["geo"], "pub struct Point { x: i32; }"),
+            (vec!["other"], "external fn send(p: geo::Point) -> i32;"),
+        ]);
+        assert_eq!(
+            msg.matches("namespace `geo` is not imported").count(),
+            1,
+            "the missing import is reported exactly once, got: {msg}"
+        );
+        assert!(
+            msg.contains(
+                "other:1:21: namespace `geo` is not imported; add `use geo;` to reach `geo::Point`"
+            ),
+            "the refusal names the file, the type and the `use` to add, got: {msg}"
+        );
+    }
+
+    /// A private type reached by qualifier from an extern's signature is refused
+    /// by the visibility gate, as it is from any other signature.
+    #[test]
+    fn qualified_private_type_in_extern_signature_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use geo; \
+                 external fn send(p: geo::Hidden) -> i32; \
+                 pub fn run() -> i32 { return 0; }",
+            ),
+            (vec!["geo"], "struct Hidden { x: i32; }"),
+        ]);
+        assert!(
+            msg.contains("cannot access private struct `Hidden`"),
+            "a private type stays private behind an extern, got: {msg}"
+        );
+    }
+
     // Axis — file-namespace bindings are private to the file that wrote them.
     // A brace-free `use a::b;` binds `b` only within its own file; a different
     // file (including a non-entry one) never resolves a bare qualified call

@@ -25,23 +25,26 @@ This document provides an in-depth look at the type checker's internal architect
 │  │  - Register spec definitions                          │  │
 │  └───────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │  Phase 3: resolve_imports()                           │  │
+│  │  Phase 3: collect_function_and_constant_definitions() │  │
+│  │  - Register function signatures                       │  │
+│  │  - Register methods on structs                        │  │
+│  │  - Register constants (value type + scope variable)   │  │
+│  └───────────────────────────────────────────────────────┘  │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Phase 4: resolve_imports()                           │  │
 │  │  - Bind import paths to symbols                       │  │
 │  │  - Handle file imports (use a::b)                     │  │
 │  │  - Handle item imports (use a::b::{A, B})             │  │
 │  │  - Validate visibility of imported symbols            │  │
 │  └───────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │  Phase 4: collect_function_and_constant_definitions() │  │
-│  │  - Register function signatures                       │  │
-│  │  - Register methods on structs                        │  │
-│  │  - Register constants (value type + scope variable)   │  │
-│  └───────────────────────────────────────────────────────┘  │
-│  ┌───────────────────────────────────────────────────────┐  │
 │  │  Phase 4b (after resolve_imports):                    │  │
 │  │  - renormalize_signatures(): re-resolve param/return  │  │
 │  │    types so an item-imported struct type becomes      │  │
 │  │    `Struct`, matching what call sites infer           │  │
+│  │  - validate_signatures(): check every signature       │  │
+│  │    type, an `external fn`'s too, against the          │  │
+│  │    imports now bound                                  │  │
 │  │  - check_definition_cycles() then                     │  │
 │  │    check_const_initializers(): const initializers are │  │
 │  │    type-checked here so a `const` may reference a      │  │
@@ -161,11 +164,62 @@ SymbolTable {
 }
 ```
 
-### Phase 3: Resolve Imports
+### Phase 3: Register Functions
+
+**Goal**: Collect function signatures (name, parameters, return type, type parameters).
+
+**Input**: Function and method definitions
+
+**Output**: Symbol table with function signatures
+
+**Signature type validation** runs in its own pass *after* import resolution, not
+during registration. Registration keeps any unresolved `Custom` or `::`-qualified
+type name as-is; the later `validate_signatures` pass enters each file's scope
+and checks every parameter and return type — of functions, methods and
+`external fn` declarations alike — against the symbol table, so an item-imported
+type (`use a::b::{T};`) or a qualified one (`geo::Point` under `use geo;`) is
+recognized in a signature position exactly as in a `let` binding. A type that
+still does not resolve is reported as an unknown type, and a qualified one whose
+namespace the file never imported as a missing import.
+
+```rust
+// Example AST
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn identity T'(x: T) -> T {
+    return x;
+}
+
+// After Phase 3
+SymbolTable {
+    functions: {
+        "add": FuncInfo {
+            name: "add",
+            type_params: [],
+            param_types: [i32, i32],
+            return_type: i32,
+            visibility: Private,
+            definition_scope_id: 0
+        },
+        "identity": FuncInfo {
+            name: "identity",
+            type_params: ["T"],
+            param_types: [Generic("T")],
+            return_type: Generic("T"),
+            visibility: Private,
+            definition_scope_id: 0
+        }
+    }
+}
+```
+
+### Phase 4: Resolve Imports
 
 **Goal**: Bind import paths to actual symbols in the symbol table.
 
-**Input**: Raw import records from Phase 1 + registered types from Phase 2
+**Input**: Raw import records from Phase 1 + the types, functions and constants registered in Phases 2 and 3, so an item import can bind any of them
 
 **Output**: Resolved imports with symbol references
 
@@ -188,54 +242,6 @@ ResolvedImport {
 // Glob import resolution
 Import { path: ["std", "io"], kind: Glob }
 // Resolves to multiple ResolvedImport entries, one for each public symbol in std::io
-```
-
-### Phase 4: Register Functions
-
-**Goal**: Collect function signatures (name, parameters, return type, type parameters).
-
-**Input**: Function and method definitions
-
-**Output**: Symbol table with function signatures
-
-**Signature type validation** runs in its own pass *after* import resolution, not
-during registration. Registration keeps any unresolved `Custom` type name as-is;
-the later `validate_signatures` pass enters each file's scope and checks every
-parameter and return type against the symbol table, so an item-imported type
-(`use a::b::{T};`) is recognized in a signature position exactly as in a `let`
-binding. A type that still does not resolve is reported as an unknown type.
-
-```rust
-// Example AST
-fn add(a: i32, b: i32) -> i32 {
-    return a + b;
-}
-
-fn identity T'(x: T) -> T {
-    return x;
-}
-
-// After Phase 4
-SymbolTable {
-    functions: {
-        "add": FuncInfo {
-            name: "add",
-            type_params: [],
-            param_types: [i32, i32],
-            return_type: i32,
-            visibility: Private,
-            definition_scope_id: 0
-        },
-        "identity": FuncInfo {
-            name: "identity",
-            type_params: ["T"],
-            param_types: [Generic("T")],
-            return_type: Generic("T"),
-            visibility: Private,
-            definition_scope_id: 0
-        }
-    }
-}
 ```
 
 ### Phase 5: Infer Variables
@@ -747,8 +753,8 @@ impl TypeChecker {
         // Run all phases even if some fail
         self.process_directives(ctx);
         self.register_types(ctx);
-        self.resolve_imports();
         self.collect_function_and_constant_definitions(ctx);
+        self.resolve_imports();
 
         // Inference phase continues with errors
         for source_file in ctx.source_files() {

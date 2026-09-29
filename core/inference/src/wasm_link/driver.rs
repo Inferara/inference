@@ -21,8 +21,8 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{DefId, NodeId};
-use inference_ast::nodes::Def;
+use inference_ast::ids::{DefId, NodeId, TypeId};
+use inference_ast::nodes::{ArgData, Def};
 use inference_type_checker::typed_context::TypedContext;
 use inference_type_checker::{ExternKind, ExternOrigin, HOST_SEGMENT};
 use inference_wasm_linker::ImportWriteSet;
@@ -306,7 +306,8 @@ pub enum ExternalResolutionError {
         error: std::io::Error,
     },
     /// A bound extern named a function the AST has no `external fn` declaration
-    /// for — an internal inconsistency between provenance and the parsed tree.
+    /// for, or a declaration no source file holds — an internal inconsistency
+    /// between provenance and the parsed tree.
     MissingDeclaration { export_field: String },
     /// Two bound declarations of one `(module, field)` declare different write
     /// sets: one marks a parameter `mut` and the other does not.
@@ -591,7 +592,7 @@ pub fn resolve_external_modules(
     }
     if !host_origins.is_empty() {
         return Ok(ResolvedExternals {
-            host_imports: resolve_host_imports(arena, &host_origins)?,
+            host_imports: resolve_host_imports(typed_context, &host_origins)?,
             ..ResolvedExternals::default()
         });
     }
@@ -626,7 +627,7 @@ pub fn resolve_external_modules(
             bytes
         };
 
-        let lowered = lower_declaration(arena, origin)?;
+        let lowered = lower_declaration(typed_context, origin)?;
 
         validate_extern(&bytes, &origin.export_field, &lowered.signature).map_err(|error| {
             ExternalResolutionError::Validate {
@@ -712,12 +713,13 @@ fn mixed_provider_refusal(
 /// two files that call one imported argument `buf` and `out` have not disagreed
 /// about anything the artifact can express.
 fn resolve_host_imports(
-    arena: &AstArena,
+    typed_context: &TypedContext,
     origins: &[&ExternOrigin],
 ) -> Result<Vec<HostImport>, ExternalResolutionError> {
+    let arena = typed_context.arena();
     let mut declared: BTreeMap<(String, String), DeclaredHostImport> = BTreeMap::new();
     for origin in origins {
-        let lowered = lower_declaration(arena, origin)?;
+        let lowered = lower_declaration(typed_context, origin)?;
         let key = (origin.logical_module.clone(), origin.export_field.clone());
         match declared.entry(key) {
             Entry::Vacant(slot) => {
@@ -776,16 +778,18 @@ struct DeclaredHostImport {
 /// mismatching one, and comparing two host declarations that are not the two the
 /// program bound would invent a disagreement or hide one. Only the bound
 /// declaration is the source of truth.
+///
+/// Its types are resolved from the file that declares it: the scope they are
+/// written in, and the file codegen emits the import's signature from.
 fn lower_declaration(
-    arena: &AstArena,
+    typed_context: &TypedContext,
     origin: &ExternOrigin,
 ) -> Result<LoweredExtern, ExternalResolutionError> {
-    let (args, returns) = extern_declaration(arena, origin.decl).ok_or_else(|| {
-        ExternalResolutionError::MissingDeclaration {
+    let (args, returns, module_path) = extern_declaration(typed_context.arena(), origin.decl)
+        .ok_or_else(|| ExternalResolutionError::MissingDeclaration {
             export_field: origin.export_field.clone(),
-        }
-    })?;
-    lower_extern_signature(arena, &args, returns).map_err(|error| {
+        })?;
+    lower_extern_signature(typed_context, module_path, args, returns).map_err(|error| {
         ExternalResolutionError::Signature {
             export_field: origin.export_field.clone(),
             error,
@@ -951,23 +955,27 @@ fn parse_module_path(logical_module: &str) -> Result<ModulePath, ExternalResolut
         .map_err(ExternalResolutionError::ModulePath)
 }
 
-/// The declared argument list and return type of the `external fn` at `decl`.
+/// The declared argument list and return type of the `external fn` at `decl`,
+/// together with the module path of the file that declares it.
 ///
 /// Resolving by [`DefId`] (rather than by bare name) is what lets the driver
 /// validate a bound extern against its *own* declaration when two same-named
 /// externs exist — the top-level and a spec-inner `sort` no longer collide into
 /// one signature slot.
+///
+/// The module path is the scope the declaration's types are written in. A
+/// declaration no source file holds is the same internal inconsistency as a
+/// `decl` that names no `external fn`, and answers `None` the same way: falling
+/// back to the entry file's path instead would resolve a `::`-qualified type
+/// against imports the declaration was never written under.
 fn extern_declaration(
-    arena: &inference_ast::arena::AstArena,
-    decl: inference_ast::ids::DefId,
-) -> Option<(
-    Vec<inference_ast::nodes::ArgData>,
-    Option<inference_ast::ids::TypeId>,
-)> {
-    match &arena[decl].kind {
-        Def::ExternFunction { args, returns, .. } => Some((args.clone(), *returns)),
-        _ => None,
-    }
+    arena: &AstArena,
+    decl: DefId,
+) -> Option<(&[ArgData], Option<TypeId>, &[String])> {
+    let Def::ExternFunction { args, returns, .. } = &arena[decl].kind else {
+        return None;
+    };
+    Some((args, *returns, arena.node_module_path(NodeId::Def(decl))?))
 }
 
 #[cfg(test)]

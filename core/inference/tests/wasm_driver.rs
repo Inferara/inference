@@ -799,6 +799,167 @@ fn two_host_modules_resolve_sorted_and_link_against_the_real_artifact() {
     );
 }
 
+/// `geo.inf` for the tests of an extern that names another file's types: a
+/// public struct and a public enum, which a file that writes `use geo;` names as
+/// `geo::Point` and `geo::Level`.
+const GEO: &str = "pub struct Point { x: i32; }\npub enum Level { Low, High }";
+
+/// A host import whose signature names a struct and an enum through an imported
+/// namespace builds end to end (#481).
+///
+/// A struct lowers to its address and an enum to its tag, both an `i32`, however
+/// the type is named. The declaration is lowered twice — by the driver into the
+/// declared host import, and by code generation into the import the artifact
+/// carries — and `link_resolved` holds the two to each other, so this is where a
+/// driver that could not lower a `::`-qualified type would show: the program
+/// type-checks, and is then refused as an unsupported type in its extern's
+/// signature.
+#[test]
+fn a_host_import_naming_imported_types_builds_end_to_end() {
+    let typed = typed_of_multi(&[
+        (
+            Vec::new(),
+            "use geo;\n\
+             external fn send(p: geo::Point, l: geo::Level) -> geo::Level;\n\
+             use { send } from host::io;\n\
+             pub fn run(p: geo::Point, l: geo::Level) -> geo::Level { return send(p, l); }\n",
+        ),
+        (vec!["geo"], GEO),
+    ]);
+
+    let externals = resolve_external_modules(&typed, &SearchPath::new(), None)
+        .unwrap_or_else(|e| panic!("a struct or enum from an imported file is an extern type: {e}"));
+    assert_eq!(
+        externals.host_imports,
+        vec![HostImport {
+            module: "io".into(),
+            field: "send".into(),
+            signature: DeclaredSignature {
+                params: vec![WasmValType::I32, WasmValType::I32],
+                results: vec![WasmValType::I32],
+            },
+        }],
+        "`geo::Point` and `geo::Level` lower to the `i32` their bare spellings do"
+    );
+
+    let artifact = codegen(&typed, "main").expect("codegen succeeds");
+    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+        .unwrap_or_else(|e| panic!("the declaration and the emitted import agree: {e}"));
+    assert_eq!(
+        linked.wasm,
+        artifact.wasm(),
+        "a host program's artifact is the codegen output, byte for byte"
+    );
+    assert_eq!(
+        function_imports(&linked.wasm),
+        vec![("io".to_string(), "send".to_string())],
+        "the import the author asked an embedder for survives the link step"
+    );
+}
+
+/// A linked extern whose parameter names a struct through an imported namespace
+/// is validated against the library that provides it, as the `i32` address
+/// codegen passes, and links (#481).
+///
+/// Two libraries differ only in that parameter. The one exporting
+/// `send(i32) -> i32` is accepted and merged; the one exporting
+/// `send(i64) -> i32` is refused, with the declaration's side shown as
+/// `(i32) -> (i32)`. The refusal is what gives the acceptance its meaning: a
+/// build that never compared this declaration with the library would accept
+/// the first library too, and only the second shows the comparison ran, against
+/// an `i32`.
+#[test]
+fn a_linked_extern_naming_an_imported_struct_is_validated_as_an_address() {
+    let typed = typed_of_multi(&[
+        (
+            Vec::new(),
+            "use geo;\n\
+             external fn send(p: geo::Point) -> i32;\n\
+             use { send } from io;\n\
+             pub fn run(p: geo::Point) -> i32 { return send(p); }\n",
+        ),
+        (vec!["geo"], GEO),
+    ]);
+
+    let address_lib = compile("pub fn send(p: i32) -> i32 { return p; }", "io");
+    let tree = TempTree::new("qualified-address");
+    tree.write("io.wasm", &address_lib);
+    let mut search = SearchPath::new();
+    search.push_lib_dir(tree.root().to_path_buf());
+    let externals = resolve_external_modules(&typed, &search, None)
+        .unwrap_or_else(|e| panic!("the library exports what the declaration lowers to: {e}"));
+    assert_eq!(externals.modules.len(), 1);
+    assert_eq!(externals.modules[0].bytes, address_lib);
+
+    let artifact = codegen(&typed, "main").expect("codegen succeeds");
+    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+        .unwrap_or_else(|e| panic!("the validated library links: {e}"));
+    assert!(
+        function_imports(&linked.wasm).is_empty(),
+        "the merge satisfies `io`.`send`, leaving no import behind"
+    );
+
+    let wide_lib = compile("pub fn send(p: i64) -> i32 { return 0; }", "io");
+    let wide_tree = TempTree::new("qualified-wide");
+    wide_tree.write("io.wasm", &wide_lib);
+    let mut wide_search = SearchPath::new();
+    wide_search.push_lib_dir(wide_tree.root().to_path_buf());
+    let err = resolve_external_modules(&typed, &wide_search, None)
+        .expect_err("a struct is passed as an `i32` address, never as an `i64`");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("declared (i32) -> (i32)") && rendered.contains("found (i64) -> (i32)"),
+        "the declaration's side is the address codegen passes, and both sides are shown: \
+         {rendered}"
+    );
+}
+
+/// An extern's types are resolved from the file that declares it, not from the
+/// entry file (#481).
+///
+/// `side` imports `geo` and declares the extern; the entry file imports only
+/// `side`, so `geo::Point` names nothing from the entry file's scope. Codegen
+/// emits the import's signature from `side`, and a driver that lowered it from
+/// the entry file instead would refuse this program — correct in every file — as
+/// an unsupported type. Every other qualified-type test here declares its extern
+/// in the entry file, where the two scopes coincide and that mistake is
+/// invisible.
+#[test]
+fn an_extern_is_lowered_from_the_file_that_declares_it() {
+    let typed = typed_of_multi(&[
+        (
+            Vec::new(),
+            "use side;\npub fn run() -> i32 { return side::go(); }\n",
+        ),
+        (vec!["geo"], GEO),
+        (
+            vec!["side"],
+            "use geo;\n\
+             external fn send(p: geo::Point) -> i32;\n\
+             use { send } from host::io;\n\
+             pub fn go() -> i32 { let p: geo::Point = geo::Point { x: 7 }; return send(p); }\n",
+        ),
+    ]);
+
+    let externals = resolve_external_modules(&typed, &SearchPath::new(), None)
+        .unwrap_or_else(|e| panic!("`side` imports `geo`, and its declaration is read there: {e}"));
+    assert_eq!(
+        externals.host_imports,
+        vec![HostImport {
+            module: "io".into(),
+            field: "send".into(),
+            signature: DeclaredSignature {
+                params: vec![WasmValType::I32],
+                results: vec![WasmValType::I32],
+            },
+        }]
+    );
+
+    let artifact = codegen(&typed, "main").expect("codegen succeeds");
+    link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+        .unwrap_or_else(|e| panic!("the declaration and the emitted import agree: {e}"));
+}
+
 #[test]
 fn resolves_a_bound_extern_through_a_manifest_entry() {
     // The manifest binds the logical module to a `.wasm` whose name on disk does

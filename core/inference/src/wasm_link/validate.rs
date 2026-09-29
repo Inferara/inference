@@ -15,33 +15,41 @@
 //! ## Signature lowering
 //!
 //! Inference primitive types lower to WASM value types as `wasm-codegen` does:
-//! `bool`, `i8`/`u8`, `i16`/`u16`, `i32`/`u32`, arrays, and struct/enum pointers
-//! become `i32`; `i64`/`u64` become `i64`; the unit type `()` produces no
-//! value. Keeping this in lock-step with codegen is what makes validation
-//! meaningful — a mismatch here is a real mismatch at link time, and since a
-//! host import's declared signature is compared against the one codegen emitted
-//! for it, a divergence is a refusal of a program in which nothing is wrong.
+//! `bool`, `i8`/`u8`, `i16`/`u16`, `i32`/`u32`, arrays, structs and enums become
+//! `i32` — an address for an array or a struct, a tag for an enum, however the
+//! struct or enum is named; `i64`/`u64` become `i64`; the unit type `()`
+//! produces no value. Keeping this in lock-step with codegen is what makes
+//! validation meaningful — a mismatch here is a real mismatch at link time, and
+//! since a host import's declared signature is compared against the one codegen
+//! emitted for it, a divergence is a refusal of a program in which nothing is
+//! wrong.
 //!
-//! The two lowerings are not yet identical, and what keeps the difference
-//! harmless is a rejection elsewhere rather than agreement here. Codegen lowers a
-//! `::`-qualified type that resolves to a struct or enum to an `i32` pointer,
-//! where this module has no arm for one and reports it unsupported; and codegen
-//! errors on a `Custom` name it cannot resolve, where this module lowers every
-//! `Custom` to `i32` on sight. Neither divergence is reachable today, because a
-//! `::`-qualified type on an `external fn` is rejected by the type checker
-//! before validation runs, and an unknown type name is rejected outright. That
-//! standoff is what [#425](https://github.com/Inferara/inference/issues/425)
-//! tracks: the rejection and these two arms have to move together, since lifting
-//! the rejection on its own would admit a declaration this module refuses and
-//! codegen accepts.
+//! A `::`-qualified type (`geo::Point`) is where the two could most easily part,
+//! because its path means something only against the imports of the file it is
+//! written in. It is therefore resolved rather than lowered on sight: by the
+//! query codegen asks, `TypedContext::qualified_type_is_nominal`, and from the
+//! declaring file codegen asks it from, so the two cannot answer differently for
+//! one declaration. This module once refused the form outright, which stayed
+//! invisible only while the type checker refused it first — together they left
+//! an `external fn` unable to name another file's type at all
+//! ([#425](https://github.com/Inferara/inference/issues/425),
+//! [#481](https://github.com/Inferara/inference/issues/481)).
+//!
+//! The mirror is still not exact for a bare type name or an array. Codegen
+//! resolves a bare name and refuses one that names no struct or enum — a `spec`
+//! written as a type, say — and refuses an array whose innermost element has no
+//! value type; this module lowers both to `i32` on sight. Both differences run
+//! the harmless way: this module accepts what codegen then refuses, so a program
+//! they touch is refused one stage later, by codegen, and never refused in
+//! error.
 
 use inf_wasmparser::{
     CompositeInnerType, Export, ExternalKind, FuncType, Parser, Payload, RecGroup, ValType,
 };
 
-use inference_ast::arena::AstArena;
 use inference_ast::ids::TypeId;
 use inference_ast::nodes::{ArgKind, SimpleTypeKind, TypeNode};
+use inference_type_checker::typed_context::TypedContext;
 
 /// Maximum number of exported function names listed in an
 /// [`ValidateError::ExportNotFound`] hint before the rest are summarized as a
@@ -127,11 +135,17 @@ impl std::error::Error for LowerSignatureError {}
 
 /// Lowers an Inference type to its WASM value type, mirroring
 /// `wasm-codegen`'s `val_type_from_type_id`. The unit type `()` lowers to
-/// `None` (no value); a struct or enum name lowers to an `i32` pointer. The
-/// mirror is not yet exact; see the module
-/// documentation for where it parts company and why that is currently
-/// unobservable.
-fn lower_value_type(arena: &AstArena, ty: TypeId) -> Result<Option<WasmValType>, LowerSignatureError> {
+/// `None` (no value); a struct or enum lowers to an `i32`, whether it is named
+/// bare or by a `::`-qualified path. `module_path` is the declaring file's, the
+/// scope a qualified path is resolved from, as it is for codegen. The mirror is
+/// not exact for a bare name or an array; see the module documentation for how,
+/// and why neither difference can refuse a program codegen compiles.
+fn lower_value_type(
+    typed_context: &TypedContext,
+    module_path: &[String],
+    ty: TypeId,
+) -> Result<Option<WasmValType>, LowerSignatureError> {
+    let arena = typed_context.arena();
     match &arena[ty].kind {
         TypeNode::Simple(SimpleTypeKind::Unit) => Ok(None),
         TypeNode::Simple(
@@ -144,16 +158,30 @@ fn lower_value_type(arena: &AstArena, ty: TypeId) -> Result<Option<WasmValType>,
             | SimpleTypeKind::U32,
         )
         | TypeNode::Array { .. }
-        // Struct / enum values are i32 pointers into linear memory, matching codegen.
+        // A struct is an address into linear memory and an enum a tag, both an
+        // `i32`, matching codegen.
         | TypeNode::Custom(_) => Ok(Some(WasmValType::I32)),
         TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Ok(Some(WasmValType::I64)),
+        // A `::`-qualified struct or enum is an `i32` exactly as its bare
+        // spelling is. The path is resolved rather than lowered on sight, by the
+        // query codegen asks and from the file codegen asks it from, so the two
+        // cannot answer differently for one declaration. The type checker has
+        // already bound the path, so the refusal is defense in depth, and it
+        // names the path as written rather than the node it was parsed into.
+        TypeNode::Qualified { .. } => {
+            let path = arena[ty].kind.qualified_segments(arena).unwrap_or_default();
+            if typed_context.qualified_type_is_nominal(&path, module_path) {
+                Ok(Some(WasmValType::I32))
+            } else {
+                Err(LowerSignatureError::UnsupportedType {
+                    rendered: path.join("::"),
+                })
+            }
+        }
         // What remains: `Generic` and `Function`, which codegen refuses as well —
         // a type application as the construct A051 owns, a function type as an
-        // unsupported type; `QualifiedName`, the dead AST variant codegen also rejects;
-        // and `Qualified`, which codegen *does* lower, to an `i32` pointer, once
-        // the path resolves to a struct or enum. Refusing the last of these is a
-        // divergence the type checker keeps out of reach — see the module
-        // documentation. Erroring beats guessing a representation.
+        // unsupported type — and `QualifiedName`, the dead AST variant codegen
+        // also rejects. Erroring beats guessing a representation.
         other => Err(LowerSignatureError::UnsupportedType {
             rendered: format!("{other:?}"),
         }),
@@ -191,16 +219,25 @@ pub struct LoweredExtern {
 /// rather than assumed, because if it ever became reachable the write set would
 /// silently name the wrong parameters.
 ///
+/// `args` and `returns` are read from `typed_context`'s arena, and
+/// `module_path` is the module path of the file that declares them — empty for
+/// the entry file. A type in the signature is resolved from that file, the scope
+/// it is written in and the one codegen's `import_param_types` resolves it
+/// from: a declaration in `lib/io.inf` naming `geo::Point` is read against
+/// `lib/io.inf`'s own `use geo;`, never against the entry file's imports.
+///
 /// # Errors
 ///
 /// Returns [`LowerSignatureError`] if a parameter is `()` or a type form is
 /// not lowerable to a scalar value type. A `()` return is valid and yields an
 /// empty `results` list.
 pub fn lower_extern_signature(
-    arena: &AstArena,
+    typed_context: &TypedContext,
+    module_path: &[String],
     args: &[inference_ast::nodes::ArgData],
     returns: Option<TypeId>,
 ) -> Result<LoweredExtern, LowerSignatureError> {
+    let arena = typed_context.arena();
     let mut params = Vec::with_capacity(args.len());
     let mut mut_params = Vec::new();
     let mut param_names = Vec::with_capacity(args.len());
@@ -226,7 +263,7 @@ pub fn lower_extern_signature(
                 continue;
             }
         };
-        match lower_value_type(arena, ty)? {
+        match lower_value_type(typed_context, module_path, ty)? {
             Some(val) => {
                 if is_mut {
                     mut_params.push(u32::try_from(params.len()).unwrap_or(u32::MAX));
@@ -239,7 +276,9 @@ pub fn lower_extern_signature(
     }
 
     let results = match returns {
-        Some(ty) => lower_value_type(arena, ty)?.into_iter().collect(),
+        Some(ty) => lower_value_type(typed_context, module_path, ty)?
+            .into_iter()
+            .collect(),
         None => Vec::new(),
     };
 
@@ -515,17 +554,48 @@ mod tests {
     use inference_ast::nodes::Def;
 
     /// Lowers the first `external fn` found in `source` (descending into specs).
+    ///
+    /// The source is type-checked first, because lowering reads the program's
+    /// types through the [`TypedContext`] rather than the bare arena. It is one
+    /// file, so the declaration is the entry file's and lowers from the empty
+    /// module path.
     fn lower_first_extern(source: &str) -> Result<DeclaredSignature, LowerSignatureError> {
-        let arena = parse(source).expect("source parses");
+        let typed_context =
+            crate::type_check(parse(source).expect("source parses")).expect("source type-checks");
+        lower_first_extern_of(&typed_context, &[])
+    }
+
+    /// Lowers the first `external fn` of a type-checked program (descending into
+    /// specs), resolving its types from the file at `module_path`.
+    fn lower_first_extern_of(
+        typed_context: &TypedContext,
+        module_path: &[String],
+    ) -> Result<DeclaredSignature, LowerSignatureError> {
+        let arena = typed_context.arena();
         let extern_def = arena
             .source_files()
             .flat_map(|file| file.defs.iter().copied())
-            .find_map(|def_id| find_extern(&arena, def_id))
+            .find_map(|def_id| find_extern(arena, def_id))
             .expect("an external fn");
         let Def::ExternFunction { args, returns, .. } = &arena[extern_def].kind else {
             unreachable!("find_extern only yields externs");
         };
-        lower_extern_signature(&arena, args, *returns).map(|lowered| lowered.signature)
+        lower_extern_signature(typed_context, module_path, args, *returns)
+            .map(|lowered| lowered.signature)
+    }
+
+    /// Type-checks a program of `(module_path, source)` files, given entry first
+    /// and then in module-path order — the canonical order the project front end
+    /// folds a source tree into.
+    fn typed_program(files: &[(&[&str], &str)]) -> TypedContext {
+        let mut arena = inference_ast::arena::AstArena::default();
+        for (module_path, source) in files {
+            let module_path = module_path.iter().map(ToString::to_string).collect();
+            let parsed = inference_parser::parse_into(arena, source, module_path);
+            assert!(parsed.errors.is_empty(), "syntax errors: {:?}", parsed.errors);
+            arena = parsed.arena;
+        }
+        crate::type_check(arena).expect("program type-checks")
     }
 
     fn find_extern(
@@ -611,6 +681,43 @@ mod tests {
             sig.results,
             vec![WasmValType::I32],
             "a struct name that merely resembles the reserved one is an ordinary pointer"
+        );
+    }
+
+    /// A struct or enum named by a `::`-qualified path lowers to the `i32` its
+    /// bare spelling does, at a parameter and at the return alike — resolved
+    /// from the file that declares it.
+    ///
+    /// The declaration lives in `side`, which imports `geo`; the entry file does
+    /// not. Lowered from `side`, the file codegen emits the import's signature
+    /// from, every position is an `i32`. Lowered from the entry file, the same
+    /// path names nothing that file can reach, and the refusal quotes the path as
+    /// written rather than the AST node it was parsed into. That second half is
+    /// what gives the first its meaning: a lowering that answered `i32` for any
+    /// path it was handed would pass the first half too.
+    #[test]
+    fn a_qualified_type_lowers_from_the_file_that_declares_it() {
+        let typed_context = typed_program(&[
+            (&[], "use side;\npub fn run() -> i32 { return 0; }"),
+            (&["geo"], "pub struct Point { x: i32; }\npub enum Level { Low, High }"),
+            (
+                &["side"],
+                "use geo;\nexternal fn f(p: geo::Point, l: geo::Level) -> geo::Point;",
+            ),
+        ]);
+
+        let sig = lower_first_extern_of(&typed_context, &["side".to_string()])
+            .expect("the declaring file imports `geo`");
+        assert_eq!(sig.params, vec![WasmValType::I32, WasmValType::I32]);
+        assert_eq!(sig.results, vec![WasmValType::I32]);
+
+        let err = lower_first_extern_of(&typed_context, &[])
+            .expect_err("the entry file never imported `geo`");
+        assert_eq!(
+            err,
+            LowerSignatureError::UnsupportedType {
+                rendered: "geo::Point".into(),
+            }
         );
     }
 

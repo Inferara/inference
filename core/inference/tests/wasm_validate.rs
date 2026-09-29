@@ -223,15 +223,19 @@ fn rejects_invalid_wasm_bytes() {
 fn lowers_extern_declaration_to_wasm_signature() {
     // The signature comparison is only meaningful if the declared side is lowered
     // exactly like codegen. Lower a real `external fn` and check the value types.
-    let arena = inference::parse(
-        "spec s { external fn mix(a: i32, b: i64, c: bool) -> u64; }",
+    // Lowering reads types through the typed context, so the source is
+    // type-checked first; it is one file, the entry, whose module path is empty.
+    let typed = inference::type_check(
+        inference::parse("spec s { external fn mix(a: i32, b: i64, c: bool) -> u64; }")
+            .expect("parse"),
     )
-    .expect("parse");
+    .expect("type-check");
+    let arena = typed.arena();
 
     let extern_def = arena
         .source_files()
         .flat_map(|file| file.defs.iter().copied())
-        .flat_map(|def_id| collect_externs(&arena, def_id))
+        .flat_map(|def_id| collect_externs(arena, def_id))
         .next()
         .expect("an external fn");
 
@@ -239,7 +243,7 @@ fn lowers_extern_declaration_to_wasm_signature() {
         unreachable!("collect_externs only yields externs");
     };
 
-    let declared = lower_extern_signature(&arena, args, *returns).expect("lower");
+    let declared = lower_extern_signature(&typed, &[], args, *returns).expect("lower");
     assert_eq!(
         declared.signature,
         sig(
