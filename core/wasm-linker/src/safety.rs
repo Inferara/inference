@@ -163,10 +163,11 @@ pub(crate) struct OpEffect {
 /// An admitted operator that sets neither `uses_tables` nor `uses_data_segments`
 /// can reach [`crate::provenance`] in a Tier-B closure, whose interpreter needs a
 /// transfer function for it; without one it falls into a fail-closed catch-all
-/// that over-rejects sound closures. A newly admitted family therefore also
-/// needs an entry in the coverage corpus of `provenance/tests.rs`
-/// (`every_admitted_operator_reaching_provenance_is_modeled`), which fails until
-/// the interpreter models it.
+/// that over-rejects sound closures. The provenance test
+/// `every_admitted_operator_reaching_provenance_is_modeled` builds every
+/// operator the parser defines and runs it through this function, so admitting a
+/// family here without giving it a transfer function there fails that test; no
+/// list needs updating by hand.
 ///
 /// # Errors
 ///

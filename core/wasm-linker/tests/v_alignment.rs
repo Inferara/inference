@@ -578,9 +578,10 @@ fn tail_calls_are_rejected() {
 
 #[test]
 fn main_globals_translate() {
-    // global.get / global.set on a main-side mutable global. Globals live on the
-    // main module (a Tier-C external carrying its own globals is rejected), so the
-    // fixture declares the global itself.
+    // global.get / global.set on a main-side mutable global. An external may
+    // carry its own globals too — they are merged, and are not a Tier-C reason —
+    // but declaring the global on main keeps this fixture about the translator
+    // alone, independent of the external merge.
     let main = wasm(
         r#"
         (module
