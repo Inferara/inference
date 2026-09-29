@@ -8,7 +8,6 @@ use rustc_hash::FxHashMap;
 
 use crate::nondet_docs::{UZUMAKI_INLAY, block_inlay, block_keyword};
 use crate::syntax::walk_file;
-use crate::type_render::render_type;
 
 /// What a non-det [`InlayHint`] annotates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -104,7 +103,7 @@ fn nondet_block_hint(source: &str, kind: BlockKind, start: u32) -> Option<InlayH
 /// parentheses when the declaration named one.
 fn uzumaki_label(declared: Option<&TypeInfo>) -> String {
     match declared {
-        Some(ty) => format!("{UZUMAKI_INLAY} ({})", render_type(ty)),
+        Some(ty) => format!("{UZUMAKI_INLAY} ({ty})"),
         None => UZUMAKI_INLAY.to_string(),
     }
 }

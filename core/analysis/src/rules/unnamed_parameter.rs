@@ -74,7 +74,6 @@ use inference_ast::nodes::{ArgData, ArgKind, Def};
 use inference_type_checker::type_info::TypeInfo;
 
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
-use crate::walker::render_type;
 
 crate::rule! {
     /// A parameter of a defined function must be named, or written `_`.
@@ -155,7 +154,7 @@ fn report_unnamed(
                 AnalysisDiagnostic::UnnamedParameter {
                     function: function.to_string(),
                     index,
-                    ty: render_type(&TypeInfo::from_type_id(arena, *ty).kind),
+                    ty: TypeInfo::from_type_id(arena, *ty).to_string(),
                     location: arg.location,
                 },
             ));

@@ -30,7 +30,6 @@ use crate::syntax::{
     def_is_public, def_signature, enclosing_function, find_def_by_name, in_scope_locals,
     method_has_self, resolve_plain_import_namespace,
 };
-use crate::type_render::render_type;
 
 /// The category of a completion, used by the editor to pick an icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -134,7 +133,7 @@ fn push_locals(
                 items.push(CompletionItem {
                     label: arena.ident_name(*name).to_string(),
                     kind: CompletionItemKind::Variable,
-                    detail: Some(render_type(&TypeInfo::from_type_id(arena, *ty))),
+                    detail: Some(TypeInfo::from_type_id(arena, *ty).to_string()),
                 });
             }
         }
@@ -144,7 +143,7 @@ fn push_locals(
             items.push(CompletionItem {
                 label: arena.ident_name(*name).to_string(),
                 kind: CompletionItemKind::Variable,
-                detail: Some(render_type(&TypeInfo::from_type_id(arena, *ty))),
+                detail: Some(TypeInfo::from_type_id(arena, *ty).to_string()),
             });
         }
     }
@@ -351,7 +350,7 @@ fn struct_members(
         items.push(CompletionItem {
             label: field.name.clone(),
             kind: CompletionItemKind::Field,
-            detail: Some(render_type(&field.type_info)),
+            detail: Some(field.type_info.to_string()),
         });
     }
     let Some(module_path) = ctx.module_path_of_struct_key(key) else {

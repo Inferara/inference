@@ -37,7 +37,7 @@ is `ide/ide` (`inference-ide`). But the compiler surface is not confined to
 `inference-ast`, `inference-parser`, `inference-type-checker`), and `ide/ide`
 *also* depends directly on `inference-ast` and `inference-type-checker` —
 `goto_definition`, `completions`, `diagnostics`, `document_symbols`, `hover`,
-`inlay_hints`, `syntax`, and `type_render` all import AST node/id types or
+`inlay_hints`, and `syntax` all import AST node/id types or
 type-checker type-info/error types to shape their editor-facing results. So a
 change to an AST node's shape or a type-checker error/type-info variant can
 touch `ide/ide` directly, not just `ide-db`; a change confined to

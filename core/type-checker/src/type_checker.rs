@@ -3586,7 +3586,7 @@ impl TypeChecker {
                     }
                     // Type the call as the spec function's declared return type so
                     // the rejected call does not cascade a misleading
-                    // "expected T, found Unit" at an enclosing `return` or `let`.
+                    // "expected T, found ()" at an enclosing `return` or `let`.
                     let return_type = sig.return_type.clone();
                     ctx.set_node_typeinfo(NodeId::Expr(call_expr_id), return_type.clone());
                     return Some(Some(return_type));

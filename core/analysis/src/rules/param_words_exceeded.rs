@@ -81,7 +81,6 @@ use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
 
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic, ParamWords, ParamWordsGroup};
-use crate::walker::render_type;
 
 /// The most parameter words `SpaceWasm` accepts in one function.
 ///
@@ -244,7 +243,7 @@ fn signature_words(ctx: &TypedContext, function: &DefinedFunction<'_>) -> ParamW
         let Some(words_each) = type_words(ctx, ty, function.module_path) else {
             continue;
         };
-        let rendered = render_type(&TypeInfo::from_type_id(arena, ty).kind);
+        let rendered = TypeInfo::from_type_id(arena, ty).to_string();
         match params.iter_mut().find(|group| group.ty == rendered) {
             Some(group) => group.count += 1,
             None => params.push(ParamWordsGroup {
@@ -257,7 +256,7 @@ fn signature_words(ctx: &TypedContext, function: &DefinedFunction<'_>) -> ParamW
     let result_pointer = function
         .returns
         .filter(|&ty| returns_through_pointer(ctx, ty, function.module_path))
-        .map(|ty| render_type(&TypeInfo::from_type_id(arena, ty).kind));
+        .map(|ty| TypeInfo::from_type_id(arena, ty).to_string());
     ParamWords {
         receiver,
         params,

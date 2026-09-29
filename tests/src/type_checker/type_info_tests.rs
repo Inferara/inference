@@ -370,19 +370,35 @@ mod display {
     #[test]
     fn test_display_unit() {
         let ti = TypeInfo::default();
-        assert_eq!(ti.to_string(), "Unit");
+        assert_eq!(ti.to_string(), "()");
     }
 
     #[test]
     fn test_display_bool() {
         let ti = TypeInfo::boolean();
-        assert_eq!(ti.to_string(), "Bool");
+        assert_eq!(ti.to_string(), "bool");
     }
 
     #[test]
     fn test_display_string() {
         let ti = TypeInfo::string();
-        assert_eq!(ti.to_string(), "String");
+        assert_eq!(ti.to_string(), "string");
+    }
+
+    /// A diagnostic quotes a builtin by its `Display`, so the `Display` must be
+    /// the spelling source uses for it, which `as_builtin_str` is the table of.
+    #[test]
+    fn test_display_of_every_builtin_is_its_source_spelling() {
+        let builtins = [TypeInfoKind::Unit, TypeInfoKind::Bool, TypeInfoKind::String]
+            .into_iter()
+            .chain(NumberType::ALL.iter().map(|nt| TypeInfoKind::Number(*nt)));
+        for kind in builtins {
+            assert_eq!(
+                Some(kind.to_string().as_str()),
+                kind.as_builtin_str(),
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]
@@ -422,7 +438,7 @@ mod display {
             kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), 10),
             type_params: vec![],
         };
-        assert_eq!(array.to_string(), "[Bool; 10]");
+        assert_eq!(array.to_string(), "[bool; 10]");
     }
 
     #[test]
@@ -432,6 +448,25 @@ mod display {
             type_params: vec![],
         };
         assert_eq!(generic.to_string(), "T'");
+    }
+
+    /// A generic application (`Array u32'`) primes its arguments, not its base.
+    #[test]
+    fn test_display_generic_application() {
+        let application = TypeInfo {
+            kind: TypeInfoKind::Generic("Array".to_string()),
+            type_params: vec!["u32".to_string()],
+        };
+        assert_eq!(application.to_string(), "Array u32'");
+    }
+
+    #[test]
+    fn test_display_array_of_unit() {
+        let array = TypeInfo {
+            kind: TypeInfoKind::Array(Box::default(), 3),
+            type_params: vec![],
+        };
+        assert_eq!(array.to_string(), "[(); 3]");
     }
 
     #[test]
@@ -509,7 +544,7 @@ mod display {
             ),
             type_params: vec![],
         };
-        assert_eq!(nested.to_string(), "[[Bool; 5]; 10]");
+        assert_eq!(nested.to_string(), "[[bool; 5]; 10]");
     }
 
     #[test]
@@ -1066,6 +1101,32 @@ mod type_info_from_ast {
             // The actual parameter types are threaded through, each spelled
             // source-like (lowercase built-ins), rather than a param count.
             assert_eq!(sig, "fn(i32, bool) -> string");
+        } else {
+            panic!("Expected function type");
+        }
+    }
+
+    #[test]
+    fn test_new_from_function_type_spells_builtins_inside_arrays() {
+        let mut arena = AstArena::default();
+        let element = alloc_simple_type(&mut arena, "bool");
+        let size = alloc_number_literal_expr(&mut arena, "2");
+        let param = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Array { element, size },
+        });
+        let ret = alloc_simple_type(&mut arena, "()");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Function {
+                params: vec![param],
+                ret: Some(ret),
+            },
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
+
+        if let TypeInfoKind::Function(sig) = &ti.kind {
+            assert_eq!(sig, "fn([bool; 2]) -> ()");
         } else {
             panic!("Expected function type");
         }

@@ -1355,7 +1355,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: type mismatch in assignment: expected `Bool`, found `Unit`"
+            "1:5: type mismatch in assignment: expected `bool`, found `()`"
         );
     }
 
@@ -1703,7 +1703,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: unary operator `Not` can only be applied to booleans, found `Bool`"
+            "1:5: unary operator `Not` can only be applied to booleans, found `bool`"
         );
     }
 
@@ -1873,7 +1873,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot call method on non-struct type `Bool`"
+            "1:5: cannot call method on non-struct type `bool`"
         );
     }
 
@@ -1888,7 +1888,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: array index must be of number type, found `Bool`"
+            "1:5: array index must be of number type, found `bool`"
         );
     }
 

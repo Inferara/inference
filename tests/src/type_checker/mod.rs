@@ -21,3 +21,4 @@ mod self_parameter_position;
 mod spec_type_collision_diagnostics;
 mod struct_tests;
 mod type_info_tests;
+mod type_spelling;

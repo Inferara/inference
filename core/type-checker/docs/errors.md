@@ -77,12 +77,12 @@ Two variants deserve a note:
 ```rust
 // Return statement mismatch
 fn test() -> i32 {
-    return true;  // Error: type mismatch in return statement: expected `i32`, found `Bool`
+    return true;  // Error: type mismatch in return statement: expected `i32`, found `bool`
 }
 
 // Variable definition mismatch
 fn test() {
-    let x: i32 = true;  // Error: type mismatch in variable definition: expected `i32`, found `Bool`
+    let x: i32 = true;  // Error: type mismatch in variable definition: expected `i32`, found `bool`
 }
 
 // Function argument mismatch
@@ -96,7 +96,7 @@ fn test() {
 struct P { x: i32; }
 
 fn test() {
-    let p: P = P { x: true };  // Error: type mismatch in field `x` of struct `P`: expected `i32`, found `Bool`
+    let p: P = P { x: true };  // Error: type mismatch in field `x` of struct `P`: expected `i32`, found `bool`
 }
 ```
 
@@ -112,7 +112,7 @@ first element's type.
 ```rust
 fn test() {
     let arr: [i32; 3] = [1, 2, true];
-    // Error: array elements must be of the same type: expected `i32`, found `Bool`
+    // Error: array elements must be of the same type: expected `i32`, found `bool`
 }
 ```
 
@@ -632,7 +632,7 @@ fn test() {
 
 **This is not the same as an integer literal in an operand position.** Two *typed* values of different widths never combine, and that has not changed: Inference has no implicit widening and no cast operator, so the only fix is at a declaration. An integer *literal* is a different thing — it has no type of its own until a position gives it one, so `let x: i64 = 10; let z: i64 = x + 20;` is fine: the literal `20` takes `x`'s type rather than being widened from `i32`. See [Integer Literal Typing](./type-system.md#integer-literal-typing) for which positions supply a type and how far it descends.
 
-The note names the two declarations rather than suggesting an annotation on an operand, because in the usual case both operands are typed variables and there is nothing to annotate. One shape still slips past that wording: a literal beside a non-numeric peer (`b == 1` with `b: bool`) keeps its `i32` default — peer typing only offers integer types — and reports `Bool` against `i32`, where "change one of the two declarations" names a declaration the literal does not have.
+The note names the two declarations rather than suggesting an annotation on an operand, because in the usual case both operands are typed variables and there is nothing to annotate. One shape still slips past that wording: a literal beside a non-numeric peer (`b == 1` with `b: bool`) keeps its `i32` default — peer typing only offers integer types — and reports `bool` against `i32`, where "change one of the two declarations" names a declaration the literal does not have.
 
 ---
 
@@ -773,7 +773,7 @@ The index expression in an array access is not a numeric type.
 ```rust
 fn test() {
     let arr: [i32; 5] = [1, 2, 3, 4, 5];
-    let x = arr[true];  // Error: array index must be of number type, found `Bool`
+    let x = arr[true];  // Error: array index must be of number type, found `bool`
 }
 ```
 
@@ -822,7 +822,7 @@ fn pair T'(a: T, b: T) -> bool { return true; }
 
 fn test() {
     pair(42, true);
-    // Error: conflicting types for type parameter `T`: inferred `i32` and `Bool`
+    // Error: conflicting types for type parameter `T`: inferred `i32` and `bool`
 }
 ```
 
@@ -1300,7 +1300,7 @@ pub struct Location {
 Error messages format the location as `start_line:start_column:` at the beginning:
 
 ```
-1:5: type mismatch in return statement: expected `i32`, found `Bool`
+1:5: type mismatch in return statement: expected `i32`, found `bool`
 ```
 
 ## Related Documentation
