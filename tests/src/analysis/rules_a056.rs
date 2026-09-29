@@ -344,4 +344,51 @@ mod analysis_rules_tests {
              assert(a[i] == a[i]); } }",
         );
     }
+
+    /// No run reaches a loop behind `if false`, so nothing in it is reported.
+    #[test]
+    fn a056_access_in_an_unreachable_loop_is_not_reported() {
+        assert_proven(
+            "pub fn f(i: i32) -> i32 { let a: [i32; 4] = [1, 2, 3, 4]; let mut r: i32 = 0; \
+             if false { loop i < 100 { r = a[i]; } } return r; }",
+        );
+    }
+
+    /// `depth` counting loops nested in one another, each over a counter of type
+    /// `ty`, with the innermost counter indexing a `[i32; 4]`.
+    fn nested_counting_loops(depth: usize, ty: &str) -> String {
+        let mut source = String::from(
+            "pub fn f() -> i32 { let a: [i32; 4] = [1, 2, 3, 4]; let mut s: i32 = 0; ",
+        );
+        for d in 0..depth {
+            source.push_str(&format!("let mut c{d}: {ty} = 0; loop c{d} < 4 {{ "));
+        }
+        source.push_str(&format!("s = wrapping(s + a[c{}]); ", depth - 1));
+        for d in (0..depth).rev() {
+            source.push_str(&format!("c{d} = c{d} + 1; }} "));
+        }
+        source.push_str("return s; }");
+        source
+    }
+
+    /// Re-analyzing a nested loop for every pass of the one around it multiplies
+    /// with the depth, so past a statement budget each remaining loop is
+    /// analyzed in one pass that forgets every local its body writes. The
+    /// fallback keeps what a loop condition establishes: an unsigned counter
+    /// is still proven by `c < 4` alone, even this deep.
+    #[test]
+    fn a056_budget_fallback_keeps_the_loop_condition() {
+        assert_proven(&nested_counting_loops(16, "u32"));
+    }
+
+    /// What the fallback forgets is the lower bound a signed counter's
+    /// initializer established, so the access is reported — never accepted on
+    /// a range narrower than the counter can take.
+    #[test]
+    fn a056_budget_fallback_reports_conservatively() {
+        assert_eq!(
+            a056_findings(&nested_counting_loops(16, "i32")),
+            vec![unproven(Some("c15"), I32_MIN, 3)]
+        );
+    }
 }
