@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - `core/wasm-to-v`'s crate docs and `ROCQ_CONTRACT.md` no longer say the wasm-verifier program logic cannot verify floating-point terms. It is generic over WasmCert's number types, floats included, and only its `testop` rule is integer-only. Both now say the narrowing is Inference's: the language has no floating-point or vector types, so the contract declares none and the translator refuses them ([#496])
+- The book's linker chapter no longer lists globals as a Tier-C signal. Its tier table put "global access" in Tier C, beside a paragraph saying reading or writing a global is not one; the table, the multi-reason diagnostic example and the comparison with `wasm-ld` now agree with the linker, which merges an external's globals at Tier A or B and rejects only an address computed from one. The chapter also says a leaked access to a dropped global fails the link with `LinkError::UnsupportedConstruct` instead of describing the rebinding onto main's first global that this replaced, and that `table.init`, `elem.drop` and `table.copy` are rejected outright rather than classified as Tier C ([#508])
 
 ### Fixed
 
@@ -882,3 +883,4 @@ Initial tagged release.
 [#425]: https://github.com/Inferara/inference/issues/425
 [#476]: https://github.com/Inferara/inference/issues/476
 [#430]: https://github.com/Inferara/inference/issues/430
+[#508]: https://github.com/Inferara/inference/pull/508
