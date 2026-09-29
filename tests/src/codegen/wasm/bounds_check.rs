@@ -1076,19 +1076,51 @@ pub fn sum(n: i32) -> i32 {
     // already checked the folded index against the array's declared length, and
     // the guard compares against that same length. The pair matters because
     // neither half is stated where the other is decided.
+    //
+    // A build that ran analysis carries no guard there at all: A056 examines a
+    // reachability body too, folds both spellings, and proves them in bounds, so
+    // code generation omits the guard. The tests below build without analysis,
+    // which is what leaves code generation's own decision to be pinned; the
+    // last of them pins the elision.
 
     /// The proof-mode `.v` for `source` -- the artifact the reachability
     /// judgment reduces, and so the only place a claim about "what lands in the
     /// retained body" can be checked. WAT is not an option: a reachability body
     /// binds `@` choices, and `wasmprinter` rejects the custom opcodes.
+    ///
+    /// Built without analysis, so no access is handed to code generation as
+    /// proven in bounds.
     fn reachability_v(source: &str) -> String {
-        let output = crate::utils::codegen_with_full_config(
+        reachability_v_of(
+            crate::utils::codegen_with_full_config_no_analysis(
+                source,
+                Target::Wasm32,
+                CompilationMode::Proof,
+                OptLevel::O0,
+            ),
             source,
-            Target::Wasm32,
-            CompilationMode::Proof,
-            OptLevel::O0,
         )
-        .unwrap_or_else(|e| panic!("proof-mode codegen failed:{e}\nsource:\n{source}"));
+    }
+
+    /// [`reachability_v`] for a build that ran analysis first, as `infc` does.
+    fn analyzed_reachability_v(source: &str) -> String {
+        reachability_v_of(
+            crate::utils::codegen_with_full_config(
+                source,
+                Target::Wasm32,
+                CompilationMode::Proof,
+                OptLevel::O0,
+            ),
+            source,
+        )
+    }
+
+    fn reachability_v_of(
+        output: anyhow::Result<inference_wasm_codegen::CodegenOutput>,
+        source: &str,
+    ) -> String {
+        let output =
+            output.unwrap_or_else(|e| panic!("proof-mode codegen failed:{e}\nsource:\n{source}"));
         let v = inference::wasm_to_v(
             "reach",
             output.wasm(),
@@ -1179,6 +1211,32 @@ spec Reach {
                  BI_binop T_i32 (Binop_i BOI_add) :: BI_local_tee"
             ),
             "the guarded index must be the constant arithmetic itself, computed and teed:\n{body}"
+        );
+    }
+
+    /// With analysis run first, both spellings are proven in bounds and neither
+    /// guard is emitted: the retained body loads at the folded index's offset
+    /// with no comparison against the array length in between.
+    #[test]
+    fn proof_mode_omits_the_guard_analysis_proved_dead_in_a_reachability_body() {
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 0);
+        cov_mark::check_count!(wasm_codegen_elide_bounds_check, 2);
+        let body = analyzed_reachability_v(
+            r#"
+spec Reach {
+  fn f() exists {
+    let a: [i32; 2] = [1, 2];
+    const K: i32 = 1;
+    let n: i32 = @;
+    assert(a[K] == n);
+    assert(a[wrapping(1 + 0)] == n);
+  }
+}
+"#,
+        );
+        assert!(
+            !body.contains("ROI_ge SX_U"),
+            "an access analysis proved in bounds carries no guard:\n{body}"
         );
     }
 

@@ -47,8 +47,11 @@
 
 #![warn(clippy::pedantic)]
 
+use std::collections::HashSet;
+use std::hash::BuildHasher;
+
 use inference_ast::arena::AstArena;
-use inference_ast::ids::DefId;
+use inference_ast::ids::{DefId, ExprId};
 use inference_ast::nodes::Def;
 use inference_fn_key::FnKey;
 use inference_type_checker::typed_context::TypedContext;
@@ -159,10 +162,43 @@ pub use crate::checked_section::SECTION_VERSION as CHECKED_SECTION_VERSION;
 ///   at a target that refuses host imports, or an export the Stellar target
 ///   cannot carry (see [`check_stellar_exports`])
 /// - Code generation fails
+///
+/// Every dynamic array access keeps its runtime bounds guard: nothing tells
+/// this entry point that any of them was proven in bounds. A caller that ran
+/// analysis hands that proof in through [`codegen_with_proven_in_bounds`].
 pub fn codegen(
     typed_context: &TypedContext,
     module_name: &str,
     options: CodegenOptions,
+) -> anyhow::Result<CodegenOutput> {
+    codegen_with_proven_in_bounds(typed_context, module_name, options, &FxHashSet::default())
+}
+
+/// [`codegen`], omitting the runtime bounds guard of every array access in
+/// `proven_in_bounds`.
+///
+/// `proven_in_bounds` names `ArrayIndexAccess` expressions of
+/// `typed_context`'s arena whose index is known to lie within `0..length` on
+/// every run that reaches them, which makes their guard dead. The one source
+/// of that knowledge is a passing analysis — `inference_analysis`'s
+/// `AnalysisResult::proven_in_bounds()`, read off the range analysis behind
+/// rule A056 — and a set from anywhere else would have the emitted module read
+/// or write outside its arrays wherever the claim is wrong, since nothing
+/// here re-checks it. It is only ever read positively: an access not in it
+/// keeps its guard, so an empty set is exactly [`codegen`].
+///
+/// The set is read by the emission of each access and by nothing that
+/// depends on the mode or the target, so a Proof build and a Compile build of
+/// one program, handed the same set, still emit the same function bodies.
+///
+/// # Errors
+///
+/// As [`codegen`].
+pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
+    typed_context: &TypedContext,
+    module_name: &str,
+    options: CodegenOptions,
+    proven_in_bounds: &HashSet<ExprId, S>,
 ) -> anyhow::Result<CodegenOutput> {
     let CodegenOptions {
         target,
@@ -247,7 +283,14 @@ pub fn codegen(
 
     check_host_import_support(typed_context, mode, target)?;
 
-    let emitted = emit(typed_context, module_name, mode, features, layout)?;
+    let emitted = emit(
+        typed_context,
+        module_name,
+        mode,
+        features,
+        layout,
+        proven_in_bounds.iter().copied().collect(),
+    )?;
 
     if target == Target::Stellar {
         check_stellar_exports(&emitted.export_signatures)?;
@@ -424,7 +467,8 @@ struct Emitted {
 ///
 /// The parameter list is the contract. Emitted bytes are a function of the
 /// typed context, the module name, the compilation mode, the requested
-/// features and the memory layout — and of nothing else: no parameter carries
+/// features, the memory layout and the accesses proven in bounds — and of
+/// nothing else: no parameter carries
 /// the target a build asked for, and this crate holds no ambient state one
 /// could be read from. A proof is written about the bytes the default target
 /// produces, and a module deployed to any other target has to be those same
@@ -461,6 +505,7 @@ fn emit(
     mode: CompilationMode,
     features: EmitFeatures,
     layout: MemoryLayout,
+    proven_in_bounds: FxHashSet<ExprId>,
 ) -> anyhow::Result<Emitted> {
     let mut compiler = Compiler::new(module_name);
     compiler.set_emit_features(features);
@@ -468,8 +513,12 @@ fn emit(
 
     // Bounds checks are on for every build, in either compilation mode and at
     // every target and optimization level: no input reaching here can turn them
-    // off. `Compiler::set_emit_bounds_checks` carries why.
+    // off. `Compiler::set_emit_bounds_checks` carries why. What the caller can
+    // do is name accesses analysis proved in bounds, whose guard is dead and is
+    // omitted, one access at a time; `Compiler::set_proven_in_bounds` carries
+    // why that is not a way of turning them off.
     compiler.set_emit_bounds_checks(true);
+    compiler.set_proven_in_bounds(proven_in_bounds);
 
     let hspecs = if typed_context.source_files().next().is_some() {
         traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?

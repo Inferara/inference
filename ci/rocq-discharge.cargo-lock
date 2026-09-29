@@ -2581,6 +2581,7 @@ dependencies = [
  "anyhow",
  "cov-mark",
  "inf-wasmparser",
+ "inference-analysis",
  "inference-ast",
  "inference-compiler-interface",
  "inference-fn-key",

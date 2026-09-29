@@ -140,10 +140,7 @@ enum Verdict {
 
 /// Calls `f` with every covered access in every lowered body, the file it is
 /// in, and what the analysis established about it.
-fn for_each_verdict(
-    ctx: &TypedContext,
-    f: &mut dyn FnMut(&[String], &CoveredAccess, Verdict),
-) {
+fn for_each_verdict(ctx: &TypedContext, f: &mut dyn FnMut(&[String], &CoveredAccess, Verdict)) {
     let arena = ctx.arena();
     for source_file in ctx.source_files() {
         let module_path = &source_file.module_path;

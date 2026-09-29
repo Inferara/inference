@@ -497,6 +497,13 @@ pub(crate) struct Compiler {
     /// frameless functions. Reset per function alongside the rest of the
     /// per-function state.
     bounds_check_scratch_local: Option<u32>,
+    /// The array accesses analysis proved in bounds (rule A056), keyed by the
+    /// `ArrayIndexAccess` expression. Such an access's index lies within
+    /// `0..length` on every run that reaches it, so its guard could never fire
+    /// and is omitted. Empty unless a caller that ran analysis hands the set in
+    /// ([`Self::set_proven_in_bounds`]), so a build that skipped analysis keeps
+    /// every guard. Read through [`Self::guard_elided`].
+    proven_in_bounds: FxHashSet<ExprId>,
     /// WASM local index of the scratch i32 used to single-evaluate the promoted
     /// quotient of a narrow (i8/i16) signed division for the overflow guard.
     /// Reserved per-function in [`Self::visit_function_definition`] only when the
@@ -827,6 +834,7 @@ impl Compiler {
             guarded_func_indices: Vec::new(),
             emit_bounds_checks: false,
             bounds_check_scratch_local: None,
+            proven_in_bounds: FxHashSet::default(),
             narrow_div_scratch_local: None,
             default_arith_mode: ArithMode::DEFAULT,
             arith_mode: Vec::new(),
@@ -1026,17 +1034,49 @@ impl Compiler {
     /// signed-division overflow guard has always been emitted in both modes; a
     /// bounds guard was the outlier.
     ///
-    /// The parameter survives rather than being folded away, but not because a
-    /// later elision would flip it. #215's elision is decided per *access*,
-    /// inside [`Self::emit_index_offset`], which stays the single seam every
-    /// guarded access passes through; a whole-compilation boolean cannot
-    /// express that, and would still be `true` for every module under it. What
-    /// keeps the parameter is that [`Compiler`] is a library type whose
-    /// in-crate tests exercise both settings — test call sites of
-    /// [`Self::new`] keep the default `false`, so their emitted bytes stay
-    /// unguarded.
+    /// The parameter survives rather than being folded away, but not because
+    /// the elision of proven guards flips it. That elision is decided per
+    /// *access*, inside [`Self::emit_index_offset`], which stays the single seam
+    /// every guarded access passes through (see [`Self::set_proven_in_bounds`]);
+    /// a whole-compilation boolean cannot express it, and is still `true` for
+    /// every module under it. What keeps the parameter is that [`Compiler`] is
+    /// a library type whose in-crate tests exercise both settings — test call
+    /// sites of [`Self::new`] keep the default `false`, so their emitted bytes
+    /// stay unguarded.
     pub(crate) fn set_emit_bounds_checks(&mut self, enabled: bool) {
         self.emit_bounds_checks = enabled;
+    }
+
+    /// Records the array accesses analysis proved in bounds, whose guard
+    /// [`Self::emit_index_offset`] omits.
+    ///
+    /// The guard of such an access is dead: analysis rule A056 bounded its
+    /// index within `0..length` on every run that reaches it, from the code the
+    /// program itself contains, and a program with any dynamic access it could
+    /// not bound does not compile. What omitting it trades is the fallback — an
+    /// analysis bug would no longer trap there — which is why the set is only
+    /// ever read positively: an access absent from it keeps its guard, so a
+    /// build that skipped analysis, a body analysis does not examine (a
+    /// `forall` body in a proof build), and an access A056 accepts only because
+    /// no run reaches it are all still guarded.
+    ///
+    /// The decision reads the source and this set and nothing else — never the
+    /// mode or the target — so a Proof build and a Compile build of one
+    /// program still agree byte for byte, and a proof is still written about
+    /// the artifact that ships.
+    pub(crate) fn set_proven_in_bounds(&mut self, proven_in_bounds: FxHashSet<ExprId>) {
+        self.proven_in_bounds = proven_in_bounds;
+    }
+
+    /// Whether the guard of the array access `access` is omitted because
+    /// analysis proved its index in bounds.
+    ///
+    /// The one place the proven set is read: guard emission in
+    /// [`Self::emit_index_offset`] and the scratch reservation in
+    /// [`Self::body_has_guarded_array_index`] both ask it, so no guard can
+    /// be emitted in a body that reserved no scratch for it.
+    fn guard_elided(&self, access: ExprId) -> bool {
+        self.proven_in_bounds.contains(&access)
     }
 
     /// Records a single WASM function index as belonging to `spec_name`.
@@ -2383,14 +2423,16 @@ impl Compiler {
 
         // Reserve an i32 scratch local for the bounds-check guard so a dynamic
         // array index can be single-evaluated via `local.tee`. It is reserved
-        // iff the function actually contains a dynamic index (the only case
-        // that emits a guard), independent of whether a frame exists: an
-        // immutable-`self` method like `self.arr[idx]` needs no frame slot yet
-        // still emits the guard. Tying the reservation to guard emission keeps
-        // constant-index-only functions byte-identical to an unchecked build.
-        // The scratch sits at the next free local after the named locals and the
-        // optional frame-pointer temp, so its index and its push order agree.
-        if self.emit_bounds_checks && self.body_has_dynamic_array_index(arena, body_id, ctx) {
+        // iff the function actually contains a guarded index — a dynamic one
+        // analysis did not prove in bounds, the only case that emits a guard —
+        // independent of whether a frame exists: an immutable-`self` method
+        // like `self.arr[idx]` needs no frame slot yet still emits the guard.
+        // Tying the reservation to guard emission keeps constant-index-only
+        // functions, and functions whose every dynamic index was proven,
+        // byte-identical to an unchecked build. The scratch sits at the next
+        // free local after the named locals and the optional frame-pointer temp,
+        // so its index and its push order agree.
+        if self.emit_bounds_checks && self.body_has_guarded_array_index(arena, body_id, ctx) {
             local_declarations.push((1, ValType::I32));
             self.bounds_check_scratch_local = Some(local_idx + u32::from(has_frame));
         }
@@ -3056,14 +3098,16 @@ impl Compiler {
     }
 
     /// Returns `true` if the function body contains at least one array index
-    /// that [`Self::emit_index_offset`] lowers *dynamically* — exactly the set
-    /// of accesses that emit a bounds-check guard.
+    /// that [`Self::emit_index_offset`] lowers *dynamically* and whose guard is
+    /// not elided — exactly the set of accesses that emit a bounds-check guard.
     ///
     /// The bounds-check scratch local is reserved iff this returns `true` (and
-    /// `emit_bounds_checks` is set), so functions that only index by constants
-    /// reserve no scratch and stay byte-identical to an unchecked build, while a
-    /// dynamic index — even through an immutable-`self` method like
-    /// `self.arr[idx]` that needs no frame slot — still gets its scratch.
+    /// `emit_bounds_checks` is set), so functions that only index by constants,
+    /// or whose every dynamic index analysis proved in bounds, reserve no
+    /// scratch and stay byte-identical to an unchecked build, while a guarded
+    /// index — even through an immutable-`self` method like `self.arr[idx]`
+    /// that needs no frame slot — still gets its scratch. Whether a guard is
+    /// elided is [`Self::guard_elided`]'s answer, the one emission reads.
     ///
     /// What counts as dynamic is not restated here: the scan asks
     /// [`try_const_index_byte_offset`], the function emission itself branches
@@ -3079,7 +3123,7 @@ impl Compiler {
     /// An access whose element size is unavailable answers `false`: every way
     /// the size can go missing is one emission resolves with an `expect` that
     /// fires *before* the guard, so no unreserved guard can follow from it.
-    fn body_has_dynamic_array_index(
+    fn body_has_guarded_array_index(
         &self,
         arena: &AstArena,
         block_id: BlockId,
@@ -3096,6 +3140,7 @@ impl Compiler {
                 return false;
             };
             try_const_index_byte_offset(arena, *index, elem_sz).is_none()
+                && !self.guard_elided(expr_id)
         })
     }
 
@@ -6103,7 +6148,7 @@ impl Compiler {
         if is_compound_element {
             // dest: array_base + index * struct_size
             self.lower_expression(arena, array_expr_id, ctx, None);
-            self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
+            self.emit_index_offset(arena, aiae_expr_id, index_expr_id, elem_sz, array_len, ctx);
             // src: RHS expression (struct pointer)
             self.lower_expression(arena, right_expr_id, ctx, None);
             self.emit_memory_copy(elem_sz);
@@ -6111,7 +6156,7 @@ impl Compiler {
             let store_instr = memory::store_instruction(&elem_type_info.kind);
 
             self.lower_expression(arena, array_expr_id, ctx, None);
-            self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
+            self.emit_index_offset(arena, aiae_expr_id, index_expr_id, elem_sz, array_len, ctx);
             self.lower_expression(arena, right_expr_id, ctx, None);
 
             self.func().instruction(&store_instr);
@@ -6280,7 +6325,7 @@ impl Compiler {
         let array_len = Self::array_length(array_expr_id, ctx);
 
         self.lower_expression(arena, array_expr_id, ctx, None);
-        self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
+        self.emit_index_offset(arena, aiae_expr_id, index_expr_id, elem_sz, array_len, ctx);
 
         if !is_compound_element {
             let load_instr = memory::load_instruction(&elem_type_info.kind);
@@ -6338,20 +6383,24 @@ impl Compiler {
         }
     }
 
-    /// Emits the byte-offset computation for an array index expression.
+    /// Emits the byte-offset computation for the array access `access_expr_id`,
+    /// whose index is `index_expr_id`.
     ///
     /// On entry the array base address is already on the WASM stack. An index
     /// that folds to a static byte offset is added as an `i32.const` and carries
     /// no runtime guard: analysis rule A037 validates a constant index
     /// statically, and a guard over a statically-known index would have nothing
     /// left to decide. Every other index is lowered at runtime, guarded by
-    /// [`Self::emit_bounds_check_guard`] when `emit_bounds_checks` is set and
-    /// `array_len` is known, and only then scaled and added.
+    /// [`Self::emit_bounds_check_guard`] when `emit_bounds_checks` is set,
+    /// `array_len` is known and analysis did not prove the access in bounds
+    /// ([`Self::guard_elided`]), and only then scaled and added.
     ///
-    /// [`try_const_index_byte_offset`] is the single place that fold is decided.
-    /// [`Self::body_has_dynamic_array_index`], which reserves the guard's
-    /// scratch local, asks that same function against the same element size, so
-    /// no index this function lowers dynamically can find the scratch missing.
+    /// [`try_const_index_byte_offset`] is the single place that fold is decided,
+    /// and [`Self::guard_elided`] the single place an elision is.
+    /// [`Self::body_has_guarded_array_index`], which reserves the guard's
+    /// scratch local, asks those same two functions against the same element
+    /// size and the same access, so no index this function guards can find the
+    /// scratch missing.
     ///
     /// The two are not equivalent, only ordered. Emission additionally requires
     /// a known `array_len`, so a body may reserve a scratch for an index whose
@@ -6359,10 +6408,11 @@ impl Compiler {
     /// unchecked build, but nothing that reads a stack slot that was never
     /// written. [`Self::emit_bounds_check_guard`] carries the `debug_assert`
     /// that watches for that direction; the direction that would matter, a guard
-    /// with no scratch, is what the shared fold decision rules out.
+    /// with no scratch, is what the shared decisions rule out.
     fn emit_index_offset(
         &mut self,
         arena: &AstArena,
+        access_expr_id: ExprId,
         index_expr_id: ExprId,
         elem_sz: u32,
         array_len: Option<u32>,
@@ -6375,7 +6425,11 @@ impl Compiler {
             }
         } else {
             self.lower_expression(arena, index_expr_id, ctx, None);
-            self.emit_bounds_check_guard(array_len);
+            if !self.guard_elided(access_expr_id) {
+                self.emit_bounds_check_guard(array_len);
+            } else if self.emit_bounds_checks {
+                cov_mark::hit!(wasm_codegen_elide_bounds_check);
+            }
             #[allow(clippy::cast_possible_wrap)]
             self.func()
                 .instruction(&Instruction::I32Const(elem_sz as i32));
@@ -6408,7 +6462,10 @@ impl Compiler {
     /// `.v` it is the trap site that a realization obligation over the enclosing
     /// function — a total-correctness claim, which no trapping reduction
     /// satisfies — turns into the side condition `index <u length`. Suppressing
-    /// it there would prove a different program than the one that ships.
+    /// it in one mode only would prove a different program than the one that
+    /// ships. An access analysis proved in bounds carries no guard in either
+    /// mode ([`Self::set_proven_in_bounds`]): its side condition is one A056
+    /// already discharged, from the source, for every run that reaches it.
     ///
     /// A requested guard whose `array_len` is unknown is the one way this
     /// emission can silently fall short of what the caller asked for: the access
@@ -8814,11 +8871,39 @@ mod tests {
             let (ctx, body_id) = typed_body_of_f(&source);
             let compiler = Compiler::new("test");
             assert_eq!(
-                compiler.body_has_dynamic_array_index(ctx.arena(), body_id, &ctx),
+                compiler.body_has_guarded_array_index(ctx.arena(), body_id, &ctx),
                 expected_dynamic,
                 "arr[{index}] on [{elem_ty}; 4]"
             );
         }
+    }
+
+    /// An access analysis proved in bounds needs no scratch, and a body keeps
+    /// its scratch as long as one access in it is still guarded.
+    #[test]
+    fn reservation_scan_skips_accesses_proven_in_bounds() {
+        let source = "pub fn f(i: u32, j: u32) -> i32 {\n    let arr: [i32; 4] = [1, 2, 3, 4];\n    return arr[i] + arr[j];\n}\n";
+        let (ctx, body_id) = typed_body_of_f(source);
+        let accesses: Vec<ExprId> = ctx
+            .arena()
+            .exprs
+            .iter()
+            .filter(|(_, data)| matches!(data.kind, Expr::ArrayIndexAccess { .. }))
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(accesses.len(), 2, "the body indexes twice");
+
+        let mut compiler = Compiler::new("test");
+        compiler.set_proven_in_bounds(accesses.iter().copied().take(1).collect());
+        assert!(
+            compiler.body_has_guarded_array_index(ctx.arena(), body_id, &ctx),
+            "the access not proven still needs the scratch"
+        );
+        compiler.set_proven_in_bounds(accesses.iter().copied().collect());
+        assert!(
+            !compiler.body_has_guarded_array_index(ctx.arena(), body_id, &ctx),
+            "a body whose every access is proven reserves nothing"
+        );
     }
 
     fn has_memory_section(wasm: &[u8]) -> bool {

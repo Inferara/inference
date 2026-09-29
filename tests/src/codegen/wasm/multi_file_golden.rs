@@ -273,8 +273,8 @@ mod multi_file_golden_codegen_tests {
             .expect("failed to read single_via_project entry");
         let arena = inference::parse(&src).expect("single-file parse");
         let tc = inference::type_check(arena).expect("single-file type check");
-        inference::analyze(&tc).expect("single-file analysis");
-        let single = inference::codegen(&tc, "output")
+        let analysis = inference::analyze(&tc).expect("single-file analysis");
+        let single = inference::codegen_with_analysis(&tc, "output", &analysis)
             .expect("single-file codegen")
             .wasm()
             .to_vec();
