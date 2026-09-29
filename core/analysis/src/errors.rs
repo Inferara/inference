@@ -27,6 +27,8 @@ use inference_type_checker::errors::TypeMismatchContext;
 use inference_type_checker::type_info::NumberType;
 use thiserror::Error;
 
+use crate::rules::array_index_not_proven::ProvenInBounds;
+
 /// The note line appended to a range error, explaining where the literal's type
 /// came from, or nothing when the literal kept the `i32` default.
 fn literal_type_source_note(type_name: &str, source: Option<&TypeMismatchContext>) -> String {
@@ -1307,11 +1309,15 @@ impl std::error::Error for AnalysisErrors {}
 /// Like [`AnalysisErrors`], stores the bare diagnostics directly (for the
 /// accessors) plus a single boxed [`DiagnosticFiles`] naming each finding's file
 /// for file-named rendering.
+///
+/// It also carries the one fact a passing analysis hands to code generation:
+/// the array accesses proven in bounds, whose runtime guard can be omitted.
 #[derive(Debug, Clone)]
 pub struct AnalysisResult {
     warnings: Vec<AnalysisDiagnostic>,
     infos: Vec<AnalysisDiagnostic>,
     files: Box<DiagnosticFiles>,
+    proven_in_bounds: ProvenInBounds,
 }
 
 impl AnalysisResult {
@@ -1326,7 +1332,26 @@ impl AnalysisResult {
                 warnings: warning_files,
                 infos: info_files,
             }),
+            proven_in_bounds: ProvenInBounds::default(),
         }
+    }
+
+    pub(crate) fn with_proven_in_bounds(self, proven_in_bounds: ProvenInBounds) -> Self {
+        Self {
+            proven_in_bounds,
+            ..self
+        }
+    }
+
+    /// The array accesses A056's analysis proved to index within their array
+    /// on every run that reaches them, for code generation to omit their
+    /// runtime bounds guard.
+    ///
+    /// Only a passing analysis produces one, so holding it means every access
+    /// the program indexes dynamically was proven or is unreachable.
+    #[must_use = "returns the accesses proven in bounds"]
+    pub fn proven_in_bounds(&self) -> &ProvenInBounds {
+        &self.proven_in_bounds
     }
 
     /// Returns the list of analysis warnings.

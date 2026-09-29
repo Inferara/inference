@@ -25,8 +25,12 @@
 //! that guard — it describes only the calls the specification makes, while any
 //! other caller can still pass an index the guard traps on.
 //!
-//! The runtime guard stays: this rule proves it unreachable, and the guard is
-//! still what an analysis bug would fall back to.
+//! The accesses this rule proves are also what code generation reads to omit
+//! the guard: [`prove`] runs the same analysis and keeps each access whose
+//! index it bounded within `0..length`, through the one [`verdict`] this rule
+//! reports from, so the set a build elides and the set this rule accepts
+//! cannot drift apart. An access proven only by never being reached keeps its
+//! guard; it costs nothing at run time.
 //!
 //! A literal index is A037's (it folds and range-checks it) and a 64-bit index
 //! is A019's; neither is reported here. The bodies examined are the ones code
@@ -37,6 +41,7 @@ use inference_ast::ids::{BlockId, ExprId, NodeId};
 use inference_ast::nodes::Expr;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
+use rustc_hash::FxHashSet;
 
 use crate::{
     errors::{AnalysisDiagnostic, LabeledDiagnostic},
@@ -53,23 +58,106 @@ crate::rule! {
     fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
-        for source_file in ctx.source_files() {
-            let module_path = &source_file.module_path;
-            walker::for_each_lowered_function_body(arena, &source_file.defs, &mut |body_id| {
-                let accesses = covered_accesses(ctx, body_id);
-                // A body with nothing to prove is not analyzed at all.
-                if accesses.is_empty() {
-                    return;
-                }
-                let ranges = range::analyze_body(ctx, body_id);
-                for access in accesses {
-                    if let Some(diagnostic) = unproven(arena, &ranges, &access) {
-                        errors.push(LabeledDiagnostic::new(module_path.clone(), diagnostic));
-                    }
-                }
-            });
-        }
+        for_each_verdict(ctx, &mut |module_path, access, verdict| {
+            if let Verdict::Unproven(range) = verdict {
+                errors.push(LabeledDiagnostic::new(
+                    module_path.to_vec(),
+                    unproven(arena, access, range),
+                ));
+            }
+        });
         errors
+    }
+}
+
+/// The array accesses whose index the analysis proved to lie within
+/// `0..length` on every run that reaches them, keyed by the access expression.
+///
+/// Such an access's runtime bounds guard can never fire, which is what lets
+/// code generation omit it. The set is produced only by an analysis that
+/// passed (see [`AnalysisResult::proven_in_bounds`]), so a program that
+/// reaches code generation with any access unproven carries none of them.
+///
+/// [`AnalysisResult::proven_in_bounds`]: crate::errors::AnalysisResult::proven_in_bounds
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProvenInBounds {
+    accesses: FxHashSet<ExprId>,
+}
+
+impl ProvenInBounds {
+    /// Whether `access`, an `ArrayIndexAccess` expression, was proven in bounds.
+    #[must_use = "returns whether the access was proven in bounds"]
+    pub fn contains(&self, access: ExprId) -> bool {
+        self.accesses.contains(&access)
+    }
+
+    /// Every access proven in bounds, as the set code generation takes.
+    #[must_use = "returns the proven accesses"]
+    pub fn accesses(&self) -> &FxHashSet<ExprId> {
+        &self.accesses
+    }
+
+    /// How many accesses were proven in bounds.
+    #[must_use = "returns the number of proven accesses"]
+    pub fn len(&self) -> usize {
+        self.accesses.len()
+    }
+
+    /// Whether no access was proven in bounds.
+    #[must_use = "returns whether no access was proven in bounds"]
+    pub fn is_empty(&self) -> bool {
+        self.accesses.is_empty()
+    }
+}
+
+/// Every covered access this rule's analysis proves in bounds.
+///
+/// Runs the range analysis again over each body with a covered access, so a
+/// build pays for it twice there; the rule's own `check` keeps no state to
+/// hand over, which is what keeps it callable on its own, as the editor calls
+/// it.
+pub(crate) fn prove(ctx: &TypedContext) -> ProvenInBounds {
+    let mut accesses = FxHashSet::default();
+    for_each_verdict(ctx, &mut |_, access, verdict| {
+        if verdict == Verdict::InBounds {
+            accesses.insert(access.node);
+        }
+    });
+    ProvenInBounds { accesses }
+}
+
+/// What the analysis established about one covered access.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    /// Every run that reaches the access indexes within `0..length`.
+    InBounds,
+    /// No run reaches the access.
+    Unreached,
+    /// A run that reaches the access may index with a value in this interval,
+    /// which leaves `0..length`.
+    Unproven(Interval),
+}
+
+/// Calls `f` with every covered access in every lowered body, the file it is
+/// in, and what the analysis established about it.
+fn for_each_verdict(
+    ctx: &TypedContext,
+    f: &mut dyn FnMut(&[String], &CoveredAccess, Verdict),
+) {
+    let arena = ctx.arena();
+    for source_file in ctx.source_files() {
+        let module_path = &source_file.module_path;
+        walker::for_each_lowered_function_body(arena, &source_file.defs, &mut |body_id| {
+            let accesses = covered_accesses(ctx, body_id);
+            // A body with nothing to prove is not analyzed at all.
+            if accesses.is_empty() {
+                return;
+            }
+            let ranges = range::analyze_body(ctx, body_id);
+            for access in &accesses {
+                f(module_path, access, verdict(&ranges, access));
+            }
+        });
     }
 }
 
@@ -129,27 +217,32 @@ fn covered_access(ctx: &TypedContext, node: ExprId) -> Option<CoveredAccess> {
     })
 }
 
-/// The diagnostic for `access` when the analysis did not prove its index in
-/// bounds.
-fn unproven(
-    arena: &AstArena,
-    ranges: &BodyRanges,
-    access: &CoveredAccess,
-) -> Option<AnalysisDiagnostic> {
+/// What `ranges` establishes about `access`. An access the analysis never
+/// met can hold any value of its index type.
+fn verdict(ranges: &BodyRanges, access: &CoveredAccess) -> Verdict {
     let range = match ranges.indices.get(&access.node) {
-        Some(IndexReach::Unreachable) => return None,
+        Some(IndexReach::Unreachable) => return Verdict::Unreached,
         Some(IndexReach::Within(range)) => *range,
         None => Interval::of_type(access.number),
     };
-    let in_bounds = range.lo >= 0 && range.hi < i128::from(access.length);
-    (!in_bounds).then(|| AnalysisDiagnostic::ArrayIndexNotProvenInBounds {
+    if range.lo >= 0 && range.hi < i128::from(access.length) {
+        Verdict::InBounds
+    } else {
+        Verdict::Unproven(range)
+    }
+}
+
+/// The diagnostic for `access`, whose index the analysis bounded only to
+/// `range`.
+fn unproven(arena: &AstArena, access: &CoveredAccess, range: Interval) -> AnalysisDiagnostic {
+    AnalysisDiagnostic::ArrayIndexNotProvenInBounds {
         index: local_name(arena, access.index),
         number: access.number,
         length: access.length,
         lo: range.lo,
         hi: range.hi,
         location: arena[access.node].location,
-    })
+    }
 }
 
 /// The name of the local `index` reads, looking through parentheses, or `None`

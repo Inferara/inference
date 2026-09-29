@@ -12,6 +12,7 @@
 mod analysis_rules_tests {
     use crate::utils::build_ast;
     use inference_analysis::errors::AnalysisDiagnostic;
+    use inference_ast::ids::NodeId;
 
     /// One A056 finding: the index's local name, when it is one, and the
     /// interval the analysis established for it.
@@ -389,6 +390,85 @@ mod analysis_rules_tests {
         assert_eq!(
             a056_findings(&nested_counting_loops(16, "i32")),
             vec![unproven(Some("c15"), I32_MIN, 3)]
+        );
+    }
+
+    /// The source text of every access a passing analysis hands to code
+    /// generation as proven in bounds, sorted.
+    fn proven_in_bounds(source: &str) -> Vec<String> {
+        let arena = build_ast(source.to_string());
+        let ctx = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type checking should succeed for analysis test input")
+            .typed_context();
+        let result = inference_analysis::analyze(&ctx)
+            .unwrap_or_else(|errors| panic!("analysis should pass, got:\n{errors}"));
+        let arena = ctx.arena();
+        let mut accesses: Vec<String> = result
+            .proven_in_bounds()
+            .accesses()
+            .iter()
+            .map(|&access| {
+                arena
+                    .get_node_source(NodeId::Expr(access))
+                    .expect("a proven access has source text")
+                    .to_string()
+            })
+            .collect();
+        accesses.sort();
+        accesses
+    }
+
+    /// Every access A056 proves is handed on, and a literal index — which
+    /// code generation folds and never guards — is not one A056 covers.
+    #[test]
+    fn a056_hands_every_proven_access_to_codegen() {
+        assert_eq!(
+            proven_in_bounds(
+                "pub fn f(i: u32, j: i32) -> i32 { let mut a: [i32; 4] = [1, 2, 3, 4]; \
+                 let mut r: i32 = a[0]; if i < 4 { r = r + a[i]; } \
+                 if j >= 0 && j < 4 { a[j] = r; } return r; }",
+            ),
+            vec!["a[i]", "a[j]"]
+        );
+    }
+
+    /// A named or computed constant takes the guarded path in code generation,
+    /// and the analysis folds it, so its guard is omitted as well.
+    #[test]
+    fn a056_hands_a_folded_constant_index_to_codegen() {
+        assert_eq!(
+            proven_in_bounds(
+                "pub fn f() -> i32 { const K: i32 = 2; let a: [i32; 4] = [1, 2, 3, 4]; \
+                 return a[K] + a[1 + 1]; }",
+            ),
+            vec!["a[1 + 1]", "a[K]"]
+        );
+    }
+
+    /// Each level of a nested access is its own access, with its own length.
+    #[test]
+    fn a056_hands_both_levels_of_a_nested_access_to_codegen() {
+        assert_eq!(
+            proven_in_bounds(
+                "pub fn f(i: u32, j: u32) -> i32 { let g: [[i32; 3]; 2] = [[1, 2, 3], [4, 5, 6]]; \
+                 let mut r: i32 = 0; if i < 2 && j < 3 { r = g[i][j]; } return r; }",
+            ),
+            vec!["g[i]", "g[i][j]"]
+        );
+    }
+
+    /// An access no run reaches passes A056 without an interval to stand on.
+    /// It is not handed on: its guard costs nothing at run time, and keeping
+    /// it means no elided guard rests on a contradiction alone.
+    #[test]
+    fn a056_does_not_hand_an_unreached_access_to_codegen() {
+        assert_eq!(
+            proven_in_bounds(
+                "pub fn f(i: i32) -> i32 { let a: [i32; 4] = [1, 2, 3, 4]; let mut r: i32 = 0; \
+                 if i < 0 && i > 3 { r = a[i]; } if i >= 0 && i < 4 { r = a[i]; } return r; }",
+            )
+            .len(),
+            1
         );
     }
 }
