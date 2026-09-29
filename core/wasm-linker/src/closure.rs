@@ -14,9 +14,9 @@ use std::collections::{BTreeSet, VecDeque};
 
 use inf_wasmparser::{BinaryReader, FunctionBody, Operator};
 
-use crate::parse::ParsedModule;
-use crate::safety::{check_operator, opens_control_frame, MAX_CONTROL_DEPTH};
 use crate::LinkError;
+use crate::parse::ParsedModule;
+use crate::safety::{MAX_CONTROL_DEPTH, check_operator, opens_control_frame};
 
 /// What a closure's bodies touch, used by tier classification.
 #[derive(Debug, Default, Clone)]
@@ -55,10 +55,7 @@ pub(crate) struct Closure {
 /// Returns [`LinkError::TransitiveHostImport`] if the closure reaches one of
 /// the module's own imported functions — a static merge has no body to copy
 /// for it.
-pub(crate) fn compute(
-    module: &ParsedModule,
-    root_func_idx: u32,
-) -> Result<Closure, LinkError> {
+pub(crate) fn compute(module: &ParsedModule, root_func_idx: u32) -> Result<Closure, LinkError> {
     let import_count = module.local_func_base();
     let mut visited: BTreeSet<u32> = BTreeSet::new();
     let mut queue: VecDeque<u32> = VecDeque::new();
@@ -294,9 +291,7 @@ mod tests {
         for _ in 0..depth {
             body.push_str("end ");
         }
-        parse(&format!(
-            r#"(module (func (;0;) (export "root") {body}))"#
-        ))
+        parse(&format!(r#"(module (func (;0;) (export "root") {body}))"#))
     }
 
     #[test]
@@ -307,8 +302,8 @@ mod tests {
         // shallower must still merge, so the cap is exact, not off-by-one.
         let at_cap = module_nested(MAX_CONTROL_DEPTH);
         let root = at_cap.exported_func_index("root").unwrap();
-        let err = compute(&at_cap, root)
-            .expect_err("a body nested exactly at the cap must be rejected");
+        let err =
+            compute(&at_cap, root).expect_err("a body nested exactly at the cap must be rejected");
         assert!(
             matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("nests structured control flow")),
             "expected an UnsupportedConstruct naming the nesting limit, got {err:?}"

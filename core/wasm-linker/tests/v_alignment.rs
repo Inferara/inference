@@ -85,7 +85,7 @@
 use inference_wasm_linker::link as raw_link;
 use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
 use rustc_hash::FxHashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Assembles a `.wasm` binary from WAT source, panicking with the WAT on error.
 fn wasm(wat: &str) -> Vec<u8> {
@@ -659,8 +659,8 @@ fn proof_path_nondet_and_uzumaki_is_rejected() {
 /// hand-encoded byte-by-byte, mirroring the encoding in `link.rs`.
 fn proof_mode_main_with_nondet_and_uzumaki() -> Vec<u8> {
     use wasm_encoder::{
-        CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
-        Instruction, Module, TypeSection, ValType,
+        CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
+        ImportSection, Instruction, Module, TypeSection, ValType,
     };
 
     let mut module = Module::new();
@@ -729,8 +729,8 @@ fn proof_path_unique_is_rejected_at_translation() {
 /// hand-encoded, mirroring [`proof_mode_main_with_nondet_and_uzumaki`].
 fn main_with_unique_block() -> Vec<u8> {
     use wasm_encoder::{
-        CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
-        Instruction, Module, TypeSection, ValType,
+        CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
+        ImportSection, Instruction, Module, TypeSection, ValType,
     };
 
     let mut module = Module::new();

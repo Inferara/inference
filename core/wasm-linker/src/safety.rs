@@ -226,8 +226,17 @@ pub(crate) fn check_operator(op: &Operator) -> Result<OpEffect, LinkError> {
 
     let effect = match op {
         // -- Structured control flow (block types handled by the re-encoder) --
-        Unreachable | Nop | Block { .. } | Loop { .. } | If { .. } | Else | End | Br { .. }
-        | BrIf { .. } | BrTable { .. } | Return => OpEffect::default(),
+        Unreachable
+        | Nop
+        | Block { .. }
+        | Loop { .. }
+        | If { .. }
+        | Else
+        | End
+        | Br { .. }
+        | BrIf { .. }
+        | BrTable { .. }
+        | Return => OpEffect::default(),
 
         // The Inference non-deterministic block extensions
         // (`forall`/`exists`/`assume`/`unique`) are verification-only and are
@@ -262,13 +271,24 @@ pub(crate) fn check_operator(op: &Operator) -> Result<OpEffect, LinkError> {
         // -- Integer memory load/store over the single shared memory.
         //    The float forms (`f32.load`/`f64.store`/…) are rejected above by
         //    `is_float`; they never reach this match. --
-        I32Load { memarg } | I64Load { memarg }
-        | I32Load8S { memarg } | I32Load8U { memarg } | I32Load16S { memarg }
-        | I32Load16U { memarg } | I64Load8S { memarg } | I64Load8U { memarg }
-        | I64Load16S { memarg } | I64Load16U { memarg } | I64Load32S { memarg }
-        | I64Load32U { memarg } | I32Store { memarg } | I64Store { memarg }
+        I32Load { memarg }
+        | I64Load { memarg }
+        | I32Load8S { memarg }
+        | I32Load8U { memarg }
+        | I32Load16S { memarg }
+        | I32Load16U { memarg }
+        | I64Load8S { memarg }
+        | I64Load8U { memarg }
+        | I64Load16S { memarg }
+        | I64Load16U { memarg }
+        | I64Load32S { memarg }
+        | I64Load32U { memarg }
+        | I32Store { memarg }
+        | I64Store { memarg }
         | I32Store8 { memarg }
-        | I32Store16 { memarg } | I64Store8 { memarg } | I64Store16 { memarg }
+        | I32Store16 { memarg }
+        | I64Store8 { memarg }
+        | I64Store16 { memarg }
         | I64Store32 { memarg } => {
             reject_nonzero_memory(memarg)?;
             OpEffect {
@@ -346,7 +366,10 @@ pub(crate) fn check_operator(op: &Operator) -> Result<OpEffect, LinkError> {
         // carry their own element segments the merge cannot relocate, and the
         // Rocq translator has no lowering for them; they are rejected as an
         // unmodeled family below. The non-segment table accessors are modeled.
-        TableGet { .. } | TableSet { .. } | TableGrow { .. } | TableSize { .. }
+        TableGet { .. }
+        | TableSet { .. }
+        | TableGrow { .. }
+        | TableSize { .. }
         | TableFill { .. } => OpEffect {
             uses_tables: true,
             ..OpEffect::default()
@@ -590,11 +613,16 @@ fn operator_family(op: &Operator) -> &'static str {
             "legacy exception handling"
         }
         // Typed function references.
-        CallRef { .. } | ReturnCallRef { .. } | RefAsNonNull | BrOnNull { .. }
+        CallRef { .. }
+        | ReturnCallRef { .. }
+        | RefAsNonNull
+        | BrOnNull { .. }
         | BrOnNonNull { .. } => "typed function references (call_ref / ref.as_non_null)",
         RefNull { .. } | RefIsNull | TypedSelect { .. } => "reference types (ref.null / select t)",
         // Atomics (0xFE threads family).
-        AtomicFence | MemoryAtomicNotify { .. } | MemoryAtomicWait32 { .. }
+        AtomicFence
+        | MemoryAtomicNotify { .. }
+        | MemoryAtomicWait32 { .. }
         | MemoryAtomicWait64 { .. } => "atomic memory operations",
         // SIMD (0xFD family). V128Const carries no memarg but is still SIMD.
         V128Const { .. } => "SIMD (v128)",
@@ -642,10 +670,9 @@ mod tests {
 
     #[test]
     fn mvp_arithmetic_is_accepted_with_no_effect() {
-        for op in ops(
-            r#"(module (func (param i32 i32) (result i32)
-                 local.get 0 local.get 1 i32.add) (export "f" (func 0)))"#,
-        ) {
+        for op in ops(r#"(module (func (param i32 i32) (result i32)
+                 local.get 0 local.get 1 i32.add) (export "f" (func 0)))"#)
+        {
             let effect = check_operator(&op).expect("mvp op accepted");
             assert!(!effect.uses_memory && !effect.uses_globals && !effect.uses_tables);
         }
@@ -653,10 +680,8 @@ mod tests {
 
     #[test]
     fn memory_load_marks_memory_use() {
-        let any_memory = ops(
-            r#"(module (memory 1) (func (param i32) (result i32)
-                 local.get 0 i32.load) (export "f" (func 0)))"#,
-        )
+        let any_memory = ops(r#"(module (memory 1) (func (param i32) (result i32)
+                 local.get 0 i32.load) (export "f" (func 0)))"#)
         .iter()
         .any(|op| check_operator(op).is_ok_and(|e| e.uses_memory));
         assert!(any_memory, "i32.load must mark memory use");
@@ -664,10 +689,8 @@ mod tests {
 
     #[test]
     fn global_access_marks_global_use() {
-        let any_global = ops(
-            r#"(module (global i32 (i32.const 0)) (func (result i32)
-                 global.get 0) (export "f" (func 0)))"#,
-        )
+        let any_global = ops(r#"(module (global i32 (i32.const 0)) (func (result i32)
+                 global.get 0) (export "f" (func 0)))"#)
         .iter()
         .any(|op| check_operator(op).is_ok_and(|e| e.uses_globals));
         assert!(any_global, "global.get must mark global use");
@@ -921,10 +944,8 @@ mod tests {
 
     #[test]
     fn indirect_call_marks_table_use() {
-        let any_table = ops(
-            r#"(module (type (func)) (table 1 funcref) (func
-                 i32.const 0 call_indirect (type 0)) (export "f" (func 0)))"#,
-        )
+        let any_table = ops(r#"(module (type (func)) (table 1 funcref) (func
+                 i32.const 0 call_indirect (type 0)) (export "f" (func 0)))"#)
         .iter()
         .any(|op| check_operator(op).is_ok_and(|e| e.uses_tables));
         assert!(any_table, "call_indirect must mark table use");
@@ -978,7 +999,10 @@ mod tests {
                         | Operator::Assume { .. }
                         | Operator::Unique { .. }
                 ) {
-                    assert!(is_verification_only(&op), "non-det op must be classified verification-only");
+                    assert!(
+                        is_verification_only(&op),
+                        "non-det op must be classified verification-only"
+                    );
                     let err = check_operator(&op).expect_err("non-det op must be rejected");
                     assert!(
                         matches!(err, LinkError::UnsupportedConstruct(_)),
@@ -997,8 +1021,14 @@ mod tests {
             // `<uzumaki> drop; end` over a one-byte locals vector.
             let body = [0x00, 0xfc, sub_opcode, 0x1a, 0x0b];
             for op in body_ops(&body) {
-                if matches!(op, Operator::I32Uzumaki { .. } | Operator::I64Uzumaki { .. }) {
-                    assert!(is_verification_only(&op), "uzumaki must be classified verification-only");
+                if matches!(
+                    op,
+                    Operator::I32Uzumaki { .. } | Operator::I64Uzumaki { .. }
+                ) {
+                    assert!(
+                        is_verification_only(&op),
+                        "uzumaki must be classified verification-only"
+                    );
                     let err = check_operator(&op).expect_err("uzumaki must be rejected");
                     assert!(
                         matches!(err, LinkError::UnsupportedConstruct(_)),
@@ -1013,10 +1043,9 @@ mod tests {
     fn plain_ops_are_not_verification_only() {
         // A guard against the predicate over-matching: ordinary executable ops
         // (arithmetic, calls, constants) must never be flagged verification-only.
-        for op in ops(
-            r#"(module (func (param i32 i32) (result i32)
-                 local.get 0 local.get 1 i32.add) (export "f" (func 0)))"#,
-        ) {
+        for op in ops(r#"(module (func (param i32 i32) (result i32)
+                 local.get 0 local.get 1 i32.add) (export "f" (func 0)))"#)
+        {
             assert!(
                 !is_verification_only(&op),
                 "{op:?} must not be classified verification-only"

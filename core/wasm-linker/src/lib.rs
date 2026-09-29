@@ -1306,8 +1306,10 @@ mod tests {
         .to_string();
         assert!(
             carried_some.contains("carried its universal (`forall`) obligations only")
-                && carried_some.contains("The universal obligations were adopted and are \
-                                          unaffected"),
+                && carried_some.contains(
+                    "The universal obligations were adopted and are \
+                                          unaffected"
+                ),
             "a partial adoption keeps the clause that says the working half survived, got: \
              {carried_some}"
         );

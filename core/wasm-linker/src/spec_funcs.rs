@@ -80,9 +80,9 @@ pub(crate) fn decode(data: &[u8]) -> Result<Vec<(String, Vec<u32>)>, LinkError> 
         // into an owned `String`, so a hand-crafted payload advertising a large
         // in-bounds name cannot force a large transient allocation ahead of the
         // cap — keeping the decoder's "bounded allocation" guarantee intact.
-        let name = reader.read_string().map_err(|e| {
-            LinkError::Parse(format!("spec_funcs section: invalid spec name: {e}"))
-        })?;
+        let name = reader
+            .read_string()
+            .map_err(|e| LinkError::Parse(format!("spec_funcs section: invalid spec name: {e}")))?;
         if name.len() > MAX_SPEC_NAME_LEN {
             return Err(LinkError::Parse(format!(
                 "spec_funcs section: spec name length {} exceeds cap {MAX_SPEC_NAME_LEN}",
@@ -161,10 +161,7 @@ mod tests {
 
     #[test]
     fn round_trips_a_two_spec_payload() {
-        let pairs = vec![
-            ("A".to_string(), vec![2, 3]),
-            ("B".to_string(), vec![5]),
-        ];
+        let pairs = vec![("A".to_string(), vec![2, 3]), ("B".to_string(), vec![5])];
         let bytes = encode(&pairs);
         // version=1, count=2, len=1 'A', idxc=2, 2,3, len=1 'B', idxc=1, 5
         assert_eq!(bytes, vec![1, 2, 1, b'A', 2, 2, 3, 1, b'B', 1, 5]);
