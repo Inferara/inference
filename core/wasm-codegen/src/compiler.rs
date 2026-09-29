@@ -4655,7 +4655,7 @@ impl Compiler {
                     // error value itself is what gets recorded — folding them into
                     // one message would lose the distinctions they draw.
                     Some(ResolvedCallee::Function(ref name)) => {
-                        if let Err(e) = self.lower_function_call(arena, name, &args, ctx) {
+                        if let Err(e) = self.lower_function_call(arena, expr_id, name, &args, ctx) {
                             self.poison(e);
                         }
                     }
@@ -5086,9 +5086,13 @@ impl Compiler {
     /// mangled `"<spec>.<callee>"` key first so sibling calls resolve to the
     /// spec's own definition before falling back to a top-level fn of the
     /// same bare name.
+    ///
+    /// `call_expr_id` is the call expression itself, whose recorded type is the
+    /// callee's result type.
     fn lower_function_call(
         &mut self,
         arena: &AstArena,
+        call_expr_id: ExprId,
         callee_name: &str,
         call_args: &[(Option<IdentId>, ExprId)],
         ctx: &TypedContext,
@@ -5106,6 +5110,22 @@ impl Compiler {
             Some(import_idx) => {
                 cov_mark::hit!(wasm_codegen_emit_extern_call);
                 self.func().instruction(&Instruction::Call(import_idx));
+                // The result crosses the same ABI boundary an exported
+                // function's parameters do, in the other direction: the foreign
+                // body may return any i32 bit pattern for a narrow integer, and
+                // nothing it runs is compiled to this module's convention that a
+                // narrow value is normalized where it is produced. The result is
+                // canonicalized here, with the shapes the entry prologue uses, so
+                // no narrow value outside its type reaches the body — which the
+                // range analysis A056 relies on when it proves an index in
+                // bounds by its type alone. `bool` and enum results are not
+                // touched: neither can index an array, and what each should mean
+                // off its domain is a separate question.
+                if let Some(result) = ctx.get_node_typeinfo(NodeId::Expr(call_expr_id))
+                    && memory::emit_sub_i32_narrowing(self.func(), &result.kind)
+                {
+                    cov_mark::hit!(wasm_codegen_extern_result_normalization);
+                }
                 return Ok(());
             }
             None if self.names_a_registered_import(callee_name) => {

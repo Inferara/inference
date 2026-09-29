@@ -450,6 +450,74 @@ pub fn main() -> i32 {
         );
     }
 
+    /// A narrow result an `external fn` returns is canonicalized where the call
+    /// returns, as an exported function's narrow parameters are on entry: the
+    /// foreign body may hand back any i32 bit pattern, and the caller sees the
+    /// low bits, zero- or sign-extended by the declared type. The host below
+    /// returns values outside every narrow type, so each row would observe the
+    /// raw bit pattern without the normalization.
+    ///
+    /// A full-width result has nothing to canonicalize, so the `i32` row is
+    /// returned unchanged and is not counted.
+    #[test]
+    fn narrow_extern_result_is_canonicalized_at_the_call() {
+        use wasmtime::{Engine, Linker, Module, Store};
+
+        cov_mark::check_count!(wasm_codegen_extern_result_normalization, 4);
+        let source = "\
+external fn raw_u8() -> u8;
+external fn raw_i8() -> i8;
+external fn raw_u16() -> u16;
+external fn raw_i16() -> i16;
+external fn raw_i32() -> i32;
+use { raw_u8, raw_i8, raw_u16, raw_i16, raw_i32 } from host::env;
+pub fn get_u8() -> u8 { return raw_u8(); }
+pub fn get_i8() -> i8 { return raw_i8(); }
+pub fn get_u16() -> u16 { return raw_u16(); }
+pub fn get_i16() -> i16 { return raw_i16(); }
+pub fn get_i32() -> i32 { return raw_i32(); }
+";
+        let wasm = crate::utils::wasm_codegen(source);
+        inf_wasmparser::validate(&wasm)
+            .unwrap_or_else(|e| panic!("generated Wasm module is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm)
+            .unwrap_or_else(|e| panic!("failed to create Wasm module: {e}"));
+        let mut linker = Linker::new(&engine);
+        for (field, raw) in [
+            ("raw_u8", 300_i32),
+            ("raw_i8", 200),
+            ("raw_u16", 70_000),
+            ("raw_i16", 40_000),
+            ("raw_i32", 300),
+        ] {
+            linker
+                .func_wrap("env", field, move || raw)
+                .unwrap_or_else(|e| panic!("`env.{field}` is supplied by the host: {e}"));
+        }
+        let mut store = Store::new(&engine, ());
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .unwrap_or_else(|e| panic!("failed to instantiate Wasm module: {e}"));
+
+        for (export, expected) in [
+            ("get_u8", 300 & 0xFF),
+            ("get_i8", i32::from(200_u8.cast_signed())),
+            ("get_u16", 70_000 & 0xFFFF),
+            ("get_i16", i32::from(40_000_u16.cast_signed())),
+            ("get_i32", 300),
+        ] {
+            let func = instance
+                .get_typed_func::<(), i32>(&mut store, export)
+                .unwrap_or_else(|e| panic!("`{export}` is exported as () -> i32: {e}"));
+            let actual = func
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("`{export}` returns: {e}"));
+            assert_eq!(actual, expected, "`{export}` must see the canonical value");
+        }
+    }
+
     /// Regenerates the golden `.wasm` and `.wat` for every extern-import test.
     /// Run with `--ignored` after intentional codegen changes.
     #[test]
