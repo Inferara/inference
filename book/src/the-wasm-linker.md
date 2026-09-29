@@ -175,9 +175,9 @@ classifies each closure:
 
 | Tier | What the closure may touch | Merged? | Admission condition |
 |------|---------------------------|---------|---------------------|
-| A | No memory, no global or table access, no data segments — pure arithmetic | Yes | None beyond the operator allow-list |
-| B | Linear memory **only through caller-supplied pointers**; no own data segments, no global or table access | Yes | Provenance proof: every memory address is parameter-derived (see below); the closure's may-write set is covered by the `external fn` declaration's `mut` parameters (see [The Declared Write-Set Check](#the-declared-write-set-check)) |
-| C | Own static data segments, global access, or table/element use | No | Rejected with `LinkError::RequiresRelocatableBuild` |
+| A | No memory, no table access, no data segments — arithmetic, optionally over its own globals | Yes | None beyond the operator allow-list |
+| B | Linear memory **only through caller-supplied pointers**; no own data segments, no table access; its own globals as scalar state, never as addresses | Yes | Provenance proof: every memory address is parameter-derived (see below); the closure's may-write set is covered by the `external fn` declaration's `mut` parameters (see [The Declared Write-Set Check](#the-declared-write-set-check)) |
+| C | Own static data segments, or table/element use | No | Rejected with `LinkError::RequiresRelocatableBuild` |
 
 ### What Each Tier May Touch
 
@@ -187,13 +187,18 @@ The classification logic inspects the parsed module structure and the closure's
 | Signal | Forces Tier C |
 |--------|---------------|
 | `module.data_count > 0` or closure uses `memory.init` / `data.drop` | owns static data segments |
-| `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
+| `module.element_count > 0` or closure uses `call_indirect` / `table.get` / `table.set` / `table.grow` / `table.size` / `table.fill` / `ref.func` | uses a table or element segment |
+
+The segment-indexed table forms (`table.init`, `elem.drop`, `table.copy`) never
+reach classification: the operator allow-list rejects them as
+`LinkError::UnsupportedConstruct`.
 
 Reading or writing a module global is **not** a Tier-C signal: the closure's
 globals are merged into the output alongside the main module's, with every
 `global.get` / `global.set` remapped onto the merged index space. A global used
 to *address* memory is still rejected, because the address it produces is not
-parameter-derived.
+parameter-derived. Writing one is no such hazard: a `global.set` between
+computing an address and using it leaves that address's provenance intact.
 
 If no Tier-C signals are present, the closure is Tier B when any body accesses
 linear memory (load, store, copy, fill, size, or grow), and Tier A otherwise.
@@ -215,11 +220,13 @@ construct the author wrote.
 
 Dropping an admitted external's globals and tables is sound because
 `ClosureEffects` is closure-scoped: a closure admitted with no global or table
-effect contains no operator naming either index space. That matters most for
-globals — the merge re-emits main's global section, so a leaked `global.get 0`
-would rebind to main's first global and, the types agreeing, still pass
-post-merge validation. A leaked *table* operator is fail-safe by comparison: no
-table section is emitted, so validation rejects it as an unknown table.
+effect contains no operator naming either index space. Neither half would fail
+silently if that were ever violated. An external whose globals were dropped has
+an empty global remap, so a leaked `global.get` finds no mapping and the link
+fails with `LinkError::UnsupportedConstruct`, rather than rebinding onto main's
+first global and, the types agreeing, passing post-merge validation with a wrong
+value. A leaked *table* operator names a table the output does not have, since
+no table section is emitted, and validation rejects it as unknown.
 
 Clearing the tier gate is not the same as linking. A stock artifact also declares
 a multi-page memory that the merge will not reconcile against an Inference main's
@@ -244,8 +251,8 @@ error: external function `lookup` requires a relocatable build:
          defines or initializes its own static data segments
 ```
 
-The `reasons` field is a `Vec<String>` so a closure that simultaneously has its
-own globals and uses `memory.init` reports both signals in one diagnostic.
+The `reasons` field is a `Vec<String>` so a closure that both uses `memory.init`
+and performs an indirect call reports both signals in one diagnostic.
 
 ## Tier-B Provenance Analysis
 
@@ -714,9 +721,10 @@ environment — one shared linear memory, remapped globals, renumbered calls.
 Traditional `wasm-ld` (LLVM's WebAssembly linker) supports relocatable object
 files: each compiled translation unit emits relocation metadata (symbol tables,
 reloc sections), and `wasm-ld` patches absolute addresses and index references at
-link time. That model handles Tier-C inputs (static data, globals, indirect-call
-tables) without a provenance proof, because the relocation metadata describes
-exactly what needs patching.
+link time. That model handles Tier-C inputs (static data, indirect-call tables),
+and globals that hold addresses such as a shadow-stack pointer, without a
+provenance proof, because the relocation metadata describes exactly what needs
+patching.
 
 Inference cannot use `wasm-ld` for two reasons:
 
