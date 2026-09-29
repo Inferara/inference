@@ -119,8 +119,9 @@
 //!   halt rather than a recovery, so a value-range analysis over the body must
 //!   prove from the code the programmer wrote — an enclosing `if` or loop
 //!   condition, an early exit, the index's initializer and arithmetic — that
-//!   the guard is unreachable. An `assert` is not a source of facts. See
-//!   [`rules::array_index_not_proven`].
+//!   the guard is unreachable. An `assert` is not a source of facts. The
+//!   accesses it proves are handed to code generation, which omits their
+//!   guards ([`ProvenInBounds`]). See [`rules::array_index_not_proven`].
 //! - A057: An `assert` in executable code must not fail on every run that
 //!   reaches it; such an `assert` is an unconditional halt written as a check,
 //!   and would otherwise stand in for the recovery A056 asks a guard's failing
@@ -317,6 +318,7 @@ mod walker;
 
 use errors::{AnalysisErrors, AnalysisResult, Severity};
 
+pub use rules::array_index_not_proven::ProvenInBounds;
 pub use rules::param_words_exceeded::param_words;
 pub use rules::stack_depth::estimate_frame_sizes;
 
@@ -396,6 +398,13 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 /// All findings are collected before returning, allowing the user to see all
 /// issues at once. `Warning`-severity findings are returned via `AnalysisResult`
 /// on both success and error paths.
+///
+/// A passing result also carries the array accesses proven in bounds
+/// ([`AnalysisResult::proven_in_bounds`]), which code generation reads to omit
+/// their runtime guards. They are computed only once every rule has passed,
+/// since a proof about a program that does not compile has no build to reach.
+///
+/// [`AnalysisResult::proven_in_bounds`]: errors::AnalysisResult::proven_in_bounds
 pub fn analyze_with_options(
     typed_context: &TypedContext,
     options: AnalysisOptions,
@@ -412,7 +421,8 @@ pub fn analyze_with_options(
         }
     }
     if errors.is_empty() {
-        Ok(AnalysisResult::new(warnings, infos))
+        let proven = rules::array_index_not_proven::prove(typed_context);
+        Ok(AnalysisResult::new(warnings, infos).with_proven_in_bounds(proven))
     } else {
         Err(AnalysisErrors::new(errors, warnings, infos))
     }
