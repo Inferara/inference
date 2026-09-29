@@ -32,6 +32,7 @@ pub fn sum4(v: [i64; 4]) -> i64 {
 // A dynamic index keeps the read from folding, so the value observed comes from
 // the caller's own bytes rather than from a constant the compiler chose.
 pub fn pick4(v: [i64; 4], i: i32) -> i64 {
+    if i < 0 || i >= 4 { return 0; }
     return v[i];
 }
 

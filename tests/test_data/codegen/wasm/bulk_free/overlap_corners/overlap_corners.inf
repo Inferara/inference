@@ -31,6 +31,7 @@ pub fn elem_copy(i: i32, j: i32) -> i32 {
         Cell { a: 5, b: 6 },
         Cell { a: 7, b: 8 },
     ];
+    if i < 0 || i >= 4 || j < 0 || j >= 4 { return -1; }
     arr[i] = arr[j];
     return arr[i].a * 10 + arr[i].b;
 }
@@ -43,6 +44,7 @@ pub fn elem_copy_neighbours(i: i32, j: i32) -> i32 {
         Cell { a: 5, b: 6 },
         Cell { a: 7, b: 8 },
     ];
+    if i < 0 || i >= 4 || j < 0 || j >= 4 { return -1; }
     brr[i] = brr[j];
     return brr[0].a * 1000 + brr[1].a * 100 + brr[2].a * 10 + brr[3].a;
 }

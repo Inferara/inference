@@ -15,6 +15,7 @@ pub fn read_middle() -> i32 {
 
 pub fn read_with_variable(i: i32) -> i32 {
     let arr: [i32; 3] = [100, 200, 300];
+    if i < 0 || i >= 3 { return -1; }
     return arr[i];
 }
 

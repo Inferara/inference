@@ -258,9 +258,10 @@ mod gate {
         },
         Fixture {
             stem: "spec_bounds_realization",
-            expected: StockValid(ScalarChoice),
-            why: "the only fixture whose executable bodies carry a bounds guard; its \
-                  specification bodies draw scalar indices",
+            expected: Rejected(Analysis("A056")),
+            why: "its executable bodies index with unguarded parameters on purpose, leaving \
+                  the specification's envelope to bound them, and A056 refuses an index no \
+                  guard in the function proves; the Rocq gate compiles it without analysis",
         },
         Fixture {
             stem: "spec_overflow_realization",

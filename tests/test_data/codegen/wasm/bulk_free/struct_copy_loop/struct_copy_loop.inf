@@ -30,6 +30,7 @@ pub fn block_ends(mut b: Block) -> i64 {
 
 pub fn block_body(mut b: Block, i: i32) -> i64 {
     b.head = b.head;
+    if i < 0 || i >= 18 { return 0; }
     return b.body[i];
 }
 

@@ -573,6 +573,24 @@
     i32.store
     local.get $__frame_ptr
     local.set $items
+    local.get $i
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $i
+      i32.const 3
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const -1
+      local.get $__frame_ptr
+      i32.const 32
+      i32.add
+      global.set 0
+      return
+    end
     local.get $items
     local.get $items
     local.get $i

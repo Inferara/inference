@@ -2,7 +2,9 @@ pub mod arith_mode_changes_nothing;
 pub mod arith_mode_governs_nothing;
 pub mod array_index_64bit;
 pub mod array_index_const_oob;
+pub mod array_index_not_proven;
 pub mod array_uzumaki_as_argument;
+pub mod assert_always_fails;
 pub mod compound_literal_as_argument;
 pub mod break_inside_nondet_block;
 pub mod break_outside_loop;
@@ -58,7 +60,9 @@ use arith_mode_changes_nothing::ArithModeChangesNothing;
 use arith_mode_governs_nothing::ArithModeGovernsNothing;
 use array_index_64bit::ArrayIndex64Bit;
 use array_index_const_oob::ArrayIndexConstOob;
+use array_index_not_proven::ArrayIndexNotProven;
 use array_uzumaki_as_argument::ArrayUzumakiAsArgument;
+use assert_always_fails::AssertAlwaysFails;
 use compound_literal_as_argument::CompoundLiteralAsArgument;
 use break_inside_nondet_block::BreakInsideNonDetBlock;
 use break_outside_loop::BreakOutsideLoop;
@@ -168,5 +172,7 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &ArithModeGovernsNothing,
         &ArithModeChangesNothing,
         &ParamWordsExceeded,
+        &ArrayIndexNotProven,
+        &AssertAlwaysFails,
     ]
 }

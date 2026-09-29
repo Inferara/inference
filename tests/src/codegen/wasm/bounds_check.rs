@@ -37,6 +37,12 @@
 /// Source with a dynamic array read (`arr[i]`) and a dynamic array write
 /// (`arr[j] = v`). Indices come from parameters, so analysis rule A037 (which
 /// only catches literal indices) does not fire and the runtime guard applies.
+///
+/// Neither access is guarded in the source, which is the point: these tests
+/// exercise the runtime guard itself, including the trap it takes on an
+/// out-of-range index. Analysis rule A056 rejects exactly such a program, so
+/// every build here skips analysis — the guard is emitted regardless, and it is
+/// what an accepted program still carries under its proven accesses.
 const READ_WRITE_SOURCE: &str = r#"
 pub fn read_at(i: u32) -> i32 {
     let arr: [i32; 4] = [10, 20, 30, 40];
@@ -54,7 +60,8 @@ pub fn write_at(j: u32, v: i32) -> i32 {
 mod bounds_check_tests {
     use super::READ_WRITE_SOURCE;
     use crate::utils::{
-        assert_wasms_modules_equivalence, codegen_output, codegen_with_full_config,
+        assert_wasms_modules_equivalence, codegen_output_no_analysis,
+        codegen_with_full_config_no_analysis as codegen_with_full_config,
     };
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
@@ -92,7 +99,7 @@ mod bounds_check_tests {
         // for every Compile-mode build, so the cov_mark fires twice here just as
         // it does under Debug -- the deployed artifact is always checked.
         cov_mark::check_count!(wasm_codegen_emit_bounds_check, 2);
-        let out = codegen_output(READ_WRITE_SOURCE);
+        let out = codegen_output_no_analysis(READ_WRITE_SOURCE);
         let wat = wasmprinter::print_bytes(out.wasm()).expect("failed to print WAT");
         assert!(
             wat.contains("i32.ge_u"),
@@ -1207,7 +1214,10 @@ spec Reach {
     /// non-constant index to avoid -- so the deadness is a property worth
     /// pinning beside the guard rather than only where P014 is defined.
     /// Analysis rule A037 does not cover it: its pattern wants the literal
-    /// directly under the access, which neither spelling has.
+    /// directly under the access, which neither spelling has. Analysis rule A056
+    /// does, and rejects both spellings before code generation runs; the build
+    /// here skips analysis so that P014's own rejection stays pinned too, since
+    /// the guard's deadness is a property of code generation's own checks.
     #[test]
     fn an_out_of_range_folded_index_never_reaches_the_guard() {
         for (label, index) in [("named const", "K"), ("const arithmetic", "1 + 4")] {
@@ -1223,7 +1233,21 @@ spec Reach {{
 }}
 "#
             );
-            let error = crate::utils::codegen_with_full_config(
+            let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(
+                crate::utils::build_ast(source.clone()),
+            )
+            .expect("the source type-checks")
+            .typed_context();
+            let analyzed = inference_analysis::analyze(&typed_context)
+                .expect_err(&format!("{label}: analysis must reject an out-of-range index"));
+            assert!(
+                analyzed
+                    .errors()
+                    .iter()
+                    .any(|error| error.rule_id() == "A056"),
+                "{label}: analysis must reject the index under A056: {analyzed:?}"
+            );
+            let error = crate::utils::codegen_with_full_config_no_analysis(
                 &source,
                 Target::Wasm32,
                 CompilationMode::Proof,

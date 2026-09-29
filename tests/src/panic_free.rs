@@ -312,6 +312,12 @@ mod gate {
             "it is the same negative with the construct written as a function-body modifier",
         ),
         (
+            "inf::spec_bounds_realization",
+            "its executable bodies index with unguarded parameters on purpose, so the Rocq \
+             realization obligation has a live bounds guard to be about, and A056 refuses an \
+             index no guard in the function proves",
+        ),
+        (
             "inf::test_parse_source_file_1",
             "it is a parser fixture written against a grammar this parser does not accept",
         ),

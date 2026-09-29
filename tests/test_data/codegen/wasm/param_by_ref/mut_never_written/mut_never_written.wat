@@ -24,6 +24,20 @@
   )
   (func $peek_array (;1;) (type 1) (param $data i32) (param $i i32) (result i32)
     (local i32)
+    local.get $i
+    i32.const 0
+    i32.lt_s
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $i
+      i32.const 8
+      i32.ge_s
+    end
+    if ;; label = @1
+      i32.const -1
+      return
+    end
     local.get $data
     local.get $i
     local.tee 2

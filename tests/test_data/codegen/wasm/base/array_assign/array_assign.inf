@@ -22,6 +22,7 @@ pub fn swap_elements() -> i32 {
 
 pub fn write_computed_index(i: i32) -> i32 {
     let mut arr: [i32; 3] = [0, 0, 0];
+    if i < -1 || i > 1 { return -1; }
     arr[i + 1] = 99;
     return arr[2];
 }

@@ -113,56 +113,28 @@
     unreachable
   )
   (func $trap_kind (;5;) (type 5) (param $a i32) (param $i i32) (result i32)
-    (local $arr i32) (local $__frame_ptr i32) (local i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
-    local.get $__frame_ptr
-    i32.const 0
-    i32.add
-    i32.const 1
-    i32.store
-    local.get $__frame_ptr
-    i32.const 4
-    i32.add
-    i32.const 2
-    i32.store
-    local.get $__frame_ptr
-    local.set $arr
+    (local i32 i32 i32)
     i32.const 100
     local.get $a
     i32.div_s
     i32.const 0
     i32.gt_s
     if (result i32) ;; label = @1
-      local.get $arr
+      i32.const 0
       local.get $i
+      i32.sub
       local.tee 4
-      local.get 4
-      i32.const 2
-      i32.ge_u
+      i32.const -2147483648
+      i32.eq
       if ;; label = @2
         unreachable
       end
-      i32.const 4
-      i32.mul
-      i32.add
-      i32.load
+      local.get 4
       i32.const 0
       i32.gt_s
     else
       i32.const 0
     end
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )
@@ -334,5 +306,5 @@
     return
     unreachable
   )
-  (@custom "inference.checked" (after code) "\01\01\08")
+  (@custom "inference.checked" (after code) "\01\02\05\08")
 )

@@ -42,6 +42,7 @@ Errors, warnings, and informational findings are partitioned by severity. The `a
 | `rule` | `Rule` trait and `rule!` / `__severity!` macros |
 | `errors` | `AnalysisDiagnostic`, `AnalysisErrors`, `AnalysisResult`, `Severity` |
 | `walker` | `walk_function_bodies()`, `for_each_function_body()`, `WalkContext` |
+| `range` | the value-range analysis over one function body that A056 and A057 read |
 | `rules` | `all_rules()` registry and one sub-module per rule |
 | `rules::position` | the shared position phrases the value-rejecting rules name in their messages |
 
@@ -134,8 +135,14 @@ A036 reuses A035's whole-program call graph (a DAG, since recursion is forbidden
 | ID | Struct | Severity | What it checks |
 |----|--------|----------|----------------|
 | A037 | `ArrayIndexConstOutOfBounds` | error | a constant array index (`arr[c]`) is negative or `>= length` |
+| A056 | `ArrayIndexNotProven` | error | a dynamic array index is not proven to lie in `0..length` on every run that reaches the access |
+| A057 | `AssertAlwaysFails` | error | an `assert` in executable code fails on every run that reaches it |
 
-A037 is the static half of array bounds checking. When the index is a constant integer literal, the array length is known at compile time from the array sub-expression's `Array(_, length)` type info, so an out-of-range access is rejected with zero runtime cost in every build profile and compilation mode. A negative literal such as `arr[-1]` lowers to a single `NumberLiteral` whose text keeps the leading `-`, so it is caught here as well. Dynamic (non-literal) indices are out of A037's scope — they are guarded at run time by `core/wasm-codegen`, in every build and every compilation mode (see that crate's docs); the two mechanisms together close the bounds-safety hole.
+A037 is the static half of array bounds checking. When the index is a constant integer literal, the array length is known at compile time from the array sub-expression's `Array(_, length)` type info, so an out-of-range access is rejected with zero runtime cost in every build profile and compilation mode. A negative literal such as `arr[-1]` lowers to a single `NumberLiteral` whose text keeps the leading `-`, so it is caught here as well. Dynamic (non-literal) indices are out of A037's scope — they are guarded at run time by `core/wasm-codegen`, in every build and every compilation mode (see that crate's docs), and A056 requires each of them to be proven in bounds.
+
+A056 makes an out-of-range dynamic index a path the program handles rather than an implicit trap. The runtime guard `index >= length -> unreachable` halts the program; A056 requires the program to make that guard unreachable, by proving from the code the programmer wrote that the index lies in `0..length` wherever the access runs. The proof comes from `src/range.rs`, a value-range analysis over one function body. It needs no control-flow graph, because control flow is structured: an `if` joins its arms, a loop iterates to a fixpoint at its head (widening a moving bound to its type's limit), a `break` carries its state to the loop's exit, and a `return` ends its path. Facts come from `if` and `loop` conditions, from the left operand of a short-circuiting `&&`/`||`, from initializers, and from arithmetic modelled as codegen emits it — a checked `+`, `-`, `*` or unary `-` that did not trap produced the mathematical result, a `wrapping(...)` one that can leave its type can be any value of it, `/` and `%` by a positive divisor and `&` with a non-negative operand are bounded by it. So the usual shapes pass unannotated — a counter that starts at `0` and grows under `loop i < N`, a binary search's `mid`, `i % N`, a `u8` index into a `[T; 256]` — while a signed index guarded only from above, a parameter indexed without a guard, and a counter advanced before its access are rejected. The analysis is sound because a scalar local changes only through `x = …` (value semantics, no references or globals) and names identify bindings within a body (no shadowing). Only a plain local is narrowed by a condition, so a guarded `s.i` is rejected with advice to bind it to a local first. An `assert` is deliberately not a source of facts: it establishes its condition only by halting. The rule is intraprocedural, since the language has no preconditions, and examines the bodies codegen lowers. The runtime guard stays under every proven access.
+
+A057 closes the matching path on the other side of a guard: `if i < 8 { a[i] } else { assert(false); }` satisfies A056 while halting on exactly the index A056 exists to handle. An `assert` in executable code is reported when no state the range analysis admits at that point satisfies its condition, so it fails on every run that reaches it. Specification bodies are skipped, since an `assert` there states a claim rather than checking one.
 
 ### Uzumaki in unsupported positions (errors)
 
@@ -429,6 +436,8 @@ Test files are organized by rule group:
 | `rules_a053.rs` | A053 (arithmetic-mode annotation with nothing to govern) |
 | `rules_a054.rs` | A054 (arithmetic-mode annotation that changes nothing) |
 | `rules_a055.rs` | A055 (parameter words over SpaceWasm's limit), and the differential test that holds its count to the words code generation emits |
+| `rules_a056.rs` | A056 (dynamic array index not proven in bounds) |
+| `rules_a057.rs` | A057 (assert that always fails) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

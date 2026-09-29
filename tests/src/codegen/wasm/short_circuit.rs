@@ -111,10 +111,10 @@ mod short_circuit_tests {
         call!("chain3_div", i32, (1_i32, 1_i32, 1_i32), 1_i32);
 
         // Trap identity distinguishes which operand ran: division on the left,
-        // out-of-bounds index on the evaluated right (`arr` has length 2).
+        // the checked negation of `i32::MIN` on the evaluated right.
         trap!("trap_kind", i32, (0_i32, 0_i32), Trap::IntegerDivisionByZero);
-        trap!("trap_kind", i32, (5_i32, 9_i32), Trap::UnreachableCodeReached);
-        call!("trap_kind", i32, (5_i32, 1_i32), 1_i32);
+        trap!("trap_kind", i32, (5_i32, i32::MIN), Trap::UnreachableCodeReached);
+        call!("trap_kind", i32, (5_i32, -1_i32), 1_i32);
 
         // Normalization: `a || b && c` (with `&&` binding tighter) yields exactly
         // 0 or 1, never any other nonzero.

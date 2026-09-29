@@ -16,6 +16,7 @@ pub fn read_c1y() -> i32 {
 
 pub fn read_var_index(i: i32) -> i32 {
     let g: Grid = Grid { cells: [Point { x: 10, y: 20 }, Point { x: 30, y: 40 }] };
+    if i < 0 || i >= 2 { return -1; }
     return g.cells[i].x;
 }
 

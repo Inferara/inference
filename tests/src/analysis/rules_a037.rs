@@ -3,7 +3,7 @@
 /// - A037: ArrayIndexConstOutOfBounds — when `arr[c]` has a constant integer
 ///   literal index `c` and the array's type is `[T; length]`, the access is
 ///   rejected at compile time if `c < 0` or `c >= length`. Dynamic (non-literal)
-///   indices are out of scope and fall to the future runtime guard.
+///   indices are out of scope and fall to A056 and the runtime guard.
 ///
 /// These tests are the cross-crate guard that the rule fires through a real
 /// parse -> type-check -> analyze pipeline on Inference source, complementing the
@@ -127,8 +127,8 @@ mod analysis_rules_tests {
     }
 
     /// A dynamic index (a variable, not a literal) is out of scope for A037 even
-    /// when its value would be out of bounds at runtime; it falls to the future
-    /// runtime guard. A037 must not fire here.
+    /// when its value would be out of bounds at runtime; it falls to A056. A037
+    /// must not fire here.
     #[test]
     fn a037_dynamic_index_not_flagged() {
         let source = r#"
