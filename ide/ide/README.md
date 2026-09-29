@@ -98,7 +98,7 @@ tagged with a `code`: `"syntax"` (resilient parser errors), `"import"`
 summary diagnostic anchored on the `use` directive that pulls it in, not as its
 own per-file-local errors), `"type"` (structured type-check diagnostics via
 `inference::type_check_with_diagnostics`), and an analysis rule id (`"A001"`
-through `"A055"`, see `core/analysis`). Only the *entry* file's own diagnostics
+through `"A057"`, see `core/analysis`). Only the *entry* file's own diagnostics
 are returned — an imported file's offsets are local to that file and would be
 misplaced if surfaced directly.
 

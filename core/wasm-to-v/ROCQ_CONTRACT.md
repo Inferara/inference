@@ -1701,10 +1701,14 @@ guards, the third access having folded to `BI_const_num (Vi32 12)`.
 
 The static story differs on the same boundary. A037 matches only a
 literal directly under the access, and `P014` — which folds named and
-computed constants — runs on specification bodies. So in an *executable*
-function `const K: i32 = 5; a[K]` over an `[i32; 3]` has no static story
-at all, and the runtime guard is what now catches it: not merely an
-unchanged case, but a hole the flip closes.
+computed constants — runs on specification bodies. In an *executable*
+function the rest falls to A056, which requires every guarded access to
+be proven in bounds by a range analysis over the source: `const K: i32 =
+5; a[K]` over an `[i32; 3]` is rejected there, and so is any index no
+guard in the function proves. The runtime guard stays under each proven
+access, dead in every accepted executable function; a module compiled
+without analysis still carries it live, which is what the obligation
+below is stated against.
 
 The same gap reaches inside an `exists`/`unique` body, where a live trap
 would be fatal (see [Why a reachability body refuses a dynamic

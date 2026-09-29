@@ -297,11 +297,11 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-Fifty-two rules are registered in `all_rules()`. Forty-six are
+Fifty-four rules are registered in `all_rules()`. Forty-eight are
 error-severity — they block compilation — and six are warnings; no
 info-severity rule has been defined yet. Three ids in the numbering range
 (A013, A021, A030) are currently unassigned, so the assigned ids run from
-A001 to A055. The tables below group the rules by the invariant family they
+A001 to A057. The tables below group the rules by the invariant family they
 protect; the descriptions are condensed from the rules' own doc comments.
 
 ### Control flow and termination
@@ -388,6 +388,8 @@ as a pure method namespace, stays legal.
 | A052 | arithmetic whose operands are constants must fit the type it is performed at |
 | A053 | a `checked(...)` or `wrapping(...)` must contain an operator it can govern |
 | A054 | an annotation naming the mode already in force is redundant *(warning)* |
+| A056 | a dynamic array index must be proven to lie within the array's bounds |
+| A057 | an `assert` must not fail on every run that reaches it |
 
 A022 exists because a value that could never round-trip through its declared
 type is a mistake wherever it is written, whatever the operators around it do —
@@ -438,6 +440,46 @@ decided by the language's default rather than by the expression. The comparison
 is against the *enclosing* effective mode, so `checked(a * wrapping(b + c))` is
 redundant nowhere, and a stack of same-mode annotations reports its outermost
 member once, the convention A048 and A049 already use.
+
+A056 is the other half of A037. Every array access whose index is not a bare
+literal carries a runtime guard (`index >= length -> unreachable`), and a trap
+is a halt rather than a recovery, so A056 requires the program to make that
+guard unreachable itself: a value-range analysis has to prove, from the code
+the programmer wrote, that the index lies in `0..length` on every run that
+reaches the access. An out-of-range index is then a path the program handles —
+an `else`, an early `return`, a loop's exit — and never an implicit trap:
+
+```inference
+if i >= 0 && i < 8 { r = arr[i]; } else { r = -1; }
+```
+
+The analysis follows the language's structured control flow directly, with no
+control-flow graph: an `if` joins its arms, a loop iterates to a fixpoint at its
+head, a `break` carries its state to the loop's exit. Facts come from the
+conditions of `if` and `loop`, from the left operand of a short-circuiting `&&`
+or `||`, from initializers, and from the arithmetic applied since, modelled as
+the code generator emits it — a checked `+` that did not trap produced the
+mathematical sum, a `wrapping(...)` one that can leave its type can be anything.
+So the common shapes need no annotation: a counter that starts at `0` and only
+grows is proven by its loop condition without a written `i >= 0`, `i % 8` and
+`k & 7` are bounded by their right operand, and a `u8` index into a `[T; 256]`
+is proven by its type alone. A signed index guarded only from above is not,
+because the guard's unsigned compare would trap on a negative one. Only a
+plain local is narrowed by a condition; an index read from a field or an
+element is proven by its type alone, so the fix is to bind it to a local and
+guard that.
+
+An `assert` proves nothing for A056: it establishes its condition only by
+halting when the condition is false, which is the outcome the rule exists to
+rule out. A057 closes the matching path on the other side of a guard — an
+`assert` that fails on every run reaching it, such as `assert(false)` in the
+`else` of a bounds check — since that is an unconditional halt written as a
+check. Both rules are intraprocedural, because the language has no
+preconditions: a parameter can hold any value of its type, and a function that
+indexes with one guards it itself. A specification's envelope does not stand in
+for that guard, since it describes only the calls the specification makes.
+The runtime guard stays in every build; A056 proves it dead rather than
+removing it.
 
 ### Language restrictions
 
