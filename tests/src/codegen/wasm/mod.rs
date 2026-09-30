@@ -39,6 +39,7 @@ mod literal_ctx_array_elements;
 mod literal_ctx_i64;
 mod literal_ctx_nested_array;
 mod loops;
+mod memory_growth;
 mod multi_file;
 mod multi_file_extern;
 mod multi_file_golden;

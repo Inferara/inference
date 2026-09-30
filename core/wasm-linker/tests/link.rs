@@ -5439,6 +5439,13 @@ fn memory_grow_against_a_fixed_memory_is_rejected() {
         matches!(err, LinkError::IncompatibleMemory { .. }),
         "expected IncompatibleMemory, got {err:?}"
     );
+    // The fix is a maximum on the main module's side, so the diagnostic names
+    // both spellings of it rather than leaving the author to guess.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("`max-pages` in the `[memory]` table") && msg.contains("--max-memory-pages"),
+        "the refusal must name the maximum knob, got: {msg}"
+    );
 }
 
 #[test]
