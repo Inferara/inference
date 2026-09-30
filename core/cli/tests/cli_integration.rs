@@ -364,15 +364,15 @@ fn abi_version_flag_prints_and_exits() {
     assert_eq!(version, expected);
 }
 
-/// Pins the ABI version string to the literal value `--host-imports` became
+/// Pins the ABI version string to the literal value `--bounds-checks` became
 /// requestable at. The `abi_version_flag_prints_and_exits` test above checks the
 /// binary against the shared constant; this one additionally asserts the
-/// concrete `1.8` so an accidental constant change is caught here too.
+/// concrete `1.9` so an accidental constant change is caught here too.
 ///
 /// Uses an exact trimmed equality (not `contains`) so a near-miss such as
-/// "11.8" or "1.80" — which would satisfy a substring match — cannot pass.
+/// "11.9" or "1.90" — which would satisfy a substring match — cannot pass.
 #[test]
-fn abi_version_is_one_dot_eight() {
+fn abi_version_is_one_dot_nine() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.arg("--abi-version");
     let assert = cmd.assert().success();
@@ -380,8 +380,8 @@ fn abi_version_is_one_dot_eight() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.trim(),
-        "1.8",
-        "ABI version must be exactly 1.8, not merely contain it"
+        "1.9",
+        "ABI version must be exactly 1.9, not merely contain it"
     );
 }
 

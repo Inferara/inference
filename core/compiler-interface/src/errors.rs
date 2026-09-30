@@ -10,8 +10,9 @@
 use thiserror::Error;
 
 use crate::{
-    MemoryLayoutSource, RESERVED_TARGET_NAMES, TargetName, TargetSource, WasmFeatureName,
-    WasmFeatureSource, supported_features_listing, supported_targets_listing,
+    BoundsChecks, BoundsChecksSource, MemoryLayoutSource, RESERVED_TARGET_NAMES, TargetName,
+    TargetSource, WasmFeatureName, WasmFeatureSource, supported_features_listing,
+    supported_targets_listing,
 };
 
 /// A requested WebAssembly feature set that cannot be honored.
@@ -121,6 +122,46 @@ pub struct MemoryLayoutError {
     /// build asked for and naming the offending one.
     pub reason: String,
     pub surface: MemoryLayoutSource,
+}
+
+/// A named bounds-check policy that is not in the vocabulary.
+///
+/// A struct rather than an enum because there is one way the request fails. The
+/// message spells out what each supported value does rather than only listing
+/// them: the likeliest wrong value is one that asks for no guards at all, and
+/// the answer to that is what `omit-proven` keeps.
+///
+/// `surface` is deliberately not named `source`, for the reason given on
+/// [`WasmFeatureError`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "Invalid {} value `{entry}`: unknown bounds-check policy. Supported values: `{}` (the \
+     default: every array access keeps its runtime bounds guard) and `{}` (an access the \
+     analysis proved in bounds is emitted without it; every other access keeps it).{}",
+    surface.label(),
+    BoundsChecks::All.as_str(),
+    BoundsChecks::OmitProven.as_str(),
+    bounds_checks_whitespace_hint(entry)
+)]
+pub struct BoundsChecksError {
+    /// The value as it was written.
+    pub entry: String,
+    pub surface: BoundsChecksSource,
+}
+
+/// The extra sentence an unknown policy earns when it is a supported one with
+/// whitespace around it. Mirrors [`whitespace_hint`] for the same reason it
+/// exists — whitespace is rejected, never trimmed.
+fn bounds_checks_whitespace_hint(entry: &str) -> String {
+    let trimmed = entry.trim();
+    if trimmed != entry && BoundsChecks::from_name(trimmed).is_some() {
+        format!(
+            " Policy names are matched exactly and this value has surrounding whitespace: \
+             write `{trimmed}`."
+        )
+    } else {
+        String::new()
+    }
 }
 
 /// The extra sentence an unknown name earns when it is a supported name with
