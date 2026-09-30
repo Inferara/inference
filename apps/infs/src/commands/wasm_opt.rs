@@ -40,6 +40,12 @@
 //! that has quietly gone stale. `--no-wasm-opt`, and `enabled = false` under
 //! `[build.wasm-opt]`, are the way to keep an exact record.
 //!
+//! A module built under `[build] bounds-checks = "omit-proven"` carries a second
+//! record of the same shape, `inference.bounds_elided`, naming the functions
+//! holding an array access emitted without its bounds guard. It goes stale the
+//! same way and is marked the same way: the opaque form says some function of
+//! the module omits a guard, and which ones is no longer recorded.
+//!
 //! ## The import set
 //!
 //! `infc` emits an import for every host binding, called or not, because the
@@ -75,7 +81,8 @@ use inf_wasmparser::{Parser, Payload, WasmFeatures};
 use inference_compiler_interface::TargetName;
 
 use crate::artifact::{
-    ArtifactScan, CHECKED_SECTION_NAME, VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS, scan_artifact,
+    ArtifactScan, BOUNDS_ELIDED_SECTION_NAME, CHECKED_SECTION_NAME,
+    VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS, scan_artifact,
 };
 use crate::commands::build::BuildMode;
 use crate::project::ProjectContext;
@@ -87,14 +94,16 @@ use crate::toolchain::{Platform, ToolchainPaths};
 /// over a PATH lookup.
 const WASM_OPT_PATH_ENV: &str = "WASM_OPT_PATH";
 
-/// The opaque form of the [`CHECKED_SECTION_NAME`] payload: a version byte
-/// and nothing else.
+/// The opaque form of a function-index record — the [`CHECKED_SECTION_NAME`]
+/// and [`BOUNDS_ELIDED_SECTION_NAME`] payloads, which share one format: a
+/// version byte and nothing else.
 ///
 /// Version 1 is the exact form — a version, a count and an ascending index list.
 /// Version 2 carries no list, and that absence is the statement: some function
-/// of this module traps when its arithmetic overflows, and which ones is no
-/// longer recorded. Code generation never writes it; this is its one producer.
-const CHECKED_OPAQUE_PAYLOAD: [u8; 1] = [2];
+/// of this module has the recorded property (traps when its arithmetic
+/// overflows, or omits a bounds guard), and which ones is no longer recorded.
+/// Code generation never writes it; this is its one producer.
+const OPAQUE_RECORD_PAYLOAD: [u8; 1] = [2];
 
 /// Minimum supported Binaryen major version. The forwarded flags
 /// (`--mvp-features` plus the `--enable-*` feature flags) and the `-Os`/`-Oz`
@@ -206,7 +215,7 @@ pub(crate) fn post_build_optimize(
     // failures name one file. The import list is read from the input too, as
     // the set `infc`'s inventory line described and its allowlist admitted, for
     // the one that lands to be held to and compared against.
-    let (uses_bulk_memory, records_overflow_guards, compiled_imports) =
+    let (uses_bulk_memory, records_overflow_guards, records_elided_bounds, compiled_imports) =
         match scan_artifact(&wasm_bytes, Path::new("out/main.wasm"))? {
             ArtifactScan::VerificationConstruct(construct) => bail!(
                 "`[build.wasm-opt]` is enabled but `out/main.wasm` contains the \
@@ -218,9 +227,16 @@ pub(crate) fn post_build_optimize(
             ArtifactScan::Executable {
                 uses_bulk_memory,
                 records_overflow_guards,
+                records_elided_bounds,
                 function_imports,
-            } => (uses_bulk_memory, records_overflow_guards, function_imports),
+            } => (
+                uses_bulk_memory,
+                records_overflow_guards,
+                records_elided_bounds,
+                function_imports,
+            ),
         };
+    let renumbered_records = renumbered_records(records_overflow_guards, records_elided_bounds);
 
     let wasm_opt = match resolve_wasm_opt_with_source()? {
         Some((path, _)) => path,
@@ -235,7 +251,7 @@ pub(crate) fn post_build_optimize(
         &config.level,
         &wasm_path,
         uses_bulk_memory,
-        records_overflow_guards,
+        &renumbered_records,
         &compiled_imports,
         ctx.manifest.build.resolved_target()?,
     )?;
@@ -260,6 +276,27 @@ pub(crate) fn post_build_optimize(
             eprintln!("warning: {warning}");
         }
     }
+    report_opaque_records(records_overflow_guards, records_elided_bounds);
+    Ok(())
+}
+
+/// The function-index records an artifact carries, each of which the optimizer
+/// is about to make stale by renumbering the functions it names.
+fn renumbered_records(
+    records_overflow_guards: bool,
+    records_elided_bounds: bool,
+) -> Vec<&'static str> {
+    [
+        (records_overflow_guards, CHECKED_SECTION_NAME),
+        (records_elided_bounds, BOUNDS_ELIDED_SECTION_NAME),
+    ]
+    .into_iter()
+    .filter_map(|(carried, name)| carried.then_some(name))
+    .collect()
+}
+
+/// Tells the user which records the optimizer left opaque, and what that costs.
+fn report_opaque_records(records_overflow_guards: bool, records_elided_bounds: bool) {
     if records_overflow_guards {
         println!(
             "wasm-opt: main.wasm records overflow guards, and the optimizer has renumbered \
@@ -269,7 +306,14 @@ pub(crate) fn post_build_optimize(
              an exact record."
         );
     }
-    Ok(())
+    if records_elided_bounds {
+        println!(
+            "wasm-opt: main.wasm records which functions omit a bounds guard, and the optimizer \
+             has renumbered its functions, so the record now says only that some function \
+             does; build without `[build.wasm-opt]` (or with `--no-wasm-opt`) to keep an exact \
+             record."
+        );
+    }
 }
 
 /// Resolves the `wasm-opt` binary and reports which precedence tier fired: the
@@ -611,7 +655,8 @@ fn wasm_opt_args(
 /// because it is the one that describes the artifact the build leaves behind,
 /// and so is the import set, which the optimizer may have narrowed.
 /// `compiled_imports` is the input's import set, which the landed one may
-/// narrow and may not grow.
+/// narrow and may not grow. `renumbered_records` names the function-index
+/// records the input carries, which the landed bytes carry in opaque form.
 ///
 /// # Errors
 ///
@@ -624,7 +669,7 @@ fn optimize_in_place(
     level: &str,
     wasm_path: &Path,
     uses_bulk_memory: bool,
-    records_overflow_guards: bool,
+    renumbered_records: &[&str],
     compiled_imports: &[(String, String)],
     target: TargetName,
 ) -> Result<Landed> {
@@ -668,18 +713,20 @@ fn optimize_in_place(
         );
     }
 
-    // The optimizer has moved the functions the guard record named, so the
-    // record is replaced by the admission that it can no longer name them —
-    // before the artifact is put in place, so a failure here leaves the exact
-    // one where it was.
-    let landing = if records_overflow_guards {
-        let marked = match mark_overflow_guards_opaque(&optimized) {
+    // The optimizer has moved the functions the records named, so each is
+    // replaced by the admission that it can no longer name them — before the
+    // artifact is put in place, so a failure here leaves the exact one where it
+    // was.
+    let landing = if renumbered_records.is_empty() {
+        optimized
+    } else {
+        let marked = match mark_records_opaque(&optimized, renumbered_records) {
             Ok(marked) => marked,
             Err(err) => {
                 let _ = std::fs::remove_file(&tmp_path);
                 return Err(err.context(format!(
                     "wasm-opt succeeded but its output could not be marked as an artifact \
-                     whose overflow-guard record no longer names its functions. The original \
+                     whose function records no longer name its functions. The original \
                      {} is unchanged; try `--no-wasm-opt`.",
                     wasm_path.display()
                 )));
@@ -693,8 +740,6 @@ fn optimize_in_place(
             )));
         }
         marked
-    } else {
-        optimized
     };
 
     // What the bytes about to land import is the set this build ships, so it is
@@ -890,17 +935,19 @@ fn optimized_tmp_path(wasm_path: &Path) -> PathBuf {
     PathBuf::from(tmp)
 }
 
-/// Returns `optimized` with its `inference.checked` section rewritten into the
-/// opaque form — the statement that some function of the module traps on
-/// arithmetic overflow and that which ones is no longer recorded.
+/// Returns `optimized` with each section named in `records` rewritten into the
+/// opaque form — for `inference.checked`, the statement that some function of
+/// the module traps on arithmetic overflow and that which ones is no longer
+/// recorded; for `inference.bounds_elided`, the same about an omitted bounds
+/// guard.
 ///
 /// Every other section is copied out of `optimized` byte for byte, and the two
 /// modules are then compared section by section to prove exactly that: this
 /// function runs over an artifact the pipeline is about to ship, so "only the
-/// custom section changed" has to be a checked fact rather than a property of
-/// the loop above it.
+/// records changed" has to be a checked fact rather than a property of the loop
+/// above it.
 ///
-/// The section is *appended* when the optimized artifact no longer carries one.
+/// A section is *appended* when the optimized artifact no longer carries one.
 /// Binaryen has been measured to carry it through, so that branch is not the
 /// expected path — but the fact being recorded is a fact about the input, and
 /// dropping it because the optimizer dropped the section would turn a marker
@@ -909,18 +956,18 @@ fn optimized_tmp_path(wasm_path: &Path) -> PathBuf {
 /// # Errors
 ///
 /// Errors if `optimized` cannot be parsed, or if the rebuilt module differs from
-/// it anywhere but in that one section.
-fn mark_overflow_guards_opaque(optimized: &[u8]) -> Result<Vec<u8>> {
+/// it anywhere but in those sections.
+fn mark_records_opaque(optimized: &[u8], records: &[&str]) -> Result<Vec<u8>> {
     let mut module = wasm_encoder::Module::new();
-    let mut replaced = false;
+    let mut replaced: Vec<&str> = Vec::new();
     for payload in Parser::new(0).parse_all(optimized) {
         let payload = payload
             .map_err(|err| anyhow::anyhow!("failed to parse the optimized artifact: {err}"))?;
         if let Payload::CustomSection(reader) = &payload
-            && reader.name() == CHECKED_SECTION_NAME
+            && let Some(&record) = records.iter().find(|&&record| reader.name() == record)
         {
-            push_opaque_guard_record(&mut module);
-            replaced = true;
+            push_opaque_record(&mut module, record);
+            replaced.push(record);
             continue;
         }
         if let Some((id, range)) = payload.as_section() {
@@ -930,19 +977,21 @@ fn mark_overflow_guards_opaque(optimized: &[u8]) -> Result<Vec<u8>> {
             });
         }
     }
-    if !replaced {
-        push_opaque_guard_record(&mut module);
+    for &record in records {
+        if !replaced.contains(&record) {
+            push_opaque_record(&mut module, record);
+        }
     }
     let marked = module.finish();
-    assert_only_guard_record_changed(optimized, &marked)?;
+    assert_only_records_changed(optimized, &marked, records)?;
     Ok(marked)
 }
 
-/// Appends the opaque `inference.checked` section to `module`.
-fn push_opaque_guard_record(module: &mut wasm_encoder::Module) {
+/// Appends the opaque form of the function-index record `name` to `module`.
+fn push_opaque_record(module: &mut wasm_encoder::Module, name: &str) {
     module.section(&wasm_encoder::CustomSection {
-        name: CHECKED_SECTION_NAME.into(),
-        data: (&CHECKED_OPAQUE_PAYLOAD[..]).into(),
+        name: name.into(),
+        data: (&OPAQUE_RECORD_PAYLOAD[..]).into(),
     });
 }
 
@@ -972,22 +1021,22 @@ fn section_shape(wasm: &[u8]) -> Result<Vec<(u8, String, &[u8])>> {
     Ok(shape)
 }
 
-/// Checks that `marked` differs from `before` in the `inference.checked` section
-/// and nowhere else.
+/// Checks that `marked` differs from `before` in the `records` sections and
+/// nowhere else.
 ///
-/// Compares the two section lists with that one section removed from each, so a
+/// Compares the two section lists with those sections removed from each, so a
 /// section reordered, dropped, re-encoded or added is caught as readily as one
 /// whose bytes changed.
 ///
 /// # Errors
 ///
 /// Errors if either module cannot be parsed, or if the two disagree anywhere but
-/// in that section.
-fn assert_only_guard_record_changed(before: &[u8], marked: &[u8]) -> Result<()> {
+/// in those sections.
+fn assert_only_records_changed(before: &[u8], marked: &[u8], records: &[&str]) -> Result<()> {
     let strip = |wasm: &[u8]| -> Result<Vec<(u8, String, Vec<u8>)>> {
         Ok(section_shape(wasm)?
             .into_iter()
-            .filter(|(_, name, _)| name != CHECKED_SECTION_NAME)
+            .filter(|(_, name, _)| !records.contains(&name.as_str()))
             .map(|(id, name, data)| (id, name, data.to_vec()))
             .collect())
     };
@@ -995,7 +1044,7 @@ fn assert_only_guard_record_changed(before: &[u8], marked: &[u8]) -> Result<()> 
     let marked_shape = strip(marked)?;
     if before_shape != marked_shape {
         bail!(
-            "marking the overflow-guard record rewrote {} section(s) it must have copied \
+            "marking the function records rewrote {} section(s) it must have copied \
              verbatim (the optimized artifact has {} such section(s), the marked one {})",
             before_shape
                 .iter()
@@ -1366,13 +1415,14 @@ mod tests {
         // constant in `crate::artifact`, and code generation and the
         // static-merge linker keep copies of their own, each pinned the same
         // way, so a drift in any one of them fails somewhere.
-        assert_eq!(CHECKED_OPAQUE_PAYLOAD, [2]);
+        assert_eq!(OPAQUE_RECORD_PAYLOAD, [2]);
     }
 
     #[test]
     fn marking_replaces_the_guard_record_and_leaves_every_other_section_alone() {
         let module = module_with_custom_section(&[0x0b], CHECKED_SECTION_NAME, &[1, 2, 0, 3]);
-        let marked = mark_overflow_guards_opaque(&module).expect("the module marks");
+        let marked =
+            mark_records_opaque(&module, &[CHECKED_SECTION_NAME]).expect("the module marks");
 
         let record: Vec<&[u8]> = section_shape(&marked)
             .unwrap()
@@ -1382,7 +1432,7 @@ mod tests {
             .collect();
         assert_eq!(record.len(), 1, "exactly one guard record survives");
         assert!(
-            record[0].ends_with(&CHECKED_OPAQUE_PAYLOAD),
+            record[0].ends_with(&OPAQUE_RECORD_PAYLOAD),
             "the surviving record carries the opaque payload: {:?}",
             record[0]
         );
@@ -1398,6 +1448,28 @@ mod tests {
         assert_eq!(others(&module), others(&marked));
     }
 
+    /// Both records an `omit-proven` build with overflow guards carries are
+    /// marked in one pass, and nothing else changes.
+    #[test]
+    fn marking_replaces_both_function_records_together() {
+        let module = module_with_custom_section(&[0x0b], BOUNDS_ELIDED_SECTION_NAME, &[1, 1, 0]);
+        let records = [CHECKED_SECTION_NAME, BOUNDS_ELIDED_SECTION_NAME];
+        let marked = mark_records_opaque(&module, &records).expect("the module marks");
+        for name in records {
+            let record: Vec<&[u8]> = section_shape(&marked)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, section, _)| section == name)
+                .map(|(_, _, data)| data)
+                .collect();
+            assert_eq!(record.len(), 1, "exactly one `{name}` survives");
+            assert!(
+                record[0].ends_with(&OPAQUE_RECORD_PAYLOAD),
+                "`{name}` is opaque"
+            );
+        }
+    }
+
     #[test]
     fn marking_appends_the_record_when_the_optimizer_dropped_it() {
         // The fact recorded is a fact about the *input*, which carried a record.
@@ -1405,7 +1477,8 @@ mod tests {
         // into silence -- and silence reads downstream as "no function here
         // traps", the one reading the marker exists to prevent.
         let module = module_with_raw_body(&[0x0b]);
-        let marked = mark_overflow_guards_opaque(&module).expect("the module marks");
+        let marked =
+            mark_records_opaque(&module, &[CHECKED_SECTION_NAME]).expect("the module marks");
         let record: Vec<&[u8]> = section_shape(&marked)
             .unwrap()
             .into_iter()
@@ -1413,7 +1486,7 @@ mod tests {
             .map(|(_, _, data)| data)
             .collect();
         assert_eq!(record.len(), 1, "the record is appended, not lost");
-        assert!(record[0].ends_with(&CHECKED_OPAQUE_PAYLOAD));
+        assert!(record[0].ends_with(&OPAQUE_RECORD_PAYLOAD));
     }
 
     #[test]
@@ -1425,9 +1498,9 @@ mod tests {
         let elsewhere = module_with_custom_section(
             &[0x41, 0x00, 0x1a, 0x0b],
             CHECKED_SECTION_NAME,
-            &CHECKED_OPAQUE_PAYLOAD,
+            &OPAQUE_RECORD_PAYLOAD,
         );
-        let err = assert_only_guard_record_changed(&before, &elsewhere)
+        let err = assert_only_records_changed(&before, &elsewhere, &[CHECKED_SECTION_NAME])
             .expect_err("a body that changed must be caught");
         assert!(
             err.to_string().contains("copied verbatim"),
@@ -1632,7 +1705,7 @@ mod tests {
 
         let fake = write_failing_wasm_opt(&dir);
         let err = crate::testing::retry_while_exec_busy(|| {
-            optimize_in_place(&fake, "z", &wasm_path, false, false, &[], TargetName::DEFAULT)
+            optimize_in_place(&fake, "z", &wasm_path, false, &[], &[], TargetName::DEFAULT)
         })
         .unwrap_err();
         assert!(

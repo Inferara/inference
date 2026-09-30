@@ -389,6 +389,13 @@ pub use inference_wasm_linker::{
     CHECKED_SECTION_VERSION as LINKER_CHECKED_SECTION_VERSION,
 };
 
+/// Re-export of the linker's own `inference.bounds_elided` identifiers, renamed
+/// for the reason the `inference.checked` ones above are.
+pub use inference_wasm_linker::{
+    BOUNDS_ELIDED_SECTION_NAME as LINKER_BOUNDS_ELIDED_SECTION_NAME,
+    BOUNDS_ELIDED_SECTION_VERSION as LINKER_BOUNDS_ELIDED_SECTION_VERSION,
+};
+
 /// Re-export of the per-program `hassert` obligation map so consumers of
 /// [`wasm_to_v`] can construct the argument (empty post-link, populated for the
 /// pre-link cross-check) without depending on `inference-hassert` directly.

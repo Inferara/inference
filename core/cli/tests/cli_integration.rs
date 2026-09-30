@@ -532,6 +532,35 @@ fn bounds_checks_omit_proven_drops_the_guard_of_each_proven_access() {
     assert_ne!(omitted, compile_source_with(&[], PROVEN_INDEX_SOURCE));
 }
 
+/// Whether `wasm` carries the `inference.bounds_elided` record, found by its
+/// name's bytes.
+fn carries_bounds_elided_record(wasm: &[u8]) -> bool {
+    let name = b"inference.bounds_elided";
+    wasm.windows(name.len()).any(|w| w == name)
+}
+
+/// An `omit-proven` artifact records that it omitted guards, and a default one
+/// does not, at every target: the Stellar rewrite and the SpaceWasm check both
+/// run over the artifact after code generation, and neither may drop it.
+#[test]
+fn an_omit_proven_artifact_records_its_omitted_guards_at_every_target() {
+    for target in ["wasm32", "stellar", "spacewasm"] {
+        let omitted = compile_source_with(
+            &["--target", target, "--bounds-checks", "omit-proven"],
+            PROVEN_INDEX_SOURCE,
+        );
+        assert!(
+            carries_bounds_elided_record(&omitted),
+            "a `{target}` build under omit-proven must carry the record"
+        );
+        let kept = compile_source_with(&["--target", target], PROVEN_INDEX_SOURCE);
+        assert!(
+            !carries_bounds_elided_record(&kept),
+            "a default `{target}` build must carry no record"
+        );
+    }
+}
+
 /// The policy applies identically in proof mode — the `.v` must describe the
 /// same program as the `.wasm`, so nothing may gate it on the compilation mode.
 #[test]

@@ -504,6 +504,12 @@ pub(crate) struct Compiler {
     /// ([`Self::set_proven_in_bounds`]), so a build that skipped analysis keeps
     /// every guard. Read through [`Self::guard_elided`].
     proven_in_bounds: FxHashSet<ExprId>,
+    /// The WASM function index of every function in which an array access was
+    /// emitted without its bounds guard, in the instantiated space, once per
+    /// omitted guard. Recorded at the one site that omits a guard, in
+    /// [`Self::emit_index_offset`], so a function appears here exactly when its
+    /// body lost one; carried as the `inference.bounds_elided` section.
+    elided_bounds_func_indices: Vec<u32>,
     /// WASM local index of the scratch i32 used to single-evaluate the promoted
     /// quotient of a narrow (i8/i16) signed division for the overflow guard.
     /// Reserved per-function in [`Self::visit_function_definition`] only when the
@@ -835,6 +841,7 @@ impl Compiler {
             emit_bounds_checks: false,
             bounds_check_scratch_local: None,
             proven_in_bounds: FxHashSet::default(),
+            elided_bounds_func_indices: Vec::new(),
             narrow_div_scratch_local: None,
             default_arith_mode: ArithMode::DEFAULT,
             arith_mode: Vec::new(),
@@ -6435,6 +6442,7 @@ impl Compiler {
                 self.emit_bounds_check_guard(array_len);
             } else if self.emit_bounds_checks {
                 cov_mark::hit!(wasm_codegen_elide_bounds_check);
+                self.elided_bounds_func_indices.push(self.func_idx);
             }
             #[allow(clippy::cast_possible_wrap)]
             self.func()
@@ -8503,9 +8511,10 @@ impl Compiler {
         )
     }
 
-    /// Appends the three `inference.*` custom sections, in the order a reader
-    /// finds them: the per-spec function indices, the obligations that apply
-    /// them, then the guarded-function list.
+    /// Appends the `inference.*` custom sections, in the order a reader finds
+    /// them: the per-spec function indices, the obligations that apply them,
+    /// the guarded-function list, then the functions that omit a bounds
+    /// guard.
     ///
     /// Each is omitted when it would say nothing, and for each the omission is
     /// the statement rather than a saving. A compile-mode build records no
@@ -8514,7 +8523,9 @@ impl Compiler {
     /// none, has no function that traps on overflow, so it emits none of the
     /// third — and *that* absence is what a linker reads as "no
     /// Inference-emitted overflow guard in this module", which is also true of
-    /// every module a foreign toolchain produced.
+    /// every module a foreign toolchain produced. A build under the default
+    /// bounds-check policy omits no guard, so it emits none of the fourth, and
+    /// its bytes are those every build produced before the policy existed.
     fn attach_verification_sections(&self, module: &mut Module, hspecs: &HSpecMap) {
         if !self.spec_func_indices_by_spec.is_empty() {
             module.section(&crate::spec_section::SpecFuncSection::new(
@@ -8527,6 +8538,11 @@ impl Compiler {
         if !self.guarded_func_indices.is_empty() {
             module.section(&crate::checked_section::CheckedSection::new(
                 &self.guarded_func_indices,
+            ));
+        }
+        if !self.elided_bounds_func_indices.is_empty() {
+            module.section(&crate::bounds_elided_section::BoundsElidedSection::new(
+                &self.elided_bounds_func_indices,
             ));
         }
     }
