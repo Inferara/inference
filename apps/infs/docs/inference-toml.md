@@ -466,6 +466,11 @@ wording `infc` applies to its flags:
   because the wrapped stack pointer lands past the end of memory, and growth
   moves that end up to the maximum.
 
+A table that sets anything other than the defaults is declared by the module
+even when the program's own code uses no memory, so a linked module that
+addresses memory merges onto the memory the table describes instead of
+bringing its own.
+
 The memory is **fixed** unless `max-pages` exceeds `pages`. Nothing the
 compiler emits grows memory: a larger maximum is room for a linked module or
 the host to grow into, and a linked module that grows memory is refused against

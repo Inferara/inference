@@ -34,6 +34,18 @@ pub fn run() -> i32 {
 }
 ";
 
+    /// The same call with no stack frame of its own: a program whose code
+    /// touches no memory, so the only memory in play is the one its build
+    /// configured and the one the linked module declares.
+    const SCALAR_MAIN_SOURCE: &str = "\
+external fn grow_by(pages: i32) -> i32;
+use { grow_by } from memlib;
+
+pub fn run() -> i32 {
+    return grow_by(1);
+}
+";
+
     /// A linked module that grows the shared memory by its argument, returning
     /// the page count before the growth, or -1 when growth failed.
     const MEMLIB_WAT: &str = r#"
@@ -63,18 +75,27 @@ pub fn run() -> i32 {
     /// the way `infc -L <dir>` does, returning the merged module or the
     /// linker's refusal.
     fn build_and_link(layout: MemoryLayout, mode: CompilationMode) -> Result<Vec<u8>, String> {
+        build_and_link_source(MAIN_SOURCE, layout, mode)
+    }
+
+    fn build_and_link_source(
+        source: &str,
+        layout: MemoryLayout,
+        mode: CompilationMode,
+    ) -> Result<Vec<u8>, String> {
         let lib_dir = tempfile::tempdir().expect("create a library search directory");
         let lib = wat::parse_str(MEMLIB_WAT).expect("the library WAT assembles");
         std::fs::write(lib_dir.path().join("memlib.wasm"), lib).expect("write the library");
-        link_in(lib_dir.path(), layout, mode)
+        link_in(source, lib_dir.path(), layout, mode)
     }
 
     fn link_in(
+        source: &str,
         lib_dir: &Path,
         layout: MemoryLayout,
         mode: CompilationMode,
     ) -> Result<Vec<u8>, String> {
-        let arena = parse(MAIN_SOURCE).expect("the program parses");
+        let arena = parse(source).expect("the program parses");
         let typed = type_check(arena).expect("the program type-checks");
         analyze(&typed).expect("the program passes analysis");
         let main = codegen(
@@ -159,6 +180,59 @@ pub fn run() -> i32 {
             err.contains("`max-pages`") && err.contains("--max-memory-pages"),
             "the refusal must name the setting that admits growth, got: {err}"
         );
+    }
+
+    /// A program that touches no memory still declares the memory its build
+    /// configured, so the linked module's declaration cannot replace it. Were
+    /// the program memoryless, the linker would adopt the library's own
+    /// `(memory 1)` — no maximum at all — and a build that asked for a cap of
+    /// three pages would ship an unbounded memory.
+    #[test]
+    fn a_memoryless_program_keeps_the_maximum_its_build_configured() {
+        let linked = build_and_link_source(
+            SCALAR_MAIN_SOURCE,
+            layout_growable_to(3),
+            CompilationMode::Compile,
+        )
+        .expect("a growable main admits the library's growth");
+
+        let (mut store, instance) = instantiate(&linked);
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("the merged module exports its memory");
+        assert_eq!(
+            memory.ty(&store).maximum(),
+            Some(3),
+            "the configured maximum must survive the link"
+        );
+        let run: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "run")
+            .expect("the merged module exports `run`");
+        assert_eq!(run.call(&mut store, ()).expect("run executes"), 1);
+        assert_eq!(run.call(&mut store, ()).expect("run executes"), 2);
+        assert_eq!(
+            run.call(&mut store, ()).expect("run executes"),
+            -1,
+            "growth stops at the configured maximum"
+        );
+    }
+
+    /// The same holds for a configured fixed memory: the build's pages are the
+    /// merged module's, and a library that grows memory is refused against
+    /// them rather than handed an unbounded memory of its own.
+    #[test]
+    fn a_memoryless_program_keeps_the_fixed_memory_its_build_configured() {
+        let fixed = MemoryLayout::resolve(
+            MemoryRequest {
+                pages: Some(2),
+                ..MemoryRequest::default()
+            },
+            MemoryLayoutSource::Flag,
+        )
+        .expect("two fixed pages are admissible");
+        let err = build_and_link_source(SCALAR_MAIN_SOURCE, fixed, CompilationMode::Compile)
+            .expect_err("a configured fixed memory cannot admit growth");
+        assert!(err.contains("grows linear memory"), "{err}");
     }
 
     /// The proof artifact describes the same machine: the `.v` a proof-mode

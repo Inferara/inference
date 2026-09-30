@@ -8381,6 +8381,21 @@ impl Compiler {
         self.has_memory = true;
     }
 
+    /// Whether the module declares a linear memory: when some function needs
+    /// one, or when the build configured a layout other than the default.
+    ///
+    /// A configured layout is declared even by a program whose own code touches
+    /// no memory. Without it the module would carry no memory for the layout to
+    /// describe, and a linked module that addresses memory would supply its own —
+    /// the linker adopts a memoryless main's external memory verbatim — so the
+    /// size and maximum the build asked for would be replaced by whatever that
+    /// module declares, an unbounded maximum included. The default layout is
+    /// left to the program's use, which keeps a default build of a memoryless
+    /// program byte-identical to what it always was.
+    fn declares_memory(&self) -> bool {
+        self.has_memory || self.memory_layout != MemoryLayout::default()
+    }
+
     /// Assembles the complete WASM binary from accumulated sections AND
     /// returns the recorded spec function indices and per-function frame sizes
     /// alongside it.
@@ -8428,7 +8443,8 @@ impl Compiler {
         }
         module.section(&function_section);
 
-        if self.has_memory {
+        let declares_memory = self.declares_memory();
+        if declares_memory {
             cov_mark::hit!(wasm_codegen_emit_memory_section);
             let mut memory_section = MemorySection::new();
             // The maximum is the layout's own, which is the page count unless the
@@ -8448,7 +8464,7 @@ impl Compiler {
             module.section(&memory_section);
         }
 
-        if self.has_memory {
+        if declares_memory {
             let mut global_section = GlobalSection::new();
             global_section.global(
                 GlobalType {
@@ -8462,12 +8478,12 @@ impl Compiler {
         }
 
         let has_func_exports = !self.exports.is_empty();
-        if has_func_exports || self.has_memory {
+        if has_func_exports || declares_memory {
             let mut export_section = ExportSection::new();
             for (name, kind, idx) in &self.exports {
                 export_section.export(name, *kind, *idx);
             }
-            if self.has_memory {
+            if declares_memory {
                 export_section.export("memory", ExportKind::Memory, 0);
                 export_section.export("__stack_pointer", ExportKind::Global, 0);
             }
@@ -8727,6 +8743,48 @@ mod tests {
         let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
         assert!(!wasm.is_empty());
         assert!(!has_memory_section(&wasm));
+    }
+
+    /// A configured layout is declared by a module none of whose functions uses
+    /// memory, with its stack pointer and both exports, so a linked module
+    /// cannot substitute its own memory for the one the build asked for. The
+    /// default layout is not: a memoryless program's default build keeps its
+    /// bytes.
+    #[test]
+    fn a_configured_layout_is_declared_without_a_memory_user() {
+        let mut compiler = Compiler::new("test");
+        compiler.set_memory_layout(
+            MemoryLayout::resolve(
+                crate::MemoryRequest {
+                    pages: Some(1),
+                    max_pages: Some(3),
+                    stack_size: None,
+                },
+                crate::MemoryLayoutSource::Flag,
+            )
+            .expect("one page growable to three is admissible"),
+        );
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert!(
+            wat.contains("(memory (;0;) 1 3)"),
+            "a configured layout must be declared though nothing uses it:\n{wat}"
+        );
+        assert!(
+            wat.contains("(export \"memory\" (memory 0))")
+                && wat.contains("(export \"__stack_pointer\" (global 0))"),
+            "the declared memory is exported like any other:\n{wat}"
+        );
+        inf_wasmparser::validate(&wasm).expect("the module is valid");
+
+        let mut default = Compiler::new("test");
+        default.set_memory_layout(MemoryLayout::default());
+        let (wasm, _spec_map, _frame_sizes) = default.finish_and_take(&HSpecMap::default());
+        assert!(
+            !has_memory_section(&wasm),
+            "the default layout is declared only when something uses it"
+        );
     }
 
     #[test]
