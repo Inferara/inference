@@ -64,10 +64,19 @@
 //! than a linked module. `infc` classifies a `use … from` clause by it and
 //! `infs` refuses an `Inference.toml [wasm-dependencies]` key under it, so the
 //! two must spell it alike.
+//!
+//! # Bounds-check vocabulary
+//!
+//! [`BoundsChecks`] is the policy deciding which array accesses keep their
+//! runtime bounds guard: every one ([`BoundsChecks::All`], the default), or only
+//! those the analysis did not prove in bounds ([`BoundsChecks::OmitProven`]).
+//! [`resolve_bounds_checks`] is the shared validation, so `infs` (reading
+//! `Inference.toml`) and `infc` (reading `--bounds-checks`) reject the same
+//! spellings with the same words.
 
 pub mod errors;
 
-pub use crate::errors::{MemoryLayoutError, TargetError, WasmFeatureError};
+pub use crate::errors::{BoundsChecksError, MemoryLayoutError, TargetError, WasmFeatureError};
 
 /// Breaking ABI changes: incompatible CLI flag removal/rename, stdout contract
 /// changes, exit-code semantics changes.
@@ -202,7 +211,23 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// on this constant, as it is for every flag minor: an `infs` that forwards
 /// must confirm it is talking to a minor-8 `infc` and refuse, never drop the
 /// flag and build.
-pub const COMPILER_ABI_MINOR: u32 = 8;
+///
+/// Minor 9 adds the additive `--bounds-checks <all|omit-proven>` flag to
+/// `infc`, choosing whether an array access the analysis proved in bounds keeps
+/// its runtime guard ([`BoundsChecks`]). It is backward compatible in the same
+/// sense as the minors above: omitting the flag selects `all`, which keeps every
+/// guard, exactly as every earlier minor did, so a minor-8 `infs` still pairs
+/// with a minor-9 `infc` and loses nothing by it — a minor-8 `infs` predates the
+/// `Inference.toml [build] bounds-checks` key, so it holds no policy to drop.
+/// The pairing callers must gate on is an `infs` holding `omit-proven` talking
+/// to a minor-8 `infc`, and it is the first flag whose dropped forward errs on
+/// the side of safety: the build would succeed and ship every guard the project
+/// asked to omit, a larger and slower module rather than a less safe one. The
+/// gate is on this constant all the same, because that module is still not the
+/// one the manifest describes — its size, its SpaceWasm envelope and its record
+/// of omitted guards are all the guarded build's — and a manifest key that
+/// silently does nothing is what every gate here exists to rule out.
+pub const COMPILER_ABI_MINOR: u32 = 9;
 
 /// The first segment of a `use … from` clause that names the embedder rather
 /// than a linked module: `use { clock_ms } from host::env;` binds a host import
@@ -792,6 +817,119 @@ pub fn resolve_target(entry: &str, source: TargetSource) -> Result<TargetName, T
     })
 }
 
+/// Which array accesses keep their runtime bounds guard, as a project's
+/// `Inference.toml` and the `infc --bounds-checks` command line name the policy.
+///
+/// Every array access whose index is not a bare number literal is emitted with a
+/// guard that traps on an out-of-range index, and rule A056 separately requires
+/// the analysis to prove each such index in bounds before the program compiles
+/// at all. The two are independent layers: under [`Self::All`], the default, an
+/// access is safe if the analysis is right *or* the guard runs, and the guard
+/// always runs. [`Self::OmitProven`] drops the guard wherever the analysis
+/// proved it can never fire, trading that second layer for size and speed. At
+/// those accesses safety then rests on the range analysis alone, a flaw in it
+/// reads or writes the neighbouring linear memory where it would have trapped,
+/// and a Rocq proof about the module no longer re-establishes the bound itself.
+///
+/// The policy describes the artifact, not how it was built, so it applies alike
+/// in compile and proof mode and at every target: nothing that acts on it may
+/// consult either, or a proof would describe a module other than the one that
+/// ships. An artifact built under [`Self::OmitProven`] records the functions it
+/// omitted a guard in, in its `inference.bounds_elided` custom section.
+///
+/// The accessor below is a match rather than `matches!`, for the reason
+/// [`TargetName`] gives: a new variant must be decided, not handed a default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BoundsChecks {
+    /// Every access keeps its guard, proven or not. The default, and what every
+    /// build emitted before the policy could be chosen.
+    #[default]
+    All,
+    /// An access the analysis proved in bounds is emitted without its guard;
+    /// every other access keeps it.
+    OmitProven,
+}
+
+impl BoundsChecks {
+    /// The policy a build gets when it names none.
+    pub const DEFAULT: Self = Self::All;
+
+    /// Every selectable policy, in canonical order. The rendered supported-set
+    /// listing in diagnostics comes from here.
+    pub const ALL: [Self; 2] = [Self::All, Self::OmitProven];
+
+    /// The policy as it is written in `Inference.toml` and on the
+    /// `--bounds-checks` command line.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::OmitProven => "omit-proven",
+        }
+    }
+
+    /// The policy written exactly as `name`, or `None`.
+    ///
+    /// The inverse of [`Self::as_str`]: matching is exact and case-sensitive,
+    /// and no whitespace is trimmed, for the reason
+    /// [`WasmFeatureName::from_name`] gives.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.as_str() == name)
+    }
+
+    /// Whether an access the analysis proved in bounds is emitted without its
+    /// guard.
+    #[must_use]
+    pub fn omits_proven(self) -> bool {
+        match self {
+            Self::All => false,
+            Self::OmitProven => true,
+        }
+    }
+}
+
+/// Which surface a bounds-check policy was named on, so a diagnostic can name
+/// the exact thing the user has to edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundsChecksSource {
+    /// The `bounds-checks` key of a project's `Inference.toml` `[build]` table.
+    Manifest,
+    /// The `--bounds-checks` flag on an `infc` command line.
+    Flag,
+}
+
+impl BoundsChecksSource {
+    /// The backtick-quoted surface name a message points the user at.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manifest => "`[build] bounds-checks`",
+            Self::Flag => "`--bounds-checks`",
+        }
+    }
+}
+
+/// Resolves the bounds-check policy named on `source`, or returns the
+/// diagnostic that rejects it.
+///
+/// This is the whole validation both front ends run. Matching is exact and
+/// case-sensitive and no whitespace is trimmed, for the reason
+/// [`BoundsChecks::from_name`] gives.
+///
+/// # Errors
+///
+/// Returns [`BoundsChecksError`] for any name outside the vocabulary.
+pub fn resolve_bounds_checks(
+    entry: &str,
+    source: BoundsChecksSource,
+) -> Result<BoundsChecks, BoundsChecksError> {
+    BoundsChecks::from_name(entry).ok_or_else(|| BoundsChecksError {
+        entry: entry.to_string(),
+        surface: source,
+    })
+}
+
 /// One WASM memory page in bytes.
 ///
 /// The unit [`MemoryLayout::pages()`] counts in, and the size of the default
@@ -1052,9 +1190,55 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one_dot_eight() {
+    fn abi_version_is_one_dot_nine() {
         assert_eq!(COMPILER_ABI_MAJOR, 1);
-        assert_eq!(COMPILER_ABI_MINOR, 8);
+        assert_eq!(COMPILER_ABI_MINOR, 9);
+    }
+
+    #[test]
+    fn every_bounds_check_policy_round_trips_through_its_name() {
+        for policy in BoundsChecks::ALL {
+            for source in [BoundsChecksSource::Manifest, BoundsChecksSource::Flag] {
+                assert_eq!(resolve_bounds_checks(policy.as_str(), source), Ok(policy));
+            }
+        }
+    }
+
+    /// The default keeps every guard, and is the one policy that omits none.
+    #[test]
+    fn the_default_bounds_check_policy_keeps_every_guard() {
+        assert_eq!(BoundsChecks::default(), BoundsChecks::DEFAULT);
+        assert_eq!(BoundsChecks::DEFAULT, BoundsChecks::All);
+        assert!(!BoundsChecks::All.omits_proven());
+        assert!(BoundsChecks::OmitProven.omits_proven());
+    }
+
+    #[test]
+    fn an_unknown_bounds_check_policy_names_the_surface_and_the_supported_values() {
+        let message = resolve_bounds_checks("none", BoundsChecksSource::Manifest)
+            .expect_err("`none` is not a policy")
+            .to_string();
+        assert!(message.contains("`[build] bounds-checks`"), "{message}");
+        assert!(message.contains("`none`"), "{message}");
+        assert!(message.contains("`all`"), "{message}");
+        assert!(message.contains("`omit-proven`"), "{message}");
+
+        let message = resolve_bounds_checks("none", BoundsChecksSource::Flag)
+            .expect_err("`none` is not a policy")
+            .to_string();
+        assert!(message.contains("`--bounds-checks`"), "{message}");
+    }
+
+    /// Matching is exact: a case variant and a padded spelling are both refused,
+    /// and the padded one is told why.
+    #[test]
+    fn a_bounds_check_policy_is_matched_exactly() {
+        assert!(resolve_bounds_checks("Omit-Proven", BoundsChecksSource::Flag).is_err());
+        let message = resolve_bounds_checks("omit-proven ", BoundsChecksSource::Manifest)
+            .expect_err("surrounding whitespace is not trimmed")
+            .to_string();
+        assert!(message.contains("surrounding whitespace"), "{message}");
+        assert!(message.contains("write `omit-proven`"), "{message}");
     }
 
     #[test]
