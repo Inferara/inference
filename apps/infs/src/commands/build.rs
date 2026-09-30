@@ -70,7 +70,8 @@
 //! The settings that decide what the artifact *is* are read from the
 //! *enclosing* project even when a source path is given, by walking up to the
 //! nearest `Inference.toml`: `[wasm-dependencies]`, `[build] target`, `[build]
-//! wasm-features`, `[memory]`, and `[host-imports]`. None is an optional nicety
+//! wasm-features`, `[build] bounds-checks`, `[memory]`, and `[host-imports]`.
+//! None is an optional nicety
 //! — `infs build`, `infs build src/main.inf`, and `infs run src/main.inf` all
 //! write `out/main.wasm` for the same project, so they must not disagree about
 //! its WebAssembly instruction level, about which `.wasm` files its `use { … }
@@ -96,8 +97,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::project_build::{
-    forward_host_imports, forward_memory_layout, forward_target, forward_wasm_features, mode_flag,
-    probe_compiler_compatibility, run_project_build,
+    forward_bounds_checks, forward_host_imports, forward_memory_layout, forward_target,
+    forward_wasm_features, mode_flag, probe_compiler_compatibility, run_project_build,
 };
 use crate::errors::InfsError;
 use crate::project::manifest::{
@@ -105,7 +106,7 @@ use crate::project::manifest::{
 };
 use crate::project::{self, ProjectContext};
 use crate::toolchain::resolver::find_infc_with_source;
-use inference_compiler_interface::{TargetName, WasmFeatureName};
+use inference_compiler_interface::{BoundsChecks, TargetName, WasmFeatureName};
 
 /// Compilation mode forwarded to `infc --mode <…>`.
 ///
@@ -207,9 +208,9 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
 /// - The source file does not exist
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
-/// - the enclosing manifest names a `target`, requests `wasm-features`, or
-///   declares a `[memory]` or `[host-imports]` table the resolved `infc` cannot
-///   honor
+/// - the enclosing manifest names a `target`, requests `wasm-features`, chooses
+///   a `bounds-checks` policy, or declares a `[memory]` or `[host-imports]` table
+///   the resolved `infc` cannot honor
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     if !path.exists() {
@@ -219,6 +220,7 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     let enclosing = enclosing_manifest(path)?;
     let target = manifest_target(enclosing.as_ref().map(|(_, manifest)| manifest))?;
     let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
+    let bounds_checks = manifest_bounds_checks(enclosing.as_ref().map(|(_, manifest)| manifest))?;
     let memory = manifest_memory(enclosing.as_ref().map(|(_, manifest)| manifest));
     let host_imports = manifest_host_imports(enclosing.as_ref().map(|(_, manifest)| manifest));
 
@@ -253,6 +255,7 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
         .map(|(dir, _)| dir.join(MANIFEST_FILE_NAME));
     forward_target(&mut cmd, compat, target, manifest_path.as_deref())?;
     forward_wasm_features(&mut cmd, compat, &features, manifest_path.as_deref())?;
+    forward_bounds_checks(&mut cmd, compat, bounds_checks, manifest_path.as_deref())?;
     forward_memory_layout(&mut cmd, compat, &memory, manifest_path.as_deref())?;
     forward_host_imports(&mut cmd, compat, host_imports, manifest_path.as_deref())?;
 
@@ -400,6 +403,24 @@ pub(crate) fn manifest_target(manifest: Option<&InferenceToml>) -> Result<Target
     manifest.map_or(Ok(TargetName::DEFAULT), |m| m.build.resolved_target())
 }
 
+/// Resolves the `[build] bounds-checks` policy of an already-loaded enclosing
+/// manifest, or the default one for a source outside any project.
+///
+/// Both single-file paths call this rather than reaching into the field, for the
+/// reason [`manifest_wasm_features`] gives: building and running one file of a
+/// project write the same artifact, so they must keep the same guards.
+///
+/// # Errors
+///
+/// Returns the manifest's rejection of a value outside the vocabulary (a
+/// manifest loaded through [`enclosing_manifest`] has already been validated, so
+/// this is the programmatic-construction path).
+pub(crate) fn manifest_bounds_checks(manifest: Option<&InferenceToml>) -> Result<BoundsChecks> {
+    manifest.map_or(Ok(BoundsChecks::DEFAULT), |m| {
+        m.build.resolved_bounds_checks()
+    })
+}
+
 /// Everything a single-file build takes from the enclosing project's manifest.
 ///
 /// Bundled rather than passed one by one because they share a provenance:
@@ -416,6 +437,8 @@ pub(crate) struct EnclosingSettings<'a> {
     pub(crate) target: TargetName,
     /// `[build] wasm-features`, resolved against the shared vocabulary.
     pub(crate) features: &'a [WasmFeatureName],
+    /// `[build] bounds-checks`, resolved against the shared vocabulary.
+    pub(crate) bounds_checks: BoundsChecks,
     /// The `[memory]` table as declared, keys still optional.
     pub(crate) memory: &'a MemoryConfig,
     /// The `[host-imports]` allowlist, or `None` for no policy.

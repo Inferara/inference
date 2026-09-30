@@ -56,7 +56,8 @@ use crate::project::ProjectContext;
 use crate::project::manifest::{HostImports, MANIFEST_FILE_NAME, MemoryConfig, VerificationConfig};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
 use inference_compiler_interface::{
-    COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, TargetName, WasmFeatureName, render_feature_list,
+    BoundsChecks, COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, TargetName, WasmFeatureName,
+    render_feature_list,
 };
 
 /// Compiles the entry point of a discovered project (project mode).
@@ -129,6 +130,8 @@ use inference_compiler_interface::{
 /// - `out_dir` is requested but the resolved `infc` does not support `--out-dir`
 /// - the manifest names a `target` the resolved `infc` cannot build for
 /// - the manifest requests `wasm-features` the resolved `infc` cannot honor
+/// - the manifest chooses a `bounds-checks` policy the resolved `infc` cannot
+///   honor
 /// - the manifest declares a `[memory]` table the resolved `infc` cannot honor
 /// - the manifest asks to adopt external specifications on a proof-artifact
 ///   build and the resolved `infc` cannot honor the request
@@ -205,6 +208,8 @@ pub(crate) fn run_project_build(
     forward_target(&mut cmd, compat, target, Some(&manifest_path))?;
     let features = ctx.manifest.build.resolved_wasm_features()?;
     forward_wasm_features(&mut cmd, compat, &features, Some(&manifest_path))?;
+    let bounds_checks = ctx.manifest.build.resolved_bounds_checks()?;
+    forward_bounds_checks(&mut cmd, compat, bounds_checks, Some(&manifest_path))?;
     forward_memory_layout(&mut cmd, compat, &ctx.manifest.memory, Some(&manifest_path))?;
     forward_adopt_external_specs(
         &mut cmd,
@@ -347,6 +352,17 @@ impl CompilerCompat {
         self.supports_abi_minor(8)
     }
 
+    /// Whether the resolved `infc` is known to support the additive
+    /// `--bounds-checks` flag, which landed at ABI minor 9.
+    ///
+    /// A dropped forward here errs on the side of safety — the build keeps
+    /// every guard the project asked to omit — but still ships a module other
+    /// than the one the manifest describes, so an unhonorable request refuses
+    /// the build rather than degrading it.
+    pub fn supports_bounds_checks(self) -> bool {
+        self.supports_abi_minor(9)
+    }
+
     /// Whether the resolved `infc` is known to have the additive feature
     /// introduced at `minor`: either it is the same build (`commit_matched`, the
     /// strongest signal) or it advertises at least that minor within the
@@ -473,6 +489,52 @@ pub(crate) fn forward_wasm_features(
     let list = render_feature_list(features);
     println!("wasm-features: {list}");
     cmd.arg("--wasm-features").arg(list);
+    Ok(())
+}
+
+/// Appends `--bounds-checks <policy>` to `cmd` when the project chose a policy
+/// other than the default, after confirming the resolved `infc` can honor it,
+/// and echoes the policy to stdout.
+///
+/// Every path that spawns `infc` on behalf of a project routes through here, for
+/// the reason [`forward_wasm_features`] exists once: a project must get the same
+/// guards whether it was built, run, or built from a bare source path.
+///
+/// [`BoundsChecks::DEFAULT`] is deliberately not forwarded, for the reason
+/// [`forward_target`] gives: `infc` resolves an absent flag to the same policy,
+/// and forwarding it would put a minor-9 floor under every project that never
+/// chose one.
+///
+/// `manifest_path` names the file the remediation tells the user to edit; `None`
+/// can only accompany the default policy, which is never forwarded.
+///
+/// # Errors
+///
+/// Returns a remediation-bearing error when a non-default policy was chosen and
+/// the resolved `infc` predates the flag. The flag is never emitted blind.
+pub(crate) fn forward_bounds_checks(
+    cmd: &mut Command,
+    compat: CompilerCompat,
+    policy: BoundsChecks,
+    manifest_path: Option<&Path>,
+) -> Result<()> {
+    if policy == BoundsChecks::DEFAULT {
+        return Ok(());
+    }
+    if !compat.supports_bounds_checks() {
+        let manifest = manifest_path.map_or_else(
+            || String::from(MANIFEST_FILE_NAME),
+            |path| path.display().to_string(),
+        );
+        bail!(
+            "the resolved infc does not support `--bounds-checks` (requires infc ABI ≥ \
+             {COMPILER_ABI_MAJOR}.9); update the toolchain or remove `[build] bounds-checks` \
+             from {manifest}. Removing it builds a module that keeps every bounds guard the \
+             project asked to omit."
+        );
+    }
+    println!("bounds-checks: {}", policy.as_str());
+    cmd.arg("--bounds-checks").arg(policy.as_str());
     Ok(())
 }
 
@@ -1074,6 +1136,96 @@ mod project_tests {
         cmd.get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// `--bounds-checks` landed at minor 9: a minor-8 `infc` — the newest before
+    /// it — must not be sent the flag, and a same-build one always may.
+    #[test]
+    fn supports_bounds_checks_capability_matrix() {
+        assert!(
+            CompilerCompat {
+                commit_matched: true,
+                abi: None,
+            }
+            .supports_bounds_checks()
+        );
+        for minor in [9, 12] {
+            assert!(
+                CompilerCompat {
+                    commit_matched: false,
+                    abi: Some((COMPILER_ABI_MAJOR, minor)),
+                }
+                .supports_bounds_checks(),
+                "minor {minor} must support --bounds-checks"
+            );
+        }
+        for minor in [0, 8] {
+            assert!(
+                !CompilerCompat {
+                    commit_matched: false,
+                    abi: Some((COMPILER_ABI_MAJOR, minor)),
+                }
+                .supports_bounds_checks(),
+                "minor {minor} predates --bounds-checks"
+            );
+        }
+    }
+
+    /// The default policy is never forwarded, so a project that never chose
+    /// one asks nothing of an older `infc`.
+    #[test]
+    fn forward_bounds_checks_appends_nothing_for_the_default_policy() {
+        let mut cmd = Command::new("infc");
+        let predates_the_flag = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 8)),
+        };
+        forward_bounds_checks(&mut cmd, predates_the_flag, BoundsChecks::All, None)
+            .expect("the default policy asks nothing of the compiler");
+        assert!(args_of(&cmd).is_empty());
+    }
+
+    #[test]
+    fn forward_bounds_checks_appends_the_chosen_policy() {
+        let mut cmd = Command::new("infc");
+        let same_build = CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        };
+        forward_bounds_checks(&mut cmd, same_build, BoundsChecks::OmitProven, None)
+            .expect("a same-build infc supports the flag");
+        assert_eq!(args_of(&cmd), ["--bounds-checks", "omit-proven"]);
+    }
+
+    /// The gate refuses rather than drops the flag, names both remediations and
+    /// the manifest to edit, and says what removing the key would build.
+    #[test]
+    fn forward_bounds_checks_refuses_an_infc_that_predates_the_flag() {
+        let mut cmd = Command::new("infc");
+        let minor_eight = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 8)),
+        };
+        let manifest = Path::new("/projects/demo").join(MANIFEST_FILE_NAME);
+        let err = forward_bounds_checks(
+            &mut cmd,
+            minor_eight,
+            BoundsChecks::OmitProven,
+            Some(&manifest),
+        )
+        .expect_err("ABI minor 8 predates --bounds-checks");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--bounds-checks") && msg.contains("1.9"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("update the toolchain") && msg.contains("[build] bounds-checks"),
+            "{msg}"
+        );
+        assert!(msg.contains(&manifest.display().to_string()), "{msg}");
+        assert!(msg.contains("keeps every bounds guard"), "{msg}");
+        assert!(args_of(&cmd).is_empty(), "nothing is forwarded blind");
     }
 
     /// An empty request appends nothing — and specifically not a bare

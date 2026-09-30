@@ -31,6 +31,7 @@
 //! optimize = "release"
 //! mode = "compile"        # "compile" (executable) or "proof" (Rocq specs)
 //! wasm-features = []      # post-MVP WebAssembly proposals to opt into
+//! bounds-checks = "all"   # "all", or "omit-proven" to drop proven-dead guards
 //!
 //! [build.wasm-opt]        # optional: post-build optimization of the executable
 //! enabled = true          # table presence enables; set false to keep it off
@@ -70,8 +71,9 @@
 
 use anyhow::{Context, Result, bail};
 use inference_compiler_interface::{
-    HOST_SEGMENT, MemoryLayout, MemoryLayoutSource, TargetName, TargetSource, WasmFeatureName,
-    WasmFeatureSource, resolve_target, resolve_wasm_features,
+    BoundsChecks, BoundsChecksSource, HOST_SEGMENT, MemoryLayout, MemoryLayoutSource, TargetName,
+    TargetSource, WasmFeatureName, WasmFeatureSource, resolve_bounds_checks, resolve_target,
+    resolve_wasm_features,
 };
 use serde::de::{DeserializeSeed, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -651,6 +653,27 @@ pub struct BuildConfig {
     )]
     pub wasm_features: Vec<String>,
 
+    /// Which array accesses keep their runtime bounds guard: `"all"` or
+    /// `"omit-proven"`.
+    ///
+    /// Absent means `"all"`, the default, which keeps every guard: an access is
+    /// safe if the analysis that proved it in bounds is right *or* the guard
+    /// runs. `"omit-proven"` drops the guard of each access the analysis proved
+    /// in bounds, for a smaller and faster module whose proven accesses rest on
+    /// the analysis alone. Kept as the raw string, `None` when the key is
+    /// absent, and resolved against the shared vocabulary by
+    /// [`Self::resolved_bounds_checks`]; validation runs on load.
+    ///
+    /// Like [`wasm_features`](Self::wasm_features), it changes every artifact
+    /// the project produces, in both compile and proof mode, which is why it
+    /// lives in the versioned manifest.
+    #[serde(
+        rename = "bounds-checks",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bounds_checks: Option<String>,
+
     /// Optional `[build.wasm-opt]` sub-table. Absent means post-build
     /// optimization is off; present means on unless `enabled = false`.
     ///
@@ -670,6 +693,7 @@ impl Default for BuildConfig {
             optimize: default_optimize(),
             mode: default_mode(),
             wasm_features: Vec::new(),
+            bounds_checks: None,
             wasm_opt: None,
         }
     }
@@ -688,6 +712,7 @@ impl BuildConfig {
             && self.optimize == default_optimize()
             && self.mode == default_mode()
             && self.wasm_features.is_empty()
+            && self.bounds_checks.is_none()
             && self.wasm_opt.is_none()
     }
 
@@ -730,15 +755,37 @@ impl BuildConfig {
             .map_err(|message| anyhow::anyhow!("{message}"))
     }
 
+    /// The `bounds-checks` value resolved into the shared compiler vocabulary,
+    /// or the default policy when the key is absent.
+    ///
+    /// The resolution is the same call [`Self::validate`] makes on load, so this
+    /// cannot disagree with what the loader accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns the diagnostic rejecting a value that is not a supported policy.
+    /// For a manifest that came from [`InferenceToml::from_toml`] this cannot
+    /// fail — validation already ran; the fallible signature is for a
+    /// `BuildConfig` built in memory, as for [`Self::resolved_target`].
+    pub fn resolved_bounds_checks(&self) -> Result<BoundsChecks> {
+        self.bounds_checks
+            .as_deref()
+            .map_or(Ok(BoundsChecks::DEFAULT), |entry| {
+                resolve_bounds_checks(entry, BoundsChecksSource::Manifest)
+                    .map_err(|message| anyhow::anyhow!("{message}"))
+            })
+    }
+
     /// Validates the `target` field against the shared vocabulary, then the
     /// `mode` field, accepting only `"compile"` or `"proof"` (case-sensitive —
     /// TOML config values are conventionally lowercase, and matching the exact
     /// `infc --mode` flag spelling avoids surprising near-misses like
-    /// `"Proof"`), then the `wasm-features` entries and the `[build.wasm-opt]`
-    /// sub-table.
+    /// `"Proof"`), then the `wasm-features` entries, the `bounds-checks` value
+    /// and the `[build.wasm-opt]` sub-table.
     ///
     /// The checking order is fixed — `target`, then `mode`, then
-    /// `wasm-features`, then the `[build.wasm-opt]` sub-table, then the pairings
+    /// `wasm-features`, then `bounds-checks`, then the `[build.wasm-opt]`
+    /// sub-table, then the pairings
     /// two individually-valid keys are not allowed to form — and is independent
     /// of the order the keys appear in the file: TOML leaves that order free and
     /// nothing here can see it. A manifest with more than one mistake therefore
@@ -757,7 +804,8 @@ impl BuildConfig {
     /// Returns an error naming the field and the allowed values when `target` is
     /// not a supported target, when `mode` is neither `"compile"` nor `"proof"`,
     /// when a `wasm-features` entry is not a supported proposal name, when
-    /// `[build.wasm-opt]` is invalid, or when the resolved target refuses the
+    /// `bounds-checks` is not a supported policy, when `[build.wasm-opt]` is
+    /// invalid, or when the resolved target refuses the
     /// mode, a requested feature, or the optimizer.
     fn validate(&self) -> Result<()> {
         let target = self.resolved_target()?;
@@ -768,6 +816,7 @@ impl BuildConfig {
             );
         }
         self.resolved_wasm_features()?;
+        self.resolved_bounds_checks()?;
         if let Some(wasm_opt) = &self.wasm_opt {
             wasm_opt.validate()?;
         }
@@ -2627,6 +2676,78 @@ target = "wasm32"
             "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n\n\
              [build]\n{body}"
         )
+    }
+
+    #[test]
+    fn bounds_checks_absent_keeps_every_guard() {
+        let manifest =
+            InferenceToml::from_toml(&manifest_with_build("mode = \"compile\"\n")).expect("parses");
+        assert_eq!(manifest.build.bounds_checks, None);
+        assert_eq!(
+            manifest.build.resolved_bounds_checks().unwrap(),
+            BoundsChecks::All
+        );
+    }
+
+    #[test]
+    fn bounds_checks_resolves_each_policy() {
+        for policy in BoundsChecks::ALL {
+            let body = format!("bounds-checks = \"{}\"\n", policy.as_str());
+            let manifest = InferenceToml::from_toml(&manifest_with_build(&body)).expect("parses");
+            assert_eq!(manifest.build.resolved_bounds_checks().unwrap(), policy);
+        }
+    }
+
+    /// A policy that is not in the vocabulary is refused on load, naming the
+    /// key rather than the flag it would have become.
+    #[test]
+    fn bounds_checks_rejects_an_unknown_policy_naming_the_key() {
+        let err = rejection_of(&manifest_with_build("bounds-checks = \"none\"\n"));
+        assert!(err.contains("`[build] bounds-checks`"), "{err}");
+        assert!(err.contains("`omit-proven`"), "{err}");
+        assert!(!err.contains("--bounds-checks"), "{err}");
+    }
+
+    #[test]
+    fn bounds_checks_matching_is_case_sensitive() {
+        let err = rejection_of(&manifest_with_build("bounds-checks = \"Omit-Proven\"\n"));
+        assert!(err.contains("unknown bounds-check policy"), "{err}");
+    }
+
+    /// Even the default spelling makes the config non-default, so a manifest
+    /// that wrote it keeps it through a round trip, above the sub-table header.
+    #[test]
+    fn bounds_checks_round_trip_keeps_the_key_above_the_wasm_opt_header() {
+        let src =
+            manifest_with_build("bounds-checks = \"all\"\n\n[build.wasm-opt]\nlevel = \"z\"\n");
+        let manifest = InferenceToml::from_toml(&src).expect("parses");
+        assert!(!manifest.build.is_default());
+        let serialized = manifest.to_toml().expect("serializes");
+        let key = serialized
+            .find("bounds-checks = \"all\"")
+            .expect("the key must be serialized");
+        let header = serialized
+            .find("[build.wasm-opt]")
+            .expect("the sub-table must be serialized");
+        assert!(key < header, "got:\n{serialized}");
+        assert_eq!(
+            InferenceToml::from_toml(&serialized).expect("reparses"),
+            manifest
+        );
+    }
+
+    /// `bounds-checks` is checked after `wasm-features` and before the
+    /// optimizer sub-table, as [`BuildConfig::validate`] documents.
+    #[test]
+    fn bounds_checks_is_checked_between_wasm_features_and_the_optimizer() {
+        let err = rejection_of(&manifest_with_build(
+            "bounds-checks = \"none\"\nwasm-features = [\"simd\"]\n",
+        ));
+        assert!(err.contains("unknown WebAssembly feature"), "{err}");
+        let err = rejection_of(&manifest_with_build(
+            "bounds-checks = \"none\"\n\n[build.wasm-opt]\nlevel = \"9\"\n",
+        ));
+        assert!(err.contains("unknown bounds-check policy"), "{err}");
     }
 
     #[test]

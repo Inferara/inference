@@ -133,21 +133,22 @@ use crate::artifact::{
     scan_artifact,
 };
 use crate::commands::build::{
-    EnclosingSettings, enclosing_manifest, format_wasm_dep_arg, manifest_host_imports,
-    manifest_memory, manifest_target, manifest_wasm_dependencies, manifest_wasm_features,
+    EnclosingSettings, enclosing_manifest, format_wasm_dep_arg, manifest_bounds_checks,
+    manifest_host_imports, manifest_memory, manifest_target, manifest_wasm_dependencies,
+    manifest_wasm_features,
 };
 use crate::commands::interpreter::{
     self, Arguments, Invocation, main_takes_arguments_in_project_mode,
 };
 use crate::commands::project_build::{
-    forward_host_imports, forward_memory_layout, forward_target, forward_wasm_features,
-    probe_compiler_compatibility, run_project_build,
+    forward_bounds_checks, forward_host_imports, forward_memory_layout, forward_target,
+    forward_wasm_features, probe_compiler_compatibility, run_project_build,
 };
 use crate::errors::InfsError;
 use crate::project::manifest::{InferenceToml, MANIFEST_FILE_NAME};
 use crate::project::{self, ProjectContext};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
-use inference_compiler_interface::TargetName;
+use inference_compiler_interface::{BoundsChecks, TargetName};
 use inference_spacewasm_runner::{ExportedFunction, LIMITS_FROM, ValType, fprime};
 
 /// The entry point invoked in project mode and the default for single-file mode.
@@ -453,6 +454,7 @@ fn compile_single_file(
 ) -> Result<PathBuf> {
     let manifest = enclosing.map(|(_, manifest)| manifest);
     let features = manifest_wasm_features(manifest)?;
+    let bounds_checks = manifest_bounds_checks(manifest)?;
     let memory = manifest_memory(manifest);
     let host_imports = manifest_host_imports(manifest);
     let deps = manifest_wasm_dependencies(enclosing)?;
@@ -469,6 +471,7 @@ fn compile_single_file(
             deps: &deps,
             target,
             features: &features,
+            bounds_checks,
             memory: &memory,
             host_imports,
             manifest_path: manifest_path.as_deref(),
@@ -1029,7 +1032,7 @@ fn check_wasmtime_availability() -> Result<()> {
 /// ```text
 /// <source> --parse --codegen -o
 ///     [--wasm-lib-dir <dir>]* [--wasm-dep <name>=<path>]*
-///     [--target <name>] [--wasm-features <list>]
+///     [--target <name>] [--wasm-features <list>] [--bounds-checks <policy>]
 ///     [--memory-pages <n>] [--stack-size <n>] [--host-imports=<list>]
 /// ```
 ///
@@ -1047,10 +1050,11 @@ fn check_wasmtime_availability() -> Result<()> {
 ///
 /// The compatibility handshake runs only when the manifest asks the compiler for
 /// something an older one could refuse: a non-default target, a feature request,
-/// a `[memory]` table, or a `[host-imports]` table. Single-file `run` otherwise
-/// keeps its historical handshake-free behavior: the probe exists to refuse an
-/// unhonorable request, and paying for it on every run would add ABI warnings to
-/// invocations that ask nothing of the compiler.
+/// a `[memory]` table, a `[host-imports]` table, or a non-default bounds-check
+/// policy. Single-file `run` otherwise keeps its historical handshake-free
+/// behavior: the probe exists to refuse an unhonorable request, and paying for
+/// it on every run would add ABI warnings to invocations that ask nothing of the
+/// compiler.
 /// Neither `--wasm-lib-dir` nor `--wasm-dep` is gated: both arrived with
 /// external-module support itself rather than at a distinguishable ABI minor, so
 /// there is no capability to probe. An `infc` too old to accept them is therefore
@@ -1074,6 +1078,7 @@ fn compile_to_wasm(
         deps,
         target,
         features,
+        bounds_checks,
         memory,
         host_imports,
         manifest_path,
@@ -1102,15 +1107,19 @@ fn compile_to_wasm(
     // manifest that named another. A `[host-imports]` table is one thing more,
     // tested for presence rather than content: a content test would skip this
     // block for the declared-empty table, the strictest policy there is, and
-    // the build would run under no policy at all.
+    // the build would run under no policy at all. A non-default bounds-check
+    // policy is one thing more, for the target's reason: skipping the block
+    // would build a module with every guard the manifest asked to omit.
     if !features.is_empty()
         || !memory.is_default()
         || target != TargetName::DEFAULT
         || host_imports.is_some()
+        || bounds_checks != BoundsChecks::DEFAULT
     {
         let compat = probe_compiler_compatibility(infc_path, infc_source)?;
         forward_target(&mut cmd, compat, target, manifest_path)?;
         forward_wasm_features(&mut cmd, compat, features, manifest_path)?;
+        forward_bounds_checks(&mut cmd, compat, bounds_checks, manifest_path)?;
         forward_memory_layout(&mut cmd, compat, memory, manifest_path)?;
         forward_host_imports(&mut cmd, compat, host_imports, manifest_path)?;
     }
@@ -2197,6 +2206,7 @@ mod forwarding_tests {
                 deps: &[],
                 target,
                 features: &[],
+                bounds_checks: BoundsChecks::DEFAULT,
                 memory: &memory,
                 host_imports,
                 manifest_path: None,
