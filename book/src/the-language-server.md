@@ -211,8 +211,8 @@ Salsa-free so compiler and IDE share one import-resolution path. The database
 therefore represents change signals, not content, as inputs:
 
 - `EntryInput { path, root, evicted }` — a project entry's identity (its path,
-  and the source root and build target it is analyzed under), plus the
-  eviction lever (below);
+  and the source root, build target and shadow-stack size it is analyzed
+  under), plus the eviction lever (below);
 - `FileStamp { stamp }` — an opaque monotonic counter per reachable file,
   bumped on any overlay write to that path;
 - `AvailabilityEpoch` — a singleton bumped when a `didOpen` makes overlay
@@ -332,8 +332,17 @@ against its runtime reports what `infs build` would: in a `spacewasm` project,
 A055 underlines a function whose parameters exceed the 255 words SpaceWasm
 accepts. A document no manifest governs is analyzed for the default target,
 `wasm32`, and so is one whose manifest names no target or a target this
-compiler does not know. The manifest is read once per open document and its
-answer kept until the document is closed, so a `[build] target` changed while a
+compiler does not know.
+
+The shadow stack follows the project the same way. A036 measures the deepest
+call chain's frames against the stack the manifest's `[memory]` table lays out
+— `stack-size` when it is set, the default 64 KiB otherwise — so a project that
+declares `pages = 4` and `stack-size = 131072` is not warned about a 72 KB chain
+its build accepts. A table `infs` would refuse to build, and a document no
+manifest governs, are measured against the default stack.
+
+The manifest is read once per open document and its answer kept until the
+document is closed, so a `[build] target` or `[memory]` table changed while a
 document is open takes effect for it once it is reopened.
 
 The analysis model is **per-document**: each open file is analyzed as its own
