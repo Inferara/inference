@@ -82,8 +82,10 @@
 //!   was bound from, with every applied symbol rewritten onto the merged body it
 //!   names. Reachability obligations are reported and left behind.
 
+mod bounds_elided;
 mod checked;
 mod closure;
+mod func_list;
 mod merge;
 mod parse;
 mod provenance;
@@ -183,6 +185,20 @@ pub const CHECKED_SECTION_NAME: &str = checked::SECTION_NAME;
 /// The opaque form's version is deliberately not published: code generation has
 /// no counterpart to agree with, since it never writes that form.
 pub const CHECKED_SECTION_VERSION: u32 = checked::VERSION;
+
+/// The custom WASM section this crate carries through a merge to record which
+/// functions of a module hold an array access emitted without its runtime
+/// bounds guard, as this crate spells it.
+///
+/// Published for the same reason as [`CHECKED_SECTION_NAME`]: a test holds this
+/// spelling and code generation's to agreement, since the two are
+/// hand-synchronised copies.
+pub const BOUNDS_ELIDED_SECTION_NAME: &str = bounds_elided::SECTION_NAME;
+
+/// The wire-format version of the exact `inference.bounds_elided` payload, as
+/// this crate's decoder requires it. Published alongside
+/// [`BOUNDS_ELIDED_SECTION_NAME`] and for the same reason.
+pub const BOUNDS_ELIDED_SECTION_VERSION: u32 = bounds_elided::VERSION;
 
 /// Why a static merge could not be produced.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

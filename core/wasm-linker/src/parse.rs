@@ -21,6 +21,7 @@ use inf_wasmparser::{
 
 use crate::LinkError;
 use crate::checked::CheckedGuards;
+use crate::func_list::FuncList;
 
 /// A WASM function signature, owned so it survives the parse borrow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +209,16 @@ pub(crate) struct ParsedModule {
     /// question the caller's specification policy can waive: the merged module
     /// is what the reachability judgment reduces either way.
     pub checked: Option<CheckedGuards>,
+    /// The decoded `inference.bounds_elided` custom section: which of this
+    /// module's functions hold an array access emitted without its runtime
+    /// bounds guard, in the *pre-link* index space. `None` when the module
+    /// carries no such section, which is the producer's statement that every
+    /// dynamic access it emitted keeps its guard.
+    ///
+    /// Decoded under every role, for the reason [`Self::checked`] is: it
+    /// describes the bodies the merge splices in, and the merged module carries
+    /// it forward about them whatever the caller's specification policy.
+    pub bounds_elided: Option<FuncList>,
     /// The logical, `::`-joined module reference this module was bound under
     /// (e.g. `"crypto::sha256"`), for an external; empty for the main module.
     /// The merge matches each main-module import's recorded `(module, field)`
@@ -380,20 +391,27 @@ impl ParsedModule {
             }
         }
 
-        module.check_checked_indices_in_range()?;
+        module
+            .check_listed_indices_in_range(module.checked.as_ref(), crate::checked::SECTION_NAME)?;
+        module.check_listed_indices_in_range(
+            module.bounds_elided.as_ref(),
+            crate::bounds_elided::SECTION_NAME,
+        )?;
         Ok(module)
     }
 
-    /// Refuses an `inference.checked` section naming a function this module does
-    /// not have.
+    /// Refuses a function-list section — `inference.checked` or
+    /// `inference.bounds_elided`, named by `section` — that names a function this
+    /// module does not have.
     ///
     /// Checked after the walk because the function space is only complete then.
     /// The producer emits indices into its own module, so an out-of-range one
     /// means the section no longer describes the bytes it travels in. Left
     /// unchecked, a stale index would map onto whichever function now sits
     /// there, and the merge would report a guard against a body that has none,
-    /// or miss one that does. Neither is a verdict worth reaching, so the
-    /// artifact is refused instead.
+    /// or miss one that does — or record an omitted bounds guard against the
+    /// wrong body. None of those is worth carrying forward, so the artifact is
+    /// refused instead.
     ///
     /// The section's contract is that it describes the artifact as its producer
     /// emitted it, **or** says it can no longer. That second spelling exists
@@ -406,8 +424,12 @@ impl ParsedModule {
     /// body, which no check on the section alone can see, so `infs` rewrites the
     /// section into its opaque form after running the optimizer rather than
     /// leaving a list that has quietly stopped being true.
-    fn check_checked_indices_in_range(&self) -> Result<(), LinkError> {
-        let Some(CheckedGuards::Exact(listed)) = &self.checked else {
+    fn check_listed_indices_in_range(
+        &self,
+        listed: Option<&FuncList>,
+        section: &str,
+    ) -> Result<(), LinkError> {
+        let Some(FuncList::Exact(listed)) = listed else {
             return Ok(());
         };
         let total = self.imported_funcs.len() + self.local_funcs.len();
@@ -420,7 +442,7 @@ impl ParsedModule {
             format!("linked module `{}`", self.logical_module)
         };
         Err(LinkError::Parse(format!(
-            "the `inference.checked` section of {origin} names function {offender}, but the \
+            "the `{section}` section of {origin} names function {offender}, but the \
              module declares only {total}; the section no longer describes the bytes it \
              travels in, which is what a post-build optimizer leaves behind when it removes \
              functions without rewriting the section"
@@ -442,8 +464,10 @@ fn collect_types(group: &RecGroup, out: &mut Vec<TypeEntry>) {
 /// Mines a custom section for everything the merge must carry through: the
 /// `name` section's module/function/local subsections, the
 /// `inference.spec_funcs` and `inference.hspecs` sections that drive proof-mode
-/// translation, and the `inference.checked` section listing the functions whose
-/// bodies trap on arithmetic overflow.
+/// translation, the `inference.checked` section listing the functions whose
+/// bodies trap on arithmetic overflow, and the `inference.bounds_elided` section
+/// listing the functions holding an array access emitted without its bounds
+/// guard.
 ///
 /// The `name` subsections are best-effort (an unparseable one is skipped). The
 /// verification payloads, by contrast, are deliverables: where they are decoded
@@ -459,10 +483,12 @@ fn collect_types(group: &RecGroup, out: &mut Vec<TypeEntry>) {
 /// under every role, since that is what a report about dropped obligations keys
 /// on and it costs no decoding.
 ///
-/// `inference.checked` is different on exactly that point: it is decoded under
-/// every role, because it describes the bodies the merge splices in rather than
-/// a library the output is not, and whether one of them traps decides a
-/// rejection no specification policy can waive.
+/// `inference.checked` and `inference.bounds_elided` are different on exactly
+/// that point: each is decoded under every role, because it describes the
+/// bodies the merge splices in rather than a library the output is not. For
+/// the first, whether one of them traps decides a rejection no specification
+/// policy can waive; the second is a record the merged module carries forward
+/// about those same bodies.
 fn collect_custom_section(
     custom: &CustomSectionReader,
     module: &mut ParsedModule,
@@ -506,6 +532,25 @@ fn collect_custom_section(
         let decoded = crate::checked::decode(custom.data())
             .map_err(|e| qualify_external_error(role, &module.logical_module, e))?;
         module.checked = Some(decoded);
+        return Ok(());
+    }
+
+    if custom.name() == crate::bounds_elided::SECTION_NAME {
+        // Read under every role, for the reason `inference.checked` is. A second
+        // one would silently discard the first under a last-wins assignment,
+        // dropping functions from the record the merged module carries, so the
+        // duplicate is a hard error rather than an overwrite.
+        if module.bounds_elided.is_some() {
+            return Err(duplicate_section_error(
+                role,
+                &module.logical_module,
+                crate::bounds_elided::SECTION_NAME,
+                "functions with an omitted bounds guard",
+            ));
+        }
+        let decoded = crate::bounds_elided::decode(custom.data())
+            .map_err(|e| qualify_external_error(role, &module.logical_module, e))?;
+        module.bounds_elided = Some(decoded);
         return Ok(());
     }
 
@@ -596,10 +641,12 @@ fn decodes_verification_sections(role: ModuleRole) -> bool {
 /// which is what the reader needs to find the offending artifact among the
 /// dependencies. There is one main module, so naming it adds nothing.
 ///
-/// `contents` is what that section carries, because the three sections this
+/// `contents` is what that section carries, because the four sections this
 /// covers carry different things: two hold proof obligations read only under
-/// adoption, and `inference.checked` holds the guarded functions every role
-/// reads. A message framed around adoption would be wrong about the third.
+/// adoption, while `inference.checked` holds the guarded functions and
+/// `inference.bounds_elided` the functions with an omitted bounds guard, which
+/// every role reads. A message framed around adoption would be wrong about the
+/// last two.
 fn duplicate_section_error(
     role: ModuleRole,
     logical_module: &str,

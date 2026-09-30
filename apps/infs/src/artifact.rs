@@ -36,6 +36,13 @@ use inf_wasmparser::{ExternalKind, FuncType, Operator, Parser, Payload, TypeRef}
 /// somewhere.
 pub(crate) const CHECKED_SECTION_NAME: &str = "inference.checked";
 
+/// The custom section recording which functions of a module hold an array
+/// access emitted without its runtime bounds guard.
+///
+/// A hand-synchronised copy, pinned by a unit test below, for the reason
+/// [`CHECKED_SECTION_NAME`] is.
+pub(crate) const BOUNDS_ELIDED_SECTION_NAME: &str = "inference.bounds_elided";
+
 /// Where a verification construct belongs, which every refusal of an
 /// [`ArtifactScan::VerificationConstruct`] artifact tells its reader: one clause,
 /// so the commands that refuse one — `infs run`, and `[build.wasm-opt]` before
@@ -55,8 +62,9 @@ pub(crate) enum ArtifactScan {
     VerificationConstruct(&'static str),
     /// An ordinary executable artifact: whether it carries any bulk-memory
     /// operator, whether it records which of its functions trap on arithmetic
-    /// overflow, and the `(module, field)` of every function it imports, in
-    /// import-section order.
+    /// overflow, whether it records which of its functions omit a bounds guard,
+    /// and the `(module, field)` of every function it imports, in import-section
+    /// order.
     ///
     /// Only function imports are listed, because a function is the only kind of
     /// import an Inference artifact carries: code generation emits no other
@@ -64,14 +72,16 @@ pub(crate) enum ArtifactScan {
     Executable {
         uses_bulk_memory: bool,
         records_overflow_guards: bool,
+        records_elided_bounds: bool,
         function_imports: Vec<(String, String)>,
     },
 }
 
-/// Scans `wasm_bytes` once for the four facts a caller needs up front:
+/// Scans `wasm_bytes` once for the five facts a caller needs up front:
 /// whether a verification-only construct leaked into the artifact, whether the
 /// artifact carries bulk memory, whether it records which of its functions trap
-/// on arithmetic overflow, and which functions it imports.
+/// on arithmetic overflow, whether it records which omit a bounds guard, and
+/// which functions it imports.
 ///
 /// Compile-mode builds strip `spec` blocks, so a well-formed executable artifact
 /// carries no verification construct. Finding one means it leaked into an
@@ -92,6 +102,7 @@ pub(crate) enum ArtifactScan {
 pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<ArtifactScan> {
     let mut uses_bulk_memory = false;
     let mut records_overflow_guards = false;
+    let mut records_elided_bounds = false;
     let mut function_imports = Vec::new();
     for payload in Parser::new(0).parse_all(wasm_bytes) {
         let payload = payload
@@ -100,6 +111,12 @@ pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<Artifa
             && reader.name() == CHECKED_SECTION_NAME
         {
             records_overflow_guards = true;
+            continue;
+        }
+        if let Payload::CustomSection(reader) = &payload
+            && reader.name() == BOUNDS_ELIDED_SECTION_NAME
+        {
+            records_elided_bounds = true;
             continue;
         }
         if let Payload::ImportSection(reader) = payload {
@@ -150,6 +167,7 @@ pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<Artifa
     Ok(ArtifactScan::Executable {
         uses_bulk_memory,
         records_overflow_guards,
+        records_elided_bounds,
         function_imports,
     })
 }
@@ -279,6 +297,25 @@ mod tests {
     }
 
     #[test]
+    fn the_elided_bounds_record_section_is_named_as_the_wire_format_has_it() {
+        assert_eq!(BOUNDS_ELIDED_SECTION_NAME, "inference.bounds_elided");
+    }
+
+    #[test]
+    fn scan_artifact_reports_an_artifact_that_records_elided_bounds() {
+        let module = module_with_custom_section(&[0x0b], BOUNDS_ELIDED_SECTION_NAME, &[1, 1, 0]);
+        assert_eq!(
+            scan(&module),
+            ArtifactScan::Executable {
+                uses_bulk_memory: false,
+                records_overflow_guards: false,
+                records_elided_bounds: true,
+                function_imports: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn scan_artifact_detects_each_nondet_block() {
         for (sub_opcode, name) in [
             (0x3a_u8, "forall"),
@@ -320,6 +357,7 @@ mod tests {
             ArtifactScan::Executable {
                 uses_bulk_memory: false,
                 records_overflow_guards: true,
+                records_elided_bounds: false,
                 function_imports: Vec::new(),
             }
         );
@@ -337,6 +375,7 @@ mod tests {
             ArtifactScan::Executable {
                 uses_bulk_memory: false,
                 records_overflow_guards: false,
+                records_elided_bounds: false,
                 function_imports: Vec::new(),
             }
         );
@@ -352,6 +391,7 @@ mod tests {
             ArtifactScan::Executable {
                 uses_bulk_memory: false,
                 records_overflow_guards: false,
+                records_elided_bounds: false,
                 function_imports: Vec::new(),
             }
         );
@@ -378,6 +418,7 @@ mod tests {
                 ArtifactScan::Executable {
                     uses_bulk_memory: true,
                     records_overflow_guards: false,
+                    records_elided_bounds: false,
                     function_imports: Vec::new(),
                 },
                 "{name} must be reported as bulk memory"
@@ -421,6 +462,7 @@ mod tests {
             ArtifactScan::Executable {
                 uses_bulk_memory: false,
                 records_overflow_guards: false,
+                records_elided_bounds: false,
                 function_imports: vec![
                     ("fprime_core".to_string(), "telemetry".to_string()),
                     ("env".to_string(), "clock_ms".to_string()),

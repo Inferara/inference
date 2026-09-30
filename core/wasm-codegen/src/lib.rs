@@ -63,6 +63,7 @@ use crate::errors::CodegenError;
 
 #[cfg(test)]
 mod arith_polarity_tests;
+mod bounds_elided_section;
 mod checked_section;
 mod choice;
 #[cfg(test)]
@@ -122,6 +123,18 @@ pub use crate::checked_section::SECTION_NAME as CHECKED_SECTION_NAME;
 /// A decoder must reject a payload whose leading varuint32 it does not
 /// recognise; bumping this value is a breaking change to the section format.
 pub use crate::checked_section::SECTION_VERSION as CHECKED_SECTION_VERSION;
+
+/// The custom WASM section name that lists the functions holding an array
+/// access emitted without its runtime bounds guard, as this crate emits it.
+///
+/// Published for the same two readers as [`CHECKED_SECTION_NAME`]: the test
+/// suite, and the cross-crate test that holds this spelling and the static
+/// merge linker's hand-synchronised copy to agreement.
+pub use crate::bounds_elided_section::SECTION_NAME as BOUNDS_ELIDED_SECTION_NAME;
+
+/// Wire-format version of the `inference.bounds_elided` payload, as this crate
+/// emits it. Published alongside [`BOUNDS_ELIDED_SECTION_NAME`].
+pub use crate::bounds_elided_section::SECTION_VERSION as BOUNDS_ELIDED_SECTION_VERSION;
 
 /// Generates WebAssembly binary from a typed AST for the specified target and compilation mode.
 ///

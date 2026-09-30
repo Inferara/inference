@@ -64,8 +64,8 @@ use wasm_encoder::{
     NameSection, TypeSection, ValType as EncValType,
 };
 
-use crate::checked::CheckedGuards;
 use crate::closure;
+use crate::func_list::FuncList;
 use crate::parse::{FuncSig, GlobalDef, GlobalInit, ParsedModule, TypeEntry};
 use crate::rewrite::{BodyOrigin, IndexMap, call_edges, reencode_body};
 use crate::tier::{self, Tier, WriteContract};
@@ -282,8 +282,33 @@ struct MergedFunc {
     name: Option<String>,
 }
 
+/// Appends the function-list section `name` recording `list`, or nothing when
+/// the list is empty: absence is the statement that no merged function is
+/// listed, and an empty section would say the same thing at a cost. A list that
+/// absorbed an opaque input is re-emitted opaque, for the reason
+/// [`MergedGuards::is_opaque`] gives.
+fn emit_merged_func_list(module: &mut wasm_encoder::Module, name: &str, list: &MergedGuards) {
+    if list.all.is_empty() {
+        return;
+    }
+    let payload = if list.is_opaque() {
+        crate::func_list::encode_opaque()
+    } else {
+        let listed: Vec<u32> = list.all.keys().copied().collect();
+        crate::func_list::encode(&listed)
+    };
+    module.section(&wasm_encoder::CustomSection {
+        name: name.into(),
+        data: (&payload[..]).into(),
+    });
+}
+
 /// The merged module's functions that trap on arithmetic overflow, in output
 /// index space, against where the merge learned it of each.
+///
+/// The same shape serves `inference.bounds_elided`, whose merged list is the
+/// functions holding an access emitted without its bounds guard; there only
+/// [`GuardOrigin::opaque`] is read.
 ///
 /// One set, not two. It is what the merged `inference.checked` section carries,
 /// so a downstream link against this artifact reads the same fact about it that
@@ -1221,18 +1246,16 @@ impl Plan {
         // the exact inputs' indices are all known, but a section naming only
         // them would state that the opaque input's bodies are unguarded.
         let guards = self.merged_guards(main, externals)?;
-        if !guards.all.is_empty() {
-            let payload = if guards.is_opaque() {
-                crate::checked::encode_opaque()
-            } else {
-                let listed: Vec<u32> = guards.all.keys().copied().collect();
-                crate::checked::encode(&listed)
-            };
-            module.section(&wasm_encoder::CustomSection {
-                name: crate::checked::SECTION_NAME.into(),
-                data: (&payload[..]).into(),
-            });
-        }
+        emit_merged_func_list(&mut module, crate::checked::SECTION_NAME, &guards);
+
+        // `inference.bounds_elided` section: the same treatment, for the record
+        // of which merged bodies hold an array access emitted without its
+        // bounds guard. Kept rather than dropped because a guarded program that
+        // absorbs a library built under `omit-proven` is the case the record
+        // exists for, and the merged module is the only artifact left to carry
+        // it. Absent when no merged body omits a guard.
+        let elided = self.merged_elided_bounds(main, externals)?;
+        emit_merged_func_list(&mut module, crate::bounds_elided::SECTION_NAME, &elided);
 
         Ok(module.finish())
     }
@@ -1360,9 +1383,36 @@ impl Plan {
         main: &ParsedModule,
         externals: &[ParsedModule],
     ) -> Result<MergedGuards, LinkError> {
+        self.merged_func_list(main, externals, |module| module.checked.as_ref())
+    }
+
+    /// The merged module's functions holding an array access emitted without
+    /// its bounds guard, in output index space.
+    ///
+    /// Gathered from every input's `inference.bounds_elided` section exactly as
+    /// [`Self::merged_guards`] gathers `inference.checked`, and for the same
+    /// reasons: a listed index is rewritten through the mapping its body was, a
+    /// library function no closure pulled in contributes nothing, and an opaque
+    /// input contributes every function it contributed at all.
+    fn merged_elided_bounds(
+        &self,
+        main: &ParsedModule,
+        externals: &[ParsedModule],
+    ) -> Result<MergedGuards, LinkError> {
+        self.merged_func_list(main, externals, |module| module.bounds_elided.as_ref())
+    }
+
+    /// One function-list section of every input, `list`, rewritten into the
+    /// output index space; see [`Self::merged_guards`].
+    fn merged_func_list(
+        &self,
+        main: &ParsedModule,
+        externals: &[ParsedModule],
+        list: impl Fn(&ParsedModule) -> Option<&FuncList>,
+    ) -> Result<MergedGuards, LinkError> {
         let mut guards = MergedGuards::default();
-        match &main.checked {
-            Some(CheckedGuards::Exact(listed)) => {
+        match list(main) {
+            Some(FuncList::Exact(listed)) => {
                 for &idx in listed {
                     guards.all.insert(
                         self.map_main_func(main, idx)?,
@@ -1373,7 +1423,7 @@ impl Plan {
                     );
                 }
             }
-            Some(CheckedGuards::Opaque) => {
+            Some(FuncList::Opaque) => {
                 for local_idx in 0..main.local_funcs.len() as u32 {
                     guards.all.insert(
                         self.main_local_base + local_idx,
@@ -1388,8 +1438,8 @@ impl Plan {
         }
         let merged_base = self.merged_base(main);
         for (ext_idx, external) in externals.iter().enumerate() {
-            match &external.checked {
-                Some(CheckedGuards::Exact(listed)) => {
+            match list(external) {
+                Some(FuncList::Exact(listed)) => {
                     for &idx in listed {
                         let Some(&out) = self.merged_index.get(&(ext_idx, idx)) else {
                             continue;
@@ -1403,7 +1453,7 @@ impl Plan {
                         );
                     }
                 }
-                Some(CheckedGuards::Opaque) => {
+                Some(FuncList::Opaque) => {
                     for (position, merged) in self.merged.iter().enumerate() {
                         if merged.external_idx != ext_idx {
                             continue;
