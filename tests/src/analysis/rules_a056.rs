@@ -3,8 +3,9 @@
 /// - A056: ArrayIndexNotProvenInBounds — every array access whose index is not
 ///   a bare literal must be proven, from the code the programmer wrote, to index
 ///   within `0..length` on every run that reaches it, so an out-of-range index
-///   is a path the program handles, never an implicit trap. The accesses it
-///   proves are handed to code generation, which omits their runtime guard.
+///   is a path the program handles, never an implicit trap. Under the
+///   `omit-proven` bounds-check policy the accesses it proves are handed to
+///   code generation, which omits their runtime guard.
 ///
 /// Each test runs the real parse -> type-check -> analyze pipeline and compares
 /// the A056 findings against the accesses expected to be unproven.
@@ -393,14 +394,27 @@ mod analysis_rules_tests {
         );
     }
 
-    /// The source text of every access a passing analysis hands to code
-    /// generation as proven in bounds, sorted.
+    /// The source text of every access a passing analysis under the
+    /// `omit-proven` policy hands to code generation as proven in bounds,
+    /// sorted.
     fn proven_in_bounds(source: &str) -> Vec<String> {
+        proven_in_bounds_under(source, inference_analysis::BoundsChecks::OmitProven)
+    }
+
+    /// [`proven_in_bounds`] under `policy`.
+    fn proven_in_bounds_under(
+        source: &str,
+        policy: inference_analysis::BoundsChecks,
+    ) -> Vec<String> {
         let arena = build_ast(source.to_string());
         let ctx = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
             .expect("type checking should succeed for analysis test input")
             .typed_context();
-        let result = inference_analysis::analyze(&ctx)
+        let options = inference_analysis::AnalysisOptions {
+            bounds_checks: policy,
+            ..Default::default()
+        };
+        let result = inference_analysis::analyze_with_options(&ctx, options)
             .unwrap_or_else(|errors| panic!("analysis should pass, got:\n{errors}"));
         let arena = ctx.arena();
         let mut accesses: Vec<String> = result
@@ -416,6 +430,20 @@ mod analysis_rules_tests {
             .collect();
         accesses.sort();
         accesses
+    }
+
+    /// A build that keeps every guard is handed nothing, however much the
+    /// analysis proved: the proofs are not computed for a build that would
+    /// discard them.
+    #[test]
+    fn a056_hands_nothing_to_a_build_that_keeps_every_guard() {
+        let source = "pub fn f(i: u32) -> i32 { let a: [i32; 4] = [1, 2, 3, 4]; \
+                      let mut r: i32 = 0; if i < 4 { r = a[i]; } return r; }";
+        assert_eq!(proven_in_bounds(source), vec!["a[i]"]);
+        assert!(proven_in_bounds_under(source, inference_analysis::BoundsChecks::All).is_empty());
+        assert!(
+            proven_in_bounds_under(source, inference_analysis::BoundsChecks::default()).is_empty()
+        );
     }
 
     /// Every access A056 proves is handed on, and a literal index — which

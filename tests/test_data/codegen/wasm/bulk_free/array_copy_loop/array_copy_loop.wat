@@ -186,48 +186,48 @@
     unreachable
   )
   (func $pick_20 (;2;) (type 2) (param $data i32) (param $i i32) (result i64)
-    (local $__frame_ptr i32) (local i32)
+    (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 160
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     i32.const 0
-    local.set 3
+    local.set 4
     loop ;; label = @1
       local.get $__frame_ptr
-      local.get 3
+      local.get 4
       i32.add
       i64.const 0
       i64.store
       local.get $__frame_ptr
-      local.get 3
+      local.get 4
       i32.add
       i64.const 0
       i64.store offset=8
-      local.get 3
+      local.get 4
       i32.const 16
       i32.add
-      local.tee 3
+      local.tee 4
       i32.const 160
       i32.ne
       br_if 0 (;@1;)
     end
     i32.const 0
-    local.set 3
+    local.set 4
     loop ;; label = @1
       local.get $__frame_ptr
-      local.get 3
+      local.get 4
       i32.add
       local.get $data
-      local.get 3
+      local.get 4
       i32.add
       i64.load align=1
       i64.store align=1
-      local.get 3
+      local.get 4
       i32.const 8
       i32.add
-      local.tee 3
+      local.tee 4
       i32.const 160
       i32.ne
       br_if 0 (;@1;)
@@ -258,6 +258,13 @@
     end
     local.get $data
     local.get $i
+    local.tee 3
+    local.get 3
+    i32.const 20
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add
@@ -270,48 +277,48 @@
     unreachable
   )
   (func $clobber_20 (;3;) (type 3) (param $data i32) (param $i i32) (result i64)
-    (local $__frame_ptr i32) (local i32)
+    (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 160
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     i32.const 0
-    local.set 3
+    local.set 4
     loop ;; label = @1
       local.get $__frame_ptr
-      local.get 3
+      local.get 4
       i32.add
       i64.const 0
       i64.store
       local.get $__frame_ptr
-      local.get 3
+      local.get 4
       i32.add
       i64.const 0
       i64.store offset=8
-      local.get 3
+      local.get 4
       i32.const 16
       i32.add
-      local.tee 3
+      local.tee 4
       i32.const 160
       i32.ne
       br_if 0 (;@1;)
     end
     i32.const 0
-    local.set 3
+    local.set 4
     loop ;; label = @1
       local.get $__frame_ptr
-      local.get 3
+      local.get 4
       i32.add
       local.get $data
-      local.get 3
+      local.get 4
       i32.add
       i64.load align=1
       i64.store align=1
-      local.get 3
+      local.get 4
       i32.const 8
       i32.add
-      local.tee 3
+      local.tee 4
       i32.const 160
       i32.ne
       br_if 0 (;@1;)
@@ -338,6 +345,13 @@
     end
     local.get $data
     local.get $i
+    local.tee 3
+    local.get 3
+    i32.const 20
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add
@@ -345,6 +359,13 @@
     i64.store
     local.get $data
     local.get $i
+    local.tee 3
+    local.get 3
+    i32.const 20
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add

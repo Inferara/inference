@@ -24,6 +24,7 @@ pub(crate) fn compile_fixture(file: &str, module_name: &str, mode: CompilationMo
             opt_level: OptLevel::O3,
             features: inference_wasm_codegen::EmitFeatures::default(),
             layout: inference_wasm_codegen::MemoryLayout::default(),
+            bounds_checks: inference_wasm_codegen::BoundsChecks::All,
         },
     )
     .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"))
@@ -64,6 +65,7 @@ pub(crate) fn compile_fixture_output(
             opt_level: OptLevel::O3,
             features: inference_wasm_codegen::EmitFeatures::default(),
             layout: inference_wasm_codegen::MemoryLayout::default(),
+            bounds_checks: inference_wasm_codegen::BoundsChecks::All,
         },
     )
     .map_err(|e| format!("{e}"))

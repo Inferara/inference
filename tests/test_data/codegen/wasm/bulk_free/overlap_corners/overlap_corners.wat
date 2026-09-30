@@ -17,7 +17,7 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $elem_copy (;0;) (type 0) (param $i i32) (param $j i32) (result i32)
-    (local $arr i32) (local $__frame_ptr i32) (local i32 i32 i32 i32 i32)
+    (local $arr i32) (local $__frame_ptr i32) (local i32 i32 i32 i32 i32 i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -109,81 +109,109 @@
     end
     local.get $arr
     local.get $i
+    local.tee 4
+    local.get 4
+    i32.const 4
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add
     local.get $arr
     local.get $j
+    local.tee 4
+    local.get 4
+    i32.const 4
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add
+    local.set 9
     local.set 8
-    local.set 7
-    local.get 7
     local.get 8
+    local.get 9
     i64.load align=1
     i64.store align=1
     local.get $arr
     local.get $i
+    local.tee 4
+    local.get 4
+    i32.const 4
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add
     i32.load
     i32.const 10
-    local.set 5
-    local.tee 4
-    local.get 5
-    i32.mul
     local.set 6
-    local.get 5
+    local.tee 5
+    local.get 6
+    i32.mul
+    local.set 7
+    local.get 6
     i32.const 0
     i32.ne
     if ;; label = @1
-      local.get 5
+      local.get 6
       i32.const -1
       i32.eq
       if ;; label = @2
-        local.get 4
+        local.get 5
         i32.const -2147483648
         i32.eq
         if ;; label = @3
           unreachable
         end
       else
+        local.get 7
         local.get 6
-        local.get 5
         i32.div_s
-        local.get 4
+        local.get 5
         i32.ne
         if ;; label = @3
           unreachable
         end
       end
     end
-    local.get 6
+    local.get 7
     local.get $arr
     local.get $i
+    local.tee 4
+    local.get 4
+    i32.const 4
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add
     i32.const 4
     i32.add
     i32.load
-    local.set 5
-    local.tee 4
-    local.get 5
+    local.set 6
+    local.tee 5
+    local.get 6
     i32.add
-    local.tee 6
-    local.get 4
-    i32.lt_s
+    local.tee 7
     local.get 5
+    i32.lt_s
+    local.get 6
     i32.const 0
     i32.lt_s
     i32.ne
     if ;; label = @1
       unreachable
     end
-    local.get 6
+    local.get 7
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -192,7 +220,7 @@
     unreachable
   )
   (func $elem_copy_neighbours (;1;) (type 1) (param $i i32) (param $j i32) (result i32)
-    (local $brr i32) (local $__frame_ptr i32) (local i32 i32 i32 i32 i32)
+    (local $brr i32) (local $__frame_ptr i32) (local i32 i32 i32 i32 i32 i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -284,175 +312,189 @@
     end
     local.get $brr
     local.get $i
+    local.tee 4
+    local.get 4
+    i32.const 4
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add
     local.get $brr
     local.get $j
+    local.tee 4
+    local.get 4
+    i32.const 4
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add
+    local.set 9
     local.set 8
-    local.set 7
-    local.get 7
     local.get 8
+    local.get 9
     i64.load align=1
     i64.store align=1
     local.get $brr
     i32.load
     i32.const 1000
-    local.set 5
-    local.tee 4
-    local.get 5
-    i32.mul
     local.set 6
-    local.get 5
+    local.tee 5
+    local.get 6
+    i32.mul
+    local.set 7
+    local.get 6
     i32.const 0
     i32.ne
     if ;; label = @1
-      local.get 5
+      local.get 6
       i32.const -1
       i32.eq
       if ;; label = @2
-        local.get 4
+        local.get 5
         i32.const -2147483648
         i32.eq
         if ;; label = @3
           unreachable
         end
       else
+        local.get 7
         local.get 6
-        local.get 5
         i32.div_s
-        local.get 4
+        local.get 5
         i32.ne
         if ;; label = @3
           unreachable
         end
       end
     end
-    local.get 6
+    local.get 7
     local.get $brr
     i32.const 8
     i32.add
     i32.load
     i32.const 100
-    local.set 5
-    local.tee 4
-    local.get 5
-    i32.mul
     local.set 6
-    local.get 5
+    local.tee 5
+    local.get 6
+    i32.mul
+    local.set 7
+    local.get 6
     i32.const 0
     i32.ne
     if ;; label = @1
-      local.get 5
+      local.get 6
       i32.const -1
       i32.eq
       if ;; label = @2
-        local.get 4
+        local.get 5
         i32.const -2147483648
         i32.eq
         if ;; label = @3
           unreachable
         end
       else
+        local.get 7
         local.get 6
-        local.get 5
         i32.div_s
-        local.get 4
+        local.get 5
         i32.ne
         if ;; label = @3
           unreachable
         end
       end
     end
+    local.get 7
+    local.set 6
+    local.tee 5
     local.get 6
-    local.set 5
-    local.tee 4
-    local.get 5
     i32.add
-    local.tee 6
-    local.get 4
-    i32.lt_s
+    local.tee 7
     local.get 5
+    i32.lt_s
+    local.get 6
     i32.const 0
     i32.lt_s
     i32.ne
     if ;; label = @1
       unreachable
     end
-    local.get 6
+    local.get 7
     local.get $brr
     i32.const 16
     i32.add
     i32.load
     i32.const 10
-    local.set 5
-    local.tee 4
-    local.get 5
-    i32.mul
     local.set 6
-    local.get 5
+    local.tee 5
+    local.get 6
+    i32.mul
+    local.set 7
+    local.get 6
     i32.const 0
     i32.ne
     if ;; label = @1
-      local.get 5
+      local.get 6
       i32.const -1
       i32.eq
       if ;; label = @2
-        local.get 4
+        local.get 5
         i32.const -2147483648
         i32.eq
         if ;; label = @3
           unreachable
         end
       else
+        local.get 7
         local.get 6
-        local.get 5
         i32.div_s
-        local.get 4
+        local.get 5
         i32.ne
         if ;; label = @3
           unreachable
         end
       end
     end
+    local.get 7
+    local.set 6
+    local.tee 5
     local.get 6
-    local.set 5
-    local.tee 4
-    local.get 5
     i32.add
-    local.tee 6
-    local.get 4
-    i32.lt_s
+    local.tee 7
     local.get 5
+    i32.lt_s
+    local.get 6
     i32.const 0
     i32.lt_s
     i32.ne
     if ;; label = @1
       unreachable
     end
-    local.get 6
+    local.get 7
     local.get $brr
     i32.const 24
     i32.add
     i32.load
-    local.set 5
-    local.tee 4
-    local.get 5
+    local.set 6
+    local.tee 5
+    local.get 6
     i32.add
-    local.tee 6
-    local.get 4
-    i32.lt_s
+    local.tee 7
     local.get 5
+    i32.lt_s
+    local.get 6
     i32.const 0
     i32.lt_s
     i32.ne
     if ;; label = @1
       unreachable
     end
-    local.get 6
+    local.get 7
     local.get $__frame_ptr
     i32.const 32
     i32.add

@@ -6,7 +6,7 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $loop_return_array (;0;) (type 0) (param $n i32) (result i32)
-    (local $arr i32) (local $result i32) (local $i i32) (local $__frame_ptr i32) (local i32 i32 i32)
+    (local $arr i32) (local $result i32) (local $i i32) (local $__frame_ptr i32) (local i32 i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -53,6 +53,13 @@
         br_if 1 (;@1;)
         local.get $arr
         local.get $i
+        local.tee 5
+        local.get 5
+        i32.const 4
+        i32.ge_u
+        if ;; label = @3
+          unreachable
+        end
         i32.const 4
         i32.mul
         i32.add
@@ -62,6 +69,13 @@
         if ;; label = @3
           local.get $arr
           local.get $i
+          local.tee 5
+          local.get 5
+          i32.const 4
+          i32.ge_u
+          if ;; label = @4
+            unreachable
+          end
           i32.const 4
           i32.mul
           i32.add
@@ -71,21 +85,21 @@
         end
         local.get $i
         i32.const 1
-        local.set 6
-        local.tee 5
-        local.get 6
+        local.set 7
+        local.tee 6
+        local.get 7
         i32.add
-        local.tee 7
-        local.get 5
-        i32.lt_s
+        local.tee 8
         local.get 6
+        i32.lt_s
+        local.get 7
         i32.const 0
         i32.lt_s
         i32.ne
         if ;; label = @3
           unreachable
         end
-        local.get 7
+        local.get 8
         local.set $i
         br 0 (;@2;)
       end

@@ -119,9 +119,10 @@
 //!   halt rather than a recovery, so a value-range analysis over the body must
 //!   prove from the code the programmer wrote — an enclosing `if` or loop
 //!   condition, an early exit, the index's initializer and arithmetic — that
-//!   the guard is unreachable. An `assert` is not a source of facts. The
-//!   accesses it proves are handed to code generation, which omits their
-//!   guards ([`ProvenInBounds`]). See [`rules::array_index_not_proven`].
+//!   the guard is unreachable. An `assert` is not a source of facts. A build
+//!   that chose [`BoundsChecks::OmitProven`] is handed the accesses it proves,
+//!   and code generation omits their guards ([`ProvenInBounds`]). See
+//!   [`rules::array_index_not_proven`].
 //! - A057: An `assert` in executable code must not fail on every run that
 //!   reaches it; such an `assert` is an unconditional halt written as a check,
 //!   and would otherwise stand in for the recovery A056 asks a guard's failing
@@ -327,10 +328,11 @@ pub use rules::stack_depth::estimate_frame_sizes;
 /// direct dependency on the type checker to name the field's type.
 pub use inference_type_checker::errors::TypeMismatchContext;
 
-/// Re-exported because [`AnalysisOptions::target`] is one: a caller that can set
-/// the field must be able to build the value, without a direct dependency on
-/// `inference-compiler-interface` to name its type.
-pub use inference_compiler_interface::TargetName;
+/// Re-exported because [`AnalysisOptions::target`] and
+/// [`AnalysisOptions::bounds_checks`] are these: a caller that can set the
+/// fields must be able to build the values, without a direct dependency on
+/// `inference-compiler-interface` to name their types.
+pub use inference_compiler_interface::{BoundsChecks, TargetName};
 
 /// The facts about the artifact a program will be compiled into that some rules
 /// must measure the program against.
@@ -341,6 +343,10 @@ pub use inference_compiler_interface::TargetName;
 /// function's parameters fit the runtime the module is built for. Carrying the
 /// settings here is what lets the answer follow the build instead of a constant
 /// that has to be kept in sync by hand.
+///
+/// One setting is read by no rule but by the analysis itself:
+/// [`Self::bounds_checks`] decides whether a passing analysis also hands code
+/// generation the accesses it proved in bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnalysisOptions {
     /// The shadow-stack size in bytes A036 measures cumulative call-chain frame
@@ -354,6 +360,16 @@ pub struct AnalysisOptions {
     /// that builds, or passing one the post-link check then refuses without a
     /// source location.
     pub target: TargetName,
+    /// Which array accesses the build keeps a runtime bounds guard on. Under
+    /// [`BoundsChecks::OmitProven`] a passing analysis carries the accesses it
+    /// proved in bounds ([`AnalysisResult::proven_in_bounds`]), which costs a
+    /// second range analysis of every body with a dynamic access; under
+    /// [`BoundsChecks::All`] no build reads them, so they are not computed and
+    /// the set is empty. Must name the policy code generation builds under, or
+    /// the build either pays for proofs it discards or omits no guard at all.
+    ///
+    /// [`AnalysisResult::proven_in_bounds`]: errors::AnalysisResult::proven_in_bounds
+    pub bounds_checks: BoundsChecks,
 }
 
 /// Implemented by hand rather than derived: a derived `Default` would give a
@@ -365,6 +381,7 @@ impl Default for AnalysisOptions {
         Self {
             stack_budget_bytes: 65_536,
             target: TargetName::DEFAULT,
+            bounds_checks: BoundsChecks::DEFAULT,
         }
     }
 }
@@ -399,10 +416,12 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 /// issues at once. `Warning`-severity findings are returned via `AnalysisResult`
 /// on both success and error paths.
 ///
-/// A passing result also carries the array accesses proven in bounds
-/// ([`AnalysisResult::proven_in_bounds`]), which code generation reads to omit
-/// their runtime guards. They are computed only once every rule has passed,
-/// since a proof about a program that does not compile has no build to reach.
+/// A passing result under [`BoundsChecks::OmitProven`] also carries the array
+/// accesses proven in bounds ([`AnalysisResult::proven_in_bounds`]), which code
+/// generation reads to omit their runtime guards. They are computed only once
+/// every rule has passed, since a proof about a program that does not compile
+/// has no build to reach, and only when the build will omit a guard, since the
+/// default build keeps every one and would discard them.
 ///
 /// [`AnalysisResult::proven_in_bounds`]: errors::AnalysisResult::proven_in_bounds
 pub fn analyze_with_options(
@@ -421,8 +440,13 @@ pub fn analyze_with_options(
         }
     }
     if errors.is_empty() {
-        let proven = rules::array_index_not_proven::prove(typed_context);
-        Ok(AnalysisResult::new(warnings, infos).with_proven_in_bounds(proven))
+        let result = AnalysisResult::new(warnings, infos);
+        if options.bounds_checks.omits_proven() {
+            let proven = rules::array_index_not_proven::prove(typed_context);
+            Ok(result.with_proven_in_bounds(proven))
+        } else {
+            Ok(result)
+        }
     } else {
         Err(AnalysisErrors::new(errors, warnings, infos))
     }

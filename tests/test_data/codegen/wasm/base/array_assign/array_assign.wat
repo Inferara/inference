@@ -217,7 +217,7 @@
     unreachable
   )
   (func $write_computed_index (;3;) (type 3) (param $i i32) (result i32)
-    (local $arr i32) (local $__frame_ptr i32) (local i32 i32 i32)
+    (local $arr i32) (local $__frame_ptr i32) (local i32 i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -252,21 +252,28 @@
     local.get $arr
     local.get $i
     i32.const 1
-    local.set 4
-    local.tee 3
-    local.get 4
+    local.set 5
+    local.tee 4
+    local.get 5
     i32.add
-    local.tee 5
-    local.get 3
-    i32.lt_s
+    local.tee 6
     local.get 4
+    i32.lt_s
+    local.get 5
     i32.const 0
     i32.lt_s
     i32.ne
     if ;; label = @1
       unreachable
     end
-    local.get 5
+    local.get 6
+    local.tee 3
+    local.get 3
+    i32.const 3
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 4
     i32.mul
     i32.add

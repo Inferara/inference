@@ -163,6 +163,7 @@ mod checked_link_tests {
                 opt_level: OptLevel::O3,
                 features: EmitFeatures::default(),
                 layout: MemoryLayout::default(),
+                bounds_checks: inference_wasm_codegen::BoundsChecks::All,
             },
         )
         .expect("codegen succeeds")
@@ -1014,6 +1015,7 @@ mod checked_link_tests {
                 opt_level: OptLevel::O3,
                 features: EmitFeatures::default(),
                 layout: MemoryLayout::default(),
+                bounds_checks: inference_wasm_codegen::BoundsChecks::All,
             },
         )
         .expect("codegen succeeds");

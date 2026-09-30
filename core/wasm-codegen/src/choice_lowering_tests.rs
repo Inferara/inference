@@ -573,6 +573,7 @@ fn a_choice_suffix_past_the_parameter_ceiling_is_rejected() {
             opt_level: crate::OptLevel::O0,
             features: crate::EmitFeatures::default(),
             layout: crate::MemoryLayout::default(),
+            bounds_checks: crate::BoundsChecks::All,
         },
     )
     .expect_err("1001 choice parameters overflow WebAssembly's limit");
@@ -607,6 +608,7 @@ fn codegen_rejects_a_declared_return_type_on_an_exists_body() {
             opt_level: crate::OptLevel::O0,
             features: crate::EmitFeatures::default(),
             layout: crate::MemoryLayout::default(),
+            bounds_checks: crate::BoundsChecks::All,
         },
     )
     .expect_err("a declared return type on an exists body must fail codegen");
@@ -638,6 +640,7 @@ fn codegen_rejects_a_return_statement_in_a_unique_body() {
             opt_level: crate::OptLevel::O0,
             features: crate::EmitFeatures::default(),
             layout: crate::MemoryLayout::default(),
+            bounds_checks: crate::BoundsChecks::All,
         },
     )
     .expect_err("a return statement in a unique body must fail codegen");

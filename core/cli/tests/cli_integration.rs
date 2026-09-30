@@ -479,6 +479,100 @@ fn unknown_wasm_feature_is_rejected_before_any_output() {
     );
 }
 
+// Bounds checks ---
+
+/// Two array accesses, each guarded by the program itself, so A056 proves both
+/// in bounds and an `omit-proven` build drops both runtime guards.
+const PROVEN_INDEX_SOURCE: &str = "\
+pub fn read_at(i: u32) -> i32 {
+    let arr: [i32; 4] = [10, 20, 30, 40];
+    if i < 4 {
+        return arr[i];
+    }
+    return 0;
+}
+
+pub fn write_at(j: u32, v: i32) -> i32 {
+    let mut arr: [i32; 4] = [0, 0, 0, 0];
+    if j < 4 {
+        arr[j] = v;
+    }
+    return arr[0];
+}
+";
+
+/// How many runtime bounds guards `wasm` carries: the `i32.ge_u; if; unreachable;
+/// end` tail every guard ends in, spelled out as bytes so the count does not
+/// depend on a disassembler.
+fn bounds_guard_count(wasm: &[u8]) -> usize {
+    wasm.windows(5)
+        .filter(|w| *w == [0x4F, 0x04, 0x40, 0x00, 0x0B])
+        .count()
+}
+
+/// Naming the default policy explicitly must produce the same bytes as naming
+/// none, and that build keeps the guard of every access, proven or not.
+#[test]
+fn bounds_checks_all_is_the_default_and_keeps_every_guard() {
+    let implicit = compile_source_with(&[], PROVEN_INDEX_SOURCE);
+    let explicit = compile_source_with(&["--bounds-checks", "all"], PROVEN_INDEX_SOURCE);
+    assert_eq!(
+        implicit, explicit,
+        "`--bounds-checks all` must be byte-identical to omitting the flag"
+    );
+    assert_eq!(bounds_guard_count(&implicit), 2);
+}
+
+/// `--bounds-checks omit-proven` reaches code generation: the artifact carries
+/// no guard for either proven access.
+#[test]
+fn bounds_checks_omit_proven_drops_the_guard_of_each_proven_access() {
+    let omitted = compile_source_with(&["--bounds-checks", "omit-proven"], PROVEN_INDEX_SOURCE);
+    assert_eq!(bounds_guard_count(&omitted), 0);
+    assert_ne!(omitted, compile_source_with(&[], PROVEN_INDEX_SOURCE));
+}
+
+/// The policy applies identically in proof mode — the `.v` must describe the
+/// same program as the `.wasm`, so nothing may gate it on the compilation mode.
+#[test]
+fn bounds_checks_apply_in_proof_mode_too() {
+    let omitted = compile_source_with(
+        &["--bounds-checks", "omit-proven", "--mode", "proof"],
+        PROVEN_INDEX_SOURCE,
+    );
+    assert_eq!(bounds_guard_count(&omitted), 0);
+    let kept = compile_source_with(&["--mode", "proof"], PROVEN_INDEX_SOURCE);
+    assert_eq!(bounds_guard_count(&kept), 2);
+}
+
+/// An unrecognized policy fails the build before any phase runs, in the wording
+/// the manifest key is refused in, naming what each supported value does.
+#[test]
+fn unknown_bounds_check_policy_is_rejected_before_any_output() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--bounds-checks")
+        .arg("none");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Invalid `--bounds-checks` value `none`: unknown bounds-check policy",
+        ))
+        .stderr(predicate::str::contains("`omit-proven`"));
+
+    assert!(
+        !temp.child("out").child("trivial.wasm").path().exists(),
+        "a rejected policy must leave no artifact"
+    );
+}
+
 // Target selection ---
 
 /// Runs `infc` with the given `--target` value against a real source file and

@@ -450,6 +450,34 @@ fn resolve_target_flag(
     })
 }
 
+/// Resolves the `--bounds-checks` policy, or the default one when the flag is
+/// absent.
+///
+/// Validation is [`inference_compiler_interface::resolve_bounds_checks`] — the
+/// same vocabulary and the same wording `infs` uses for the `[build]
+/// bounds-checks` key, so a value rejected in one place is rejected identically
+/// in the other.
+///
+/// Two phases read the result: analysis computes the accesses it proved in
+/// bounds only for a policy that omits their guards, and code generation omits
+/// them.
+///
+/// # Errors
+///
+/// Returns the shared diagnostic when `requested` names no policy.
+fn resolve_bounds_checks_flag(
+    requested: Option<&str>,
+) -> anyhow::Result<inference_compiler_interface::BoundsChecks> {
+    use inference_compiler_interface::{BoundsChecks, BoundsChecksSource};
+
+    Ok(match requested {
+        Some(entry) => {
+            inference_compiler_interface::resolve_bounds_checks(entry, BoundsChecksSource::Flag)?
+        }
+        None => BoundsChecks::DEFAULT,
+    })
+}
+
 /// The emission target code generation takes for a requested target name.
 ///
 /// The mapping is an exhaustive match with no wildcard arm: a name cannot be
@@ -1337,6 +1365,16 @@ fn run() {
     };
     let target = emission_target(target_name);
 
+    // Resolve the bounds-check policy for the same reason and at the same point:
+    // a misspelled policy is a mistake about the artifact.
+    let bounds_checks = match resolve_bounds_checks_flag(args.bounds_checks.as_deref()) {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    };
+
     // Refuse a proof artifact for a target whose shipped module is not the one
     // the translation would read, before any phase runs. See
     // `proof_artifact_refusal` for why compile mode is the only spelling this
@@ -1438,8 +1476,9 @@ fn run() {
 
     let mut typed_context = None;
     // The array accesses the analysis proved in bounds, whose runtime guard
-    // code generation omits. Set only by a passing analysis, which every path
-    // that reaches code generation runs first.
+    // code generation omits under `--bounds-checks omit-proven`. Set only by a
+    // passing analysis, which every path that reaches code generation runs
+    // first, and empty under the default policy, which keeps every guard.
     let mut proven_in_bounds = None;
 
     if need_codegen || need_analyze {
@@ -1456,10 +1495,13 @@ fn run() {
                 // program whose frame exceeds the stack a diagnostic here rather
                 // than a panic in frame layout later, and a function over the
                 // target's parameter words an error at its declaration rather
-                // than a refusal of the finished module.
+                // than a refusal of the finished module. The bounds-check policy
+                // decides whether a passing analysis also proves the accesses
+                // code generation may emit without a guard.
                 let options = AnalysisOptions {
                     stack_budget_bytes: layout.stack_size(),
                     target: target_name,
+                    bounds_checks,
                 };
                 match analyze_with_options(&tctx, options) {
                     Err(e) => {
@@ -1618,6 +1660,7 @@ fn run() {
                 opt_level,
                 features: emit_features,
                 layout,
+                bounds_checks,
             },
             proven_in_bounds.accesses(),
         ) {
@@ -1873,6 +1916,7 @@ mod tests {
             wasm_features: Vec::new(),
             memory_pages: None,
             stack_size: None,
+            bounds_checks: None,
             adopt_external_specs: false,
             commit_hash: false,
             abi_version: false,
@@ -2615,6 +2659,35 @@ mod tests {
 
     /// Omitting `--target` must land on the same emission target the flag's
     /// default name selects, not on a second idea of what the default is.
+    #[test]
+    fn an_absent_bounds_checks_flag_keeps_every_guard() {
+        assert_eq!(
+            resolve_bounds_checks_flag(None).expect("no policy named"),
+            inference_compiler_interface::BoundsChecks::All
+        );
+    }
+
+    #[test]
+    fn every_bounds_check_policy_resolves_from_its_flag_spelling() {
+        for policy in inference_compiler_interface::BoundsChecks::ALL {
+            assert_eq!(
+                resolve_bounds_checks_flag(Some(policy.as_str())).expect("a supported policy"),
+                policy
+            );
+        }
+    }
+
+    /// The flag's rejection is the shared one, naming the flag rather than the
+    /// manifest key.
+    #[test]
+    fn an_unknown_bounds_check_policy_is_refused_naming_the_flag() {
+        let err = resolve_bounds_checks_flag(Some("off"))
+            .expect_err("`off` is not a policy")
+            .to_string();
+        assert!(err.contains("`--bounds-checks`"), "{err}");
+        assert!(!err.contains("[build]"), "{err}");
+    }
+
     #[test]
     fn an_absent_target_flag_resolves_like_the_default_name() {
         use inference_compiler_interface::TargetName;

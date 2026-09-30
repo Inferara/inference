@@ -60,6 +60,10 @@
 /// along: a caller that can set the field must be able to build the value.
 pub use inference_compiler_interface::{MemoryLayout, MemoryLayoutError, MemoryLayoutSource};
 
+/// The bounds-check policy, re-exported so [`CodegenOptions`] and every caller
+/// naming the field keep one path to it.
+pub use inference_compiler_interface::BoundsChecks;
+
 /// Compilation target for code generation.
 ///
 /// Every target produces a WebAssembly module; what differs is which WASM
@@ -275,8 +279,9 @@ impl OptLevel {
 
 /// The complete configuration [`crate::codegen`] compiles under: which platform
 /// the module targets, which compilation mode drives emission, how the output is
-/// optimized, which post-MVP instruction families emission may use, and how the
-/// module's linear memory is laid out.
+/// optimized, which post-MVP instruction families emission may use, how the
+/// module's linear memory is laid out, and which array accesses keep their
+/// runtime bounds guard.
 ///
 /// This is the input mirror of the configuration [`crate::CodegenOutput`]
 /// records on the artifact it describes. Bundling the values keeps the
@@ -295,6 +300,14 @@ pub struct CodegenOptions {
     /// The linear memory the module declares and the share of it the shadow
     /// stack occupies.
     pub layout: MemoryLayout,
+    /// Which array accesses keep their runtime bounds guard.
+    ///
+    /// Under [`BoundsChecks::All`], the default, every dynamic access keeps it,
+    /// and the proven set [`crate::codegen_with_proven_in_bounds`] is handed is
+    /// not read at all. Under [`BoundsChecks::OmitProven`] each access in that
+    /// set is emitted without it. Independent of [`CompilationMode`] and of the
+    /// target, for the reason [`EmitFeatures`] is.
+    pub bounds_checks: BoundsChecks,
 }
 
 /// Implemented by hand rather than derived: the default optimization level is
@@ -310,6 +323,7 @@ impl Default for CodegenOptions {
             opt_level: target.default_opt_level(),
             features: EmitFeatures::default(),
             layout: MemoryLayout::default(),
+            bounds_checks: BoundsChecks::DEFAULT,
         }
     }
 }

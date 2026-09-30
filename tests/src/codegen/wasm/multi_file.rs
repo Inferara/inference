@@ -47,6 +47,7 @@ fn proof_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> CodegenOutput {
             opt_level: OptLevel::O3,
             features: inference_wasm_codegen::EmitFeatures::default(),
             layout: inference_wasm_codegen::MemoryLayout::default(),
+            bounds_checks: inference_wasm_codegen::BoundsChecks::All,
         },
     )
     .expect("multi-file proof codegen should succeed")
@@ -79,6 +80,7 @@ fn try_proof_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> anyhow::Result<C
             opt_level: OptLevel::O3,
             features: inference_wasm_codegen::EmitFeatures::default(),
             layout: inference_wasm_codegen::MemoryLayout::default(),
+            bounds_checks: inference_wasm_codegen::BoundsChecks::All,
         },
     )
 }

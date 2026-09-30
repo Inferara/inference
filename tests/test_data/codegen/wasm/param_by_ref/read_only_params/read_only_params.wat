@@ -64,6 +64,7 @@
     unreachable
   )
   (func $pick4 (;2;) (type 2) (param $v i32) (param $i i32) (result i64)
+    (local i32)
     local.get $i
     i32.const 0
     i32.lt_s
@@ -80,6 +81,13 @@
     end
     local.get $v
     local.get $i
+    local.tee 2
+    local.get 2
+    i32.const 4
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add

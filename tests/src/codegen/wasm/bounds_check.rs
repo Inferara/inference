@@ -56,9 +56,29 @@ pub fn write_at(j: u32, v: i32) -> i32 {
 }
 "#;
 
+/// [`READ_WRITE_SOURCE`] with each index guarded by the program itself, so A056
+/// proves both accesses in bounds and an `omit-proven` build drops both guards.
+const PROVEN_READ_WRITE_SOURCE: &str = r#"
+pub fn read_at(i: u32) -> i32 {
+    let arr: [i32; 4] = [10, 20, 30, 40];
+    if i < 4 {
+        return arr[i];
+    }
+    return 0;
+}
+
+pub fn write_at(j: u32, v: i32) -> i32 {
+    let mut arr: [i32; 4] = [0, 0, 0, 0];
+    if j < 4 {
+        arr[j] = v;
+    }
+    return arr[0];
+}
+"#;
+
 #[cfg(test)]
 mod bounds_check_tests {
-    use super::READ_WRITE_SOURCE;
+    use super::{PROVEN_READ_WRITE_SOURCE, READ_WRITE_SOURCE};
     use crate::utils::{
         assert_wasms_modules_equivalence, codegen_output_no_analysis,
         codegen_with_full_config_no_analysis as codegen_with_full_config,
@@ -209,6 +229,85 @@ mod bounds_check_tests {
         )
         .expect("proof-mode codegen failed");
         assert_wasms_modules_equivalence(compile.wasm(), proof.wasm());
+    }
+
+    /// The same identity under `omit-proven`: which guards a build omits is read
+    /// off the source, the analysis and the policy, never the mode, so the two
+    /// builds still match. Both must also differ from the default build of the
+    /// same source, or the policy changed nothing and the identity is vacuous.
+    #[test]
+    fn proof_and_compile_builds_under_omit_proven_are_byte_identical() {
+        use inference_wasm_codegen::{BoundsChecks, CodegenOptions};
+        let build = |mode, bounds_checks| {
+            crate::utils::codegen_with_options(
+                PROVEN_READ_WRITE_SOURCE,
+                CodegenOptions {
+                    target: Target::Wasm32,
+                    mode,
+                    opt_level: OptLevel::O3,
+                    bounds_checks,
+                    ..Default::default()
+                },
+            )
+            .expect("codegen failed")
+            .wasm()
+            .to_vec()
+        };
+        let compile = build(CompilationMode::Compile, BoundsChecks::OmitProven);
+        let proof = build(CompilationMode::Proof, BoundsChecks::OmitProven);
+        assert_wasms_modules_equivalence(&compile, &proof);
+        assert_ne!(
+            compile,
+            build(CompilationMode::Compile, BoundsChecks::All),
+            "an `omit-proven` build of two proven accesses must not be the guarded build"
+        );
+    }
+
+    /// Holding a proof is not choosing to rely on it: a build under `all`
+    /// handed every access the analysis proved emits exactly what it emits
+    /// handed none.
+    #[test]
+    fn a_build_that_keeps_every_guard_ignores_the_proofs_it_is_handed() {
+        use inference_wasm_codegen::{BoundsChecks, CodegenOptions};
+        let arena = crate::utils::build_ast(PROVEN_READ_WRITE_SOURCE.to_string());
+        let ctx = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type check failed")
+            .typed_context();
+        let analysis = inference_analysis::analyze_with_options(
+            &ctx,
+            inference_analysis::AnalysisOptions {
+                bounds_checks: BoundsChecks::OmitProven,
+                ..Default::default()
+            },
+        )
+        .expect("analysis failed");
+        assert_eq!(analysis.proven_in_bounds().len(), 2);
+        let handed = inference_wasm_codegen::codegen_with_proven_in_bounds(
+            &ctx,
+            "output",
+            CodegenOptions::default(),
+            analysis.proven_in_bounds().accesses(),
+        )
+        .expect("codegen failed");
+        let bare = inference_wasm_codegen::codegen(&ctx, "output", CodegenOptions::default())
+            .expect("codegen failed");
+        assert_eq!(handed.wasm(), bare.wasm());
+    }
+
+    /// The default policy keeps the guard of an access the analysis proved in
+    /// bounds: running analysis, and holding the proof, is not what drops it.
+    #[test]
+    fn the_default_policy_keeps_the_guard_of_a_proven_access() {
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 2);
+        cov_mark::check_count!(wasm_codegen_elide_bounds_check, 0);
+        let wasm = crate::utils::codegen_with_options(PROVEN_READ_WRITE_SOURCE, Default::default())
+            .expect("codegen failed");
+        let wat = wasmprinter::print_bytes(wasm.wasm()).expect("failed to print WAT");
+        assert_eq!(
+            wat.matches("i32.ge_u").count(),
+            2,
+            "both proven accesses keep their guard under the default policy:\n{wat}"
+        );
     }
 
     #[test]
@@ -1077,50 +1176,34 @@ pub fn sum(n: i32) -> i32 {
     // the guard compares against that same length. The pair matters because
     // neither half is stated where the other is decided.
     //
-    // A build that ran analysis carries no guard there at all: A056 examines a
-    // reachability body too, folds both spellings, and proves them in bounds, so
-    // code generation omits the guard. The tests below build without analysis,
-    // which is what leaves code generation's own decision to be pinned; the
-    // last of them pins the elision.
+    // A build under the `omit-proven` bounds-check policy carries no guard there
+    // at all: A056 examines a reachability body too, folds both spellings, and
+    // proves them in bounds, so code generation omits the guard. The tests
+    // below build under the default policy, which keeps it and leaves code
+    // generation's own decision to be pinned; the last of them pins the
+    // elision.
 
     /// The proof-mode `.v` for `source` -- the artifact the reachability
     /// judgment reduces, and so the only place a claim about "what lands in the
     /// retained body" can be checked. WAT is not an option: a reachability body
     /// binds `@` choices, and `wasmprinter` rejects the custom opcodes.
-    ///
-    /// Built without analysis, so no access is handed to code generation as
-    /// proven in bounds.
     fn reachability_v(source: &str) -> String {
-        reachability_v_of(
-            crate::utils::codegen_with_full_config_no_analysis(
-                source,
-                Target::Wasm32,
-                CompilationMode::Proof,
-                OptLevel::O0,
-            ),
-            source,
-        )
+        reachability_v_under(source, inference_wasm_codegen::BoundsChecks::All)
     }
 
-    /// [`reachability_v`] for a build that ran analysis first, as `infc` does.
-    fn analyzed_reachability_v(source: &str) -> String {
-        reachability_v_of(
-            crate::utils::codegen_with_full_config(
-                source,
-                Target::Wasm32,
-                CompilationMode::Proof,
-                OptLevel::O0,
-            ),
+    /// [`reachability_v`] under the bounds-check `policy`.
+    fn reachability_v_under(source: &str, policy: inference_wasm_codegen::BoundsChecks) -> String {
+        let output = crate::utils::codegen_with_options(
             source,
+            inference_wasm_codegen::CodegenOptions {
+                target: Target::Wasm32,
+                mode: CompilationMode::Proof,
+                opt_level: OptLevel::O0,
+                bounds_checks: policy,
+                ..Default::default()
+            },
         )
-    }
-
-    fn reachability_v_of(
-        output: anyhow::Result<inference_wasm_codegen::CodegenOutput>,
-        source: &str,
-    ) -> String {
-        let output =
-            output.unwrap_or_else(|e| panic!("proof-mode codegen failed:{e}\nsource:\n{source}"));
+        .unwrap_or_else(|e| panic!("proof-mode codegen failed:{e}\nsource:\n{source}"));
         let v = inference::wasm_to_v(
             "reach",
             output.wasm(),
@@ -1214,14 +1297,14 @@ spec Reach {
         );
     }
 
-    /// With analysis run first, both spellings are proven in bounds and neither
+    /// Under `omit-proven`, both spellings are proven in bounds and neither
     /// guard is emitted: the retained body loads at the folded index's offset
     /// with no comparison against the array length in between.
     #[test]
-    fn proof_mode_omits_the_guard_analysis_proved_dead_in_a_reachability_body() {
+    fn omit_proven_drops_the_guard_analysis_proved_dead_in_a_reachability_body() {
         cov_mark::check_count!(wasm_codegen_emit_bounds_check, 0);
         cov_mark::check_count!(wasm_codegen_elide_bounds_check, 2);
-        let body = analyzed_reachability_v(
+        let body = reachability_v_under(
             r#"
 spec Reach {
   fn f() exists {
@@ -1233,6 +1316,7 @@ spec Reach {
   }
 }
 "#,
+            inference_wasm_codegen::BoundsChecks::OmitProven,
         );
         assert!(
             !body.contains("ROI_ge SX_U"),
