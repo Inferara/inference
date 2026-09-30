@@ -662,6 +662,16 @@ second wire form carries no indices and says only that some body of the module
 traps — what `infs` writes over an artifact a post-build optimizer has just
 renumbered — and the linker reads that as every function of that module.
 
+A fourth, `inference.bounds_elided` (`src/bounds_elided.rs`), shares that wire
+format and is only carried. It lists the bodies of its module that hold an
+array access emitted without its runtime bounds guard, which only a build under
+the `omit-proven` bounds-check policy writes. The linker decodes it under every
+role, rewrites it through the same index mappings, and re-emits one merged list,
+so a program that keeps every guard and links a library that did not still says
+so in the module it ships; a library body no closure pulled in drops out of it,
+and an opaque input makes the merged list opaque. Both sections are decoded by
+one codec, `src/func_list.rs`.
+
 Both obligation sections above describe the **main module's own** sections. An
 **external** module's `inference.spec_funcs` and `inference.hspecs` — the spec
 membership and `hassert` obligations a linked *library* recorded about its own

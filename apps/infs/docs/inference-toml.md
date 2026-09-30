@@ -34,6 +34,7 @@ target = "wasm32"
 optimize = "debug"
 mode = "compile"    # "compile" (executable WASM) or "proof" (Rocq translation)
 wasm-features = []  # post-MVP WebAssembly proposals to opt into
+bounds-checks = "all"  # "all", or "omit-proven" to drop guards proven dead
 
 [build.wasm-opt]        # optional: post-build optimization of the executable
 enabled = true          # table presence enables; set false to keep it off
@@ -60,7 +61,7 @@ TOML parse error at line 7, column 1
   |
 7 | wasm_features = ["bulk-memory"]
   | ^^^^^^^^^^^^^
-unknown field `wasm_features`, expected one of `target`, `optimize`, `mode`, `wasm-features`, `wasm-opt`
+unknown field `wasm_features`, expected one of `target`, `optimize`, `mode`, `wasm-features`, `bounds-checks`, `wasm-opt`
 ```
 
 The exceptions are the three tables whose keys are the data: `[dependencies]`
@@ -110,6 +111,7 @@ honor the same settings:
 |---|---|---|
 | `[build] target` | honored | honored |
 | `[build] wasm-features` | honored | honored |
+| `[build] bounds-checks` | honored | honored |
 | `[memory]` | honored | honored |
 | `[wasm-dependencies]` | honored | honored |
 | `[host-imports]` | honored | honored |
@@ -135,9 +137,11 @@ separate link step.
 `[host-imports]` is honored by both for the reason `[build] wasm-features` is:
 the three commands write one artifact for one project, so a policy that
 `infs build` applied and `infs run src/main.inf` skipped would let the
-unpoliced run overwrite the policed build.
+unpoliced run overwrite the policed build. `[build] bounds-checks` is honored by
+both for the same reason: which guards the shipped module keeps must not depend
+on which command wrote it.
 
-Everything in the manifest but those five settings is project-mode
+Everything in the manifest but those six settings is project-mode
 configuration: `[build] mode`, `[verification] output-dir`, and
 `[build.wasm-opt]` are not consulted in single-file mode. A source file outside
 any project takes every default and never errors for want of a manifest.
@@ -316,6 +320,34 @@ The `[build]` section configures compilation settings.
     and requires an `infc` with ABI 1.2 or newer — an older compiler cannot honor
     the request and is refused with remediation rather than handed the flag.
 
+- **`bounds-checks`** (string, default: `"all"`): Which array accesses keep
+  their runtime bounds guard (`index >= length -> unreachable`).
+  - `"all"` — the default — keeps every one. Analysis rule A056 already proves
+    each dynamic index in bounds before a program compiles, so the guards are
+    dead; keeping them means an access stays safe even if that analysis were
+    wrong, and a proof about the module re-checks every bound itself.
+  - `"omit-proven"` drops the guard of each access A056 proved in bounds, for a
+    smaller and faster module (the corpus modules that index dynamically shrink
+    by about 2%, and each removed guard saves a compare and a branch per
+    access). Those accesses then rest on the analysis alone: a flaw in it would
+    read or write neighbouring memory rather than trap, and a Rocq proof no
+    longer re-establishes their bounds. An access A056 accepts only because no
+    run reaches it keeps its guard, and so does every access in a `forall`
+    body a proof build compiles.
+  - A module built with `"omit-proven"` lists the functions that lost a guard
+    in its `inference.bounds_elided` custom section, so the choice is visible in
+    the artifact; the linker carries the list into a merged module, and
+    `[build.wasm-opt]` leaves it opaque (some function omits a guard, which is
+    no longer recorded).
+  - Matching is exact and case-sensitive, and whitespace is not trimmed.
+  - Applies identically in compile and proof mode, and at every target, so the
+    `.v` describes the module that ships.
+  - Honored by single-file `build` and `run` as well as project mode. `"all"` is
+    never forwarded; `"omit-proven"` requires an `infc` with ABI 1.9 or newer —
+    an older compiler is refused with remediation rather than handed the flag,
+    and the refusal is not dropped to a guarded build, which would ship a module
+    other than the one the manifest describes.
+
 #### Example
 
 ```toml
@@ -324,6 +356,7 @@ target = "wasm32"
 optimize = "release"
 mode = "proof"
 wasm-features = ["bulk-memory"]
+bounds-checks = "omit-proven"
 ```
 
 ### [build.wasm-opt]

@@ -500,9 +500,10 @@ pub(crate) struct Compiler {
     /// The array accesses analysis proved in bounds (rule A056), keyed by the
     /// `ArrayIndexAccess` expression. Such an access's index lies within
     /// `0..length` on every run that reaches it, so its guard could never fire
-    /// and is omitted. Empty unless a caller that ran analysis hands the set in
-    /// ([`Self::set_proven_in_bounds`]), so a build that skipped analysis keeps
-    /// every guard. Read through [`Self::guard_elided`].
+    /// and is omitted. Empty unless a build under `BoundsChecks::OmitProven`
+    /// hands in the set a passing analysis proved
+    /// ([`Self::set_proven_in_bounds`]), so a default build, and one that
+    /// skipped analysis, keeps every guard. Read through [`Self::guard_elided`].
     proven_in_bounds: FxHashSet<ExprId>,
     /// The WASM function index of every function in which an array access was
     /// emitted without its bounds guard, in the instantiated space, once per

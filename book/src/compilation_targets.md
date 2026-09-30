@@ -228,7 +228,8 @@ the gate's business.
 #### The custom sections
 
 A contract carries three contract sections beyond the ones every build has —
-the `name` section, and `inference.checked` where code generation wrote one —
+the `name` section, and `inference.checked` and `inference.bounds_elided` where
+code generation wrote them —
 and each is written for a different primary reader.
 
 **`contractenvmetav0`.** Every contract carries this section, declaring the
@@ -564,7 +565,7 @@ why it is a sentence here rather than a row above.
 | Import module and field name | 32 bytes each | `Module::MAX_NAME_LENGTH` |
 | Host-registered module and function name | 31 bytes each | `HOST_MODULE_NAME_CAP` / `HOST_FUNCTION_NAME_CAP` — the registration side is one byte tighter than the decode side, so 31 is the cap an import name has to meet to be bindable at all |
 | Host function parameters | 9, and a single result | `MAX_HOST_FUNCTION_PARAMS`; more than one result is `MultiReturnNotAllowed` |
-| Custom section name | 32 bytes | Compile mode emits at most `inference.checked` and `name`, both well inside it |
+| Custom section name | 32 bytes | Compile mode emits at most `inference.checked`, `inference.bounds_elided` and `name`, all well inside it |
 | A `call_indirect`'s type index, and a `br_table`'s target count | 65,535 | The interpreter compiles a module into a bytecode of its own, and holds both in one 16-bit immediate. Code generation emits neither instruction, so this is a bound on a linked module |
 | Operands one branch discards | 255 words | Counted in words from the bottom of the live stack to the frame the branch leaves, so an `i64` held across it costs two. Leaving the *function* — `return`, or a branch to its own outermost label — is an early return and is not counted at all |
 | Control-frame nesting | Embedder-configured; 64 in the `spacewasm_std` reference embedding | `MAX_CONTROL_FRAMES`, a const generic of `Module::new` — a *deployment's* number, not the interpreter's |

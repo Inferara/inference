@@ -71,6 +71,9 @@ mode = "compile"
 # Post-MVP WebAssembly proposals to opt into; empty (the default) keeps the
 # output pure WebAssembly 1.0. Currently supported: "bulk-memory".
 # wasm-features = ["bulk-memory"]
+# "all" (default) keeps every array bounds guard; "omit-proven" drops the
+# guards the analysis proved can never fire.
+# bounds-checks = "all"
 # optimize is recognized but not yet consumed.
 
 [verification]
@@ -102,6 +105,7 @@ The fields:
 | `target` | `[build]` | target name | `"wasm32"` | The runtime the module is built for; `"wasm32"` is generic WebAssembly, `"stellar"` a Soroban smart contract, and `"spacewasm"` the SpaceWasm flight interpreter. Accepted: `"wasm32"`, `"stellar"`, `"spacewasm"` |
 | `mode` | `[build]` | `"compile"` \| `"proof"` | `"compile"` | Build mode (see below) |
 | `wasm-features` | `[build]` | array of proposal names | `[]` | Post-MVP WebAssembly proposals the artifact may use; `[]` = pure Wasm 1.0. Supported: `"bulk-memory"` |
+| `bounds-checks` | `[build]` | `"all"` \| `"omit-proven"` | `"all"` | Which array accesses keep their runtime bounds guard; `"omit-proven"` drops the guard of each access analysis proved in bounds. See [Omitting proven guards](memory-allocation-in-wasm-codegen.md#omitting-proven-guards) |
 | `output-dir` | `[verification]` | path string | `"proofs/"` | Proof artifact directory; proof mode only |
 | `<name>` | `[wasm-dependencies]` | `{ path = "…" }` | — | External `.wasm` module dependency |
 | `<module>` | `[host-imports]` | array of field names | table absent: no policy | The host functions of import module `<module>` the program may bind; a table with no keys admits none. See [The allowlist](external-functions-and-wasm-linking.md#the-allowlist) |
@@ -468,6 +472,8 @@ infs build / infs run (project mode)
                                          modes — a `.v` describing a different
                                          instruction set than the shipped `.wasm`
                                          would be worthless)
+            arg: --bounds-checks <policy> (if [build] bounds-checks is
+                                         "omit-proven"; ABI ≥ 1.9; both modes)
             arg: --memory-pages <n>     (if [memory] declares `pages`; ABI ≥ 1.3)
             arg: --stack-size <n>       (if [memory] declares `stack-size`; ABI ≥ 1.3)
             arg: --adopt-external-specs (if [verification] asks for it on a
@@ -493,8 +499,8 @@ pipeline explicitly, because it needs the finished WASM artifact in hand to
 execute it. What they do agree on: neither sets `current_dir`, so `infc`
 inherits the invocation directory; every `-L` is forwarded verbatim, with no
 anchoring step; and whichever of `--wasm-lib-dir`, `--wasm-dep`, `--target`,
-`--wasm-features`, the memory flags and `--host-imports` a given invocation
-sends, they appear in that same relative order.
+`--wasm-features`, `--bounds-checks`, the memory flags and `--host-imports` a
+given invocation sends, they appear in that same relative order.
 
 ```text
 infs build <path> (single-file mode)
@@ -519,6 +525,7 @@ infs build <path> (single-file mode)
             arg: --target <name>        (as the project route sends it)
             arg: --wasm-features <list> (if the enclosing manifest requests any;
                                          requires infc ABI ≥ 1.2)
+            arg: --bounds-checks <policy> (as the project route sends it)
             arg: --memory-pages <n>     (as the project route sends them)
             arg: --stack-size <n>
             arg: --host-imports=<list>  (if the enclosing manifest declares a
@@ -538,7 +545,8 @@ infs run <path> (single-file mode)
     +-- compatibility handshake     # conditional — runs only when the
     |       infc --commit-hash      # enclosing manifest asks for something an
     |       infc --abi-version      # older infc could not honor: a target,
-    |                               # wasm-features, a [memory] table, or a
+    |                               # wasm-features, bounds-checks =
+    |                               # "omit-proven", a [memory] table, or a
     |                               # [host-imports] table (present, even
     |                               # empty); skipped entirely otherwise,
     |                               # unlike `build`
@@ -556,6 +564,7 @@ infs run <path> (single-file mode)
             arg: --target <name>        (as the project route sends it)
             arg: --wasm-features <list> (if the enclosing manifest requests any;
                                          requires infc ABI ≥ 1.2)
+            arg: --bounds-checks <policy> (as the project route sends it)
             arg: --memory-pages <n>     (as the project route sends them)
             arg: --stack-size <n>
             arg: --host-imports=<list>  (if the enclosing manifest declares a

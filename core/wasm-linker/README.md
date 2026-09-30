@@ -306,6 +306,26 @@ concerned, so no `exists`/`unique` specification of the linking program may reac
 it at all, whatever it actually calls. `forall` specifications and ordinary
 linking are untouched: neither reads this section.
 
+### The `inference.bounds_elided` section
+
+A fourth `inference.*` section shares `inference.checked`'s wire format — both
+are decoded by one codec, `src/func_list.rs` — and is carried rather than read.
+It lists the functions of a module that hold an array access emitted without its
+runtime bounds guard, which only a build under the `omit-proven` bounds-check
+policy writes. Its **absence means every dynamic array access Inference emitted
+in the module keeps its guard**; a foreign module has no Inference guard to
+omit, so its missing section says nothing about how it indexes memory.
+
+Nothing in a module's instructions says which policy produced them, so the
+merge keeps this record rather than dropping it as an unknown section: the case
+it exists for is a program that keeps every guard linking a library that did
+not, and the merged module is the only artifact left to say so. It is decoded
+under every role, refused when duplicated or when an index is out of range,
+rewritten through the same index mappings the bodies are, and re-emitted as one
+merged list; a library function no closure pulled in drops out of it, and an
+opaque input — what `infs` writes after `[build.wasm-opt]` renumbers a module —
+makes the merged list opaque. No link is refused over its contents.
+
 ### External specification adoption
 
 Under `ExternalSpecPolicy::Adopt` — `infc --adopt-external-specs`, or
@@ -769,7 +789,7 @@ to a same-named `sum` exported by a different module.
 
 | Error | Meaning |
 |-------|---------|
-| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM. Also covers a malformed, out-of-range-indexed, or duplicate main-module `inference.spec_funcs`/`inference.hspecs` section, and a malformed, duplicate or out-of-range `inference.checked` section in *any* module (that one is decoded under every role). A duplicate names what a second copy would cost — the first section's guarded functions, dropped without a word by a last-wins assignment — rather than being framed around adoption, which is true of the other two sections and not of this one. An external's two sections are decoded **only** when adoption is requested, in which case a malformed or duplicate one is reported here with the logical module named; under every other policy they are not decoded at all and cannot fail a link |
+| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM. Also covers a malformed, out-of-range-indexed, or duplicate main-module `inference.spec_funcs`/`inference.hspecs` section, and a malformed, duplicate or out-of-range `inference.checked` or `inference.bounds_elided` section in *any* module (those two are decoded under every role). A duplicate names what a second copy would cost — the first section's guarded functions, dropped without a word by a last-wins assignment — rather than being framed around adoption, which is true of the other two sections and not of this one. An external's two sections are decoded **only** when adoption is requested, in which case a malformed or duplicate one is reported here with the logical module named; under every other policy they are not decoded at all and cannot fail a link |
 | `LinkError::UnsatisfiedImport { field }` | No external module exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
@@ -840,9 +860,11 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
 | `src/tier.rs` | `classify` — Tier A/B/C feasibility decision, plus `check_write_contract`, the declared write-set check that gates Tier-B admission |
 | `src/provenance.rs` | `verify_param_addressing` — the address-provenance abstract interpretation proving Tier-B addresses are parameter-derived; also runs the root write-set attribution and returns it |
 | `src/provenance/attribution.rs` | `root_write_set` — the forward least-fixpoint pass computing, for a memory-touching closure, which of the *root export's* parameters each `Store` access's address may be attributed to |
-| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode, the `inference.checked` remap and its reachability check, and the external-specification policy (the dropped-obligations report, and the adoption of a library's universal obligations) |
+| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode, the `inference.checked` remap and its reachability check, the `inference.bounds_elided` remap, and the external-specification policy (the dropped-obligations report, and the adoption of a library's universal obligations) |
 | `src/rewrite.rs` | `reencode_body` — operator-level re-encoding under a new index space; `call_edges` — the call targets of one body, read off the same operator stream |
-| `src/checked.rs` | Codec for the `inference.checked` custom section — the guarded-function list the reachability check in `src/merge.rs` reads, kept as a self-contained copy of `inference_wasm_codegen`'s encoder |
+| `src/checked.rs` | The `inference.checked` custom section — the guarded-function list the reachability check in `src/merge.rs` reads — decoded through `src/func_list.rs` |
+| `src/bounds_elided.rs` | The `inference.bounds_elided` custom section — the functions holding an array access emitted without its bounds guard, carried through the merge — decoded through `src/func_list.rs` |
+| `src/func_list.rs` | The function-index list codec both sections share, kept as a self-contained copy of `inference_wasm_codegen`'s encoders: an exact ascending list, or the opaque form a post-build optimizer's marker writes |
 | `src/spec_funcs.rs` | Codec for the `inference.spec_funcs` custom section — mirrors `inference_wasm_codegen`'s encoder as a self-contained copy rather than a cross-crate dependency (the sibling `inference.hspecs` section, by contrast, shares its codec via the `inference-hassert` crate) |
 | `tests/link.rs` | Integration tests: Tier A, Tier B, Tier C rejection, transitive closure, type dedup, name section, multiple externals, diamond closure |
 
