@@ -1033,7 +1033,8 @@ fn check_wasmtime_availability() -> Result<()> {
 /// <source> --parse --codegen -o
 ///     [--wasm-lib-dir <dir>]* [--wasm-dep <name>=<path>]*
 ///     [--target <name>] [--wasm-features <list>] [--bounds-checks <policy>]
-///     [--memory-pages <n>] [--stack-size <n>] [--host-imports=<list>]
+///     [--memory-pages <n>] [--max-memory-pages <n>] [--stack-size <n>]
+///     [--host-imports=<list>]
 /// ```
 ///
 /// which is the relative order single-file `infs build` uses, so the two

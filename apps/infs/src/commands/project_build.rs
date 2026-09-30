@@ -363,6 +363,20 @@ impl CompilerCompat {
         self.supports_abi_minor(9)
     }
 
+    /// Whether the resolved `infc` is known to support the additive
+    /// `--max-memory-pages` flag, which landed at ABI minor 10.
+    ///
+    /// Separate from [`Self::supports_memory_layout`] because the flag landed
+    /// seven minors after the other two memory flags: a project that sets only
+    /// `pages` or `stack-size` must keep building against a minor-3 `infc`, and
+    /// folding the maximum into that predicate would raise its floor to 10.
+    /// A dropped forward would build a fixed memory where the manifest asked for
+    /// a growable one, which nothing reports until something tries to grow it,
+    /// so an unhonorable request refuses the build rather than degrading it.
+    pub fn supports_max_memory_pages(self) -> bool {
+        self.supports_abi_minor(10)
+    }
+
     /// Whether the resolved `infc` is known to have the additive feature
     /// introduced at `minor`: either it is the same build (`commit_matched`, the
     /// strongest signal) or it advertises at least that minor within the
@@ -538,9 +552,9 @@ pub(crate) fn forward_bounds_checks(
     Ok(())
 }
 
-/// Appends `--memory-pages` / `--stack-size` to `cmd` for the keys the project
-/// actually declared, after confirming the resolved `infc` can honor them, and
-/// echoes the resolved layout to stdout.
+/// Appends `--memory-pages` / `--max-memory-pages` / `--stack-size` to `cmd` for
+/// the keys the project actually declared, after confirming the resolved `infc`
+/// can honor them, and echoes the resolved layout to stdout.
 ///
 /// Every path that spawns `infc` on behalf of a project routes through here, for
 /// the same reason [`forward_wasm_features`] exists once: a project must get the
@@ -552,7 +566,9 @@ pub(crate) fn forward_bounds_checks(
 /// build against an `infc` that the project never needed anything from. What is
 /// forwarded is therefore the request, not its resolution — and since `infc`
 /// fills an omitted flag from the same default, the layout it resolves is the one
-/// echoed here.
+/// echoed here. Each key is gated on the minor its own flag landed at, for the
+/// same reason: `max-pages` asks for minor 10, and a project that does not set it
+/// must not be held to that floor.
 ///
 /// The declared-nothing check lives inside rather than at the call sites so no
 /// caller can reach the ABI gate on behalf of a project that asked for nothing.
@@ -567,7 +583,7 @@ pub(crate) fn forward_bounds_checks(
 ///
 /// Returns the layout diagnostic when the declared keys do not describe a usable
 /// memory, or a remediation-bearing error when they do and the resolved `infc`
-/// predates the flags. Neither flag is ever emitted blind.
+/// predates a flag they need. No flag is ever emitted blind.
 pub(crate) fn forward_memory_layout(
     cmd: &mut Command,
     compat: CompilerCompat,
@@ -578,24 +594,48 @@ pub(crate) fn forward_memory_layout(
         return Ok(());
     }
     let layout = memory.resolved_layout()?;
-    if !compat.supports_memory_layout() {
-        let manifest = manifest_path.map_or_else(
+    let manifest = || {
+        manifest_path.map_or_else(
             || String::from(MANIFEST_FILE_NAME),
             |path| path.display().to_string(),
-        );
+        )
+    };
+    if (memory.pages.is_some() || memory.stack_size.is_some()) && !compat.supports_memory_layout()
+    {
         bail!(
             "the resolved infc does not support `--memory-pages` / `--stack-size` \
              (requires infc ABI ≥ 1.3); update the toolchain or remove the \
-             `[memory]` table from {manifest}."
+             `[memory]` table from {}.",
+            manifest()
         );
     }
-    println!(
-        "memory: {} page(s), {}-byte stack",
-        layout.pages(),
-        layout.stack_size()
-    );
+    if memory.max_pages.is_some() && !compat.supports_max_memory_pages() {
+        bail!(
+            "the resolved infc does not support `--max-memory-pages` (requires infc \
+             ABI ≥ 1.10); update the toolchain or remove `max-pages` from the \
+             `[memory]` table of {}.",
+            manifest()
+        );
+    }
+    if layout.is_growable() {
+        println!(
+            "memory: {} page(s) growable to {}, {}-byte stack",
+            layout.pages(),
+            layout.max_pages(),
+            layout.stack_size()
+        );
+    } else {
+        println!(
+            "memory: {} page(s), {}-byte stack",
+            layout.pages(),
+            layout.stack_size()
+        );
+    }
     if let Some(pages) = memory.pages {
         cmd.arg("--memory-pages").arg(pages.to_string());
+    }
+    if let Some(max_pages) = memory.max_pages {
+        cmd.arg("--max-memory-pages").arg(max_pages.to_string());
     }
     if let Some(stack_size) = memory.stack_size {
         cmd.arg("--stack-size").arg(stack_size.to_string());
@@ -1400,6 +1440,7 @@ mod project_tests {
             same_build,
             &MemoryConfig {
                 pages: Some(4),
+                max_pages: None,
                 stack_size: None,
             },
             None,
@@ -1413,6 +1454,7 @@ mod project_tests {
             same_build,
             &MemoryConfig {
                 pages: None,
+                max_pages: None,
                 stack_size: Some(32_768),
             },
             None,
@@ -1426,6 +1468,7 @@ mod project_tests {
             same_build,
             &MemoryConfig {
                 pages: Some(2),
+                max_pages: None,
                 stack_size: Some(32_768),
             },
             None,
@@ -1452,6 +1495,7 @@ mod project_tests {
             minor_two,
             &MemoryConfig {
                 pages: Some(2),
+                max_pages: None,
                 stack_size: None,
             },
             Some(&manifest),
@@ -1690,6 +1734,7 @@ mod project_tests {
             minor_two,
             &MemoryConfig {
                 pages: Some(0),
+                max_pages: None,
                 stack_size: None,
             },
             None,
@@ -1701,6 +1746,172 @@ mod project_tests {
             "the value must be diagnosed, not the toolchain, got: {msg}"
         );
         assert!(args_of(&cmd).is_empty());
+    }
+
+    /// `--max-memory-pages` landed at minor 10, so a minor-9 `infc` — which has
+    /// the other two memory flags and every older one — must not be sent it.
+    #[test]
+    fn supports_max_memory_pages_capability_matrix() {
+        assert!(
+            CompilerCompat {
+                commit_matched: true,
+                abi: None,
+            }
+            .supports_max_memory_pages(),
+            "a same-build infc supports every flag this infs knows"
+        );
+        for minor in [10, 12] {
+            assert!(
+                CompilerCompat {
+                    commit_matched: false,
+                    abi: Some((COMPILER_ABI_MAJOR, minor)),
+                }
+                .supports_max_memory_pages(),
+                "minor {minor} must support --max-memory-pages"
+            );
+        }
+        let minor_nine = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 9)),
+        };
+        assert!(
+            !minor_nine.supports_max_memory_pages(),
+            "minor 9 predates --max-memory-pages"
+        );
+        assert!(
+            minor_nine.supports_memory_layout() && minor_nine.supports_bounds_checks(),
+            "minor 9 still supports the older flags; only the newer one is gated out"
+        );
+        for compat in [
+            CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR + 1, 10)),
+            },
+            CompilerCompat {
+                commit_matched: false,
+                abi: None,
+            },
+        ] {
+            assert!(
+                !compat.supports_max_memory_pages(),
+                "a foreign major or an unknown ABI must not be sent the flag"
+            );
+        }
+    }
+
+    /// A declared maximum is forwarded between the other two flags, and alone
+    /// when it is the only key declared.
+    #[test]
+    fn forward_memory_layout_forwards_a_declared_maximum() {
+        let same_build = CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        };
+
+        let mut cmd = Command::new("infc");
+        forward_memory_layout(
+            &mut cmd,
+            same_build,
+            &MemoryConfig {
+                pages: Some(2),
+                max_pages: Some(8),
+                stack_size: Some(32_768),
+            },
+            None,
+        )
+        .expect("a same-build infc supports the flags");
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "--memory-pages",
+                "2",
+                "--max-memory-pages",
+                "8",
+                "--stack-size",
+                "32768"
+            ]
+        );
+
+        let mut cmd = Command::new("infc");
+        forward_memory_layout(
+            &mut cmd,
+            same_build,
+            &MemoryConfig {
+                pages: None,
+                max_pages: Some(8),
+                stack_size: None,
+            },
+            None,
+        )
+        .expect("a same-build infc supports the flags");
+        assert_eq!(args_of(&cmd), ["--max-memory-pages", "8"]);
+    }
+
+    /// Each key is gated on its own flag's minor. A minor-9 `infc` builds a
+    /// project that sets only `pages`, and refuses one that also sets
+    /// `max-pages` — naming the maximum and minor 10, not the older pair — with
+    /// the command left untouched. A maximum alone is refused at minor 3 for
+    /// minor 10 as well, not sent to the older floor.
+    #[test]
+    fn forward_memory_layout_gates_the_maximum_on_its_own_minor() {
+        let minor_nine = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 9)),
+        };
+        let mut cmd = Command::new("infc");
+        forward_memory_layout(
+            &mut cmd,
+            minor_nine,
+            &MemoryConfig {
+                pages: Some(4),
+                max_pages: None,
+                stack_size: None,
+            },
+            None,
+        )
+        .expect("a project without a maximum needs only minor 3");
+        assert_eq!(args_of(&cmd), ["--memory-pages", "4"]);
+
+        let manifest = Path::new("/projects/demo").join(MANIFEST_FILE_NAME);
+        for (minor, memory) in [
+            (
+                9,
+                MemoryConfig {
+                    pages: Some(4),
+                    max_pages: Some(8),
+                    stack_size: None,
+                },
+            ),
+            (
+                3,
+                MemoryConfig {
+                    pages: None,
+                    max_pages: Some(8),
+                    stack_size: None,
+                },
+            ),
+        ] {
+            let compat = CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR, minor)),
+            };
+            let mut cmd = Command::new("infc");
+            let err = forward_memory_layout(&mut cmd, compat, &memory, Some(&manifest))
+                .expect_err("the maximum needs minor 10");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("--max-memory-pages") && msg.contains("1.10"),
+                "minor {minor}: the error must name the flag and its ABI, got: {msg}"
+            );
+            assert!(
+                msg.contains("max-pages") && msg.contains(&manifest.display().to_string()),
+                "minor {minor}: the error must name the key and the manifest, got: {msg}"
+            );
+            assert!(
+                args_of(&cmd).is_empty(),
+                "minor {minor}: a refused request must leave no flag on the command"
+            );
+        }
     }
 
     // Host-import allowlist forwarding ---

@@ -68,6 +68,10 @@ pub struct ManifestSettings {
     /// jointly, by `inference-compiler-interface`, and the caller decides what a
     /// rejected pair means for it.
     pub memory_pages: Option<u32>,
+    /// The `[memory] max-pages` value as written, or `None` when the manifest
+    /// sets no integer there that a `u32` can hold. Not validated, as
+    /// [`Self::memory_pages`] is not.
+    pub memory_max_pages: Option<u32>,
     /// The `[memory] stack-size` value as written, or `None` when the manifest
     /// sets no integer there that a `u32` can hold. Not validated, as
     /// [`Self::memory_pages`] is not.
@@ -108,6 +112,7 @@ pub fn manifest_settings(file: &Path) -> Option<ManifestSettings> {
         src_root,
         build_target,
         memory_pages: memory_key(&manifest, "pages"),
+        memory_max_pages: memory_key(&manifest, "max-pages"),
         memory_stack_size: memory_key(&manifest, "stack-size"),
     })
 }
@@ -424,6 +429,7 @@ mod tests {
                 src_root: tree.path("src"),
                 build_target: Some("spacewasm".to_string()),
                 memory_pages: None,
+                memory_max_pages: None,
                 memory_stack_size: None,
             })
         );
@@ -483,6 +489,7 @@ mod tests {
                 src_root: tree.path("inner/src"),
                 build_target: None,
                 memory_pages: None,
+                memory_max_pages: None,
                 memory_stack_size: None,
             })
         );
@@ -507,15 +514,21 @@ mod tests {
         assert_eq!(manifest_settings(&file), None);
     }
 
-    /// Both `[memory]` keys come back as written, and each independently: a
-    /// manifest that sets only one leaves the other to the caller's default.
+    /// Every `[memory]` key comes back as written, and each independently: a
+    /// manifest that sets only one leaves the others to the caller's default.
     #[test]
     fn settings_carry_the_memory_keys_as_written() {
-        for (table, pages, stack_size) in [
-            ("pages = 4\nstack-size = 131072\n", Some(4), Some(131_072)),
-            ("pages = 2\n", Some(2), None),
-            ("stack-size = 32768\n", None, Some(32_768)),
-            ("", None, None),
+        for (table, pages, max_pages, stack_size) in [
+            (
+                "pages = 4\nmax-pages = 8\nstack-size = 131072\n",
+                Some(4),
+                Some(8),
+                Some(131_072),
+            ),
+            ("pages = 2\n", Some(2), None, None),
+            ("max-pages = 8\n", None, Some(8), None),
+            ("stack-size = 32768\n", None, None, Some(32_768)),
+            ("", None, None, None),
         ] {
             let tree = TempTree::new("settings-memory");
             tree.write(
@@ -526,6 +539,7 @@ mod tests {
 
             let settings = manifest_settings(&file).expect("the manifest governs the file");
             assert_eq!(settings.memory_pages, pages, "for table:\n{table}");
+            assert_eq!(settings.memory_max_pages, max_pages, "for table:\n{table}");
             assert_eq!(settings.memory_stack_size, stack_size, "for table:\n{table}");
         }
     }

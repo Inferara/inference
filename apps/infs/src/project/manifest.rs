@@ -39,7 +39,8 @@
 //! auto-install = false    # download wasm-opt automatically if it is missing
 //!
 //! [memory]                # linear memory of the emitted module
-//! pages = 1               # 64 KiB pages; emitted as a fixed, non-growable size
+//! pages = 1               # 64 KiB pages; fixed at this size unless max-pages is set
+//! max-pages = 1           # optional: the most pages it may grow to; defaults to pages
 //! stack-size = 65536      # shadow stack bytes, at the bottom of that memory
 //!
 //! [verification]
@@ -989,12 +990,12 @@ impl WasmOptConfig {
     }
 }
 
-/// The `[memory]` table: the linear memory the emitted module declares and the
-/// share of it the shadow stack occupies.
+/// The `[memory]` table: the linear memory the emitted module declares, how far
+/// it may grow, and the share of it the shadow stack occupies.
 ///
-/// Both keys are optional and an absent table is identical to a table with
-/// neither key — there is no state where declaring `[memory]` means something on
-/// its own, unlike `[build.wasm-opt]` whose presence is what enables the
+/// Every key is optional and an absent table is identical to a table with no
+/// keys — there is no state where declaring `[memory]` means something on its
+/// own, unlike `[build.wasm-opt]` whose presence is what enables the
 /// optimizer. That is why this is a plain field with a `Default` rather than an
 /// `Option`: "the user said nothing" and "the user said nothing in particular"
 /// must resolve to the same memory.
@@ -1012,6 +1013,15 @@ pub struct MemoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pages: Option<u32>,
 
+    /// The most 64 KiB pages the memory may grow to. Absent means the memory's
+    /// own size, so it is fixed.
+    #[serde(
+        rename = "max-pages",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_pages: Option<u32>,
+
     /// Shadow stack size in bytes. Absent means 64 KiB.
     #[serde(
         rename = "stack-size",
@@ -1026,7 +1036,7 @@ impl MemoryConfig {
     /// both the serialization skip condition and the "forward nothing" test.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.pages.is_none() && self.stack_size.is_none()
+        self.pages.is_none() && self.max_pages.is_none() && self.stack_size.is_none()
     }
 
     /// The declared keys resolved into the shared compiler vocabulary, with every
@@ -1047,7 +1057,7 @@ impl MemoryConfig {
     pub fn resolved_layout(&self) -> Result<MemoryLayout> {
         let request = MemoryRequest {
             pages: self.pages,
-            max_pages: None,
+            max_pages: self.max_pages,
             stack_size: self.stack_size,
         };
         MemoryLayout::resolve(request, MemoryLayoutSource::Manifest).map_err(Into::into)
@@ -3391,6 +3401,58 @@ target = "wasm32"
         );
     }
 
+    /// `max-pages` raises the ceiling over the size, alone or beside `pages`, and
+    /// is a declared key in its own right: a table with only it is not the
+    /// default, so it is forwarded.
+    #[test]
+    fn max_pages_parses_and_raises_the_ceiling() {
+        let alone = InferenceToml::from_toml(&manifest_with_memory("max-pages = 8
+"))
+            .expect("parses");
+        assert_eq!(alone.memory.max_pages, Some(8));
+        assert!(!alone.memory.is_default());
+        let layout = alone.memory.resolved_layout().unwrap();
+        assert_eq!((layout.pages(), layout.max_pages()), (1, 8));
+
+        let both = InferenceToml::from_toml(&manifest_with_memory("pages = 2
+max-pages = 8
+"))
+            .expect("parses");
+        let layout = both.memory.resolved_layout().unwrap();
+        assert_eq!((layout.pages(), layout.max_pages()), (2, 8));
+        assert!(layout.is_growable());
+    }
+
+    /// Without `max-pages` the memory is fixed at whatever size `pages` asks for.
+    #[test]
+    fn an_absent_max_pages_keeps_the_memory_fixed() {
+        let manifest =
+            InferenceToml::from_toml(&manifest_with_memory("pages = 4
+")).expect("parses");
+        let layout = manifest.memory.resolved_layout().unwrap();
+        assert_eq!((layout.pages(), layout.max_pages()), (4, 4));
+        assert!(!layout.is_growable());
+    }
+
+    /// The maximum is spelled with a hyphen like every other multi-word key, and
+    /// a maximum below the size is refused on load naming the manifest keys.
+    #[test]
+    fn a_misspelled_or_unusable_max_pages_is_rejected_on_load() {
+        let msg = rejection_of(&manifest_with_memory("max_pages = 8
+"));
+        assert!(
+            msg.contains("unknown field") && msg.contains("max_pages"),
+            "the error must diagnose the underscore spelling, got: {msg}"
+        );
+        assert!(msg.contains("max-pages"), "got: {msg}");
+
+        let msg = rejection_of(&manifest_with_memory("pages = 4
+max-pages = 2
+"));
+        assert!(msg.contains("`[memory] max-pages`"), "got: {msg}");
+        assert!(msg.contains("is below its size"), "got: {msg}");
+    }
+
     /// A declared table survives serialization and reparses to an equal manifest,
     /// and its keys stay in `[memory]` rather than reparenting into the sub-table
     /// that precedes them.
@@ -3407,6 +3469,7 @@ target = "wasm32"
         manifest.build.wasm_opt = Some(WasmOptConfig::default());
         manifest.memory = MemoryConfig {
             pages: Some(2),
+            max_pages: Some(8),
             stack_size: Some(32_768),
         };
 
