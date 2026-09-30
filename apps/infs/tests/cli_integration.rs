@@ -11393,3 +11393,252 @@ fn a_host_imports_table_reaches_the_real_compiler() {
         "a refused build must write no artifact"
     );
 }
+
+// ── [build] bounds-checks ───────────────────────────────────────────────────
+
+/// A program whose one array access indexes with a loop counter the loop's own
+/// condition bounds, so A056 proves it in bounds; `main` returns 10.
+const PROVEN_INDEX_MAIN_SRC: &str = "pub fn main() -> i32 {\n\
+     let a: [i32; 4] = [1, 2, 3, 4];\n\
+     let mut s: i32 = 0;\n\
+     let mut i: u32 = 0;\n\
+     loop i < 4 {\n\
+         s = s + a[i];\n\
+         i = i + 1;\n\
+     }\n\
+     return s;\n\
+}\n";
+
+/// The echo line `infs` prints when it forwards a non-default policy.
+const BOUNDS_CHECKS_ECHO: &str = "bounds-checks: omit-proven";
+
+/// How many runtime bounds guards `wasm` carries: the `i32.ge_u; if; unreachable;
+/// end` tail every guard ends in, as bytes.
+fn bounds_guard_count(wasm: &[u8]) -> usize {
+    wasm.windows(5)
+        .filter(|w| *w == [0x4F, 0x04, 0x40, 0x00, 0x0B])
+        .count()
+}
+
+/// Whether `wasm` carries the `inference.bounds_elided` record.
+fn carries_bounds_elided_record(wasm: &[u8]) -> bool {
+    let name = b"inference.bounds_elided";
+    wasm.windows(name.len()).any(|w| w == name)
+}
+
+/// Asserts `stdout` echoes the forwarded policy exactly once, as a whole line.
+fn assert_echoes_omit_proven_once(stdout: &str) {
+    let matches = stdout
+        .lines()
+        .filter(|line| line.trim() == BOUNDS_CHECKS_ECHO)
+        .count();
+    assert_eq!(
+        matches, 1,
+        "expected exactly one `{BOUNDS_CHECKS_ECHO}` line, found {matches} in:\n{stdout}"
+    );
+}
+
+/// Asserts the artifact is the `omit-proven` build: the proven access lost its
+/// guard, and the module says so.
+fn assert_artifact_omits_the_proven_guard(bytes: &[u8], context: &str) {
+    assert_eq!(
+        bounds_guard_count(bytes),
+        0,
+        "{context}: the guard is omitted"
+    );
+    assert!(
+        carries_bounds_elided_record(bytes),
+        "{context}: the artifact records the omitted guard"
+    );
+}
+
+/// The baseline: with no `bounds-checks` key the proven access keeps its guard,
+/// nothing is recorded, and nothing is echoed.
+#[test]
+fn project_build_without_bounds_checks_keeps_every_guard() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROVEN_INDEX_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("bounds-checks:").not());
+
+    let artifact = read_project_artifact(&temp);
+    assert_eq!(bounds_guard_count(&artifact), 1);
+    assert!(!carries_bounds_elided_record(&artifact));
+}
+
+/// `[build] bounds-checks = "omit-proven"` reaches `infc`: the proven access is
+/// emitted without its guard, the artifact records it, and the policy is echoed
+/// once.
+#[test]
+fn project_build_with_omit_proven_drops_the_proven_guard() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROVEN_INDEX_MAIN_SRC,
+        "[build]\nbounds-checks = \"omit-proven\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    assert_echoes_omit_proven_once(&stdout_of(&cmd.assert().success()));
+
+    assert_artifact_omits_the_proven_guard(&read_project_artifact(&temp), "a project build");
+}
+
+/// Single-file mode honors the enclosing project's policy: building
+/// `src/main.inf` by path must keep the same guards `infs build` does.
+#[test]
+fn single_file_build_honors_enclosing_manifest_bounds_checks() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROVEN_INDEX_MAIN_SRC,
+        "[build]\nbounds-checks = \"omit-proven\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(std::path::Path::new("src").join("main.inf"));
+    assert_echoes_omit_proven_once(&stdout_of(&cmd.assert().success()));
+
+    assert_artifact_omits_the_proven_guard(
+        &read_project_artifact(&temp),
+        "a single-file build inside the project",
+    );
+}
+
+/// Project-mode `run` executes the module `infs build` ships, so it is built
+/// under the same policy.
+#[test]
+fn project_run_honors_bounds_checks_and_executes() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROVEN_INDEX_MAIN_SRC,
+        "[build]\nbounds-checks = \"omit-proven\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+    let stdout = stdout_of(&cmd.assert().success());
+    assert_echoes_omit_proven_once(&stdout);
+    assert!(
+        stdout.contains("10"),
+        "wasmtime must print main's return value (1 + 2 + 3 + 4), got:\n{stdout}"
+    );
+
+    assert_artifact_omits_the_proven_guard(
+        &read_project_artifact(&temp),
+        "the artifact project-mode `run` executed",
+    );
+}
+
+/// Single-file `run` takes the enclosing project's policy too, which is also
+/// what makes it probe the compiler: a non-default policy is a request an older
+/// `infc` could not honor.
+#[test]
+fn single_file_run_honors_enclosing_manifest_bounds_checks() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROVEN_INDEX_MAIN_SRC,
+        "[build]\nbounds-checks = \"omit-proven\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run")
+        .arg(std::path::Path::new("src").join("main.inf"));
+    let stdout = stdout_of(&cmd.assert().success());
+    assert_echoes_omit_proven_once(&stdout);
+    assert!(stdout.contains("10"), "got:\n{stdout}");
+
+    assert_artifact_omits_the_proven_guard(
+        &read_project_artifact(&temp),
+        "the artifact single-file `run` executed",
+    );
+}
+
+/// Old-infc gate: a stub `infc` reporting ABI `1.8` — the newest before
+/// `--bounds-checks` — paired with a manifest that chose `omit-proven` must
+/// hard-error naming the required ABI and both remediations, rather than build
+/// a module with every guard the manifest asked to omit.
+///
+/// Unix-only: relies on an executable shell stub. The gate fires before the
+/// spawn, so the error is deterministic.
+#[cfg(unix)]
+#[test]
+fn project_build_old_infc_with_bounds_checks_hard_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROVEN_INDEX_MAIN_SRC,
+        "[build]\nbounds-checks = \"omit-proven\"\n",
+    );
+
+    let stub = temp.child("infc_stub");
+    stub.write_str(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '1.8\\n'; exit 0 ;;\n\
+           *) exit 0 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("--bounds-checks")
+            .and(predicate::str::contains("1.9"))
+            .and(predicate::str::contains("update the toolchain"))
+            .and(predicate::str::contains("[build] bounds-checks")),
+    );
+}

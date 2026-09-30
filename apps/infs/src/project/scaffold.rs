@@ -260,6 +260,12 @@ mode = "compile"
 # WebAssembly 1.0; "bulk-memory" lets codegen use memory.copy/memory.fill.
 # Changing this changes the instruction set of every artifact, in both modes.
 # wasm-features = ["bulk-memory"]
+# Which array accesses keep their runtime bounds guard. "all" -- the default --
+# keeps every one, so an access stays safe even if the analysis that proved it
+# in bounds were wrong. "omit-proven" drops the guard of each proven access for
+# a smaller, faster module whose proven accesses rest on that analysis alone;
+# the module then lists the functions it omitted a guard in.
+# bounds-checks = "all"
 # Not yet consumed:
 # optimize = "release"
 
@@ -555,6 +561,24 @@ mod tests {
                 target.as_str()
             );
         }
+    }
+
+    /// The scaffolded `[build] bounds-checks` comment names every policy the
+    /// loader accepts, and its commented-out line loads once uncommented.
+    #[test]
+    fn the_scaffolded_bounds_checks_comment_names_every_policy_and_loads() {
+        let content = manifest_content("demo");
+        for policy in inference_compiler_interface::BoundsChecks::ALL {
+            assert!(
+                content.contains(&format!("\"{}\"", policy.as_str())),
+                "the scaffolded `[build] bounds-checks` comment omits `{}`",
+                policy.as_str()
+            );
+        }
+        let uncommented = content.replace("# bounds-checks = ", "bounds-checks = ");
+        let manifest = InferenceToml::from_toml(&uncommented)
+            .expect("the uncommented bounds-checks line must load");
+        assert_eq!(manifest.build.bounds_checks.as_deref(), Some("all"));
     }
 
     #[test]
