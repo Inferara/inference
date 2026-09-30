@@ -364,15 +364,15 @@ fn abi_version_flag_prints_and_exits() {
     assert_eq!(version, expected);
 }
 
-/// Pins the ABI version string to the literal value `--bounds-checks` became
+/// Pins the ABI version string to the literal value `--max-memory-pages` became
 /// requestable at. The `abi_version_flag_prints_and_exits` test above checks the
 /// binary against the shared constant; this one additionally asserts the
-/// concrete `1.9` so an accidental constant change is caught here too.
+/// concrete `1.10` so an accidental constant change is caught here too.
 ///
 /// Uses an exact trimmed equality (not `contains`) so a near-miss such as
-/// "11.9" or "1.90" — which would satisfy a substring match — cannot pass.
+/// "11.10" or "1.100" — which would satisfy a substring match — cannot pass.
 #[test]
-fn abi_version_is_one_dot_nine() {
+fn abi_version_is_one_dot_ten() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.arg("--abi-version");
     let assert = cmd.assert().success();
@@ -380,8 +380,8 @@ fn abi_version_is_one_dot_nine() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.trim(),
-        "1.9",
-        "ABI version must be exactly 1.9, not merely contain it"
+        "1.10",
+        "ABI version must be exactly 1.10, not merely contain it"
     );
 }
 
@@ -2106,6 +2106,59 @@ fn either_memory_flag_alone_reaches_the_emitted_module() {
     assert!(
         stack_only.contains("(global (;0;) (mut i32) i32.const 16384)"),
         "--stack-size alone must size the stack:\n{stack_only}"
+    );
+}
+
+/// `--max-memory-pages` reaches the memory section's maximum and nothing else:
+/// the size and the stack pointer are the ones the other flags ask for, and a
+/// build that names no maximum keeps the memory fixed at its size.
+#[test]
+fn the_maximum_memory_flag_reaches_the_emitted_module() {
+    let growable = wat_of(&compile_source_with(
+        &["--memory-pages", "2", "--max-memory-pages", "8"],
+        FRAME_ALLOCATING_SOURCE,
+    ));
+    assert!(
+        growable.contains("(memory (;0;) 2 8)"),
+        "the memory section must declare 2 pages growable to 8:\n{growable}"
+    );
+    assert!(
+        growable.contains("(global (;0;) (mut i32) i32.const 65536)"),
+        "a maximum must not move the stack pointer:\n{growable}"
+    );
+
+    let fixed = wat_of(&compile_source_with(
+        &["--memory-pages", "2"],
+        FRAME_ALLOCATING_SOURCE,
+    ));
+    assert!(
+        fixed.contains("(memory (;0;) 2 2)"),
+        "without a maximum the memory stays fixed at its size:\n{fixed}"
+    );
+}
+
+/// A growable memory at a target whose runtime refuses `memory.grow` fails
+/// the build, naming the target and the setting to change, and writes nothing.
+#[test]
+fn a_growable_memory_is_refused_at_spacewasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), FRAME_ALLOCATING_SOURCE).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .args(["--target", "spacewasm", "--max-memory-pages", "4"]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "The `spacewasm` target does not support a growable linear memory",
+        ))
+        .stderr(predicate::str::contains("--max-memory-pages"));
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a refused layout must leave no artifact"
     );
 }
 

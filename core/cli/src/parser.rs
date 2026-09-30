@@ -75,9 +75,11 @@ impl From<CliMode> for inference_wasm_codegen::CompilationMode {
 /// ## Memory Layout
 ///
 /// - `--memory-pages <N>`: Linear memory size in 64 KiB pages (default 1).
+/// - `--max-memory-pages <N>`: The most pages the memory may grow to (default:
+///   the memory's size, so it is fixed).
 /// - `--stack-size <BYTES>`: Shadow stack size in bytes (default 65536).
 ///
-/// Either may be given alone; the other keeps its default. The two are checked
+/// Any may be given alone; the others keep their defaults. They are checked
 /// together, so a value that is legal on its own can still be refused by the
 /// layout it completes to.
 ///
@@ -329,9 +331,10 @@ pub(crate) struct Cli {
 
     /// Linear memory size in 64 KiB pages.
     ///
-    /// Emitted as both the minimum and the maximum of the memory section, so the
-    /// memory is fixed rather than growable. Omitting the flag keeps the single
-    /// page every build emitted before the layout was configurable.
+    /// Emitted as the minimum of the memory section, and as its maximum too
+    /// unless `--max-memory-pages` raises it, so by default the memory is fixed
+    /// rather than growable. Omitting the flag keeps the single page every build
+    /// emitted before the layout was configurable.
     ///
     /// Independent of `--stack-size`: pages above the stack are ordinary
     /// addressable data memory. The two are nonetheless validated jointly, since
@@ -341,6 +344,24 @@ pub(crate) struct Cli {
     /// callers pass it by hand.
     #[clap(long = "memory-pages", value_name = "N")]
     pub(crate) memory_pages: Option<u32>,
+
+    /// The most 64 KiB pages the linear memory may grow to.
+    ///
+    /// Emitted as the maximum of the memory section. Omitting the flag makes it
+    /// the memory's own size, so the memory is fixed; a larger value lets a
+    /// linked module or the host grow the memory up to it. Nothing this compiler
+    /// emits grows memory itself, and the value is always a bound — there is no
+    /// spelling for an unbounded memory.
+    ///
+    /// Must be at least `--memory-pages`. The shadow stack's overflow trap needs
+    /// the stack and the memory at this size to fit the 32-bit address space
+    /// together, so a large maximum limits the stack. Refused at a target whose
+    /// runtime cannot grow memory.
+    ///
+    /// `infs build` forwards the project's `[memory] max-pages`; direct `infc`
+    /// callers pass it by hand.
+    #[clap(long = "max-memory-pages", value_name = "N")]
+    pub(crate) max_memory_pages: Option<u32>,
 
     /// Shadow stack size in bytes, occupying the bottom of linear memory.
     ///

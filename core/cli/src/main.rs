@@ -486,7 +486,7 @@ fn resolve_bounds_checks_flag(
 fn memory_request(args: &Cli) -> MemoryRequest {
     MemoryRequest {
         pages: args.memory_pages,
-        max_pages: None,
+        max_pages: args.max_memory_pages,
         stack_size: args.stack_size,
     }
 }
@@ -1924,6 +1924,7 @@ mod tests {
             target: None,
             wasm_features: Vec::new(),
             memory_pages: None,
+            max_memory_pages: None,
             stack_size: None,
             bounds_checks: None,
             adopt_external_specs: false,
@@ -2847,14 +2848,43 @@ mod tests {
         );
     }
 
+    /// `--max-memory-pages` raises the ceiling alone or beside the size, and
+    /// leaving it off keeps the memory fixed at whatever size was asked for —
+    /// not at the default single page, which would refuse every larger memory.
+    #[test]
+    fn the_maximum_flag_raises_the_ceiling_and_its_absence_keeps_the_memory_fixed() {
+        let fixed = layout_from(&["--memory-pages", "4"]).expect("four fixed pages");
+        assert_eq!((fixed.pages(), fixed.max_pages()), (4, 4));
+
+        let alone = layout_from(&["--max-memory-pages", "8"]).expect("a maximum alone");
+        assert_eq!((alone.pages(), alone.max_pages()), (1, 8));
+
+        let both =
+            layout_from(&["--memory-pages", "2", "--max-memory-pages", "8"]).expect("admissible");
+        assert_eq!((both.pages(), both.max_pages()), (2, 8));
+        assert!(both.is_growable());
+    }
+
+    /// A maximum below the size is refused naming the flag spelling.
+    #[test]
+    fn a_maximum_below_the_size_is_rejected_naming_the_flags() {
+        let err = layout_from(&["--memory-pages", "4", "--max-memory-pages", "2"])
+            .expect_err("a maximum below the size is refused");
+        let rendered = err.to_string();
+        assert!(rendered.contains("`--max-memory-pages`"), "{rendered}");
+        assert!(rendered.contains("is below its size"), "{rendered}");
+    }
+
     /// A non-numeric or negative value is refused by the parser rather than
-    /// reaching the resolver, so the two flags cannot carry a nonsense value.
+    /// reaching the resolver, so the memory flags cannot carry a nonsense value.
     #[test]
     fn memory_flags_reject_a_non_numeric_value() {
         for argv in [
             ["--memory-pages", "many"],
             ["--stack-size", "-16"],
             ["--memory-pages", "1.5"],
+            ["--max-memory-pages", "-1"],
+            ["--max-memory-pages", "unbounded"],
         ] {
             assert!(
                 Cli::try_parse_from(["infc", "x.inf", argv[0], argv[1]]).is_err(),
