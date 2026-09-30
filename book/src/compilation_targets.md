@@ -77,6 +77,7 @@ Purpose: general WASM execution and verification of Inference code.
 | Target | `wasm32-unknown-unknown` |
 | Instruction set | WebAssembly 1.0. `proof` mode may additionally emit the custom 0xfc non-deterministic instructions, which only this target permits, and `--wasm-features bulk-memory` opts into `memory.copy`/`memory.fill` |
 | WASM proposals the module uses | `mutable-globals` only — a module with linear memory exports its mutable `__stack_pointer` global — unless a build opts into `bulk-memory` above |
+| Linear memory | One fixed 64 KiB page, all stack, by default; `[memory]` sets the size, a maximum it may grow to, and the stack's share — see [Configuring the layout](memory-allocation-in-wasm-codegen.md#configuring-the-layout) |
 | Recorded `OptLevel` (compile) | `O3` under `release`, `O0` under `debug` — no optimization pass currently acts on either |
 | Proof mode output | Byte-identical to compile mode's, plus structurally 1:1 spec functions |
 
@@ -486,8 +487,10 @@ are therefore properties of code generation:
   exported; methods and spec-inner functions are never exported. No dead-code-elimination pass
   runs, so a private, never-called function in a compiled file is still emitted.
 - **Linear memory is stack-first**: the shadow stack occupies the low end and grows downward
-  from its top toward 0, and anything above it is the data region. Its size is one 64 KiB page
-  by default and is set through `[memory]` / `--stack-size`, not by a link-time flag.
+  from its top toward 0, and anything above it is the data region. Its size is one fixed 64 KiB
+  page by default and is set through `[memory]` / `--memory-pages` / `--stack-size`, not by a
+  link-time flag. `[memory] max-pages` / `--max-memory-pages` lets the contract's memory grow up
+  to a declared bound.
 
 ### SpaceWasm
 
@@ -510,6 +513,7 @@ instruction set, and nothing else.
 | Instruction set | WebAssembly 1.0, with no opt-in available | `Target::permits_bulk_memory()` is `false`, so the one post-MVP family the compiler can emit is unreachable here |
 | WASM proposals the module uses | `mutable-globals` only — a module with linear memory exports its mutable `__stack_pointer` global — and no instruction outside WebAssembly 1.0 | See "What the interpreter decodes" below |
 | Compilation mode | `compile` only | Proof mode emits the custom 0xfc non-deterministic instructions, which the interpreter's decoder does not define |
+| Linear memory | Fixed: `[memory] max-pages` / `--max-memory-pages` above the page count fails the build | `Target::permits_memory_growth()` is `false`: the interpreter is loaded with `memory.grow` disallowed, as `spacewasm_std` and `infs run` load it, so room above the size could never be reached |
 | Recorded `OptLevel` (compile) | `Os` under `release`, `O0` under `debug` — no optimization pass currently acts on either | `Os` is the target's `default_opt_level`: size is the scarce resource on a flight computer |
 | Floats | Impossible — no float instruction can be emitted, at any target | The language has no floating-point type: `SimpleTypeKind` (`core/ast`) admits the unit type `()`, `bool` and the eight integer widths and nothing else |
 | Emitted bytes | Identical to a `wasm32` compile-mode build of the same source | Nothing on the emission path reads a target; see the procedure below |
@@ -523,7 +527,7 @@ them, `bulk-memory`, costs an Inference build anything at all:
 | Proposal | Interpreter status | What it costs a build here |
 |----------|--------------------|----------------------------|
 | `mutable-globals` | Implemented, every version | Nothing — the exported `__stack_pointer` global needs it |
-| `custom-page-sizes` | Implemented since 0.2.0 | Nothing — memory stays 64 KiB pages, `min == max` |
+| `custom-page-sizes` | Implemented since 0.2.0 | Nothing — memory stays 64 KiB pages, `min == max`; a growable memory is refused at this target (see the table above) |
 | `bulk-memory` | Planned, `nasa/spacewasm#54` | `--wasm-features bulk-memory` fails the build before a byte is emitted; region fills and copies take the load/store lowering instead |
 | `sign-ext` | Planned, `nasa/spacewasm#55` | Nothing — no target ever emits `i32.extend8_s` or its relatives; a narrow signed value is normalized with `i32.shl` followed by `i32.shr_s` |
 | `saturating-float-to-int` | Planned, `nasa/spacewasm#56` | Nothing — the language has no float type |

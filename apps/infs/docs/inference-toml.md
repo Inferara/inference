@@ -41,6 +41,11 @@ enabled = true          # table presence enables; set false to keep it off
 level = "3"             # forwarded as -O<level>: "0".."4", "s", "z"
 auto-install = false    # download wasm-opt automatically if it is missing
 
+[memory]                # optional: linear memory of the emitted module
+pages = 1               # 64 KiB pages; fixed at this size unless max-pages is set
+max-pages = 1           # the most pages it may grow to; defaults to pages
+stack-size = 65536      # shadow stack bytes, at the bottom of that memory
+
 [host-imports]          # optional: the host functions the program may bind
 env = ["clock_ms"]      # import module -> the fields of it admitted
 
@@ -436,6 +441,54 @@ The resolved binary must report **Binaryen 116 or newer** (`wasm-opt --version`)
 
   This costs nothing for a program you build and run. It matters for a library, and it reaches most of them: `+`, `-`, `*` and unary `-` trap unless the source wrote `wrapping(...)` around them, so a library with any arithmetic at all carries the record and is marked once it is optimized. From then on no `exists`- or `unique`-quantified specification in a project that links it may reach it, whatever it calls. If some other project states one over a call into your library, build the library without `[build.wasm-opt]` (or with `--no-wasm-opt`) so its record stays exact. `forall` specifications and ordinary linking are unaffected either way, and a module whose arithmetic is written `wrapping(...)` throughout records nothing and is never marked.
 
+### [memory]
+
+The `[memory]` table sets the linear memory the emitted module declares, how far
+it may grow, and the share of it the shadow stack occupies. Every key is
+optional, and an absent table is identical to one with no keys: one fixed page,
+entirely stack.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `pages` | integer | `1` | Size of linear memory in 64 KiB pages: the memory section's minimum, and all the module is guaranteed at instantiation |
+| `max-pages` | integer | `pages` | The most pages the memory may grow to: the memory section's maximum |
+| `stack-size` | integer | `65536` | Size of the shadow stack in bytes, occupying `[0, stack-size)`; also the budget analysis rule A036 measures call chains against |
+
+Any key may be given alone; the others keep their defaults. The three are
+validated on load as the layout they complete to, with the same rules and
+wording `infc` applies to its flags:
+
+- `pages` is at least 1 and at most 65536; `max-pages` is at least `pages` and
+  at most 65536.
+- `stack-size` is a non-zero multiple of 16 and fits in `pages` — not in
+  `max-pages`, since growth can fail.
+- `max-pages × 65536 + stack-size` is at most 2³². A stack overflow traps
+  because the wrapped stack pointer lands past the end of memory, and growth
+  moves that end up to the maximum.
+
+The memory is **fixed** unless `max-pages` exceeds `pages`. Nothing the
+compiler emits grows memory: a larger maximum is room for a linked module or
+the host to grow into, and a linked module that grows memory is refused against
+a fixed one, with a message naming `max-pages`. The `spacewasm` target refuses a
+growable memory, because its interpreter is loaded with `memory.grow`
+disallowed.
+
+Each declared key is forwarded to `infc` as its flag — `--memory-pages`,
+`--max-memory-pages`, `--stack-size` — and gated on the ABI minor that flag
+landed at: 1.3 for `pages` and `stack-size`, 1.10 for `max-pages`. An
+undeclared key is never forwarded, so a project that sets no maximum puts no
+1.10 floor under its compiler. `infs` echoes the resolved layout, as
+`memory: 2 page(s), 32768-byte stack`, or as
+`memory: 2 page(s) growable to 8, 32768-byte stack` when the memory may grow.
+
+#### Example
+
+```toml
+[memory]
+pages = 4           # 256 KiB of linear memory
+stack-size = 131072 # half of it is shadow stack; the rest is the data region
+```
+
 ### [host-imports]
 
 The `[host-imports]` table is the project's allowlist of **host imports**: the
@@ -611,7 +664,10 @@ Because `[package]` now rejects keys it does not recognize, a manifest that stil
 carries one of these fails to load rather than ignoring it. Delete the key; no
 replacement is needed.
 
-**Added tables:**
+**Added tables and keys:**
+- `[memory] max-pages`: the most pages the linear memory may grow to (see
+  [`[memory]`](#memory)). Requires an `infc` with ABI 1.10 or newer; an older
+  compiler is refused rather than handed the flag.
 - `[host-imports]`: the host-import allowlist, one array of field names per
   import module (see [`[host-imports]`](#host-imports)). An `infs` that predates
   the table but has the unknown-key refusal rejects a manifest carrying it; one
