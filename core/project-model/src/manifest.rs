@@ -7,14 +7,15 @@
 //! files as their own analysis entries; to resolve a non-entry file's imports
 //! exactly as the compiler would, it must use that same source root rather than
 //! the opened file's own directory. And to report what a build of the file would
-//! report, it must analyze for the target the manifest's `[build] target` names,
-//! since an analysis rule can measure a program against the runtime it is built
-//! for.
+//! report, it must analyze for the artifact the manifest describes: the target
+//! its `[build] target` names and the shadow stack its `[memory]` table lays
+//! out, since an analysis rule can measure a program against the runtime it is
+//! built for and the stack it will run on.
 //!
-//! This module gives ide-db just enough to derive both: walk up to the nearest
-//! manifest, confirm it is a well-formed Inference manifest, and return
-//! `<manifest_dir>/src` and the `[build] target` value when the opened file lives
-//! under that root. It deliberately does not model the whole manifest — `infs`
+//! This module gives ide-db just enough to derive all three: walk up to the
+//! nearest manifest, confirm it is a well-formed Inference manifest, and return
+//! `<manifest_dir>/src`, the `[build] target` value and the `[memory]` keys when
+//! the opened file lives under that root. It deliberately does not model the whole manifest — `infs`
 //! owns the full `InferenceToml`, and a future change can let `infs` and this
 //! helper converge on one implementation. Until then this small piece keeps the
 //! IDE and CLI agreeing on what a manifest means without ide-db depending on
@@ -27,8 +28,8 @@
 //! asked. How often it asks is the caller's decision: ide-db asks when a
 //! document's analysis has to be computed and keeps a manifest's answer until
 //! the document is closed, so a manifest edited after that — a changed
-//! `[build] target` included — is not observed until the document is closed and
-//! reopened. This matches the rest of ide-db, which observes only the files an
+//! `[build] target` or `[memory]` table included — is not observed until the
+//! document is closed and reopened. This matches the rest of ide-db, which observes only the files an
 //! editor opens.
 
 use std::path::{Path, PathBuf};
@@ -59,6 +60,18 @@ pub struct ManifestSettings {
     /// on, so the caller resolves the name and decides what an unknown one
     /// means for it.
     pub build_target: Option<String>,
+    /// The `[memory] pages` value as written, or `None` when the manifest sets
+    /// no integer there that a `u32` can hold.
+    ///
+    /// Not validated, for the reason [`Self::build_target`] is not: whether a
+    /// page count and a stack size describe a memory a build can emit is decided
+    /// jointly, by `inference-compiler-interface`, and the caller decides what a
+    /// rejected pair means for it.
+    pub memory_pages: Option<u32>,
+    /// The `[memory] stack-size` value as written, or `None` when the manifest
+    /// sets no integer there that a `u32` can hold. Not validated, as
+    /// [`Self::memory_pages`] is not.
+    pub memory_stack_size: Option<u32>,
 }
 
 /// Reads the settings that govern `file` from the nearest ancestor manifest, or
@@ -67,9 +80,10 @@ pub struct ManifestSettings {
 /// Walks up from `file`'s directory to the nearest `Inference.toml` (nearest
 /// wins, mirroring `infs` project discovery). When that manifest is a well-formed
 /// Inference manifest and `file` lives under its source root
-/// (`<manifest_dir>/src`), returns that root and the manifest's build target, so
-/// a resilient walk resolves `file`'s imports as the compiler would and analysis
-/// measures it against the target a build would. Returns `None` when no manifest
+/// (`<manifest_dir>/src`), returns that root, the manifest's build target and its
+/// memory keys, so a resilient walk resolves `file`'s imports as the compiler
+/// would and analysis measures it against the target and the stack a build
+/// would. Returns `None` when no manifest
 /// is found, the nearest manifest is malformed, or `file` lies outside the source
 /// root — leaving the caller to fall back to another strategy.
 #[must_use = "the derived settings are the reason to call this"]
@@ -93,7 +107,23 @@ pub fn manifest_settings(file: &Path) -> Option<ManifestSettings> {
     Some(ManifestSettings {
         src_root,
         build_target,
+        memory_pages: memory_key(&manifest, "pages"),
+        memory_stack_size: memory_key(&manifest, "stack-size"),
     })
+}
+
+/// The `[memory]` key `key` of `manifest` as a `u32`, or `None` when the table,
+/// the key, or an integer value in `u32` range is missing.
+///
+/// A value out of that range is not a size `infs` would load, so it reads as no
+/// value at all rather than as a truncation of one.
+fn memory_key(manifest: &toml::Table, key: &str) -> Option<u32> {
+    manifest
+        .get("memory")
+        .and_then(toml::Value::as_table)
+        .and_then(|memory| memory.get(key))
+        .and_then(toml::Value::as_integer)
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 /// Derives the analysis source root for `file` from the nearest ancestor
@@ -393,6 +423,8 @@ mod tests {
             Some(ManifestSettings {
                 src_root: tree.path("src"),
                 build_target: Some("spacewasm".to_string()),
+                memory_pages: None,
+                memory_stack_size: None,
             })
         );
     }
@@ -450,6 +482,8 @@ mod tests {
             Some(ManifestSettings {
                 src_root: tree.path("inner/src"),
                 build_target: None,
+                memory_pages: None,
+                memory_stack_size: None,
             })
         );
 
@@ -471,5 +505,53 @@ mod tests {
         );
         let file = tree.write("scratch/a.inf", "pub fn a() {}");
         assert_eq!(manifest_settings(&file), None);
+    }
+
+    /// Both `[memory]` keys come back as written, and each independently: a
+    /// manifest that sets only one leaves the other to the caller's default.
+    #[test]
+    fn settings_carry_the_memory_keys_as_written() {
+        for (table, pages, stack_size) in [
+            ("pages = 4\nstack-size = 131072\n", Some(4), Some(131_072)),
+            ("pages = 2\n", Some(2), None),
+            ("stack-size = 32768\n", None, Some(32_768)),
+            ("", None, None),
+        ] {
+            let tree = TempTree::new("settings-memory");
+            tree.write(
+                MANIFEST_FILE_NAME,
+                &format!("{VALID_MANIFEST}\n[memory]\n{table}"),
+            );
+            let file = tree.write("src/a.inf", "pub fn a() {}");
+
+            let settings = manifest_settings(&file).expect("the manifest governs the file");
+            assert_eq!(settings.memory_pages, pages, "for table:\n{table}");
+            assert_eq!(settings.memory_stack_size, stack_size, "for table:\n{table}");
+        }
+    }
+
+    /// The keys are not validated as a layout — a stack that does not fit its
+    /// memory comes back as written — but a value that is not a `u32` at all is
+    /// no size, and reads as none rather than as a truncation of one.
+    #[test]
+    fn settings_return_the_memory_keys_unvalidated() {
+        for (value, expected) in [
+            ("1000", Some(1000)),
+            ("0", Some(0)),
+            ("-16", None),
+            ("4294967296", None),
+            ("\"65536\"", None),
+            ("1.5", None),
+        ] {
+            let tree = TempTree::new("settings-memory-unvalidated");
+            tree.write(
+                MANIFEST_FILE_NAME,
+                &format!("{VALID_MANIFEST}\n[memory]\nstack-size = {value}\n"),
+            );
+            let file = tree.write("src/a.inf", "pub fn a() {}");
+
+            let settings = manifest_settings(&file).expect("the manifest governs the file");
+            assert_eq!(settings.memory_stack_size, expected, "`stack-size = {value}`");
+        }
     }
 }
