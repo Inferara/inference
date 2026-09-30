@@ -30,7 +30,9 @@ mod extern_link_toolchain_tests {
     use inf_wasmparser::{Parser, Payload};
     use inference::wasm_link::{SearchPath, resolve_external_modules};
     use inference::{LinkWarning, analyze, link_with_warnings, parse, type_check};
-    use inference_wasm_codegen::{CodegenOptions, MemoryLayout, MemoryLayoutSource, codegen};
+    use inference_wasm_codegen::{
+        CodegenOptions, MemoryLayout, MemoryLayoutSource, MemoryRequest, codegen,
+    };
     use std::path::PathBuf;
     use wasmtime::{Engine, Instance, Module, Store, TypedFunc};
 
@@ -76,8 +78,14 @@ mod extern_link_toolchain_tests {
             .expect("the committed artifact resolves and validates");
         let external_bytes = externals.module_bytes();
 
-        let layout = MemoryLayout::resolve(Some(pages), None, MemoryLayoutSource::Flag)
-            .expect("the requested memory layout is legal");
+        let layout = MemoryLayout::resolve(
+            MemoryRequest {
+                pages: Some(pages),
+                ..MemoryRequest::default()
+            },
+            MemoryLayoutSource::Flag,
+        )
+        .expect("the requested memory layout is legal");
         let output = codegen(
             &typed,
             module_name,

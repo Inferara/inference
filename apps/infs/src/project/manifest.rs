@@ -71,9 +71,9 @@
 
 use anyhow::{Context, Result, bail};
 use inference_compiler_interface::{
-    BoundsChecks, BoundsChecksSource, HOST_SEGMENT, MemoryLayout, MemoryLayoutSource, TargetName,
-    TargetSource, WasmFeatureName, WasmFeatureSource, resolve_bounds_checks, resolve_target,
-    resolve_wasm_features,
+    BoundsChecks, BoundsChecksSource, HOST_SEGMENT, MemoryLayout, MemoryLayoutSource, MemoryRequest,
+    TargetName, TargetSource, WasmFeatureName, WasmFeatureSource, resolve_bounds_checks,
+    resolve_target, resolve_wasm_features,
 };
 use serde::de::{DeserializeSeed, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -1045,8 +1045,12 @@ impl MemoryConfig {
     /// without ever passing through the loader, and this is where such a value is
     /// checked.
     pub fn resolved_layout(&self) -> Result<MemoryLayout> {
-        MemoryLayout::resolve(self.pages, self.stack_size, MemoryLayoutSource::Manifest)
-            .map_err(Into::into)
+        let request = MemoryRequest {
+            pages: self.pages,
+            max_pages: None,
+            stack_size: self.stack_size,
+        };
+        MemoryLayout::resolve(request, MemoryLayoutSource::Manifest).map_err(Into::into)
     }
 
     /// Validates the declared keys as the layout they complete to.

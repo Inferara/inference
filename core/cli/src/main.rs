@@ -194,7 +194,7 @@ use inference::{
     AnalysisOptions, ExternKind, ExternalSpecPolicy, HOST_SEGMENT, LinkOptions,
     analyze_with_options, link_resolved, parse_project, type_check, wasm_to_v,
 };
-use inference_wasm_codegen::{EmitFeatures, MemoryLayout, MemoryLayoutSource};
+use inference_wasm_codegen::{EmitFeatures, MemoryLayout, MemoryLayoutSource, MemoryRequest};
 use parser::{Cli, CliMode};
 use std::{
     fs,
@@ -476,6 +476,19 @@ fn resolve_bounds_checks_flag(
         }
         None => BoundsChecks::DEFAULT,
     })
+}
+
+/// The memory layout the command line's memory flags ask for, every flag left
+/// off still unset for [`MemoryLayout::resolve`] to fill.
+///
+/// The one place a flag becomes a request field, so the build and the tests of
+/// the flags resolve the same request.
+fn memory_request(args: &Cli) -> MemoryRequest {
+    MemoryRequest {
+        pages: args.memory_pages,
+        max_pages: None,
+        stack_size: args.stack_size,
+    }
 }
 
 /// The emission target code generation takes for a requested target name.
@@ -1388,11 +1401,7 @@ fn run() {
     // analysis phase and code generation need it: A036 measures call chains
     // against this stack size and the emitter lays every frame out in it, so the
     // two must be handed one value rather than each reaching for a default.
-    let layout = match MemoryLayout::resolve(
-        args.memory_pages,
-        args.stack_size,
-        MemoryLayoutSource::Flag,
-    ) {
+    let layout = match MemoryLayout::resolve(memory_request(&args), MemoryLayoutSource::Flag) {
         Ok(layout) => layout,
         Err(e) => {
             eprintln!("{e}");
@@ -2764,7 +2773,7 @@ mod tests {
         let mut full = vec!["infc", "x.inf"];
         full.extend_from_slice(argv);
         let cli = Cli::try_parse_from(full).expect("the flags under test parse");
-        MemoryLayout::resolve(cli.memory_pages, cli.stack_size, MemoryLayoutSource::Flag)
+        MemoryLayout::resolve(memory_request(&cli), MemoryLayoutSource::Flag)
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 
 use inference_analysis::TargetName;
-use inference_compiler_interface::{MemoryLayout, MemoryLayoutSource};
+use inference_compiler_interface::{MemoryLayout, MemoryLayoutSource, MemoryRequest};
 use inference_vfs::Vfs;
 use rustc_hash::FxHashMap;
 use salsa::{Database, Setter, Storage};
@@ -266,7 +266,12 @@ fn manifest_target(name: Option<&str>) -> TargetName {
 /// the default layout is the one under which the rest of the file is still
 /// analyzed in full.
 fn manifest_stack_budget(pages: Option<u32>, stack_size: Option<u32>) -> u32 {
-    MemoryLayout::resolve(pages, stack_size, MemoryLayoutSource::Manifest)
+    let request = MemoryRequest {
+        pages,
+        stack_size,
+        ..MemoryRequest::default()
+    };
+    MemoryLayout::resolve(request, MemoryLayoutSource::Manifest)
         .unwrap_or_default()
         .stack_size()
 }
