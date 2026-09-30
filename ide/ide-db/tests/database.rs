@@ -1737,6 +1737,12 @@ fn a_project_without_a_larger_stack_is_measured_against_the_default() {
         Some(manifest_with_memory(
             "pages = 4\nmax-pages = 2\nstack-size = 131072\n",
         )),
+        // So does a key `infs` cannot read: the rest of the table is not read
+        // without it, or the 128 KiB stack would clear the chain.
+        Some(manifest_with_memory(
+            "pages = 4\nmax-pages = \"8\"\nstack-size = 131072\n",
+        )),
+        Some(manifest_with_memory("pages = 4\npage = 2\nstack-size = 131072\n")),
     ] {
         let findings = chain_findings_under(manifest.as_deref(), "stack-default");
         assert_eq!(findings.len(), 1, "under manifest {manifest:?}: {findings:?}");

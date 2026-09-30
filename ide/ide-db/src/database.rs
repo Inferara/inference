@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 
 use inference_analysis::TargetName;
+use inference_project_model::MemoryKeys;
 use inference_compiler_interface::{MemoryLayout, MemoryLayoutSource, MemoryRequest};
 use inference_vfs::Vfs;
 use rustc_hash::FxHashMap;
@@ -256,7 +257,8 @@ fn manifest_target(name: Option<&str>) -> TargetName {
 }
 
 /// The shadow-stack size a build of a manifest's `[memory]` table emits, or the
-/// default layout's when the table describes no memory a build could emit.
+/// default layout's when the table cannot be read or describes no memory a build
+/// could emit.
 ///
 /// The keys are resolved exactly as `infs` and `infc` resolve them, filling an
 /// absent key from the default layout, so a table that sets only `pages` keeps
@@ -267,8 +269,16 @@ fn manifest_target(name: Option<&str>) -> TargetName {
 /// refuses to build it, so there is no build for the editor to agree with, and
 /// the default layout is the one under which the rest of the file is still
 /// analyzed in full.
-fn manifest_stack_budget(request: MemoryRequest) -> u32 {
-    MemoryLayout::resolve(request, MemoryLayoutSource::Manifest)
+fn manifest_stack_budget(memory: Option<MemoryKeys>) -> u32 {
+    memory
+        .and_then(|keys| {
+            let request = MemoryRequest {
+                pages: keys.pages,
+                max_pages: keys.max_pages,
+                stack_size: keys.stack_size,
+            };
+            MemoryLayout::resolve(request, MemoryLayoutSource::Manifest).ok()
+        })
         .unwrap_or_default()
         .stack_size()
 }
@@ -1383,11 +1393,7 @@ impl RootDatabase {
             let root = EntryRoot {
                 src_root: settings.src_root,
                 target: manifest_target(settings.build_target.as_deref()),
-                stack_budget_bytes: manifest_stack_budget(MemoryRequest {
-                    pages: settings.memory_pages,
-                    max_pages: settings.memory_max_pages,
-                    stack_size: settings.memory_stack_size,
-                }),
+                stack_budget_bytes: manifest_stack_budget(settings.memory),
             };
             self.worker_mut()
                 .roots
