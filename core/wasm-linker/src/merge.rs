@@ -2988,6 +2988,11 @@ impl MemoryReconciler {
     /// deliberately: an external must not silently relax the host program's own
     /// memory bound. A memoryless reconciliation that needs to grow is rejected
     /// by the caller's required-memory guard before reaching here.
+    ///
+    /// The rejection names the maximum knob, as [`reconcile_pair`]'s names the
+    /// page-count one: the fix is on the main module's side — declaring a
+    /// maximum above its size — which a diagnostic reporting only the two
+    /// numbers would leave the author to guess.
     fn admit_growth(&self, field: &str) -> Result<(), LinkError> {
         let Some(mem) = self.current.as_ref() else {
             return Ok(());
@@ -2999,7 +3004,10 @@ impl MemoryReconciler {
                 field: field.to_string(),
                 reason: format!(
                     "the external grows linear memory, but the reconciled memory's maximum \
-                     ({max} pages) does not exceed its minimum ({} pages)",
+                     ({max} pages) does not exceed its minimum ({} pages); the kept memory \
+                     bound is not relaxed. Give the main module a memory that may grow: \
+                     `max-pages` in the `[memory]` table of `Inference.toml`, or \
+                     `infc --max-memory-pages <N>`",
                     mem.minimum
                 ),
             });
