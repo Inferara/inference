@@ -1310,8 +1310,9 @@ impl std::error::Error for AnalysisErrors {}
 /// accessors) plus a single boxed [`DiagnosticFiles`] naming each finding's file
 /// for file-named rendering.
 ///
-/// It also carries the one fact a passing analysis hands to code generation:
-/// the array accesses proven in bounds, whose runtime guard can be omitted.
+/// It also carries the one fact a passing analysis can hand to code
+/// generation: the array accesses proven in bounds, whose runtime guard a build
+/// that chose to may omit.
 #[derive(Debug, Clone)]
 pub struct AnalysisResult {
     warnings: Vec<AnalysisDiagnostic>,
@@ -1348,7 +1349,9 @@ impl AnalysisResult {
     /// runtime bounds guard.
     ///
     /// Only a passing analysis produces one, so holding it means every access
-    /// the program indexes dynamically was proven or is unreachable.
+    /// the program indexes dynamically was proven or is unreachable. It is
+    /// computed only when the analysis ran under `BoundsChecks::OmitProven`;
+    /// under the default policy, which keeps every guard, it is empty.
     #[must_use = "returns the accesses proven in bounds"]
     pub fn proven_in_bounds(&self) -> &ProvenInBounds {
         &self.proven_in_bounds

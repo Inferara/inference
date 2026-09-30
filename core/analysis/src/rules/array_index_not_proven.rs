@@ -26,11 +26,12 @@
 //! other caller can still pass an index the guard traps on.
 //!
 //! The accesses this rule proves are also what code generation reads to omit
-//! the guard: `prove` runs the same analysis and keeps each access whose
-//! index it bounded within `0..length`, through the one `verdict` this rule
-//! reports from, so the set a build elides and the set this rule accepts
-//! cannot drift apart. An access proven only by never being reached keeps its
-//! guard; it costs nothing at run time.
+//! the guard, in a build that chose `BoundsChecks::OmitProven`: `prove` runs
+//! the same analysis and keeps each access whose index it bounded within
+//! `0..length`, through the one `verdict` this rule reports from, so the set a
+//! build elides and the set this rule accepts cannot drift apart. An access
+//! proven only by never being reached keeps its guard; it costs nothing at run
+//! time.
 //!
 //! A literal index is A037's (it folds and range-checks it) and a 64-bit index
 //! is A019's; neither is reported here. The bodies examined are the ones code
@@ -73,10 +74,11 @@ crate::rule! {
 /// The array accesses whose index the analysis proved to lie within
 /// `0..length` on every run that reaches them, keyed by the access expression.
 ///
-/// Such an access's runtime bounds guard can never fire, which is what lets
-/// code generation omit it. The set is produced only by an analysis that
-/// passed (see [`AnalysisResult::proven_in_bounds`]), so a program that
-/// reaches code generation with any access unproven carries none of them.
+/// Such an access's runtime bounds guard can never fire, which is what lets a
+/// build that chose `BoundsChecks::OmitProven` omit it. The set is produced
+/// only by an analysis that passed under that policy (see
+/// [`AnalysisResult::proven_in_bounds`]), so a program that reaches code
+/// generation with any access unproven carries none of them.
 ///
 /// [`AnalysisResult::proven_in_bounds`]: crate::errors::AnalysisResult::proven_in_bounds
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -113,9 +115,9 @@ impl ProvenInBounds {
 /// Every covered access this rule's analysis proves in bounds.
 ///
 /// Runs the range analysis again over each body with a covered access, so a
-/// build pays for it twice there; the rule's own `check` keeps no state to
-/// hand over, which is what keeps it callable on its own, as the editor calls
-/// it.
+/// build that omits proven guards pays for it twice there; the rule's own
+/// `check` keeps no state to hand over, which is what keeps it callable on its
+/// own, as the editor calls it.
 pub(crate) fn prove(ctx: &TypedContext) -> ProvenInBounds {
     let mut accesses = FxHashSet::default();
     for_each_verdict(ctx, &mut |_, access, verdict| {

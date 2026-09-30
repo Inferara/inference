@@ -82,7 +82,7 @@ pub mod target;
 pub use output::{AbiParam, AbiReturn, AbiType, CodegenOutput, ExportSignature};
 pub use stellar_cli::{stellar_cli_flag_alias, stellar_flag_collision};
 pub use target::{
-    CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, MemoryLayoutError,
+    BoundsChecks, CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, MemoryLayoutError,
     MemoryLayoutSource, OptLevel, Target,
 };
 
@@ -163,9 +163,11 @@ pub use crate::checked_section::SECTION_VERSION as CHECKED_SECTION_VERSION;
 ///   cannot carry (see [`check_stellar_exports`])
 /// - Code generation fails
 ///
-/// Every dynamic array access keeps its runtime bounds guard: nothing tells
-/// this entry point that any of them was proven in bounds. A caller that ran
-/// analysis hands that proof in through [`codegen_with_proven_in_bounds`].
+/// Every dynamic array access keeps its runtime bounds guard, whatever
+/// `options.bounds_checks` says: nothing tells this entry point that any of
+/// them was proven in bounds. A caller that ran analysis and chose
+/// [`BoundsChecks::OmitProven`] hands that proof in through
+/// [`codegen_with_proven_in_bounds`].
 pub fn codegen(
     typed_context: &TypedContext,
     module_name: &str,
@@ -175,7 +177,8 @@ pub fn codegen(
 }
 
 /// [`codegen`], omitting the runtime bounds guard of every array access in
-/// `proven_in_bounds`.
+/// `proven_in_bounds` when `options.bounds_checks` is
+/// [`BoundsChecks::OmitProven`].
 ///
 /// `proven_in_bounds` names `ArrayIndexAccess` expressions of
 /// `typed_context`'s arena whose index is known to lie within `0..length` on
@@ -187,9 +190,15 @@ pub fn codegen(
 /// here re-checks it. It is only ever read positively: an access not in it
 /// keeps its guard, so an empty set is exactly [`codegen`].
 ///
+/// Under [`BoundsChecks::All`], the default, the set is not read at all and the
+/// module is exactly [`codegen`]'s. Holding a proof is not the same as choosing
+/// to rely on it alone: the guard is the layer that still traps if the proof is
+/// wrong, and only the build's own policy may give it up.
+///
 /// The set is read by the emission of each access and by nothing that
 /// depends on the mode or the target, so a Proof build and a Compile build of
-/// one program, handed the same set, still emit the same function bodies.
+/// one program, under the same policy and handed the same set, still emit the
+/// same function bodies.
 ///
 /// # Errors
 ///
@@ -206,6 +215,7 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
         opt_level,
         features,
         layout,
+        bounds_checks,
     } = options;
 
     // Refuse a feature the target's runtime does not accept before a single byte
@@ -283,13 +293,18 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
 
     check_host_import_support(typed_context, mode, target)?;
 
+    let omitted_guards = if bounds_checks.omits_proven() {
+        proven_in_bounds.iter().copied().collect()
+    } else {
+        FxHashSet::default()
+    };
     let emitted = emit(
         typed_context,
         module_name,
         mode,
         features,
         layout,
-        proven_in_bounds.iter().copied().collect(),
+        omitted_guards,
     )?;
 
     if target == Target::Stellar {
@@ -467,8 +482,8 @@ struct Emitted {
 ///
 /// The parameter list is the contract. Emitted bytes are a function of the
 /// typed context, the module name, the compilation mode, the requested
-/// features, the memory layout and the accesses proven in bounds — and of
-/// nothing else: no parameter carries
+/// features, the memory layout and the accesses whose bounds guard the build
+/// omits — and of nothing else: no parameter carries
 /// the target a build asked for, and this crate holds no ambient state one
 /// could be read from. A proof is written about the bytes the default target
 /// produces, and a module deployed to any other target has to be those same
@@ -505,7 +520,7 @@ fn emit(
     mode: CompilationMode,
     features: EmitFeatures,
     layout: MemoryLayout,
-    proven_in_bounds: FxHashSet<ExprId>,
+    omitted_guards: FxHashSet<ExprId>,
 ) -> anyhow::Result<Emitted> {
     let mut compiler = Compiler::new(module_name);
     compiler.set_emit_features(features);
@@ -513,12 +528,13 @@ fn emit(
 
     // Bounds checks are on for every build, in either compilation mode and at
     // every target and optimization level: no input reaching here can turn them
-    // off. `Compiler::set_emit_bounds_checks` carries why. What the caller can
-    // do is name accesses analysis proved in bounds, whose guard is dead and is
-    // omitted, one access at a time; `Compiler::set_proven_in_bounds` carries
-    // why that is not a way of turning them off.
+    // off. `Compiler::set_emit_bounds_checks` carries why. What a build that
+    // chose `BoundsChecks::OmitProven` can do is name accesses analysis proved
+    // in bounds, whose guard is dead and is omitted, one access at a time;
+    // `Compiler::set_proven_in_bounds` carries why that is not a way of turning
+    // them off. Under the default policy the set is empty.
     compiler.set_emit_bounds_checks(true);
-    compiler.set_proven_in_bounds(proven_in_bounds);
+    compiler.set_proven_in_bounds(omitted_guards);
 
     let hspecs = if typed_context.source_files().next().is_some() {
         traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?
@@ -2612,6 +2628,7 @@ mod feature_validation_tests {
                 opt_level: target.default_opt_level(),
                 features,
                 layout: crate::MemoryLayout::default(),
+                bounds_checks: crate::BoundsChecks::All,
             },
         )
     }
@@ -2680,6 +2697,7 @@ mod feature_validation_tests {
                     opt_level: Target::Stellar.default_opt_level(),
                     features: EmitFeatures::default(),
                     layout: crate::MemoryLayout::default(),
+                    bounds_checks: crate::BoundsChecks::All,
                 },
             )
             .is_ok(),

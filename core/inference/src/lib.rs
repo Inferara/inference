@@ -177,13 +177,13 @@
 //! ### Standard Compilation
 //!
 //! ```rust,no_run
-//! use inference::{parse, type_check, analyze, codegen_with_analysis};
+//! use inference::{parse, type_check, analyze, codegen};
 //!
 //! fn compile_to_wasm(source_code: &str) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
-//!     let analysis_result = analyze(&typed_context)?;
-//!     codegen_with_analysis(&typed_context, "module", &analysis_result)
+//!     let _analysis_result = analyze(&typed_context)?;
+//!     codegen(&typed_context, "module")
 //! }
 //! ```
 //!
@@ -272,10 +272,10 @@
 pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
 
 /// Re-export of the analysis settings so a caller that configures code
-/// generation can hand [`analyze_with_options`] a budget and a target matching
-/// the artifact it is about to emit, without a direct dependency on
-/// `inference-analysis`.
-pub use inference_analysis::{AnalysisOptions, TargetName};
+/// generation can hand [`analyze_with_options`] a budget, a target and a
+/// bounds-check policy matching the artifact it is about to emit, without a
+/// direct dependency on `inference-analysis`.
+pub use inference_analysis::{AnalysisOptions, BoundsChecks, TargetName};
 use inference_ast::arena::AstArena;
 pub use inference_type_checker::typed_context::TypedContext;
 /// Re-export of the lossless type-check entry point and its result types so
@@ -764,11 +764,6 @@ pub fn analyze_with_options(
 /// instruction family, call `inference_wasm_codegen::codegen()` directly with
 /// an explicit `CodegenOptions` value.
 ///
-/// Nothing tells this function which array accesses are proven in bounds, so
-/// every dynamic access keeps its runtime bounds guard. After a passing
-/// [`analyze`], call [`codegen_with_analysis`] instead to omit the guards the
-/// analysis proved dead.
-///
 /// # Errors
 ///
 /// Returns an error if:
@@ -785,30 +780,6 @@ pub fn codegen(
         typed_context,
         module_name,
         inference_wasm_codegen::CodegenOptions::default(),
-    )
-}
-
-/// [`codegen`] for a program [`analyze`] accepted, omitting the runtime bounds
-/// guard of every array access the analysis proved in bounds.
-///
-/// Such a guard is dead: analysis rule A056 bounded the access's index within
-/// `0..length` on every run that reaches it. `analysis` must be the result of
-/// analyzing `typed_context` itself — its proof names that context's
-/// expressions, and is not re-checked here. Every other access keeps its guard.
-///
-/// # Errors
-///
-/// Returns an error on the same conditions as [`codegen`].
-pub fn codegen_with_analysis(
-    typed_context: &TypedContext,
-    module_name: &str,
-    analysis: &AnalysisResult,
-) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
-    inference_wasm_codegen::codegen_with_proven_in_bounds(
-        typed_context,
-        module_name,
-        inference_wasm_codegen::CodegenOptions::default(),
-        analysis.proven_in_bounds().accesses(),
     )
 }
 

@@ -118,7 +118,7 @@
     unreachable
   )
   (func $read_var_index (;2;) (type 2) (param $i i32) (result i32)
-    (local $g i32) (local $__frame_ptr i32)
+    (local $g i32) (local $__frame_ptr i32) (local i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -170,6 +170,13 @@
     end
     local.get $g
     local.get $i
+    local.tee 3
+    local.get 3
+    i32.const 2
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 8
     i32.mul
     i32.add

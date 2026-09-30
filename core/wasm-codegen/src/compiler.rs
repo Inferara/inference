@@ -1021,9 +1021,10 @@ impl Compiler {
     /// — Compile and Proof, Debug and Release alike, and nothing on the emission
     /// path reads a target. A dynamic out-of-range access therefore traps
     /// cleanly instead of corrupting adjacent frame slots, and the artifact a
-    /// proof is written about is byte-for-byte the artifact that ships. An
-    /// access analysis proved in bounds carries no guard in any build
-    /// ([`Self::set_proven_in_bounds`]); this flag does not change that.
+    /// proof is written about is byte-for-byte the artifact that ships. A build
+    /// that chose `BoundsChecks::OmitProven` names the accesses analysis proved
+    /// in bounds, which then carry no guard ([`Self::set_proven_in_bounds`]);
+    /// this flag does not change that.
     ///
     /// Proof mode used to be the one unguarded build, which made its `.v` weaker
     /// than the deployed module on exactly the property the language exists to
@@ -1049,23 +1050,26 @@ impl Compiler {
         self.emit_bounds_checks = enabled;
     }
 
-    /// Records the array accesses analysis proved in bounds, whose guard
-    /// [`Self::emit_index_offset`] omits.
+    /// Records the array accesses whose guard [`Self::emit_index_offset`]
+    /// omits: the ones analysis proved in bounds, in a build that chose
+    /// `BoundsChecks::OmitProven`, and none in any other.
     ///
     /// The guard of such an access is dead: analysis rule A056 bounded its
     /// index within `0..length` on every run that reaches it, from the code the
     /// program itself contains, and a program with any dynamic access it could
     /// not bound does not compile. What omitting it trades is the fallback — an
-    /// analysis bug would no longer trap there — which is why the set is only
-    /// ever read positively: an access absent from it keeps its guard, so a
-    /// build that skipped analysis, a body analysis does not examine (a
-    /// `forall` body in a proof build), and an access A056 accepts only because
-    /// no run reaches it are all still guarded.
+    /// analysis bug would no longer trap there — which is why omission is a
+    /// policy the build opts into rather than a consequence of holding a
+    /// proof, and why the set is only ever read positively: an access absent
+    /// from it keeps its guard, so a build that skipped analysis, a body
+    /// analysis does not examine (a `forall` body in a proof build), and an
+    /// access A056 accepts only because no run reaches it are all still
+    /// guarded.
     ///
     /// The decision reads the source and this set and nothing else — never the
     /// mode or the target — so a Proof build and a Compile build of one
-    /// program still agree byte for byte, and a proof is still written about
-    /// the artifact that ships.
+    /// program under one policy still agree byte for byte, and a proof is
+    /// still written about the artifact that ships.
     pub(crate) fn set_proven_in_bounds(&mut self, proven_in_bounds: FxHashSet<ExprId>) {
         self.proven_in_bounds = proven_in_bounds;
     }

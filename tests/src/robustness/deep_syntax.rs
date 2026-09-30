@@ -137,8 +137,8 @@ fn compiles(source: &str) -> Result<usize, String> {
     inference::with_compiler_stack(|| {
         let arena = try_build_ast(source.to_string()).map_err(|e| e.to_string())?;
         let typed_context = inference::type_check(arena).map_err(|e| e.to_string())?;
-        let analysis = inference::analyze(&typed_context).map_err(|e| format!("{e:?}"))?;
-        inference::codegen_with_analysis(&typed_context, "deep", &analysis)
+        inference::analyze(&typed_context).map_err(|e| format!("{e:?}"))?;
+        inference::codegen(&typed_context, "deep")
             .map(|output| output.wasm().len())
             .map_err(|e| e.to_string())
     })

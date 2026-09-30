@@ -1,21 +1,24 @@
 //! Differential soundness check for omitting the bounds guards analysis proved
 //! dead (#215).
 //!
-//! Code generation omits the runtime guard of an array access A056's range
-//! analysis bounded within `0..length`. The guard used to be what an analysis
-//! bug fell back to: a wrong proof trapped. Without it, a wrong proof reads or
-//! writes outside the array, silently. These tests are what stands in for that
-//! fallback.
+//! Under the `omit-proven` bounds-check policy, code generation omits the
+//! runtime guard of an array access A056's range analysis bounded within
+//! `0..length`. Under the default policy the guard stays, and is what an
+//! analysis bug falls back to: a wrong proof traps. Without it, a wrong proof
+//! reads or writes outside the array, silently. These tests make such a bug
+//! less likely to reach a build that opted out of the guard; they cannot give
+//! back the guarantee the guard gives every program, only check the programs
+//! they run, which is why omission is a policy a build chooses.
 //!
-//! Every program here is built twice from one typed context: once with the
-//! accesses analysis proved handed to code generation, as `infc` builds it, and
-//! once with none, which keeps every guard. The two modules are then run side
-//! by side on the same inputs. They differ only in guards that are claimed
-//! never to fire, so on every input they must return the same values, trap
-//! with the same trap, and leave linear memory byte for byte the same. An
-//! elided guard that would have fired shows up as a mismatch: the guarded
-//! build traps where the elided one reads a neighbour's bytes or writes over
-//! them.
+//! Every program here is built twice from one typed context, each as `infc`
+//! builds it: under `omit-proven`, whose analysis hands code generation the
+//! accesses it proved, and under the default `all`, which keeps every guard.
+//! The two modules are then run side by side on the same inputs. They differ
+//! only in guards that are claimed never to fire, so on every input they must
+//! return the same values, trap with the same trap, and leave linear memory
+//! byte for byte the same. An elided guard that would have fired shows up as a
+//! mismatch: the guarded build traps where the elided one reads a neighbour's
+//! bytes or writes over them.
 //!
 //! The sweep runs over the whole single-file codegen corpus and over a set of
 //! programs written to exercise each source of fact the analysis draws on.
@@ -23,7 +26,8 @@
 #[cfg(test)]
 mod bounds_elision_tests {
     use crate::corpus::{has_import_section, single_file_corpus_sources};
-    use inference_wasm_codegen::{CodegenOptions, codegen, codegen_with_proven_in_bounds};
+    use inference_type_checker::typed_context::TypedContext;
+    use inference_wasm_codegen::{BoundsChecks, CodegenOptions, codegen_with_proven_in_bounds};
     use wasmtime::{Config, Engine, Instance, Linker, Module, Store, Trap, Val, ValType};
 
     /// Fuel for one call. A call that runs out in either build proves nothing
@@ -70,29 +74,37 @@ mod bounds_elision_tests {
         guarded: Vec<u8>,
     }
 
-    /// Builds `source` with and without the proofs a passing analysis returns,
-    /// or `None` when the program does not reach code generation, or when no
-    /// guard was elided and the two builds are the same bytes.
+    /// Builds `source` under `omit-proven` and under `all`, or `None` when the
+    /// program does not reach code generation, or when no guard was elided and
+    /// the two builds are the same bytes.
     fn builds(source: &str) -> Option<Builds> {
         let arena = crate::utils::try_build_ast(source.to_string()).ok()?;
         let ctx = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
             .ok()?
             .typed_context();
-        let analysis = inference_analysis::analyze(&ctx).ok()?;
-        let elided = codegen_with_proven_in_bounds(
-            &ctx,
+        let elided = build_under(&ctx, BoundsChecks::OmitProven)?;
+        let guarded = build_under(&ctx, BoundsChecks::All)?;
+        (elided != guarded).then_some(Builds { elided, guarded })
+    }
+
+    /// Builds `ctx` as `infc` does under `policy`: the analysis runs under it,
+    /// and code generation is handed whatever that analysis proved.
+    fn build_under(ctx: &TypedContext, policy: BoundsChecks) -> Option<Vec<u8>> {
+        let options = CodegenOptions {
+            bounds_checks: policy,
+            ..Default::default()
+        };
+        let analysis =
+            inference_analysis::analyze_with_options(ctx, crate::utils::analysis_options(&options))
+                .ok()?;
+        let output = codegen_with_proven_in_bounds(
+            ctx,
             "output",
-            CodegenOptions::default(),
+            options,
             analysis.proven_in_bounds().accesses(),
         )
-        .ok()?
-        .wasm()
-        .to_vec();
-        let guarded = codegen(&ctx, "output", CodegenOptions::default())
-            .ok()?
-            .wasm()
-            .to_vec();
-        (elided != guarded).then_some(Builds { elided, guarded })
+        .ok()?;
+        Some(output.wasm().to_vec())
     }
 
     fn engine() -> Engine {

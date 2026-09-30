@@ -48,6 +48,7 @@ mod helpers {
                 opt_level: OptLevel::O3,
                 features: inference_wasm_codegen::EmitFeatures::default(),
                 layout: inference_wasm_codegen::MemoryLayout::default(),
+                bounds_checks: inference_wasm_codegen::BoundsChecks::All,
             },
         )
         .expect("codegen should succeed")
@@ -75,6 +76,7 @@ mod helpers {
                 opt_level: OptLevel::O3,
                 features: inference_wasm_codegen::EmitFeatures::default(),
                 layout: inference_wasm_codegen::MemoryLayout::default(),
+                bounds_checks: inference_wasm_codegen::BoundsChecks::All,
             },
         )
     }
@@ -1788,6 +1790,7 @@ mod scenario_11_overlong_spec_name {
                 opt_level: OptLevel::O3,
                 features: inference_wasm_codegen::EmitFeatures::default(),
                 layout: inference_wasm_codegen::MemoryLayout::default(),
+                bounds_checks: inference_wasm_codegen::BoundsChecks::All,
             },
         )
         .expect_err("codegen must reject a spec name exceeding 255 bytes");
@@ -1827,6 +1830,7 @@ mod scenario_11_overlong_spec_name {
                 opt_level: OptLevel::O3,
                 features: inference_wasm_codegen::EmitFeatures::default(),
                 layout: inference_wasm_codegen::MemoryLayout::default(),
+                bounds_checks: inference_wasm_codegen::BoundsChecks::All,
             },
         )
         .expect("a 255-byte spec name is at the cap and must be accepted");

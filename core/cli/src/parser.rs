@@ -81,6 +81,12 @@ impl From<CliMode> for inference_wasm_codegen::CompilationMode {
 /// together, so a value that is legal on its own can still be refused by the
 /// layout it completes to.
 ///
+/// ## Bounds Checks
+///
+/// - `--bounds-checks <all|omit-proven>`: Which array accesses keep their
+///   runtime bounds guard. `all`, the default, keeps every one; `omit-proven`
+///   drops the guard of each access analysis proved in bounds.
+///
 /// Output flags only take effect when `--codegen` is active (explicitly or via default).
 ///
 /// ## Examples
@@ -350,6 +356,31 @@ pub(crate) struct Cli {
     /// callers pass it by hand.
     #[clap(long = "stack-size", value_name = "BYTES")]
     pub(crate) stack_size: Option<u32>,
+
+    /// Which array accesses keep their runtime bounds guard: `all` or
+    /// `omit-proven`.
+    ///
+    /// Every array access whose index is not a number literal carries a guard
+    /// that traps on an out-of-range index, and analysis rule A056 separately
+    /// proves each such index in bounds before the program compiles. `all`, the
+    /// default, keeps the guard behind the proof, so an access stays safe if
+    /// either one holds. `omit-proven` drops the guard wherever the proof holds,
+    /// for a smaller and faster module whose proven accesses rest on the
+    /// analysis alone: a flaw in it would read or write neighbouring memory
+    /// rather than trap. A module built this way lists the functions it omitted
+    /// a guard in, in its `inference.bounds_elided` custom section.
+    ///
+    /// Applies alike to compile and proof mode, so a proof describes the module
+    /// that ships. `infs build` and `infs run` forward the project's `[build]
+    /// bounds-checks`; direct `infc` callers pass it by hand.
+    //
+    // Maintainer note, kept out of the doc comment because clap prints that
+    // verbatim as `--help`: an `Option<String>` resolved through
+    // `inference_compiler_interface::resolve_bounds_checks` rather than a
+    // `clap::ValueEnum`, for the reason `--target` gives — a rejected value has
+    // to read the same as the manifest's rejection of it.
+    #[clap(long = "bounds-checks", value_name = "POLICY")]
+    pub(crate) bounds_checks: Option<String>,
 
     /// Carry a linked library's own universal proof obligations into this
     /// program's proof artifact.
