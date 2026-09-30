@@ -152,11 +152,14 @@ pub use crate::bounds_elided_section::SECTION_VERSION as BOUNDS_ELIDED_SECTION_V
 /// inside WebAssembly 1.0 at the target's default optimization level, into a
 /// single all-stack page of linear memory.
 ///
-/// The memory layout needs no check here: [`MemoryLayout`]'s fields are private
-/// and [`MemoryLayout::resolve`] refuses anything the emitter could not lower, so
-/// a layout that reaches this function is one code generation can honor. That is
-/// a stronger guarantee than a refusal at this boundary was — it holds for every
-/// caller, including one that never passes through here.
+/// The memory layout needs no check of its own here: [`MemoryLayout`]'s fields
+/// are private and [`MemoryLayout::resolve`] refuses anything the emitter could
+/// not lower, so a layout that reaches this function is one code generation can
+/// honor. That is a stronger guarantee than a refusal at this boundary was — it
+/// holds for every caller, including one that never passes through here. What is
+/// checked here is the one property of a layout that depends on the target:
+/// whether its runtime can grow a memory the layout declares growable (see
+/// [`Target::permits_memory_growth`]).
 ///
 /// The target-specific export check runs on what [`emit`] returns rather than
 /// on a half-built module; [`emit`] carries why that position changes no
@@ -169,7 +172,8 @@ pub use crate::bounds_elided_section::SECTION_VERSION as BOUNDS_ELIDED_SECTION_V
 /// # Errors
 ///
 /// Returns an error if:
-/// - Validation fails: a feature the target does not accept, `proof` mode at a
+/// - Validation fails: a feature the target does not accept, a growable memory
+///   at a target whose runtime refuses `memory.grow`, `proof` mode at a
 ///   target that refuses it, a non-deterministic construct in a function that
 ///   ships at a target that refuses those, a host import in a `proof` build or
 ///   at a target that refuses host imports, or an export the Stellar target
@@ -237,11 +241,11 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
     // is emitted: a build-time refusal names the manifest entry to remove, where
     // the same module rejected at deploy time names nothing.
     //
-    // Every target name in the four configuration refusals is rendered through
+    // Every target name in the five configuration refusals is rendered through
     // `as_str()`, which is the spelling `--target` and `Inference.toml` accept.
     // A user reading one has to be able to paste the name back into the command
-    // that produced it, which the `Debug` form does not allow. Three of the four
-    // are below; the fourth is the host-import target gate in
+    // that produced it, which the `Debug` form does not allow. Four of the five
+    // are below; the fifth is the host-import target gate in
     // `check_host_import_target_support`, whose proof-mode sibling is
     // deliberately outside the set, because it names no target at all -- what
     // it refuses is the mode.
@@ -254,6 +258,23 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
              using the instructions '{feature}' adds is refused here rather than at \
              deployment; drop '{feature}' from the requested features to build for \
              `{name}`."
+        ));
+    }
+
+    // A growable memory is refused where the runtime cannot grow one, for the
+    // reason a feature is: the maximum is written into the memory section, and a
+    // capacity the runtime will never provide is better refused here, naming the
+    // setting to change, than shipped as a claim about the module.
+    if layout.is_growable() && !target.permits_memory_growth() {
+        cov_mark::hit!(wasm_codegen_target_rejects_growable_memory);
+        let name = target.as_str();
+        return Err(anyhow::anyhow!(
+            "The `{name}` target does not support a growable linear memory. Its runtime \
+             refuses `memory.grow`, so a maximum of {max} pages above the memory's {pages} \
+             could never be reached; leave `[memory] max-pages` / `--max-memory-pages` \
+             unset, or equal to the page count, to build for `{name}`.",
+            max = layout.max_pages(),
+            pages = layout.pages(),
         ));
     }
 
@@ -2775,6 +2796,103 @@ mod feature_validation_tests {
             )
             .is_ok(),
             "Wasm32 permits bulk memory"
+        );
+    }
+}
+
+#[cfg(test)]
+mod growable_memory_tests {
+    use super::feature_validation_tests::type_check;
+    use super::{
+        CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, MemoryLayoutSource,
+        MemoryRequest, Target, codegen,
+    };
+
+    /// One exported function, so the Stellar target has a contract method and
+    /// every target an ordinary module to build.
+    const ONE_EXPORT: &str = "pub fn answer() -> i32 { return 42; }";
+
+    /// A layout of `pages` pages that may grow to `max_pages`.
+    fn layout(pages: u32, max_pages: u32) -> MemoryLayout {
+        MemoryLayout::resolve(
+            MemoryRequest {
+                pages: Some(pages),
+                max_pages: Some(max_pages),
+                stack_size: None,
+            },
+            MemoryLayoutSource::Flag,
+        )
+        .expect("the layout is admissible")
+    }
+
+    fn compile(
+        target: Target,
+        mode: CompilationMode,
+        layout: MemoryLayout,
+    ) -> anyhow::Result<crate::CodegenOutput> {
+        codegen(
+            &type_check(ONE_EXPORT),
+            "output",
+            CodegenOptions {
+                target,
+                mode,
+                opt_level: target.default_opt_level(),
+                features: EmitFeatures::default(),
+                layout,
+                bounds_checks: crate::BoundsChecks::All,
+            },
+        )
+    }
+
+    /// Pinned whole, for the reason the feature refusal is: the target is
+    /// rendered through `Target::as_str()`, and the two numbers and the setting
+    /// to change are what the user acts on.
+    #[test]
+    fn spacewasm_rejects_a_growable_memory() {
+        cov_mark::check!(wasm_codegen_target_rejects_growable_memory);
+        let err = compile(Target::SpaceWasm, CompilationMode::Compile, layout(1, 4))
+            .expect_err("SpaceWasm cannot grow memory");
+        assert_eq!(
+            err.to_string(),
+            "The `spacewasm` target does not support a growable linear memory. Its runtime \
+             refuses `memory.grow`, so a maximum of 4 pages above the memory's 1 could never \
+             be reached; leave `[memory] max-pages` / `--max-memory-pages` unset, or equal \
+             to the page count, to build for `spacewasm`."
+        );
+    }
+
+    /// A memory of any size builds at the `spacewasm` target as long as it is
+    /// fixed, whether the maximum was left unset or spelled equal to the size.
+    #[test]
+    fn spacewasm_accepts_a_fixed_memory() {
+        for fixed in [MemoryLayout::default(), layout(4, 4)] {
+            assert!(
+                compile(Target::SpaceWasm, CompilationMode::Compile, fixed).is_ok(),
+                "a fixed {}-page memory must build at SpaceWasm",
+                fixed.pages()
+            );
+        }
+    }
+
+    #[test]
+    fn wasm32_and_stellar_accept_a_growable_memory() {
+        for target in [Target::Wasm32, Target::Stellar] {
+            let output = compile(target, CompilationMode::Compile, layout(1, 4))
+                .unwrap_or_else(|e| panic!("`{}` can grow memory: {e}", target.as_str()));
+            assert!(!output.wasm().is_empty());
+        }
+    }
+
+    /// The growth refusal sits beside the feature refusal, ahead of the mode
+    /// checks: a build whose memory the runtime cannot provide is told that
+    /// before it is sent to fix an unrelated mode conflict.
+    #[test]
+    fn the_growth_refusal_precedes_the_proof_mode_refusal() {
+        let err = compile(Target::SpaceWasm, CompilationMode::Proof, layout(1, 4))
+            .expect_err("both rules refuse this build");
+        assert!(
+            err.to_string().contains("does not support a growable linear memory"),
+            "the growth refusal must win, got: {err}"
         );
     }
 }

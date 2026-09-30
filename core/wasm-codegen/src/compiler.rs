@@ -8431,14 +8431,16 @@ impl Compiler {
         if self.has_memory {
             cov_mark::hit!(wasm_codegen_emit_memory_section);
             let mut memory_section = MemorySection::new();
-            // Minimum and maximum are deliberately the same value: the memory is
-            // fixed, not growable, so `memory.grow` can never move the boundary
-            // the shadow stack and its overflow trap are reasoned about against.
-            // A separate maximum, which is what makes a memory growable, is
-            // issue #170 and is not part of the single size issue #210 asks for.
+            // The maximum is the layout's own, which is the page count unless the
+            // build asked for more: by default the memory is fixed, so
+            // `memory.grow` can never move the end of memory. A larger maximum is
+            // room for a linked module or the host to grow into. Either way it is
+            // always bounded, and the layout's overflow-trap headroom is measured
+            // against it, so growth cannot carry the end of memory under a
+            // wrapped stack pointer.
             memory_section.memory(MemoryType {
                 minimum: u64::from(self.memory_layout.pages()),
-                maximum: Some(u64::from(self.memory_layout.pages())),
+                maximum: Some(u64::from(self.memory_layout.max_pages())),
                 memory64: false,
                 shared: false,
                 page_size_log2: None,
@@ -8812,6 +8814,37 @@ mod tests {
         assert!(
             !wat.contains("i32.const 65536"),
             "the stack pointer must not fall back to the page count:\n{wat}"
+        );
+    }
+
+    /// A layout whose maximum exceeds its size declares both: the size as the
+    /// minimum, the maximum as the maximum, and the stack pointer still at the
+    /// stack size, which growth does not move.
+    #[test]
+    fn a_growable_layout_declares_its_maximum() {
+        let mut compiler = Compiler::new("test");
+        compiler.set_memory_layout(
+            MemoryLayout::resolve(
+                crate::MemoryRequest {
+                    pages: Some(2),
+                    max_pages: Some(8),
+                    stack_size: None,
+                },
+                crate::MemoryLayoutSource::Flag,
+            )
+            .expect("two pages growable to eight is admissible"),
+        );
+        compiler.enable_memory();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert!(
+            wat.contains("(memory (;0;) 2 8)"),
+            "the memory section must declare 2 pages growable to 8:\n{wat}"
+        );
+        assert!(
+            wat.contains("i32.const 65536"),
+            "the stack pointer must start at the default stack size:\n{wat}"
         );
     }
 
