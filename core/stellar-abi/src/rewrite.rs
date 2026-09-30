@@ -6,13 +6,15 @@
 //! # Why the wrappers go at the end
 //!
 //! Every existing function keeps its index. Nothing is renumbered, so nothing
-//! that names a function index has to be remapped — and the module carries two
-//! such records that this crate does not decode: `inference.checked`, the list
-//! of functions whose arithmetic traps on overflow, and the name section's
-//! function names. Appending leaves the first byte-identical and lets the second
-//! be extended rather than rewritten. It is also *true*: a wrapper contains no
-//! arithmetic that could overflow, so its absence from the guard record is the
-//! correct statement rather than a convenient one.
+//! that names a function index has to be remapped — and the module carries such
+//! records that this crate does not decode: `inference.checked`, the list of
+//! functions whose arithmetic traps on overflow, `inference.bounds_elided`, the
+//! list of functions holding an array access emitted without its bounds guard,
+//! and the name section's function names. Appending leaves the first two
+//! byte-identical and lets the third be extended rather than rewritten. It is
+//! also *true*: a wrapper contains no arithmetic that could overflow and indexes
+//! no array, so its absence from both lists is the correct statement rather than
+//! a convenient one.
 //!
 //! # Why an export is matched by name
 //!

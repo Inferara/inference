@@ -131,12 +131,15 @@ Typed AST (TypedContext)
    TypeSection first, then ImportSection (only if at least one `external fn` is present;
    sits between Type and Function per WASM spec), FunctionSection, MemorySection and
    GlobalSection (only when at least one function uses arrays or structs), ExportSection,
-   CodeSection, NameSection, then up to three `inference.*` custom sections in that order:
-   (proof mode, when non-empty) `inference.spec_funcs` and `inference.hspecs`, and, in
-   either mode when the module carries at least one overflow guard, `inference.checked`.
+   CodeSection, NameSection, then up to four `inference.*` custom sections in that order:
+   (proof mode, when non-empty) `inference.spec_funcs` and `inference.hspecs`; in
+   either mode when the module carries at least one overflow guard, `inference.checked`;
+   and in either mode when a build under `BoundsChecks::OmitProven` omitted at least one
+   bounds guard, `inference.bounds_elided`, listing the functions that lost one.
    Each is omitted when it would say nothing, and for each the omission is the statement:
    no `inference.checked` section means no function of this module traps on arithmetic
-   overflow, which is also true of every module a foreign toolchain produced. The import
+   overflow, which is also true of every module a foreign toolchain produced, and no
+   `inference.bounds_elided` section means every dynamic array access keeps its guard. The import
    section placement is mandatory because imported functions occupy the lowest indices and
    the section ordering is enforced by the binary format.
 
@@ -445,6 +448,7 @@ Detailed design documents live in `docs/`:
 - `overflow_guard.rs` - The overflow-guard catalogue: `guard_kind`, the single classifier both the two arithmetic lowering sites and the pre-body scratch reservation ask about a `+`, `-`, `*` or unary `-`; the per-row instruction sequences, every one of which traps through `unreachable`; and `GuardScratchPool`, the per-function scratch shared by all of a body's guards
 - `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation — kind-tagged, so a `forall`/plain body yields a `ValidSpec` payload and an `exists`/`unique` body a reachability payload with its entry arity and source-visible slots — read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator with its `Univ`/`UnivLvl`/`Exist`/`Reach` modes, the `AggValue` leaf tree that aggregate values translate to, and the pinned-witness machinery short-circuit operators and non-constant indices share; `reach.rs`: the reachability pre-scan whose `ChoicePlan` maps each scalar `@` to its appended choice parameter, shared by signature registration, body lowering, and payload translation; `overflow_reach.rs`: the per-hop re-scoped call walk that decides whether a reachability body reaches a function carrying an overflow guard, reusing code generation's own call resolution, counting an unresolvable callee as guarded and skipping `external fn` callees for the linker to judge; `diag.rs`: the `P001`–`P018` diagnostic registry). See [`docs/specification-obligations.md`](docs/specification-obligations.md) for the obligation shapes a specification author reads, and [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
 - `hspecs_section.rs` - Encodes the obligation map into the `inference.hspecs` custom WASM section (via the shared `inference-hassert` codec) and the fail-closed pre-encode depth guard
+- `bounds_elided_section.rs` - Encodes the list of functions that hold an array access emitted without its bounds guard into the `inference.bounds_elided` custom WASM section, in `inference.checked`'s format, emitted in both compilation modes and only when non-empty. Only a build under `BoundsChecks::OmitProven` writes it; it exists so the choice is visible in the artifact, and the static merge linker carries it into a merged module
 - `checked_section.rs` - Encodes the guarded-function list into the `inference.checked` custom WASM section, emitted in both compilation modes and only when non-empty, so its absence is the statement that no function of the module traps on arithmetic overflow. Nothing in the Rocq translation reads it; it exists for the static merge linker, which is the sole judge of a merged body
 
 ## Testing

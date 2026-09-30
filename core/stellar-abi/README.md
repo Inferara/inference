@@ -73,12 +73,13 @@ descriptor with no export would ship a contract silently missing a method.
 
 ### Appended, never renumbered
 
-The module carries two records naming raw function indices that this crate does
-not decode: `inference.checked`, the overflow-guard record, and the name
-section's function names. Appending leaves the first byte-identical and lets the
-second be extended. It is also the truthful arrangement: a wrapper holds no
-guardable arithmetic, so its absence from the guard record is accurate rather
-than merely convenient.
+The module carries records naming raw function indices that this crate does
+not decode: `inference.checked`, the overflow-guard record,
+`inference.bounds_elided`, the record of functions that omit a bounds guard, and
+the name section's function names. Appending leaves the first two byte-identical
+and lets the third be extended. It is also the truthful arrangement: a wrapper
+holds no guardable arithmetic and indexes no array, so its absence from both
+records is accurate rather than merely convenient.
 
 ## The custom sections
 

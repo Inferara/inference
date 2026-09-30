@@ -52,10 +52,12 @@
 //!    verbatim and gain the new ones; the export section keeps its names, kinds
 //!    and order and moves only the targets of the wrapped methods.
 //! 6. The wrappers go **after** every existing function, so no existing index
-//!    moves. That is what keeps the `inference.checked` overflow-guard record —
-//!    a list of raw function indices this crate does not decode — correct with
-//!    no remap. It is also true: a wrapper holds no guardable arithmetic, so its
-//!    absence from that list is the accurate statement.
+//!    moves. That is what keeps the `inference.checked` overflow-guard record
+//!    and the `inference.bounds_elided` record of omitted bounds guards — lists
+//!    of raw function indices this crate does not decode — correct with no
+//!    remap. It is also true: a wrapper holds no guardable arithmetic and
+//!    indexes no array, so its absence from both lists is the accurate
+//!    statement.
 //! 7. The name section, when there is one, gains one function-name entry per
 //!    wrapper. Then three custom sections are appended: `contractspecv0`,
 //!    `contractmetav0`, and the environment metadata section
