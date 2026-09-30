@@ -48,7 +48,7 @@ pub mod manifest;
 mod project;
 
 pub use errors::InferenceError;
-pub use manifest::{ManifestSettings, manifest_settings, manifest_source_root};
+pub use manifest::{ManifestSettings, MemoryKeys, manifest_settings, manifest_source_root};
 pub use project::{
     DiskLoader, FileLoader, FileParseErrors, ImportProblem, LoadedFile, ProjectParse,
     ProjectWarning, ResilientProjectParse, load_project_resilient,

@@ -60,22 +60,35 @@ pub struct ManifestSettings {
     /// on, so the caller resolves the name and decides what an unknown one
     /// means for it.
     pub build_target: Option<String>,
-    /// The `[memory] pages` value as written, or `None` when the manifest sets
-    /// no integer there that a `u32` can hold.
+    /// The `[memory]` table's keys as written — every key unset when the
+    /// manifest has no table — or `None` when the table holds something `infs`
+    /// refuses to load before any layout is considered: a key it does not know,
+    /// or a value that is not an integer a `u32` can hold.
     ///
-    /// Not validated, for the reason [`Self::build_target`] is not: whether a
-    /// page count and a stack size describe a memory a build can emit is decided
-    /// jointly, by `inference-compiler-interface`, and the caller decides what a
-    /// rejected pair means for it.
-    pub memory_pages: Option<u32>,
-    /// The `[memory] max-pages` value as written, or `None` when the manifest
-    /// sets no integer there that a `u32` can hold. Not validated, as
-    /// [`Self::memory_pages`] is not.
-    pub memory_max_pages: Option<u32>,
-    /// The `[memory] stack-size` value as written, or `None` when the manifest
-    /// sets no integer there that a `u32` can hold. Not validated, as
-    /// [`Self::memory_pages`] is not.
-    pub memory_stack_size: Option<u32>,
+    /// The keys are not validated as a layout, for the reason
+    /// [`Self::build_target`] is not: whether they describe a memory a build can
+    /// emit is decided jointly, by `inference-compiler-interface`, and the
+    /// caller decides what a rejected layout means for it. What is decided here
+    /// is whether the table can be read at all, because only here is an
+    /// unreadable key still distinguishable from an absent one — and reading one
+    /// as absent would resolve a layout the manifest does not describe, and one
+    /// `infs` would never build.
+    pub memory: Option<MemoryKeys>,
+}
+
+/// The keys of a manifest's `[memory]` table, each as written or unset.
+///
+/// Mirrors the fields of `infs`'s `MemoryConfig`. A key added there has to be
+/// added here too, or a table that uses it reads as unusable — the IDE then
+/// falls back to the default layout rather than guess at a key it does not know.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryKeys {
+    /// `pages`: linear memory size in 64 KiB pages.
+    pub pages: Option<u32>,
+    /// `max-pages`: the most pages the memory may grow to.
+    pub max_pages: Option<u32>,
+    /// `stack-size`: shadow stack size in bytes.
+    pub stack_size: Option<u32>,
 }
 
 /// Reads the settings that govern `file` from the nearest ancestor manifest, or
@@ -111,24 +124,36 @@ pub fn manifest_settings(file: &Path) -> Option<ManifestSettings> {
     Some(ManifestSettings {
         src_root,
         build_target,
-        memory_pages: memory_key(&manifest, "pages"),
-        memory_max_pages: memory_key(&manifest, "max-pages"),
-        memory_stack_size: memory_key(&manifest, "stack-size"),
+        memory: memory_keys(&manifest),
     })
 }
 
-/// The `[memory]` key `key` of `manifest` as a `u32`, or `None` when the table,
-/// the key, or an integer value in `u32` range is missing.
+/// The keys of `manifest`'s `[memory]` table, or `None` when `infs` would refuse
+/// to load the table: it is not a table, it holds a key `infs` does not know, or
+/// a value is not an integer a `u32` can hold.
 ///
-/// A value out of that range is not a size `infs` would load, so it reads as no
-/// value at all rather than as a truncation of one.
-fn memory_key(manifest: &toml::Table, key: &str) -> Option<u32> {
-    manifest
-        .get("memory")
-        .and_then(toml::Value::as_table)
-        .and_then(|memory| memory.get(key))
-        .and_then(toml::Value::as_integer)
-        .and_then(|value| u32::try_from(value).ok())
+/// A manifest with no `[memory]` table has every key unset, exactly as `infs`
+/// reads it. A value out of `u32` range is not a size `infs` would load, so it
+/// makes the table unusable rather than being read as a truncation of itself.
+fn memory_keys(manifest: &toml::Table) -> Option<MemoryKeys> {
+    let Some(table) = manifest.get("memory") else {
+        return Some(MemoryKeys::default());
+    };
+    let mut keys = MemoryKeys::default();
+    for (key, value) in table.as_table()? {
+        let slot = match key.as_str() {
+            "pages" => &mut keys.pages,
+            "max-pages" => &mut keys.max_pages,
+            "stack-size" => &mut keys.stack_size,
+            _ => return None,
+        };
+        *slot = Some(
+            value
+                .as_integer()
+                .and_then(|value| u32::try_from(value).ok())?,
+        );
+    }
+    Some(keys)
 }
 
 /// Derives the analysis source root for `file` from the nearest ancestor
@@ -428,9 +453,7 @@ mod tests {
             Some(ManifestSettings {
                 src_root: tree.path("src"),
                 build_target: Some("spacewasm".to_string()),
-                memory_pages: None,
-                memory_max_pages: None,
-                memory_stack_size: None,
+                memory: Some(MemoryKeys::default()),
             })
         );
     }
@@ -488,9 +511,7 @@ mod tests {
             Some(ManifestSettings {
                 src_root: tree.path("inner/src"),
                 build_target: None,
-                memory_pages: None,
-                memory_max_pages: None,
-                memory_stack_size: None,
+                memory: Some(MemoryKeys::default()),
             })
         );
 
@@ -515,48 +536,57 @@ mod tests {
     }
 
     /// Every `[memory]` key comes back as written, and each independently: a
-    /// manifest that sets only one leaves the others to the caller's default.
+    /// manifest that sets only one leaves the others to the caller's default,
+    /// and one with no table leaves all three unset.
     #[test]
     fn settings_carry_the_memory_keys_as_written() {
-        for (table, pages, max_pages, stack_size) in [
+        for (table, expected) in [
             (
-                "pages = 4\nmax-pages = 8\nstack-size = 131072\n",
-                Some(4),
-                Some(8),
-                Some(131_072),
+                "[memory]\npages = 4\nmax-pages = 8\nstack-size = 131072\n",
+                MemoryKeys {
+                    pages: Some(4),
+                    max_pages: Some(8),
+                    stack_size: Some(131_072),
+                },
             ),
-            ("pages = 2\n", Some(2), None, None),
-            ("max-pages = 8\n", None, Some(8), None),
-            ("stack-size = 32768\n", None, None, Some(32_768)),
-            ("", None, None, None),
+            (
+                "[memory]\npages = 2\n",
+                MemoryKeys {
+                    pages: Some(2),
+                    ..MemoryKeys::default()
+                },
+            ),
+            (
+                "[memory]\nmax-pages = 8\n",
+                MemoryKeys {
+                    max_pages: Some(8),
+                    ..MemoryKeys::default()
+                },
+            ),
+            (
+                "[memory]\nstack-size = 32768\n",
+                MemoryKeys {
+                    stack_size: Some(32_768),
+                    ..MemoryKeys::default()
+                },
+            ),
+            ("[memory]\n", MemoryKeys::default()),
+            ("", MemoryKeys::default()),
         ] {
             let tree = TempTree::new("settings-memory");
-            tree.write(
-                MANIFEST_FILE_NAME,
-                &format!("{VALID_MANIFEST}\n[memory]\n{table}"),
-            );
+            tree.write(MANIFEST_FILE_NAME, &format!("{VALID_MANIFEST}\n{table}"));
             let file = tree.write("src/a.inf", "pub fn a() {}");
 
             let settings = manifest_settings(&file).expect("the manifest governs the file");
-            assert_eq!(settings.memory_pages, pages, "for table:\n{table}");
-            assert_eq!(settings.memory_max_pages, max_pages, "for table:\n{table}");
-            assert_eq!(settings.memory_stack_size, stack_size, "for table:\n{table}");
+            assert_eq!(settings.memory, Some(expected), "for table:\n{table}");
         }
     }
 
     /// The keys are not validated as a layout — a stack that does not fit its
-    /// memory comes back as written — but a value that is not a `u32` at all is
-    /// no size, and reads as none rather than as a truncation of one.
+    /// memory, or a zero, comes back as written for the caller to judge.
     #[test]
-    fn settings_return_the_memory_keys_unvalidated() {
-        for (value, expected) in [
-            ("1000", Some(1000)),
-            ("0", Some(0)),
-            ("-16", None),
-            ("4294967296", None),
-            ("\"65536\"", None),
-            ("1.5", None),
-        ] {
+    fn settings_return_the_memory_keys_unvalidated_as_a_layout() {
+        for (value, expected) in [("1000", 1000), ("0", 0), ("131072", 131_072)] {
             let tree = TempTree::new("settings-memory-unvalidated");
             tree.write(
                 MANIFEST_FILE_NAME,
@@ -565,7 +595,40 @@ mod tests {
             let file = tree.write("src/a.inf", "pub fn a() {}");
 
             let settings = manifest_settings(&file).expect("the manifest governs the file");
-            assert_eq!(settings.memory_stack_size, expected, "`stack-size = {value}`");
+            assert_eq!(
+                settings.memory.and_then(|keys| keys.stack_size),
+                Some(expected),
+                "`stack-size = {value}`"
+            );
+        }
+    }
+
+    /// A table `infs` would refuse before considering any layout is unusable as
+    /// a whole, rather than read with the offending key dropped: dropping
+    /// `max-pages = "8"` from `pages = 4, stack-size = 131072` would resolve a
+    /// 128 KiB stack for a project `infs` refuses to build.
+    #[test]
+    fn a_memory_table_infs_would_refuse_is_unusable_as_a_whole() {
+        for table in [
+            "[memory]\npages = 4\nmax-pages = \"8\"\nstack-size = 131072\n",
+            "[memory]\nstack-size = -16\n",
+            "[memory]\nstack-size = 4294967296\n",
+            "[memory]\npages = 1.5\n",
+            "[memory]\npages = 4\nstack_size = 131072\n",
+            "[memory]\npage = 2\n",
+        ]
+        .map(|table| format!("{VALID_MANIFEST}\n{table}"))
+        // A root key, so it precedes the `[package]` header it would otherwise
+        // be read as part of.
+        .into_iter()
+        .chain([format!("memory = 5\n{VALID_MANIFEST}")])
+        {
+            let tree = TempTree::new("settings-memory-refused");
+            tree.write(MANIFEST_FILE_NAME, &table);
+            let file = tree.write("src/a.inf", "pub fn a() {}");
+
+            let settings = manifest_settings(&file).expect("the manifest governs the file");
+            assert_eq!(settings.memory, None, "for table:\n{table}");
         }
     }
 }
