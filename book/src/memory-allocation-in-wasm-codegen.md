@@ -49,9 +49,11 @@ Any key may be given alone; the others keep their defaults, and the three are ch
 
 The memory is **fixed** unless a build sets `max-pages` above `pages`: the memory section declares `min == max`, so `memory.grow` can never move the end of memory. Nothing the compiler emits grows memory; a larger maximum is room for a linked module or the host to grow into, and the linker refuses a module that grows memory against a fixed one. The maximum is always a number — there is no unbounded memory — and the `spacewasm` target refuses a growable one outright, because its interpreter is loaded with `memory.grow` disallowed.
 
+A configured layout is declared even by a program whose own code touches no memory. Otherwise the module would have no memory for the layout to describe, and a linked module that addresses memory would bring its own: the linker adopts a memoryless program's external memory as that module declared it, so the size and maximum the build asked for — a bound included — would silently give way to the library's. The default layout is still emitted only when something uses it.
+
 The overflow trap constrains the maximum. A wrapped stack pointer lands at `2^32 - stack-size` or above, and must land past the end of memory to trap, so the memory at its maximum and the stack must fit the 32-bit address space together: `max-pages × 64 KiB + stack-size ≤ 2^32`. The check is made against the maximum rather than the size because growth moves the end of memory up to it. A layout that breaks it is refused when the manifest loads or the flags are read.
 
-Programs without arrays do not get a memory section, a global section, or any memory-related exports. The compiler tracks a `has_memory` flag and only emits these sections when at least one function uses arrays. Existing programs produce identical WASM output — zero regression.
+Programs without arrays do not get a memory section, a global section, or any memory-related exports. The compiler tracks a `has_memory` flag and only emits these sections when at least one function uses arrays — or when the build configures a layout other than the default (below). Existing programs produce identical WASM output — zero regression.
 
 ## Stack Frame Layout
 
@@ -547,7 +549,7 @@ Zig also uses `--stack-first` layout when targeting WASM, placing the stack at l
 
 ## WASM Section Layout
 
-When `has_memory` is true, the compiler emits three additional sections in the WASM module:
+When `has_memory` is true, or the build configured a non-default layout, the compiler emits three additional sections in the WASM module:
 
 | Section | Contents |
 |---|---|
@@ -557,7 +559,7 @@ When `has_memory` is true, the compiler emits three additional sections in the W
 
 These sections are ordered according to the WASM specification: Type, Function, Memory, Global, Export, Code, Name. The ordering is mandatory — a misordered module fails validation.
 
-When no function uses arrays, these sections are omitted entirely. The output is byte-identical to what the compiler produced before array support was added.
+When no function uses arrays and the layout is the default, these sections are omitted entirely. The output is byte-identical to what the compiler produced before array support was added.
 
 ## Formal Verification Implications
 
