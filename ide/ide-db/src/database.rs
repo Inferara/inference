@@ -260,17 +260,14 @@ fn manifest_target(name: Option<&str>) -> TargetName {
 ///
 /// The keys are resolved exactly as `infs` and `infc` resolve them, filling an
 /// absent key from the default layout, so a table that sets only `pages` keeps
-/// the default stack and one that sets only `stack-size` gets that stack. An
+/// the default stack and one that sets only `stack-size` gets that stack. The
+/// maximum does not move the stack, but it takes part in deciding whether the
+/// table is usable at all, so it is resolved with the other two. An
 /// unusable table falls back for the reason [`manifest_target`] gives: `infs`
 /// refuses to build it, so there is no build for the editor to agree with, and
 /// the default layout is the one under which the rest of the file is still
 /// analyzed in full.
-fn manifest_stack_budget(pages: Option<u32>, stack_size: Option<u32>) -> u32 {
-    let request = MemoryRequest {
-        pages,
-        stack_size,
-        ..MemoryRequest::default()
-    };
+fn manifest_stack_budget(request: MemoryRequest) -> u32 {
     MemoryLayout::resolve(request, MemoryLayoutSource::Manifest)
         .unwrap_or_default()
         .stack_size()
@@ -1386,10 +1383,11 @@ impl RootDatabase {
             let root = EntryRoot {
                 src_root: settings.src_root,
                 target: manifest_target(settings.build_target.as_deref()),
-                stack_budget_bytes: manifest_stack_budget(
-                    settings.memory_pages,
-                    settings.memory_stack_size,
-                ),
+                stack_budget_bytes: manifest_stack_budget(MemoryRequest {
+                    pages: settings.memory_pages,
+                    max_pages: settings.memory_max_pages,
+                    stack_size: settings.memory_stack_size,
+                }),
             };
             self.worker_mut()
                 .roots

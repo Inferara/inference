@@ -278,10 +278,13 @@ mode = "compile"
 # auto-install = true
 
 # [memory]
-# Linear memory of the emitted module. Either key may be given alone; the other
-# keeps its default. `stack-size` also sets the budget A036 measures call-chain
-# frame usage against, so a smaller stack tightens that diagnostic.
+# Linear memory of the emitted module. Any key may be given alone; the others
+# keep their defaults. The memory is fixed at `pages` unless `max-pages` lets it
+# grow, which only a linked module or the host can do. `stack-size` also sets
+# the budget A036 measures call-chain frame usage against, so a smaller stack
+# tightens that diagnostic.
 # pages = 1
+# max-pages = 1
 # stack-size = 65536
 
 # [verification]

@@ -1709,15 +1709,18 @@ fn chain_findings_under(manifest: Option<&str>, tag: &str) -> Vec<String> {
 
 #[test]
 fn a_manifest_stack_size_reaches_analysis() {
-    let findings = chain_findings_under(
-        Some(&manifest_with_memory("pages = 4\nstack-size = 131072\n")),
-        "stack-larger",
-    );
-    assert_eq!(
-        findings,
-        Vec::<String>::new(),
-        "a ~72 KB chain fits the 128 KB stack the project declares"
-    );
+    for table in [
+        "pages = 4\nstack-size = 131072\n",
+        // A maximum does not move the stack, and a usable one does not unseat it.
+        "pages = 4\nmax-pages = 8\nstack-size = 131072\n",
+    ] {
+        let findings = chain_findings_under(Some(&manifest_with_memory(table)), "stack-larger");
+        assert_eq!(
+            findings,
+            Vec::<String>::new(),
+            "a ~72 KB chain fits the 128 KB stack the project declares:\n{table}"
+        );
+    }
 }
 
 #[test]
@@ -1730,6 +1733,10 @@ fn a_project_without_a_larger_stack_is_measured_against_the_default() {
         // A table `infs` would refuse to build leaves the default in force.
         Some(manifest_with_memory("stack-size = 1000\n")),
         Some(manifest_with_memory("stack-size = 131072\n")),
+        // An unusable maximum makes the whole table one `infs` refuses.
+        Some(manifest_with_memory(
+            "pages = 4\nmax-pages = 2\nstack-size = 131072\n",
+        )),
     ] {
         let findings = chain_findings_under(manifest.as_deref(), "stack-default");
         assert_eq!(findings.len(), 1, "under manifest {manifest:?}: {findings:?}");

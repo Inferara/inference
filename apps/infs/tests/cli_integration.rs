@@ -8152,6 +8152,182 @@ fn project_build_rejects_an_unknown_memory_key() {
     );
 }
 
+// [memory] max-pages forwarding
+//
+// The maximum travels the route the other two keys do, but it is gated on its
+// own ABI minor and it changes the echo, so the routes that differ in code —
+// project build and single-file run — are exercised with it, beside the wire
+// spelling, the gate, and the target that refuses a growable memory.
+
+/// A `[memory]` table declaring a maximum above the size.
+const GROWABLE_MEMORY_TABLE: &str = "[memory]\npages = 2\nmax-pages = 8\nstack-size = 32768\n";
+
+/// The `memory:` line `forward_memory_layout` echoes for [`GROWABLE_MEMORY_TABLE`].
+const GROWABLE_MEMORY_ECHO: &str = "memory: 2 page(s) growable to 8, 32768-byte stack";
+
+/// Asserts the growable layout is echoed exactly once, as its own whole line.
+fn assert_echoes_growable_memory_once(stdout: &str) {
+    let lines = stdout
+        .lines()
+        .filter(|line| line.trim() == GROWABLE_MEMORY_ECHO)
+        .count();
+    assert_eq!(
+        lines, 1,
+        "the resolved layout must be echoed exactly once, got stdout:\n{stdout}"
+    );
+}
+
+/// Asserts `wasm` declares two pages growable to eight, with its stack pointer
+/// at 32768.
+fn assert_artifact_carries_the_declared_maximum(wasm: &[u8]) {
+    let wat = wasmprinter::print_bytes(wasm).expect("the artifact must be printable");
+    assert!(
+        wat.contains("(memory (;0;) 2 8)"),
+        "the artifact must declare 2 pages growable to 8:\n{wat}"
+    );
+    assert!(
+        wat.contains("(global (;0;) (mut i32) i32.const 32768)"),
+        "the artifact's stack pointer must start at the manifest's stack size:\n{wat}"
+    );
+}
+
+#[test]
+fn project_build_honors_a_declared_maximum() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, GROWABLE_MEMORY_TABLE);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    assert_echoes_growable_memory_once(&stdout_of(&cmd.assert().success()));
+
+    assert_artifact_carries_the_declared_maximum(&read_project_artifact(&temp));
+}
+
+/// Single-file `run` honors the maximum and still executes: a growable memory
+/// is one wasmtime instantiates like any other.
+#[test]
+fn single_file_run_honors_a_declared_maximum_and_executes() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, GROWABLE_MEMORY_TABLE);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("src/main.inf");
+    let stdout = stdout_of(&cmd.assert().success());
+    assert_echoes_growable_memory_once(&stdout);
+    assert!(
+        stdout.contains('1'),
+        "main returns arr[0] == 1, got stdout:\n{stdout}"
+    );
+
+    let artifact = temp.child("out").child("main.wasm");
+    assert_artifact_carries_the_declared_maximum(&std::fs::read(artifact.path()).unwrap());
+}
+
+/// The maximum reaches `infc` as its own argv entry with its value adjacent,
+/// exactly once, beside the other two keys.
+#[cfg(unix)]
+#[test]
+fn a_declared_maximum_reaches_infc_as_adjacent_argv_entries() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, GROWABLE_MEMORY_TABLE);
+
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build");
+    assert_echoes_growable_memory_once(&stdout_of(&cmd.assert().success()));
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+    assert_eq!(
+        argv_values_after(&argv, "--max-memory-pages"),
+        [Some("8")],
+        "`--max-memory-pages` must be forwarded once with its value adjacent, got argv: {argv:?}"
+    );
+    assert_eq!(argv_values_after(&argv, "--memory-pages"), [Some("2")]);
+    assert_eq!(argv_values_after(&argv, "--stack-size"), [Some("32768")]);
+}
+
+/// An `infc` one minor short of the maximum is refused with remediation naming
+/// the maximum, even though it supports the other two memory flags.
+#[cfg(unix)]
+#[test]
+fn project_build_old_infc_with_a_declared_maximum_hard_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, GROWABLE_MEMORY_TABLE);
+
+    let stub = temp.child("infc_stub");
+    stub.write_str(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '1.9\\n'; exit 0 ;;\n\
+           *) exit 0 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("--max-memory-pages")
+            .and(predicate::str::contains("1.10"))
+            .and(predicate::str::contains("update the toolchain"))
+            .and(predicate::str::contains("max-pages")),
+    );
+}
+
+/// A growable memory in a `spacewasm` project is refused by the compiler, whose
+/// message names the target and the key to change.
+#[test]
+fn project_build_refuses_a_growable_memory_at_spacewasm() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_ARRAY_SRC,
+        "[build]\ntarget = \"spacewasm\"\n\n[memory]\nmax-pages = 4\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("The `spacewasm` target does not support a growable linear memory")
+            .and(predicate::str::contains("[memory] max-pages")),
+    );
+}
+
 // Adoption of a linked library's proof obligations
 
 /// A `[verification]` table that asks for adoption, for projects whose build
