@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 
 use inference_analysis::TargetName;
+use inference_compiler_interface::{MemoryLayout, MemoryLayoutSource};
 use inference_vfs::Vfs;
 use rustc_hash::FxHashMap;
 use salsa::{Database, Setter, Storage};
@@ -254,6 +255,22 @@ fn manifest_target(name: Option<&str>) -> TargetName {
         .unwrap_or(TargetName::DEFAULT)
 }
 
+/// The shadow-stack size a build of a manifest's `[memory]` table emits, or the
+/// default layout's when the table describes no memory a build could emit.
+///
+/// The keys are resolved exactly as `infs` and `infc` resolve them, filling an
+/// absent key from the default layout, so a table that sets only `pages` keeps
+/// the default stack and one that sets only `stack-size` gets that stack. An
+/// unusable table falls back for the reason [`manifest_target`] gives: `infs`
+/// refuses to build it, so there is no build for the editor to agree with, and
+/// the default layout is the one under which the rest of the file is still
+/// analyzed in full.
+fn manifest_stack_budget(pages: Option<u32>, stack_size: Option<u32>) -> u32 {
+    MemoryLayout::resolve(pages, stack_size, MemoryLayoutSource::Manifest)
+        .unwrap_or_default()
+        .stack_size()
+}
+
 /// Owns the editor's open-document overlay and the per-entry-file analyses
 /// derived from it.
 ///
@@ -318,6 +335,13 @@ fn manifest_target(name: Option<&str>) -> TargetName {
 /// closure donor lends the target its own analysis ran for, so a file navigated
 /// into from a project entry is analyzed as that entry's build would compile it.
 /// The own-directory tier has no project, so it takes the default target.
+///
+/// The shadow stack travels the same way. A036 measures a call chain's frames
+/// against the stack the project's `[memory]` table lays out, resolved as `infc`
+/// resolves it, so a project that enlarges its stack is not flagged in the
+/// editor for a chain its build accepts, and one that shrinks it is flagged for
+/// a chain its build rejects. A table `infs` would refuse, and the own-directory
+/// tier, take the default layout's stack.
 ///
 /// # Sticky per-document source root
 ///
@@ -1357,6 +1381,10 @@ impl RootDatabase {
             let root = EntryRoot {
                 src_root: settings.src_root,
                 target: manifest_target(settings.build_target.as_deref()),
+                stack_budget_bytes: manifest_stack_budget(
+                    settings.memory_pages,
+                    settings.memory_stack_size,
+                ),
             };
             self.worker_mut()
                 .roots
@@ -1375,6 +1403,7 @@ impl RootDatabase {
                 .unwrap_or_else(|| Path::new(""))
                 .to_path_buf(),
             target: TargetName::DEFAULT,
+            stack_budget_bytes: MemoryLayout::default().stack_size(),
         }
     }
 

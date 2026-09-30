@@ -457,6 +457,45 @@ fn a_project_without_a_spacewasm_target_does_not_underline_it() {
     client.shutdown_exit_ok();
 }
 
+// --- 6c. the manifest's shadow stack reaches analysis (A036) ----------------
+
+/// A chain of three ~24 KB frames: about 72 KB, over the default 64 KB shadow
+/// stack and under a 128 KB one.
+const CHAIN_SOURCE: &str = "\
+pub fn a() -> i32 { forall { let arr: [i32; 6000] = @; let x: i32 = arr[0]; } return b(); }
+pub fn b() -> i32 { forall { let arr: [i32; 6000] = @; let x: i32 = arr[0]; } return c(); }
+pub fn c() -> i32 { forall { let arr: [i32; 6000] = @; let x: i32 = arr[0]; } return 0; }
+";
+
+#[test]
+fn a036_follows_the_stack_the_project_declares() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let (_default_dir, default_uri) =
+        project_fixture("a036-default-stack", Some(PACKAGE_MANIFEST), CHAIN_SOURCE);
+    let published = client.did_open(&default_uri, CHAIN_SOURCE, 1);
+    let finding = published.by_code("A036").expect("an A036 finding");
+    assert!(
+        finding["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("exceeding the 65536-byte stack")),
+        "the default stack is the budget, got {}",
+        finding["message"]
+    );
+
+    let larger = format!("{PACKAGE_MANIFEST}\n[memory]\npages = 4\nstack-size = 131072\n");
+    let (_larger_dir, larger_uri) = project_fixture("a036-larger-stack", Some(&larger), CHAIN_SOURCE);
+    let published = client.did_open(&larger_uri, CHAIN_SOURCE, 1);
+    assert!(
+        published.by_code("A036").is_none(),
+        "the chain fits the project's 128 KB stack, got {:?}",
+        published.diagnostics
+    );
+
+    client.shutdown_exit_ok();
+}
+
 // --- 7. hover ---------------------------------------------------------------
 
 #[test]

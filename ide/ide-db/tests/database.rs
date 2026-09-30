@@ -1666,6 +1666,161 @@ fn a_changed_manifest_target_is_observed_only_after_a_reopen() {
     );
 }
 
+// The shadow stack a project's `[memory]` table lays out reaches analysis the
+// way its target does, so A036 measures a call chain against the stack a build
+// of the project emits rather than the default one. The fixture is a chain of
+// three ~24 KB frames: about 72 KB, over the default 64 KB stack and under the
+// 128 KB one `pages = 4, stack-size = 131072` declares.
+
+/// Three public functions calling one another, each holding a ~24 KB frame.
+const CHAIN_SOURCE: &str = "\
+pub fn a() -> i32 { forall { let arr: [i32; 6000] = @; let x: i32 = arr[0]; } return b(); }
+pub fn b() -> i32 { forall { let arr: [i32; 6000] = @; let x: i32 = arr[0]; } return c(); }
+pub fn c() -> i32 { forall { let arr: [i32; 6000] = @; let x: i32 = arr[0]; } return 0; }
+";
+
+/// A well-formed manifest declaring `table` as the body of its `[memory]` table.
+fn manifest_with_memory(table: &str) -> String {
+    format!("{MANIFEST}\n[memory]\n{table}")
+}
+
+/// The messages of `path`'s A036 findings.
+fn a036_findings(db: &mut RootDatabase, path: &Path) -> Vec<String> {
+    db.analysis(path)
+        .findings()
+        .iter()
+        .filter(|finding| finding.rule_id == "A036")
+        .map(|finding| finding.labeled.diagnostic.to_string())
+        .collect()
+}
+
+/// Analyzes `CHAIN_SOURCE` as the entry of a project whose manifest is
+/// `manifest` (none when `None`), returning its A036 messages.
+fn chain_findings_under(manifest: Option<&str>, tag: &str) -> Vec<String> {
+    let tree = TempTree::new(tag);
+    if let Some(manifest) = manifest {
+        tree.write("Inference.toml", manifest);
+    }
+    let main = tree.write("src/main.inf", CHAIN_SOURCE);
+    let mut db = RootDatabase::default();
+    db.open_document(&main, CHAIN_SOURCE);
+    a036_findings(&mut db, &main)
+}
+
+#[test]
+fn a_manifest_stack_size_reaches_analysis() {
+    let findings = chain_findings_under(
+        Some(&manifest_with_memory("pages = 4\nstack-size = 131072\n")),
+        "stack-larger",
+    );
+    assert_eq!(
+        findings,
+        Vec::<String>::new(),
+        "a ~72 KB chain fits the 128 KB stack the project declares"
+    );
+}
+
+#[test]
+fn a_project_without_a_larger_stack_is_measured_against_the_default() {
+    for manifest in [
+        None,
+        Some(MANIFEST.to_string()),
+        // Only the memory grows: the stack keeps its default size, as in a build.
+        Some(manifest_with_memory("pages = 4\n")),
+        // A table `infs` would refuse to build leaves the default in force.
+        Some(manifest_with_memory("stack-size = 1000\n")),
+        Some(manifest_with_memory("stack-size = 131072\n")),
+    ] {
+        let findings = chain_findings_under(manifest.as_deref(), "stack-default");
+        assert_eq!(findings.len(), 1, "under manifest {manifest:?}: {findings:?}");
+        assert!(
+            findings[0].contains("exceeding the 65536-byte stack"),
+            "under manifest {manifest:?}: {}",
+            findings[0]
+        );
+    }
+}
+
+#[test]
+fn a_smaller_manifest_stack_tightens_the_budget() {
+    // One ~40 KB frame fits the default stack and not a 32 KB one, so the
+    // manifest's number is what decides, in the direction that adds a finding.
+    let source = "pub fn heavy() -> i32 { forall { let arr: [i64; 5000] = @; \
+                  let x: i64 = arr[0]; } return 0; }\n";
+    for (manifest, expected) in [
+        (MANIFEST.to_string(), None),
+        (
+            manifest_with_memory("stack-size = 32768\n"),
+            Some("exceeding the 32768-byte stack"),
+        ),
+    ] {
+        let tree = TempTree::new("stack-smaller");
+        tree.write("Inference.toml", &manifest);
+        let main = tree.write("src/main.inf", source);
+        let mut db = RootDatabase::default();
+        db.open_document(&main, source);
+
+        let findings = a036_findings(&mut db, &main);
+        match expected {
+            None => assert_eq!(findings, Vec::<String>::new(), "{manifest}"),
+            Some(budget) => {
+                assert_eq!(findings.len(), 1, "{manifest}: {findings:?}");
+                assert!(findings[0].contains(budget), "{}", findings[0]);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_closure_donor_lends_its_stack_with_its_root() {
+    // The layout of `a_closure_donor_lends_its_target_with_its_root`: the
+    // malformed `src/lib/Inference.toml` leaves `src/lib/chain.inf` no tier-1
+    // root, so it adopts the entry's, and must adopt the entry's stack with it.
+    let tree = TempTree::new("stack-donor");
+    tree.write(
+        "Inference.toml",
+        &manifest_with_memory("pages = 4\nstack-size = 131072\n"),
+    );
+    tree.write("src/lib/Inference.toml", "not = = toml");
+    let main = tree.write("src/main.inf", "use lib::chain;\npub fn main() -> i32 { return 0; }");
+    let chain = tree.write("src/lib/chain.inf", CHAIN_SOURCE);
+    let mut db = RootDatabase::default();
+
+    assert_eq!(
+        a036_findings(&mut db, &main),
+        Vec::<String>::new(),
+        "the entry measures the imported chain against the project's stack"
+    );
+    assert_eq!(
+        a036_findings(&mut db, &chain),
+        Vec::<String>::new(),
+        "the file is analyzed against the donor's stack"
+    );
+}
+
+#[test]
+fn a_file_without_a_donor_or_a_manifest_gets_the_default_stack() {
+    // The negative of the test above: opened before any entry importing it is
+    // analyzed, the file takes the own-directory tier and the default stack.
+    let tree = TempTree::new("stack-no-donor");
+    tree.write(
+        "Inference.toml",
+        &manifest_with_memory("pages = 4\nstack-size = 131072\n"),
+    );
+    tree.write("src/lib/Inference.toml", "not = = toml");
+    tree.write("src/main.inf", "use lib::chain;\npub fn main() -> i32 { return 0; }");
+    let chain = tree.write("src/lib/chain.inf", CHAIN_SOURCE);
+    let mut db = RootDatabase::default();
+
+    let findings = a036_findings(&mut db, &chain);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("exceeding the 65536-byte stack"),
+        "{}",
+        findings[0]
+    );
+}
+
 #[test]
 fn never_opened_analyses_are_capped_with_fifo_eviction() {
     // The cap is a small constant (8). Memoizing analyses for ten never-opened

@@ -85,11 +85,12 @@ impl ClosureFile {
 }
 
 /// Where an entry's project roots its analysis: the source root its imports
-/// resolve against, and the target a build of it names.
+/// resolve against, and the target and shadow stack a build of it has.
 ///
-/// One value because one resolution produces both. The manifest that supplies a
-/// source root supplies the target, and a closure donor lends the two together,
-/// so no entry is analyzed against one project's root and another's target.
+/// One value because one resolution produces all three. The manifest that
+/// supplies a source root supplies the target and the stack, and a closure donor
+/// lends the three together, so no entry is analyzed against one project's root
+/// and another's artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct EntryRoot {
     /// The directory every path-form `use` in the closure resolves against.
@@ -97,6 +98,10 @@ pub(crate) struct EntryRoot {
     /// The runtime the build targets, which a rule such as A055 measures the
     /// program against. The default target when no manifest names one.
     pub(crate) target: TargetName,
+    /// The shadow-stack size in bytes a build emits, which A036 measures
+    /// call-chain frame usage against. The default layout's stack when no
+    /// manifest configures one.
+    pub(crate) stack_budget_bytes: u32,
 }
 
 /// The memoized analysis of one file treated as its own project entry.
@@ -125,9 +130,9 @@ pub struct FileAnalysis {
     /// read, so any event touching the entry can invalidate this analysis.
     closure_paths: FxHashSet<PathBuf>,
     /// The source root this analysis resolved imports against and the target
-    /// it analyzed for. Recorded so the database can lend both to another file
-    /// this closure covers (the closure fallback in `RootDatabase`'s root
-    /// resolution).
+    /// and stack it analyzed for. Recorded so the database can lend all three to
+    /// another file this closure covers (the closure fallback in
+    /// `RootDatabase`'s root resolution).
     root: EntryRoot,
     /// Whether any import went unresolved, so a newly-opened file might fix it.
     had_missing_import: bool,
@@ -208,7 +213,7 @@ impl FileAnalysis {
         checkpoint();
 
         let files = build_closure_files(typed_context.arena(), &path_by_module);
-        let findings = run_analysis_rules(&typed_context, root.target);
+        let findings = run_analysis_rules(&typed_context, root);
 
         FileAnalysis {
             typed: typed_context,
@@ -344,8 +349,8 @@ impl FileAnalysis {
     }
 
     /// The source root this analysis resolved its imports against and the
-    /// target it analyzed for, so the database can lend both to another file
-    /// this closure covers.
+    /// target and stack it analyzed for, so the database can lend all three to
+    /// another file this closure covers.
     pub(crate) fn root(&self) -> &EntryRoot {
         &self.root
     }
@@ -392,15 +397,17 @@ fn build_closure_files(
 /// still valid. A rule is trusted not to panic on partial data; a panic here is
 /// a compiler bug to surface, not to suppress.
 ///
-/// The target is the one the entry's project names, so a rule that measures the
-/// program against its runtime (A055 against `SpaceWasm`'s parameter words)
-/// reports in the editor what a build of the project would. The rest of the
-/// settings are the defaults: A036 answers for a default-layout build, and a
-/// file whose project configures a different `[memory]` layout would want that
-/// layout threaded in here too.
-fn run_analysis_rules(typed_context: &TypedContext, target: TargetName) -> Vec<AnalysisFinding> {
+/// The target and the stack budget are the ones the entry's project builds
+/// with, so a rule that measures the program against its artifact (A055 against
+/// `SpaceWasm`'s parameter words, A036 against the shadow stack the project's
+/// `[memory]` table lays out) reports in the editor what a build of the project
+/// would. The bounds-check policy stays the default: it decides only whether a
+/// passing analysis also computes the accesses code generation may leave
+/// unguarded, and no rule's findings depend on it.
+fn run_analysis_rules(typed_context: &TypedContext, root: &EntryRoot) -> Vec<AnalysisFinding> {
     let options = AnalysisOptions {
-        target,
+        target: root.target,
+        stack_budget_bytes: root.stack_budget_bytes,
         ..AnalysisOptions::default()
     };
     let mut findings = Vec::new();
