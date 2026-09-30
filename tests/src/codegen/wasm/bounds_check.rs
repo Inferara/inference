@@ -294,6 +294,47 @@ mod bounds_check_tests {
         assert_eq!(handed.wasm(), bare.wasm());
     }
 
+    /// A proof names an expression of the program it was proven about, and an
+    /// id means nothing in another program's arena. A set handed to the wrong
+    /// program is refused rather than allowed to drop whichever guard an id
+    /// happens to land on.
+    #[test]
+    fn proofs_about_another_program_are_refused() {
+        use inference_wasm_codegen::{BoundsChecks, CodegenOptions};
+        let typed = |source: &str| {
+            inference_type_checker::TypeCheckerBuilder::build_typed_context(
+                crate::utils::build_ast(source.to_string()),
+            )
+            .expect("type check failed")
+            .typed_context()
+        };
+        let options = inference_analysis::AnalysisOptions {
+            bounds_checks: BoundsChecks::OmitProven,
+            ..Default::default()
+        };
+        let proven_program = typed(PROVEN_READ_WRITE_SOURCE);
+        let proofs = inference_analysis::analyze_with_options(&proven_program, options)
+            .expect("analysis failed");
+        assert!(!proofs.proven_in_bounds().is_empty());
+
+        cov_mark::check!(wasm_codegen_foreign_bounds_proof);
+        let other_program = typed("pub fn f() -> i32 { return 1; }");
+        let err = inference_wasm_codegen::codegen_with_proven_in_bounds(
+            &other_program,
+            "output",
+            CodegenOptions {
+                bounds_checks: BoundsChecks::OmitProven,
+                ..Default::default()
+            },
+            proofs.proven_in_bounds().accesses(),
+        )
+        .expect_err("proofs about another program must be refused");
+        assert!(
+            err.to_string().contains("proven about a different program"),
+            "{err}"
+        );
+    }
+
     /// The default policy keeps the guard of an access the analysis proved in
     /// bounds: running analysis, and holding the proof, is not what drops it.
     #[test]

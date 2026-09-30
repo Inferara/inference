@@ -362,8 +362,8 @@ pub struct AnalysisOptions {
     pub target: TargetName,
     /// Which array accesses the build keeps a runtime bounds guard on. Under
     /// [`BoundsChecks::OmitProven`] a passing analysis carries the accesses it
-    /// proved in bounds ([`AnalysisResult::proven_in_bounds`]), which costs a
-    /// second range analysis of every body with a dynamic access; under
+    /// proved in bounds ([`AnalysisResult::proven_in_bounds`]), read off the
+    /// same range analysis A056 runs for its findings; under
     /// [`BoundsChecks::All`] no build reads them, so they are not computed and
     /// the set is empty. Must name the policy code generation builds under, or
     /// the build either pays for proofs it discards or omits no guard at all.
@@ -418,10 +418,11 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 ///
 /// A passing result under [`BoundsChecks::OmitProven`] also carries the array
 /// accesses proven in bounds ([`AnalysisResult::proven_in_bounds`]), which code
-/// generation reads to omit their runtime guards. They are computed only once
-/// every rule has passed, since a proof about a program that does not compile
-/// has no build to reach, and only when the build will omit a guard, since the
-/// default build keeps every one and would discard them.
+/// generation reads to omit their runtime guards. They are computed only when
+/// the build will omit a guard, since the default build keeps every one and
+/// would discard them, and then in the same pass that produces A056's
+/// findings; they are returned only once every rule has passed, since a proof
+/// about a program that does not compile has no build to reach.
 ///
 /// [`AnalysisResult::proven_in_bounds`]: errors::AnalysisResult::proven_in_bounds
 pub fn analyze_with_options(
@@ -431,8 +432,18 @@ pub fn analyze_with_options(
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let mut infos = Vec::new();
+    let mut proven = rules::array_index_not_proven::ProvenInBounds::default();
+    let a056 = rule::Rule::id(&rules::array_index_not_proven::ArrayIndexNotProven);
     for &r in rules::all_rules() {
-        let findings = r.check(typed_context, options);
+        // A build that omits proven guards needs A056's proofs as well as its
+        // findings, and both come from one run of the range analysis.
+        let findings = if options.bounds_checks.omits_proven() && r.id() == a056 {
+            let (findings, proofs) = rules::array_index_not_proven::check_and_prove(typed_context);
+            proven = proofs;
+            findings
+        } else {
+            r.check(typed_context, options)
+        };
         match r.severity() {
             Severity::Error => errors.extend(findings),
             Severity::Warning => warnings.extend(findings),
@@ -440,13 +451,7 @@ pub fn analyze_with_options(
         }
     }
     if errors.is_empty() {
-        let result = AnalysisResult::new(warnings, infos);
-        if options.bounds_checks.omits_proven() {
-            let proven = rules::array_index_not_proven::prove(typed_context);
-            Ok(result.with_proven_in_bounds(proven))
-        } else {
-            Ok(result)
-        }
+        Ok(AnalysisResult::new(warnings, infos).with_proven_in_bounds(proven))
     } else {
         Err(AnalysisErrors::new(errors, warnings, infos))
     }

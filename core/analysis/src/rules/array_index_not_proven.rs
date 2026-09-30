@@ -26,10 +26,11 @@
 //! other caller can still pass an index the guard traps on.
 //!
 //! The accesses this rule proves are also what code generation reads to omit
-//! the guard, in a build that chose `BoundsChecks::OmitProven`: `prove` runs
-//! the same analysis and keeps each access whose index it bounded within
-//! `0..length`, through the one `verdict` this rule reports from, so the set a
-//! build elides and the set this rule accepts cannot drift apart. An access
+//! the guard, in a build that chose `BoundsChecks::OmitProven`:
+//! `check_and_prove` keeps each access whose index the analysis bounded within
+//! `0..length` from the same pass, and the same `verdict`, this rule reports
+//! from, so the set a build elides and the set this rule accepts cannot drift
+//! apart. An access
 //! proven only by never being reached keeps its guard; it costs nothing at run
 //! time.
 //!
@@ -57,17 +58,7 @@ crate::rule! {
     #[severity = error]
     pub struct ArrayIndexNotProven;
     fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
-        let mut errors = Vec::new();
-        let arena = ctx.arena();
-        for_each_verdict(ctx, &mut |module_path, access, verdict| {
-            if let Verdict::Unproven(range) = verdict {
-                errors.push(LabeledDiagnostic::new(
-                    module_path.to_vec(),
-                    unproven(arena, access, range),
-                ));
-            }
-        });
-        errors
+        check_and_prove(ctx).0
     }
 }
 
@@ -112,20 +103,29 @@ impl ProvenInBounds {
     }
 }
 
-/// Every covered access this rule's analysis proves in bounds.
+/// The rule's findings and every covered access its analysis proves in
+/// bounds, from one run of the range analysis over each body with a covered
+/// access.
 ///
-/// Runs the range analysis again over each body with a covered access, so a
-/// build that omits proven guards pays for it twice there; the rule's own
-/// `check` keeps no state to hand over, which is what keeps it callable on its
-/// own, as the editor calls it.
-pub(crate) fn prove(ctx: &TypedContext) -> ProvenInBounds {
+/// The rule's own `check` is this with the proofs dropped, which keeps it
+/// callable on its own, as the editor calls it; a build that omits proven
+/// guards calls this in its place, so it analyzes each body once rather than
+/// once for the findings and again for the proofs.
+pub(crate) fn check_and_prove(ctx: &TypedContext) -> (Vec<LabeledDiagnostic>, ProvenInBounds) {
+    let mut errors = Vec::new();
     let mut accesses = FxHashSet::default();
-    for_each_verdict(ctx, &mut |_, access, verdict| {
-        if verdict == Verdict::InBounds {
+    let arena = ctx.arena();
+    for_each_verdict(ctx, &mut |module_path, access, verdict| match verdict {
+        Verdict::InBounds => {
             accesses.insert(access.node);
         }
+        Verdict::Unreached => {}
+        Verdict::Unproven(range) => errors.push(LabeledDiagnostic::new(
+            module_path.to_vec(),
+            unproven(arena, access, range),
+        )),
     });
-    ProvenInBounds { accesses }
+    (errors, ProvenInBounds { accesses })
 }
 
 /// What the analysis established about one covered access.

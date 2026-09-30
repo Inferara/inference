@@ -52,7 +52,7 @@ use std::hash::BuildHasher;
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{DefId, ExprId};
-use inference_ast::nodes::Def;
+use inference_ast::nodes::{Def, Expr};
 use inference_fn_key::FnKey;
 use inference_type_checker::typed_context::TypedContext;
 use inference_type_checker::{ExternKind, ExternOrigin};
@@ -215,7 +215,9 @@ pub fn codegen(
 ///
 /// # Errors
 ///
-/// As [`codegen`].
+/// As [`codegen`], and under [`BoundsChecks::OmitProven`] when the set names
+/// an expression that is not an array access of `typed_context`: such a set
+/// was proven about a different program (see [`check_proofs_name_this_program`]).
 pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
     typed_context: &TypedContext,
     module_name: &str,
@@ -307,6 +309,7 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
     check_host_import_support(typed_context, mode, target)?;
 
     let omitted_guards = if bounds_checks.omits_proven() {
+        check_proofs_name_this_program(typed_context, proven_in_bounds)?;
         proven_in_bounds.iter().copied().collect()
     } else {
         FxHashSet::default()
@@ -488,6 +491,44 @@ struct Emitted {
     has_main: bool,
     guarded_functions: Vec<FnKey>,
     export_signatures: Vec<ExportSignature>,
+}
+
+/// Refuses a proven set that cannot have been proven about `typed_context`.
+///
+/// An expression id is an index into one arena, and every program numbers its
+/// own from zero, so a set a caller took from another program's analysis names
+/// ids this one also has — and an id that landed on an array access here would
+/// drop the guard of an access nobody proved. Nothing in the id says which
+/// arena it came from, so this cannot catch every mix-up: a stray id that
+/// happens to land on another array access of this program passes. What it
+/// does catch is every id that names nothing, or anything but an array access,
+/// which a set from another program of any size will almost always contain.
+/// The caller's contract is unchanged: hand in the set the analysis of this
+/// very context returned.
+///
+/// # Errors
+///
+/// Names the first id that is not an array access of this program.
+fn check_proofs_name_this_program<S: BuildHasher>(
+    typed_context: &TypedContext,
+    proven_in_bounds: &HashSet<ExprId, S>,
+) -> anyhow::Result<()> {
+    let arena = typed_context.arena();
+    let stray = proven_in_bounds.iter().find(|&&id| {
+        let index = u32::from(id.into_raw()) as usize;
+        index >= arena.exprs.len() || !matches!(arena[id].kind, Expr::ArrayIndexAccess { .. })
+    });
+    if let Some(stray) = stray {
+        cov_mark::hit!(wasm_codegen_foreign_bounds_proof);
+        return Err(anyhow::anyhow!(
+            "Internal error: the accesses proven in bounds name expression {stray:?}, which is \
+             not an array access of the program being compiled; they were proven about a \
+             different program, and omitting a guard on their strength could read or write \
+             outside an array. Hand code generation the proofs from this program's own \
+             analysis."
+        ));
+    }
+    Ok(())
 }
 
 /// Assembles the WASM module for `typed_context`, with the emission metadata
