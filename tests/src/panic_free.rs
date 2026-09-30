@@ -66,7 +66,7 @@
 mod gate {
     use crate::utils::{get_test_data_path, panic_message, try_build_ast};
     use inference_type_checker::TypeCheckerBuilder;
-    use inference_wasm_codegen::{CodegenOptions, CompilationMode, Target};
+    use inference_wasm_codegen::{BoundsChecks, CodegenOptions, CompilationMode, Target};
     use std::path::{Path, PathBuf};
 
     /// How far one compilation got.
@@ -423,9 +423,9 @@ mod gate {
     /// report a fixture. [`inference::with_compiler_stack`] re-raises a worker
     /// panic on this thread, which is what leaves the guard below still able to
     /// see one.
-    fn compile(source: &str, name: &str, mode: CompilationMode) -> Outcome {
+    fn compile(source: &str, name: &str, mode: CompilationMode, policy: BoundsChecks) -> Outcome {
         let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            inference::with_compiler_stack(|| run_pipeline(source, name, mode))
+            inference::with_compiler_stack(|| run_pipeline(source, name, mode, policy))
         }));
         match guarded {
             Ok(outcome) => outcome,
@@ -439,8 +439,14 @@ mod gate {
     /// Analysis measures the program against the artifact these options
     /// describe, which is the pairing a real build makes: the stack budget a
     /// rule clears a call chain against is the stack code generation is about to
-    /// emit.
-    fn run_pipeline(source: &str, name: &str, mode: CompilationMode) -> Outcome {
+    /// emit, and the bounds-check policy decides whether it proves the accesses
+    /// code generation then emits without a guard.
+    fn run_pipeline(
+        source: &str,
+        name: &str,
+        mode: CompilationMode,
+        policy: BoundsChecks,
+    ) -> Outcome {
         let Ok(arena) = try_build_ast(source.to_string()) else {
             return Outcome::ParseFailed;
         };
@@ -453,6 +459,7 @@ mod gate {
             target,
             mode,
             opt_level: target.default_opt_level(),
+            bounds_checks: policy,
             ..Default::default()
         };
         let analysis = match inference_analysis::analyze_with_options(
@@ -606,19 +613,22 @@ mod gate {
         for case in &cases {
             let source = read(&case.path);
             for mode in [CompilationMode::Compile, CompilationMode::Proof] {
-                if let Outcome::Panicked(payload) = compile(&source, &case.name, mode) {
-                    failures.push(format!(
-                        "{name} in {mode:?} mode: {payload}",
-                        name = case.name
-                    ));
+                for policy in BoundsChecks::ALL {
+                    if let Outcome::Panicked(payload) = compile(&source, &case.name, mode, policy) {
+                        failures.push(format!(
+                            "{name} in {mode:?} mode under `{policy}`: {payload}",
+                            name = case.name,
+                            policy = policy.as_str()
+                        ));
+                    }
                 }
             }
         }
         assert!(
             failures.is_empty(),
-            "{} of {} fixtures aborted the compiler instead of reaching a verdict:\n  {}",
+            "{} of {} builds aborted the compiler instead of reaching a verdict:\n  {}",
             failures.len(),
-            cases.len() * 2,
+            cases.len() * 2 * BoundsChecks::ALL.len(),
             failures.join("\n  ")
         );
     }
@@ -637,7 +647,12 @@ mod gate {
                 .join("panic_free")
                 .join(format!("{stem}.inf", stem = shape.stem));
             let source = read(&path);
-            let outcome = compile(&source, shape.stem, CompilationMode::Compile);
+            let outcome = compile(
+                &source,
+                shape.stem,
+                CompilationMode::Compile,
+                BoundsChecks::All,
+            );
             match (shape.declared, &outcome) {
                 (Module, Outcome::Module) | (TypeCheck, Outcome::TypeCheckFailed) => {}
                 (Analysis(declared), Outcome::AnalysisFailed(reported)) => {
@@ -732,7 +747,12 @@ mod gate {
         let mut allowed_but_arrived: Vec<String> = Vec::new();
         for case in &cases {
             let source = read(&case.path);
-            let outcome = compile(&source, &case.name, CompilationMode::Compile);
+            let outcome = compile(
+                &source,
+                &case.name,
+                CompilationMode::Compile,
+                BoundsChecks::All,
+            );
             let arrived = matches!(outcome, Outcome::Module | Outcome::CodegenFailed(_));
             let allowance = STOPS_BEFORE_CODEGEN
                 .iter()

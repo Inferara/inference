@@ -52,7 +52,7 @@ mod gate {
     use crate::utils::{get_test_data_path, try_build_ast};
     use inference_type_checker::TypeCheckerBuilder;
     use inference_wasm_codegen::{
-        CodegenOptions, CodegenOutput, CompilationMode, SPEC_FUNCS_SECTION_NAME,
+        BoundsChecks, CodegenOptions, CodegenOutput, CompilationMode, SPEC_FUNCS_SECTION_NAME,
         SPEC_FUNCS_SECTION_VERSION, Target,
     };
 
@@ -431,8 +431,9 @@ mod gate {
     ///
     /// The optimization level is the target's own, which is what proof mode uses
     /// regardless of build profile — so this gate measures the artifact a proof
-    /// build writes, not a differently optimized one.
-    fn compile_proof_mode(stem: &str) -> Outcome {
+    /// build writes, not a differently optimized one. `policy` is the
+    /// bounds-check policy that build chose; the verdict must not depend on it.
+    fn compile_proof_mode(stem: &str, policy: BoundsChecks) -> Outcome {
         let path = get_test_data_path().join("inf").join(format!("{stem}.inf"));
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -448,6 +449,7 @@ mod gate {
             target,
             mode: CompilationMode::Proof,
             opt_level: target.default_opt_level(),
+            bounds_checks: policy,
             ..Default::default()
         };
         let analysis = match inference_analysis::analyze_with_options(
@@ -528,13 +530,18 @@ mod gate {
     ///
     /// Failures are accumulated rather than raised at the first mismatch: the
     /// table's value is the whole column, and one fixture regressing must not
-    /// hide the twenty behind it.
+    /// hide the twenty behind it. Each fixture is built under every bounds-check
+    /// policy, which changes which guards a body carries and nothing the verdict
+    /// is about.
     #[test]
     fn every_fixture_reaches_its_expected_verdict() {
         let mut failures: Vec<String> = Vec::new();
-        for fixture in CORPUS {
+        for (fixture, policy) in CORPUS
+            .iter()
+            .flat_map(|fixture| BoundsChecks::ALL.map(|policy| (fixture, policy)))
+        {
             let stem = fixture.stem;
-            let outcome = compile_proof_mode(stem);
+            let outcome = compile_proof_mode(stem, policy);
             match (fixture.expected, &outcome) {
                 (StockValid(_), Outcome::Module(output)) => {
                     if let Err(e) = wasmparser::Validator::new().validate_all(output.wasm()) {
@@ -589,11 +596,14 @@ mod gate {
     #[test]
     fn no_specification_function_body_carries_a_custom_opcode() {
         let mut failures: Vec<String> = Vec::new();
-        for fixture in CORPUS {
+        for (fixture, policy) in CORPUS
+            .iter()
+            .flat_map(|fixture| BoundsChecks::ALL.map(|policy| (fixture, policy)))
+        {
             let StockValid(lowering) = fixture.expected else {
                 continue;
             };
-            let Outcome::Module(output) = compile_proof_mode(fixture.stem) else {
+            let Outcome::Module(output) = compile_proof_mode(fixture.stem, policy) else {
                 // The verdict test reports this; here it would be noise.
                 continue;
             };
