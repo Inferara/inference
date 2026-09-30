@@ -434,6 +434,39 @@ impl Target {
         }
     }
 
+    /// Whether this target's runtime can grow a linear memory, so a layout whose
+    /// maximum exceeds its size declares room that can actually be reached.
+    ///
+    /// Nothing this compiler emits grows memory; a maximum above the size is
+    /// room for a linked module or the host to grow into. Where the runtime
+    /// refuses growth that room is unreachable, and a memory section declaring
+    /// it would state a capacity the module can never have, so the layout is
+    /// refused at build time rather than accepted as a promise nobody keeps.
+    ///
+    /// - `Wasm32` and `Stellar` answer `true`: their runtimes are WebAssembly
+    ///   engines that implement `memory.grow` up to the declared maximum.
+    /// - `SpaceWasm` answers `false`: the interpreter is loaded with
+    ///   `memory.grow` disallowed, as the `spacewasm_std` reference embedding
+    ///   loads it and as `infs run` does, and a module containing the
+    ///   instruction is refused when it is decoded.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use inference_wasm_codegen::Target;
+    ///
+    /// assert!(Target::Wasm32.permits_memory_growth());
+    /// assert!(Target::Stellar.permits_memory_growth());
+    /// assert!(!Target::SpaceWasm.permits_memory_growth());
+    /// ```
+    #[must_use]
+    pub fn permits_memory_growth(self) -> bool {
+        match self {
+            Self::Wasm32 | Self::Stellar => true,
+            Self::SpaceWasm => false,
+        }
+    }
+
     /// Whether a foreign module linked into this target's artifact must itself
     /// be WebAssembly 1.0.
     ///

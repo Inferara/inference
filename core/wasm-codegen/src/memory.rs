@@ -1238,8 +1238,9 @@ fn copy_memarg(offset: u32) -> MemArg {
 /// (SP goes "below 0"), the result is a large unsigned value: the frame is at
 /// most the configured stack size and SP is at least 0, so a wrapped frame
 /// pointer is at least `2^32 - stack_size`. `MemoryLayout::resolve` requires
-/// `memory_bytes + stack_size <= 2^32`, which is exactly the statement that
-/// `2^32 - stack_size` is at or past the end of memory. WebAssembly computes an
+/// `max_memory_bytes + stack_size <= 2^32`, which is exactly the statement that
+/// `2^32 - stack_size` is at or past the end of memory — measured at the
+/// memory's maximum, so it stays past the end however far growth moves it. WebAssembly computes an
 /// effective address as `base + offset` without 32-bit wraparound, so the first
 /// zero-fill store — the one at offset 0, emitted first in both the unrolled and
 /// the looped form — fails its bounds check and traps before any byte is
