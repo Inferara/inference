@@ -726,6 +726,22 @@ A pure leaf function does not contribute its module's declared memory at all, so
 a `wasm32-unknown-unknown` artifact whose merged closure only computes links
 against a single-page main with main's own memory kept unchanged.
 
+An external whose closure *grows* memory meets the same kept bound from the
+other side. Against a main whose memory is fixed, every `memory.grow` it runs
+would fail, so the merge refuses it rather than emit a module that silently
+cannot grow — and names the knob that admits the growth:
+
+```text
+error: cannot reconcile linear memory for `grow_by`: the external grows linear
+       memory, but the reconciled memory's maximum (1 pages) does not exceed its
+       minimum (1 pages); the kept memory bound is not relaxed. Give the main
+       module a memory that may grow: `max-pages` in the `[memory]` table of
+       `Inference.toml`, or `infc --max-memory-pages <N>`
+```
+
+With a maximum declared, growth proceeds up to it and no further: the output
+keeps main's maximum, so a `memory.grow` past it returns -1.
+
 ## Entry Point
 
 ```rust

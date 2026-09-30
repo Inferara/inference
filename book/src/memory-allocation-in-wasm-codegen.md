@@ -16,7 +16,7 @@ Inference uses option 3. Arrays have stack-scoped lifetimes (they are created wh
 
 ## Linear Memory Layout
 
-WebAssembly linear memory is a contiguous byte array. Inference allocates one page (64 KB) and uses it entirely as a stack:
+WebAssembly linear memory is a contiguous byte array. By default Inference allocates one page (64 KiB) and uses it entirely as a stack:
 
 ```text
 Linear Memory (1 page = 64KB)
@@ -34,6 +34,22 @@ Linear Memory (1 page = 64KB)
 ```
 
 `__stack_pointer` is a mutable i32 WebAssembly global initialized to 65536 — the top of the stack region. When a function that needs a frame is called, `__stack_pointer` is decremented by the frame size; when the function returns, it is restored. Not every function that touches arrays needs a frame: a function whose only compound values are parameters it provably never writes reads them through the caller's pointers and never touches `__stack_pointer` at all (see [Array Parameter Passing](#array-parameter-passing)). The stack grows downward toward address 0, following the `--stack-first` convention used by Rust and Zig when targeting WebAssembly. Any stack overflow that pushes the pointer below address 0 causes a WASM out-of-bounds memory trap automatically, providing free overflow protection without a runtime guard. Future data sections and heap allocations will be placed above the stack region, starting at STACK_SIZE and growing upward.
+
+### Configuring the layout
+
+The layout above is the default, not a constant. A project sets it in the `[memory]` table of `Inference.toml`, and a direct `infc` invocation with the matching flags:
+
+| Key | Flag | Default | Meaning |
+|---|---|---|---|
+| `pages` | `--memory-pages <N>` | `1` | Size of linear memory in 64 KiB pages: the memory section's minimum, and all a module is guaranteed at instantiation |
+| `max-pages` | `--max-memory-pages <N>` | `pages` | The most pages the memory may grow to: the memory section's maximum |
+| `stack-size` | `--stack-size <BYTES>` | `65536` | Size of the shadow stack, which spans `[0, stack-size)`, and the budget A036 measures call chains against |
+
+Any key may be given alone; the others keep their defaults, and the three are checked together as the layout they complete to. The stack must fit in `pages`, and be a multiple of the 16-byte frame alignment. Whatever lies between the top of the stack and the end of memory is the data region: ordinary addressable memory that nothing the compiler emits reads or writes. The whole memory is exported, so a host reads a program's values in place — an array a program hands to a host import arrives as the address of the caller's copy, inside the stack region.
+
+The memory is **fixed** unless a build sets `max-pages` above `pages`: the memory section declares `min == max`, so `memory.grow` can never move the end of memory. Nothing the compiler emits grows memory; a larger maximum is room for a linked module or the host to grow into, and the linker refuses a module that grows memory against a fixed one. The maximum is always a number — there is no unbounded memory — and the `spacewasm` target refuses a growable one outright, because its interpreter is loaded with `memory.grow` disallowed.
+
+The overflow trap constrains the maximum. A wrapped stack pointer lands at `2^32 - stack-size` or above, and must land past the end of memory to trap, so the memory at its maximum and the stack must fit the 32-bit address space together: `max-pages × 64 KiB + stack-size ≤ 2^32`. The check is made against the maximum rather than the size because growth moves the end of memory up to it. A layout that breaks it is refused when the manifest loads or the flags are read.
 
 Programs without arrays do not get a memory section, a global section, or any memory-related exports. The compiler tracks a `has_memory` flag and only emits these sections when at least one function uses arrays. Existing programs produce identical WASM output — zero regression.
 
@@ -535,8 +551,8 @@ When `has_memory` is true, the compiler emits three additional sections in the W
 
 | Section | Contents |
 |---|---|
-| Memory | 1 page minimum, 1 page maximum: `(memory 1 1)` |
-| Global | `__stack_pointer`: mutable i32, init 65536: `(global (mut i32) i32.const 65536)` |
+| Memory | `pages` minimum, `max-pages` maximum; by default `(memory 1 1)` |
+| Global | `__stack_pointer`: mutable i32, initialized to `stack-size`; by default `(global (mut i32) i32.const 65536)` |
 | Export | `"memory"` (memory 0), `"__stack_pointer"` (global 0) |
 
 These sections are ordered according to the WASM specification: Type, Function, Memory, Global, Export, Code, Name. The ordering is mandatory — a misordered module fails validation.

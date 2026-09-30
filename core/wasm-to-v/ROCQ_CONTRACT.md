@@ -1085,9 +1085,11 @@ quantifies over "what an import was permitted to write" in the first place. A
 merged function's stores are already present in the translated body, not
 promised by a signature a proof would need to consult.
 
-The module record changes shape too, in one place. Code generation emits
-its linear memory with the minimum and the maximum equal, so a module it
-produced alone always reads `Mm {|lim_min := N%N; lim_max := Some(N%N)|}`.
+The module record changes shape too, in one place. Code generation always
+emits its linear memory with a maximum — by default equal to the minimum, or
+the larger bound a build declares with `[memory] max-pages` — so a module it
+produced alone reads `Mm {|lim_min := N%N; lim_max := Some(M%N)|}` with
+`M >= N`, and `M = N` unless the build asked for growth.
 A memoryless main that adopts a Tier-B external's memory takes that
 external's limits verbatim, and a `wasm32-unknown-unknown` artifact
 declares no maximum — so `lim_max := None` is a shape only a link

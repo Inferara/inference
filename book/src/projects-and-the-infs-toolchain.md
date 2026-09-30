@@ -76,6 +76,13 @@ mode = "compile"
 # bounds-checks = "all"
 # optimize is recognized but not yet consumed.
 
+# [memory]
+# Linear memory of the emitted module; any key may be given alone. The memory
+# is fixed at `pages` unless `max-pages` lets a linked module or the host grow it.
+# pages = 1
+# max-pages = 1
+# stack-size = 65536
+
 [verification]
 # Output directory for proof artifacts (honored only in proof mode).
 # Defaults to "proofs/" if this section is omitted.
@@ -106,6 +113,9 @@ The fields:
 | `mode` | `[build]` | `"compile"` \| `"proof"` | `"compile"` | Build mode (see below) |
 | `wasm-features` | `[build]` | array of proposal names | `[]` | Post-MVP WebAssembly proposals the artifact may use; `[]` = pure Wasm 1.0. Supported: `"bulk-memory"` |
 | `bounds-checks` | `[build]` | `"all"` \| `"omit-proven"` | `"all"` | Which array accesses keep their runtime bounds guard; `"omit-proven"` drops the guard of each access analysis proved in bounds. See [Omitting proven guards](memory-allocation-in-wasm-codegen.md#omitting-proven-guards) |
+| `pages` | `[memory]` | integer | `1` | Linear memory size in 64 KiB pages. See [Configuring the layout](memory-allocation-in-wasm-codegen.md#configuring-the-layout) |
+| `max-pages` | `[memory]` | integer | `pages` | The most pages the memory may grow to; the memory is fixed unless this exceeds `pages`. Refused at the `spacewasm` target when it does |
+| `stack-size` | `[memory]` | integer | `65536` | Shadow stack size in bytes, a multiple of 16 that fits in `pages`; also the budget A036 measures call chains against |
 | `output-dir` | `[verification]` | path string | `"proofs/"` | Proof artifact directory; proof mode only |
 | `<name>` | `[wasm-dependencies]` | `{ path = "…" }` | — | External `.wasm` module dependency |
 | `<module>` | `[host-imports]` | array of field names | table absent: no policy | The host functions of import module `<module>` the program may bind; a table with no keys admits none. See [The allowlist](external-functions-and-wasm-linking.md#the-allowlist) |
@@ -475,6 +485,8 @@ infs build / infs run (project mode)
             arg: --bounds-checks <policy> (if [build] bounds-checks is
                                          "omit-proven"; ABI ≥ 1.9; both modes)
             arg: --memory-pages <n>     (if [memory] declares `pages`; ABI ≥ 1.3)
+            arg: --max-memory-pages <n> (if [memory] declares `max-pages`;
+                                         ABI ≥ 1.10)
             arg: --stack-size <n>       (if [memory] declares `stack-size`; ABI ≥ 1.3)
             arg: --adopt-external-specs (if [verification] asks for it on a
                                          proof-artifact build; ABI ≥ 1.4; `run`
@@ -527,6 +539,7 @@ infs build <path> (single-file mode)
                                          requires infc ABI ≥ 1.2)
             arg: --bounds-checks <policy> (as the project route sends it)
             arg: --memory-pages <n>     (as the project route sends them)
+            arg: --max-memory-pages <n>
             arg: --stack-size <n>
             arg: --host-imports=<list>  (if the enclosing manifest declares a
                                          [host-imports] table; one argument;
@@ -566,6 +579,7 @@ infs run <path> (single-file mode)
                                          requires infc ABI ≥ 1.2)
             arg: --bounds-checks <policy> (as the project route sends it)
             arg: --memory-pages <n>     (as the project route sends them)
+            arg: --max-memory-pages <n>
             arg: --stack-size <n>
             arg: --host-imports=<list>  (if the enclosing manifest declares a
                                          [host-imports] table; one argument;
@@ -597,13 +611,14 @@ interpreter decodes it — see [`infs run`](#infs-run).
 | `--target <name>` | Name the runtime the module is built for; matched exactly against the same vocabulary `[build] target` uses (`wasm32`, `stellar`, `spacewasm`). Omitted selects `wasm32` |
 | `--wasm-features <names>` | Post-MVP WebAssembly proposals emission may use; comma separated, proposal names only |
 | `--memory-pages <n>` | Linear memory size of the emitted module, in 64 KiB pages |
+| `--max-memory-pages <n>` | The most pages that memory may grow to; omitted, the memory is fixed at its size. Refused at the `spacewasm` target when it exceeds the size |
 | `--stack-size <bytes>` | Shadow stack size, and the budget A036 measures call-chain frame usage against |
 | `--adopt-external-specs` | Carry a linked library's universal proof obligations into the program's proof artifact; proof mode only |
 | `--host-imports=<list>` | Allowlist the host functions the program may bind, as comma-separated `module.field` pairs; the `=` is required, and `--host-imports=` is an explicit empty allowlist that admits none. Omitted applies no policy |
 | `--commit-hash` | Print the build commit hash and exit; used by the `infs` handshake |
 | `--abi-version` | Print `<major>.<minor>` ABI version and exit; used by the `infs` handshake |
 
-> **Note:** The current ABI version is `1.8`.
+> **Note:** The current ABI version is `1.10`.
 
 The default behavior when no phase flag is supplied is full compilation with
 WASM output written to disk — equivalent to `--codegen -o`.
@@ -621,12 +636,13 @@ is parsed as `<major>.<minor>`:
 - **Unknown/old** (`infc` exits non-zero or prints `unknown`): silent; treated
   as graceful skip, equivalent to ABI unknown.
 
-The current ABI is `1.8` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 8` in
+The current ABI is `1.10` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 10` in
 `core/compiler-interface/src/lib.rs`). Each additive flag is gated at the minor
 it was introduced at, independently: `--out-dir` landed at minor 1,
 `--wasm-features` at minor 2, `--memory-pages` and `--stack-size` at minor 3,
-`--adopt-external-specs` at minor 4, `--target` at minor 5, and
-`--host-imports` at minor 8. `infs` forwards each only to an `infc` that
+`--adopt-external-specs` at minor 4, `--target` at minor 5,
+`--host-imports` at minor 8, `--bounds-checks` at minor 9, and
+`--max-memory-pages` at minor 10. `infs` forwards each only to an `infc` that
 reports an ABI minor at or above the flag's own (or matches by commit hash) —
 an `infc` that reports minor 1, for instance, supports `--out-dir` but not
 `--wasm-features`. `--host-imports` is forwarded from the `[host-imports]`
@@ -642,7 +658,11 @@ artifact rather than a refusal. That is true even where the two builds are the
 same bytes: dropping `spacewasm` produces the module a `wasm32` build produces
 and drops the target's acceptance envelope with it, so what the name was
 written for never runs. The default target is never forwarded at all, so a
-project that names none puts no floor under its compiler. Pairing a manifest
+project that names none puts no floor under its compiler. `[memory]` is gated
+per key for the same reason: `pages` and `stack-size` need minor 3 and
+`max-pages` minor 10, so a project that declares no maximum puts no minor-10
+floor under its compiler, and one that does is refused against an older `infc`
+rather than built with a fixed memory. Pairing a manifest
 with a non-default `[verification] output-dir` against an older `infc` is a
 hard error:
 
