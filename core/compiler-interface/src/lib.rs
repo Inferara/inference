@@ -46,9 +46,11 @@
 //!
 //! # Memory layout vocabulary
 //!
-//! [`MemoryLayout`] is the linear memory a build asks for — the page count and
-//! the shadow stack's share of it — together with the invariants that make those
-//! two numbers a memory a module can actually declare. It lives here for the
+//! [`MemoryLayout`] is the linear memory a build asks for — the page count, the
+//! most pages it may grow to, and the shadow stack's share of it — together with
+//! the invariants that make those numbers a memory a module can actually
+//! declare. [`MemoryRequest`] is the same three numbers before any is filled or
+//! checked. It lives here for the
 //! same reason the feature vocabulary does: the surfaces that select a layout
 //! and the code generation that emits one must agree on which layouts exist, and
 //! a rejection has to read the same whether the numbers came from a manifest or
@@ -945,18 +947,20 @@ pub const FRAME_ALIGNMENT: u32 = 16;
 /// Which surface a layout request was written on, so a diagnostic can name the
 /// exact thing the user has to edit.
 ///
-/// Both keys of a surface are named together because [`MemoryLayout::resolve`]
-/// checks the two numbers jointly: several invariants — a stack that outgrows
-/// its memory, a memory that leaves the overflow trap no room — are properties
-/// of the pair, and attributing those to one key would name the wrong one half
-/// the time. The `reason` on [`MemoryLayoutError`] identifies the offending
-/// value; this identifies where it was written.
+/// Every key of a surface is named together because [`MemoryLayout::resolve`]
+/// checks the numbers jointly: several invariants — a stack that outgrows its
+/// memory, a maximum below the size it caps, a memory that leaves the overflow
+/// trap no room — are properties of a pair, and attributing those to one key
+/// would name the wrong one half the time. The `reason` on
+/// [`MemoryLayoutError`] identifies the offending value; this identifies where
+/// it was written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryLayoutSource {
-    /// The `pages` / `stack-size` keys of a project's `Inference.toml`
-    /// `[memory]` table.
+    /// The `pages` / `max-pages` / `stack-size` keys of a project's
+    /// `Inference.toml` `[memory]` table.
     Manifest,
-    /// The `--memory-pages` / `--stack-size` flags on an `infc` command line.
+    /// The `--memory-pages` / `--max-memory-pages` / `--stack-size` flags on an
+    /// `infc` command line.
     Flag,
 }
 
@@ -965,19 +969,37 @@ impl MemoryLayoutSource {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Manifest => "`[memory] pages` / `[memory] stack-size`",
-            Self::Flag => "`--memory-pages` / `--stack-size`",
+            Self::Manifest => "`[memory] pages` / `[memory] max-pages` / `[memory] stack-size`",
+            Self::Flag => "`--memory-pages` / `--max-memory-pages` / `--stack-size`",
         }
     }
 }
 
-/// The linear memory a generated module declares, and the share of it the shadow
-/// stack occupies.
+/// A memory layout as a build asked for it: every dimension a request may leave
+/// unset, before [`MemoryLayout::resolve`] fills and checks them.
+///
+/// A struct rather than three positional arguments to the constructor: all three
+/// are `Option<u32>`, and a call that transposed two of them would compile and
+/// resolve a different memory. Naming each field at the call site is what keeps
+/// a stack size from being read as a page count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryRequest {
+    /// Linear memory size in 64 KiB pages. Unset means one page.
+    pub pages: Option<u32>,
+    /// The most pages the memory may grow to. Unset means the memory's own
+    /// size — whatever `pages` resolves to — so the memory is fixed.
+    pub max_pages: Option<u32>,
+    /// Shadow stack size in bytes. Unset means 64 KiB.
+    pub stack_size: Option<u32>,
+}
+
+/// The linear memory a generated module declares, how far it may grow, and the
+/// share of it the shadow stack occupies.
 ///
 /// This is shared vocabulary rather than a code-generation detail: a project's
 /// manifest, the compiler flags that override it, and the emitter that turns the
-/// two numbers into a memory section and a `__stack_pointer` initializer all read
-/// this one type. A layout a build accepts is therefore exactly a layout that can
+/// three numbers into a memory section and a `__stack_pointer` initializer all
+/// read this one type. A layout a build accepts is therefore exactly a layout that can
 /// be emitted.
 ///
 /// It is deliberately not mirrored by a code-generation twin the way
@@ -987,6 +1009,15 @@ impl MemoryLayoutSource {
 /// produce. A layout has no such second reading — the pages and stack bytes a
 /// user writes are the pages and stack bytes emitted — so a mirror would buy
 /// nothing but a second place for the invariants below to drift apart.
+///
+/// The memory is fixed unless a build asks otherwise: the maximum defaults to
+/// the size, so the memory section declares `min == max` and `memory.grow` can
+/// never move the end of memory. A build may raise the maximum above the size,
+/// which lets a linked module or the host grow the memory up to it; nothing this
+/// compiler emits grows memory itself. The size is what the stack must fit in,
+/// since it is all a module is guaranteed at instantiation, and the maximum is
+/// what the overflow trap's headroom is measured against, since it is how far
+/// growth can move the end of memory.
 ///
 /// Code generation places the shadow stack at the bottom of memory: it spans
 /// `[0, stack_size)` and `__stack_pointer` grows downward from `stack_size`
@@ -998,21 +1029,26 @@ impl MemoryLayoutSource {
 /// needs is not free (see `core/wasm-linker`, which today leans on an
 /// out-of-region address usually being out of bounds).
 ///
-/// The two numbers form one type because neither is checkable alone: a stack
+/// The three numbers form one type because none is checkable alone: a stack
 /// size is only sane relative to the memory it must fit in, a page count is only
-/// sane relative to the stack it must hold, and the overflow trap needs the two
-/// together to leave headroom below 2^32. [`Self::resolve`] is where that joint
-/// contract lives, and it is the only way to name a layout other than
-/// [`Self::default`]. The fields are private so that holding a value of this
-/// type *is* the guarantee that the contract holds — a consumer reads the two
-/// numbers through [`Self::pages()`] and [`Self::stack_size()`] without owing
-/// anyone a validation step, and no caller can assemble a memory the emitter
-/// would have to refuse.
+/// sane relative to the stack it must hold, a maximum only relative to the size
+/// it caps, and the overflow trap needs the maximum and the stack together to
+/// leave headroom below 2^32. [`Self::resolve`] is where that joint contract
+/// lives, and it is the only way to name a layout other than [`Self::default`].
+/// The fields are private so that holding a value of this type *is* the
+/// guarantee that the contract holds — a consumer reads the numbers through
+/// [`Self::pages()`], [`Self::max_pages()`] and [`Self::stack_size()`] without
+/// owing anyone a validation step, and no caller can assemble a memory the
+/// emitter would have to refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryLayout {
-    /// Linear memory size in 64 KiB pages. Emitted as both the minimum and the
-    /// maximum, so the memory is fixed rather than growable.
+    /// Linear memory size in 64 KiB pages: the memory section's minimum, and
+    /// every page a module is guaranteed at instantiation.
     pages: u32,
+    /// The most pages the memory may grow to: the memory section's maximum.
+    /// Equal to `pages` unless the build asked for more, so by default the
+    /// memory is fixed rather than growable.
+    max_pages: u32,
     /// Size of the shadow-stack region in bytes, occupying `[0, stack_size)`.
     stack_size: u32,
 }
@@ -1020,12 +1056,13 @@ pub struct MemoryLayout {
 /// Implemented by hand rather than derived: a derived `Default` would produce a
 /// zero-page, zero-byte memory, which is not a layout any program can run in.
 /// These are instead exactly the values every build emitted before the layout
-/// became configurable — one page, entirely stack — so a default build's bytes
-/// are unchanged.
+/// became configurable — one fixed page, entirely stack — so a default build's
+/// bytes are unchanged.
 impl Default for MemoryLayout {
     fn default() -> Self {
         Self {
             pages: 1,
+            max_pages: 1,
             stack_size: PAGE_SIZE,
         }
     }
@@ -1038,15 +1075,16 @@ const MAX_PAGES: u32 = 65_536;
 /// The 32-bit address space in bytes.
 ///
 /// The stack-overflow trap depends on a wrapped frame pointer landing past the
-/// end of memory, so the memory and the stack must fit inside this together —
-/// see the headroom invariant enforced by [`MemoryLayout::resolve`]. That is a stricter
-/// bound than [`MAX_PAGES`] alone, and it is why a module may not declare the
-/// whole address space.
+/// end of memory, so the memory at its maximum and the stack must fit inside
+/// this together — see the headroom invariant enforced by
+/// [`MemoryLayout::resolve`]. That is a stricter bound than [`MAX_PAGES`] alone,
+/// and it is why a module may not declare the whole address space.
 const ADDRESS_SPACE: u64 = 1 << 32;
 
 impl MemoryLayout {
     /// The layout a build asked for, with every dimension the request left unset
-    /// taken from [`Self::default`].
+    /// taken from [`Self::default`] — except the maximum, which is taken from
+    /// the resolved size.
     ///
     /// This is the checked constructor: partial specification is meaningful — a
     /// project that sets only `pages` wants the default stack inside a larger
@@ -1055,22 +1093,32 @@ impl MemoryLayout {
     /// lets a single well-formed number still be rejected: a 128 KiB stack is
     /// fine on its own terms and impossible inside the default one page.
     ///
-    /// `surface` selects only the spelling a rejection names. The same two
-    /// numbers are accepted or refused identically whether they came from a
-    /// manifest or a command line, which is the property that makes this the one
-    /// definition of a legal layout.
+    /// An unset maximum is the resolved size rather than the default one, so a
+    /// request for four pages and no maximum is a fixed four-page memory — not a
+    /// four-page memory capped at one, which no module could declare.
+    ///
+    /// `surface` selects only the spelling a rejection names. The same numbers
+    /// are accepted or refused identically whether they came from a manifest or
+    /// a command line, which is the property that makes this the one definition
+    /// of a legal layout.
     ///
     /// # Errors
     ///
     /// Returns the violated invariant, rendered against `surface`.
     pub fn resolve(
-        pages: Option<u32>,
-        stack_size: Option<u32>,
+        request: MemoryRequest,
         surface: MemoryLayoutSource,
     ) -> Result<Self, MemoryLayoutError> {
+        let MemoryRequest {
+            pages,
+            max_pages,
+            stack_size,
+        } = request;
         let defaults = Self::default();
+        let pages = pages.unwrap_or(defaults.pages);
         let layout = Self {
-            pages: pages.unwrap_or(defaults.pages),
+            pages,
+            max_pages: max_pages.unwrap_or(pages),
             stack_size: stack_size.unwrap_or(defaults.stack_size),
         };
         layout
@@ -1079,10 +1127,26 @@ impl MemoryLayout {
         Ok(layout)
     }
 
-    /// Linear memory size in 64 KiB pages.
+    /// Linear memory size in 64 KiB pages: the memory section's minimum.
     #[must_use]
     pub fn pages(self) -> u32 {
         self.pages
+    }
+
+    /// The most pages the memory may grow to: the memory section's maximum.
+    /// Equal to [`Self::pages()`] unless the build asked for more.
+    #[must_use]
+    pub fn max_pages(self) -> u32 {
+        self.max_pages
+    }
+
+    /// Whether the memory may grow: its maximum exceeds its size.
+    ///
+    /// False for every layout a build did not explicitly ask to be growable,
+    /// the default included.
+    #[must_use]
+    pub fn is_growable(self) -> bool {
+        self.max_pages > self.pages
     }
 
     /// Size of the shadow-stack region in bytes, occupying `[0, stack_size)`.
@@ -1091,8 +1155,8 @@ impl MemoryLayout {
         self.stack_size
     }
 
-    /// Checks that the two sizes describe a linear memory a module can actually
-    /// declare and code generation can actually address.
+    /// Checks that the three numbers describe a linear memory a module can
+    /// actually declare and code generation can actually address.
     ///
     /// Private because [`Self::resolve`] is the only caller that can exist: a
     /// value of this type has already passed here, so a public re-check would
@@ -1108,9 +1172,14 @@ impl MemoryLayout {
     /// value. Callers surface it verbatim, so it must read as an explanation of
     /// the number the build asked for, not of the check that rejected it.
     fn validate(self) -> Result<(), String> {
-        let Self { pages, stack_size } = self;
+        let Self {
+            pages,
+            max_pages,
+            stack_size,
+        } = self;
         let page_size = u64::from(PAGE_SIZE);
         let memory_bytes = u64::from(pages) * page_size;
+        let max_memory_bytes = u64::from(max_pages) * page_size;
 
         if pages == 0 {
             return Err(
@@ -1122,6 +1191,18 @@ impl MemoryLayout {
             return Err(format!(
                 "linear memory is limited to {MAX_PAGES} pages (4 GiB) by 32-bit WebAssembly, \
                  but {pages} pages were requested"
+            ));
+        }
+        if max_pages < pages {
+            return Err(format!(
+                "the linear memory's maximum ({max_pages} pages) is below its size ({pages} \
+                 pages); a maximum only admits growth, so it must be at least the size"
+            ));
+        }
+        if max_pages > MAX_PAGES {
+            return Err(format!(
+                "the linear memory's maximum is limited to {MAX_PAGES} pages (4 GiB) by 32-bit \
+                 WebAssembly, but a maximum of {max_pages} pages was requested"
             ));
         }
         if stack_size == 0 {
@@ -1152,14 +1233,30 @@ impl MemoryLayout {
                 i32::MAX
             ));
         }
-        let span = memory_bytes + u64::from(stack_size);
+        // Measured against the maximum rather than the size: growth moves the
+        // end of memory up to it, and a wrapped frame pointer must still land
+        // past that end once it has moved.
+        let span = max_memory_bytes + u64::from(stack_size);
         if span > ADDRESS_SPACE {
+            let (memory, end) = if max_pages == pages {
+                (
+                    format!("the linear memory ({pages} × 64 KiB = {memory_bytes} bytes)"),
+                    "the end of memory",
+                )
+            } else {
+                (
+                    format!(
+                        "the linear memory at its maximum ({max_pages} × 64 KiB = \
+                         {max_memory_bytes} bytes)"
+                    ),
+                    "the end of memory however far growth moves it",
+                )
+            };
             return Err(format!(
-                "the linear memory ({pages} × 64 KiB = {memory_bytes} bytes) and the shadow \
-                 stack ({stack_size} bytes) together span {span} bytes, more than the \
-                 {ADDRESS_SPACE}-byte 32-bit address space; a stack overflow wraps to an \
-                 address at least {ADDRESS_SPACE} minus the stack size, which must stay past \
-                 the end of memory for the overflow to trap instead of writing into it"
+                "{memory} and the shadow stack ({stack_size} bytes) together span {span} bytes, \
+                 more than the {ADDRESS_SPACE}-byte 32-bit address space; a stack overflow wraps \
+                 to an address at least {ADDRESS_SPACE} minus the stack size, which must stay \
+                 past {end} for the overflow to trap instead of writing into it"
             ));
         }
         Ok(())
@@ -1557,7 +1654,39 @@ mod tests {
     /// Both dimensions given, for the cases where the point is the resulting
     /// layout rather than which keys the request left unset.
     fn layout(pages: u32, stack_size: u32) -> Result<MemoryLayout, MemoryLayoutError> {
-        MemoryLayout::resolve(Some(pages), Some(stack_size), MemoryLayoutSource::Flag)
+        growable(pages, pages, stack_size)
+    }
+
+    /// All three dimensions given, the maximum included.
+    fn growable(
+        pages: u32,
+        max_pages: u32,
+        stack_size: u32,
+    ) -> Result<MemoryLayout, MemoryLayoutError> {
+        MemoryLayout::resolve(
+            MemoryRequest {
+                pages: Some(pages),
+                max_pages: Some(max_pages),
+                stack_size: Some(stack_size),
+            },
+            MemoryLayoutSource::Flag,
+        )
+    }
+
+    /// Only the dimensions a manifest would name, the rest left to the defaults.
+    fn requested(
+        pages: Option<u32>,
+        max_pages: Option<u32>,
+        stack_size: Option<u32>,
+    ) -> Result<MemoryLayout, MemoryLayoutError> {
+        MemoryLayout::resolve(
+            MemoryRequest {
+                pages,
+                max_pages,
+                stack_size,
+            },
+            MemoryLayoutSource::Manifest,
+        )
     }
 
     #[test]
@@ -1571,7 +1700,7 @@ mod tests {
     #[test]
     fn the_default_is_a_layout_the_constructor_accepts() {
         assert_eq!(
-            MemoryLayout::resolve(None, None, MemoryLayoutSource::Manifest),
+            MemoryLayout::resolve(MemoryRequest::default(), MemoryLayoutSource::Manifest),
             Ok(MemoryLayout::default())
         );
     }
@@ -1587,13 +1716,12 @@ mod tests {
     /// key has to be independently settable.
     #[test]
     fn an_unset_dimension_is_filled_from_the_default() {
-        let pages_only = MemoryLayout::resolve(Some(4), None, MemoryLayoutSource::Manifest)
-            .expect("four pages holds the default stack");
+        let pages_only = requested(Some(4), None, None).expect("four pages holds the default stack");
         assert_eq!(pages_only.pages(), 4);
         assert_eq!(pages_only.stack_size(), MemoryLayout::default().stack_size());
 
-        let stack_only = MemoryLayout::resolve(None, Some(32_768), MemoryLayoutSource::Manifest)
-            .expect("half a page of stack fits the default page");
+        let stack_only =
+            requested(None, None, Some(32_768)).expect("half a page of stack fits the default page");
         assert_eq!(stack_only.pages(), MemoryLayout::default().pages());
         assert_eq!(stack_only.stack_size(), 32_768);
     }
@@ -1608,14 +1736,14 @@ mod tests {
     /// memory holding it.
     #[test]
     fn a_partial_request_is_checked_against_the_layout_it_completes_to() {
-        let err = MemoryLayout::resolve(None, Some(131_072), MemoryLayoutSource::Manifest)
+        let err = requested(None, None, Some(131_072))
             .expect_err("a 128 KiB stack cannot live in the default single page");
         assert!(
             err.reason.contains("does not fit in the linear memory"),
             "{err}"
         );
         assert!(
-            MemoryLayout::resolve(Some(4), Some(131_072), MemoryLayoutSource::Manifest).is_ok(),
+            requested(Some(4), None, Some(131_072)).is_ok(),
             "the same stack size is fine once the memory is large enough"
         );
     }
@@ -1710,15 +1838,105 @@ mod tests {
         );
     }
 
+    /// The default memory is fixed: its maximum is its size, so a build that
+    /// asks for nothing emits the `min == max` memory every earlier build did.
+    #[test]
+    fn the_default_layout_is_fixed() {
+        let default = MemoryLayout::default();
+        assert_eq!(default.max_pages(), default.pages());
+        assert!(!default.is_growable());
+    }
+
+    /// An unset maximum is the *resolved* size, not the default one: a request
+    /// for four pages alone is a fixed four-page memory. Filling it from the
+    /// default would cap a four-page memory at one page, which no module can
+    /// declare, so the most common partial request would be refused.
+    #[test]
+    fn an_unset_maximum_is_the_resolved_size() {
+        let four = requested(Some(4), None, None).expect("four fixed pages are admissible");
+        assert_eq!((four.pages(), four.max_pages()), (4, 4));
+        assert!(!four.is_growable());
+
+        let growable = requested(None, Some(8), None).expect("a maximum alone is admissible");
+        assert_eq!(
+            (growable.pages(), growable.max_pages()),
+            (MemoryLayout::default().pages(), 8),
+            "a maximum alone raises the ceiling over the default size"
+        );
+        assert!(growable.is_growable());
+
+        let explicit_fixed =
+            requested(Some(2), Some(2), None).expect("a maximum equal to the size is admissible");
+        assert!(
+            !explicit_fixed.is_growable(),
+            "a maximum equal to the size is a fixed memory, however it was spelled"
+        );
+    }
+
+    /// Each rule about the maximum rejects on its own and names the number it
+    /// is about.
+    #[test]
+    fn the_constructor_rejects_a_broken_maximum() {
+        let err = growable(4, 2, 65_536).expect_err("a maximum below the size is refused");
+        assert!(err.reason.contains("is below its size"), "{err}");
+        assert!(
+            err.reason.contains("(2 pages)") && err.reason.contains("(4 pages)"),
+            "{err}"
+        );
+
+        let err = growable(1, 65_537, 16).expect_err("a maximum past 4 GiB is refused");
+        assert!(err.reason.contains("maximum is limited to 65536 pages"), "{err}");
+        assert!(err.reason.contains("65537 pages"), "{err}");
+    }
+
+    /// The stack must fit in the memory's size, not its maximum: the size is
+    /// all a module is guaranteed at instantiation, and growth may fail.
+    #[test]
+    fn the_stack_must_fit_the_size_rather_than_the_maximum() {
+        let err = growable(1, 4, 131_072).expect_err("a 128 KiB stack does not fit one page");
+        assert!(
+            err.reason.contains("does not fit in the linear memory"),
+            "{err}"
+        );
+    }
+
+    /// The overflow trap's headroom is measured against the maximum, because
+    /// growth moves the end of memory up to it. The same stack and size that a
+    /// fixed memory holds are refused once the maximum leaves a wrapped frame
+    /// pointer nowhere out of bounds to land, and the boundary is exact.
+    #[test]
+    fn the_headroom_is_measured_against_the_maximum() {
+        assert!(
+            layout(2, 65_552).is_ok(),
+            "a fixed two-page memory holds a stack one frame over a page"
+        );
+        let err = growable(2, 65_535, 65_552)
+            .expect_err("the same stack leaves no headroom under a 65535-page maximum");
+        assert!(err.reason.contains("32-bit address space"), "{err}");
+        assert!(err.reason.contains("at its maximum (65535 × 64 KiB"), "{err}");
+        assert!(err.reason.contains("however far growth moves it"), "{err}");
+
+        let fits = growable(1, 65_535, 65_536).expect("this layout sits exactly on the boundary");
+        assert_eq!(
+            u64::from(fits.max_pages()) * 65_536 + u64::from(fits.stack_size()),
+            1 << 32,
+            "this case is meant to sit exactly on the boundary"
+        );
+        assert!(
+            growable(1, 65_535, 65_536 + 16).is_err(),
+            "one frame past the boundary must be rejected"
+        );
+    }
+
     #[test]
     fn memory_source_selects_the_spelling_the_message_names() {
         assert_eq!(
             MemoryLayoutSource::Manifest.label(),
-            "`[memory] pages` / `[memory] stack-size`"
+            "`[memory] pages` / `[memory] max-pages` / `[memory] stack-size`"
         );
         assert_eq!(
             MemoryLayoutSource::Flag.label(),
-            "`--memory-pages` / `--stack-size`"
+            "`--memory-pages` / `--max-memory-pages` / `--stack-size`"
         );
     }
 
@@ -1730,20 +1948,26 @@ mod tests {
     /// verdict is surface-independent — only the spelling changes.
     #[test]
     fn the_memory_error_renders_its_exact_wording() {
-        let manifest = MemoryLayout::resolve(Some(0), None, MemoryLayoutSource::Manifest)
-            .expect_err("a zero-page memory is rejected");
+        let manifest =
+            requested(Some(0), None, None).expect_err("a zero-page memory is rejected");
         assert_eq!(
             manifest.to_string(),
-            "Invalid `[memory] pages` / `[memory] stack-size`: linear memory must be at least \
-             one 64 KiB page, but 0 pages were requested"
+            "Invalid `[memory] pages` / `[memory] max-pages` / `[memory] stack-size`: linear \
+             memory must be at least one 64 KiB page, but 0 pages were requested"
         );
 
-        let flag = MemoryLayout::resolve(Some(0), None, MemoryLayoutSource::Flag)
-            .expect_err("a zero-page memory is rejected");
+        let flag = MemoryLayout::resolve(
+            MemoryRequest {
+                pages: Some(0),
+                ..MemoryRequest::default()
+            },
+            MemoryLayoutSource::Flag,
+        )
+        .expect_err("a zero-page memory is rejected");
         assert_eq!(
             flag.to_string(),
-            "Invalid `--memory-pages` / `--stack-size`: linear memory must be at least one \
-             64 KiB page, but 0 pages were requested"
+            "Invalid `--memory-pages` / `--max-memory-pages` / `--stack-size`: linear memory \
+             must be at least one 64 KiB page, but 0 pages were requested"
         );
         assert_eq!(
             manifest.reason, flag.reason,

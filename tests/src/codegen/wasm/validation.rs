@@ -32,7 +32,7 @@ mod codegen_validation_tests {
     };
     use inf_wasmparser::{Operator, Parser, Payload};
     use inference_wasm_codegen::{
-        CompilationMode, MemoryLayout, MemoryLayoutSource, OptLevel, Target,
+        CompilationMode, MemoryLayout, MemoryLayoutSource, MemoryRequest, OptLevel, Target,
     };
 
     // WASM content tests ---
@@ -108,8 +108,15 @@ pub fn read_first() -> i32 {
     fn a_configured_layout_reaches_the_emitted_module() {
         let configured = wat_of(&wasm_codegen_with_layout(
             FRAME_ALLOCATING_SOURCE,
-            MemoryLayout::resolve(Some(2), Some(32_768), MemoryLayoutSource::Flag)
-                .expect("a half-page stack in two pages is admissible"),
+            MemoryLayout::resolve(
+                MemoryRequest {
+                    pages: Some(2),
+                    max_pages: None,
+                    stack_size: Some(32_768),
+                },
+                MemoryLayoutSource::Flag,
+            )
+            .expect("a half-page stack in two pages is admissible"),
         ));
         assert!(
             configured.contains("(memory (;0;) 2 2)"),

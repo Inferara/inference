@@ -84,7 +84,7 @@ pub use output::{AbiParam, AbiReturn, AbiType, CodegenOutput, ExportSignature};
 pub use stellar_cli::{stellar_cli_flag_alias, stellar_flag_collision};
 pub use target::{
     BoundsChecks, CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, MemoryLayoutError,
-    MemoryLayoutSource, OptLevel, Target,
+    MemoryLayoutSource, MemoryRequest, OptLevel, Target,
 };
 
 /// Re-exports of the `hassert` obligation IR, so a consumer of
@@ -1872,7 +1872,7 @@ fn collect_emittable_functions(
 
 #[cfg(test)]
 mod memory_layout_tests {
-    use super::{CodegenOptions, MemoryLayout, MemoryLayoutSource, codegen};
+    use super::{CodegenOptions, MemoryLayout, MemoryLayoutSource, MemoryRequest, codegen};
     use inference_type_checker::typed_context::TypedContext;
 
     /// Every layout `codegen` can be handed compiles, which is what replaced the
@@ -1885,9 +1885,15 @@ mod memory_layout_tests {
     #[test]
     fn a_constructible_layout_compiles() {
         for (pages, stack_size) in [(1, 65_536), (2, 32_768), (4, 131_072)] {
-            let layout =
-                MemoryLayout::resolve(Some(pages), Some(stack_size), MemoryLayoutSource::Flag)
-                    .expect("these layouts are admissible");
+            let layout = MemoryLayout::resolve(
+                MemoryRequest {
+                    pages: Some(pages),
+                    max_pages: None,
+                    stack_size: Some(stack_size),
+                },
+                MemoryLayoutSource::Flag,
+            )
+            .expect("these layouts are admissible");
             assert!(
                 codegen(
                     &TypedContext::default(),

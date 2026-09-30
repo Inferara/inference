@@ -8787,8 +8787,15 @@ mod tests {
     fn a_configured_layout_sizes_the_memory_and_the_stack_pointer_separately() {
         let mut compiler = Compiler::new("test");
         compiler.set_memory_layout(
-            MemoryLayout::resolve(Some(2), Some(32_768), crate::MemoryLayoutSource::Flag)
-                .expect("a half-page stack in two pages is admissible"),
+            MemoryLayout::resolve(
+                crate::MemoryRequest {
+                    pages: Some(2),
+                    max_pages: None,
+                    stack_size: Some(32_768),
+                },
+                crate::MemoryLayoutSource::Flag,
+            )
+            .expect("a half-page stack in two pages is admissible"),
         );
         compiler.enable_memory();
         let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
