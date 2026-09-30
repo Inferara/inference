@@ -229,7 +229,24 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// one the manifest describes — its size, its SpaceWasm envelope and its record
 /// of omitted guards are all the guarded build's — and a manifest key that
 /// silently does nothing is what every gate here exists to rule out.
-pub const COMPILER_ABI_MINOR: u32 = 9;
+///
+/// Minor 10 adds the additive `--max-memory-pages <N>` flag to `infc`, raising
+/// the linear memory's maximum above its size so a linked module or the host can
+/// grow it ([`MemoryLayout::max_pages`]). It is backward compatible in the same
+/// sense as the minors above: omitting the flag makes the maximum the size, the
+/// fixed memory every earlier minor emitted, so a minor-9 `infs` still pairs
+/// with a minor-10 `infc` and loses nothing by it — a minor-9 `infs` predates the
+/// `Inference.toml [memory] max-pages` key, so it holds no maximum to drop. The
+/// pairing callers must gate on is an `infs` holding a maximum talking to a
+/// minor-9 `infc`. A forward that reaches one fails loudly on a flag it does not
+/// parse; a caller that decided the flag was unnecessary and omitted it would
+/// build a fixed memory instead, and the difference surfaces only later and
+/// only sometimes — a linked module that grows memory is refused at the link,
+/// but a host that grows the exported memory at run time is simply told the
+/// growth failed. So the gate is on this constant, as it is for every flag
+/// minor, and it is on this minor alone: a project that sets only `pages` or
+/// `stack-size` still needs no more than minor 3.
+pub const COMPILER_ABI_MINOR: u32 = 10;
 
 /// The first segment of a `use … from` clause that names the embedder rather
 /// than a linked module: `use { clock_ms } from host::env;` binds a host import
@@ -1287,9 +1304,9 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one_dot_nine() {
+    fn abi_version_is_one_dot_ten() {
         assert_eq!(COMPILER_ABI_MAJOR, 1);
-        assert_eq!(COMPILER_ABI_MINOR, 9);
+        assert_eq!(COMPILER_ABI_MINOR, 10);
     }
 
     #[test]
