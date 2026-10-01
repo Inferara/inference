@@ -250,6 +250,26 @@ let arr = [];
 let arr: [i32; 0] = [];
 ```
 
+**Repeated array literals**: `[value; N]` is an array of `N` copies of `value`, typed
+`[T; N]` where `T` is the value's type. An expected `[T; N]` reaches the value as `T`, so
+`let a: [u8; 16] = [0; 16];` types the literal `0` as `u8`. The value is evaluated once.
+
+- The count is held to the rule for the size in `[T; N]`: an integer literal of at least 1 that
+  fits in 32 bits (`InvalidArraySize`, `NonLiteralArraySize`); any other expression is
+  `RepeatCountNotLiteral`.
+- A count that disagrees with a declared type is a `TypeMismatch`, as for any two array types.
+- `@` anywhere in the value is `RepeatedUzumaki`: evaluated once, it would draw one value for
+  every element. A non-deterministic array is written `@` for the whole array.
+
+```rust
+let row: [i32; 3] = [1, 2, 3];
+let grid: [[i32; 3]; 4] = [row; 4];     // Valid: four copies of `row`
+let points: [Point; 8] = [Point { x: 0, y: 0 }; 8];
+
+let a: [i32; 3] = [0; 4];               // Error: [i32; 4] != [i32; 3]
+let b: [i32; 4] = [@; 4];               // Error: `@` cannot be repeated
+```
+
 **Array Indexing**:
 
 ```rust
@@ -506,7 +526,7 @@ An integer literal has no intrinsic type. Its type is determined by the typing c
 - the initializer of an annotated `let` or `const` (the annotation);
 - the right-hand side of an assignment (the target's declared type — for `p.x = 5` and `a[i] = 5` this is the field's or element's type, not the struct's or array's);
 - a struct-literal field value (the field's declared type);
-- an element of an array literal whose expected type is `[T; N]` (which is `T`);
+- an element of an array literal whose expected type is `[T; N]` (which is `T`), and the value of a repeated array literal `[value; N]` likewise;
 - a call argument (the parameter's declared type), for free functions, associated functions and methods alike;
 - the operand of `return` (the enclosing function's declared return type).
 

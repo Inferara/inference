@@ -68,7 +68,7 @@ During `lower_statement()` and `lower_expression()`, arrays are lowered to:
 
 - **Array variable definition** (`let arr: [i32; 3] = [1, 2, 3]`)
   - Lowered to store instructions at frame addresses
-  - Supported initializers: array literals, uzumaki (`@`)
+  - Supported initializers: array literals, repeated array literals (`[value; N]`), uzumaki (`@`)
 
 - **Array index read** (`x = arr[i]`)
   - Compute address: `base + i * elem_size`
@@ -740,6 +740,50 @@ i32.load / i64.load / ...
 
 The empty-result `if` consumes only the comparison result and leaves `base` and `index` on the stack, so the offset computation proceeds unchanged. The `unreachable` trap reuses the `assert` lowering idiom and maps to `BI_unreachable` in the Rocq translator, so guarded code remains translatable. Both the read path (`lower_array_index_access`) and the write path (`lower_array_index_write`) share the single `emit_index_offset` choke point, so reads and writes are guarded identically.
 
+## Repeated Array Literals
+
+`[value; N]` is lowered by `store_array_repeat` in two steps: `value` is stored once into
+element 0, then element 0 is replicated into the other `N - 1` elements by region copies.
+
+**Element 0** takes exactly the store sequence a one-element list would, by calling
+`store_array_literal_elements` with `&[value]`: a scalar store, a struct literal's field
+stores, a nested list or repeat recursing at the element's offset, or a whole-element copy
+of a binding (`[row; 4]`). The value is evaluated once — the language's semantics for a
+repeat — so `[f(); 9]` calls `f` once however many elements it fills.
+
+**Replication doubles.** Element 0 is copied to element 1, elements `[0, 2)` to `[2, 4)`,
+`[0, 4)` to `[4, 8)`, and so on, the last copy taking only what remains:
+
+```
+[x; 13]   filled 1 → copy 1 element  → 2
+          filled 2 → copy 2 elements → 4
+          filled 4 → copy 4 elements → 8
+          filled 8 → copy 5 elements → 13
+```
+
+That is `ceil(log2(N))` copies, and each one is between two disjoint regions — the source
+is the filled prefix, the destination starts where the prefix ends — so each is an ordinary
+`emit_memcpy_via_locals`: one `memory.copy` under bulk memory, and otherwise the
+straight-line or looped copy chosen by [`BULK_UNROLL_LIMIT_BYTES`](#two-shapes-straight-line-and-looped).
+The alternatives are both worse: one copy per element emits `N - 1` copies, and a single
+copy of `[0, N - 1)` onto `[1, N)` overlaps and reads bytes it has not written yet.
+
+**Every position an array literal takes.** The repeat is accepted wherever a list is: a
+`let` or `const` initializer (`lower_array_repeat`, into the binding's frame slot), an
+assignment, an element of an enclosing list or repeat, a struct field's value, and the
+operand of `return` in an array-returning function (written through the sret pointer by
+`lower_array_sret_return`).
+
+**Self-referencing assignment.** `a = [a[1]; 4]` must read `a` before any of it is
+written, so — as for a self-referencing list — `lower_self_ref_array_reassign` builds the
+whole repeat in the frame's scratch region, then copies it over `a`. The scratch reservation
+(`scan_self_ref_scratch`) and the stack estimate of analysis rule A036 both count it.
+
+**Zero values.** Under initialization a value whose every leaf is a syntactic zero — `0`,
+`false`, or a list, repeat or struct literal of them — emits nothing at all, for the reason
+a list of zeros does; see [Zero-Store Elision](#zero-store-elision-during-initialization).
+`is_all_zero` makes that decision; it is never taken for an assignment or an sret return.
+
 ## Zero-Store Elision During Initialization
 
 The function prologue zero-initializes the entire stack frame before any instructions run (see [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)). This means that every byte of the frame is already zero at the point where the first `let` or `const` initializer executes. Any store of a zero value into that freshly-zeroed memory is therefore redundant.
@@ -765,6 +809,9 @@ The flag is threaded into recursive helpers as the `skip_zero_stores: bool` para
 | `BoolLiteral { value: false }` | Stored as `i32` 0 |
 | `Parenthesized(e)` where `e` is zero | Transparent wrapper |
 | `PrefixUnary { op: Neg, expr: e }` where `e` is zero | `-(0)` == 0 |
+
+A repeated array literal `[value; N]` whose value is zero at every leaf (`is_all_zero`) is
+elided whole: neither element 0 nor the copies that would replicate it are emitted.
 
 This is a conservative check: only false negatives are possible (e.g., `0x0` or `0_0` are not recognized and will emit a redundant store). False positives — incorrectly skipping a non-zero store — cannot occur.
 
