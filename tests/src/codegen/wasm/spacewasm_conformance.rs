@@ -116,6 +116,7 @@ mod spacewasm_conformance_tests {
     ("codegen/wasm/base/array_nondet/array_nondet.wasm", Refused),
     ("codegen/wasm/base/array_of_structs/array_of_structs.wasm", Maxima(2, 3, 3)),
     ("codegen/wasm/base/array_params/array_params.wasm", Maxima(3, 3, 3)),
+    ("codegen/wasm/base/array_repeat/array_repeat.wasm", Maxima(4, 3, 4)),
     ("codegen/wasm/base/array_self_ref_reassign/array_self_ref_reassign.wasm", Maxima(4, 3, 5)),
     ("codegen/wasm/base/array_zero_literal/array_zero_literal.wasm", Maxima(1, 2, 3)),
     ("codegen/wasm/base/assert/assert.wasm", Maxima(4, 3, 3)),

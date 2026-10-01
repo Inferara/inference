@@ -1,0 +1,70 @@
+// Repeated array literals, `[value; N]`, in executable code and in
+// specification bodies. In a specification a repeat binds the value tree of
+// its value copied into every element, so a constant-index read of any element
+// is the value's own term; `@` cannot be repeated, so a drawn value is drawn
+// once, bound, and the binding repeated.
+struct Cell {
+  tag: i32;
+  weight: i64;
+}
+
+// An array of `n`s, read back at both ends.
+pub fn ends(n: i32) -> i32 {
+  let xs: [i32; 6] = [n; 6];
+  return xs[0] - xs[5];
+}
+
+// A zeroed buffer, written once and summed.
+pub fn buffer_sum() -> i32 {
+  let mut buf: [i32; 16] = [0; 16];
+  buf[3] = 7;
+  let mut s: i32 = 0;
+  let mut i: i32 = 0;
+  loop i < 16 {
+    s = s + buf[i];
+    i = i + 1;
+  }
+  return s;
+}
+
+pub fn grid_corner() -> i32 {
+  let grid: [[i32; 3]; 2] = [[5; 3]; 2];
+  return grid[1][2];
+}
+
+pub fn heaviest() -> i64 {
+  let cells: [Cell; 4] = [Cell { tag: 1, weight: 9 }; 4];
+  return cells[3].weight;
+}
+
+spec ArrayRepeat {
+  // Every element of a repeat is its value.
+  fn every_element_is_the_value() forall {
+    let v: i32 = @;
+    let xs: [i32; 4] = [v; 4];
+    assert(xs[0] == v && xs[3] == v);
+  }
+
+  // A repeat equals the list it abbreviates, leaf by leaf.
+  fn repeat_equals_its_list() forall {
+    let v: i32 = @;
+    let xs: [i32; 3] = [v; 3];
+    let ys: [i32; 3] = [v, v, v];
+    assert(xs == ys);
+  }
+
+  // A nested repeat is a value tree two levels deep.
+  fn nested_repeat() forall {
+    let g: [[i32; 2]; 3] = [[7; 2]; 3];
+    assert(g[2][1] == 7);
+  }
+
+  // The executable function and the specification agree on the ends. `ends`
+  // subtracts with an overflow guard, so the obligation bounds `n` to state a
+  // claim about arguments the guard admits.
+  fn ends_cancel() forall {
+    let n: i32 = @;
+    assume { assert(n >= -1000 && n <= 1000); }
+    assert(ends(n) == 0);
+  }
+}

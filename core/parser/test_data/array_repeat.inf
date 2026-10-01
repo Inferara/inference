@@ -1,0 +1,42 @@
+// Repeated array literals, `[value; count]`, in every position an array
+// literal takes. The parser accepts any expression as the count; holding it
+// to an integer literal is the type checker's job.
+
+const ZEROS: [u8; 32] = [0; 32];
+const EMPTY_BOARD: [[bool; 3]; 3] = [[false; 3]; 3];
+
+struct Buffer {
+  bytes: [u8; 16];
+  len: u32;
+}
+
+fn fresh() -> Buffer {
+  return Buffer { bytes: [0; 16], len: 0 };
+}
+
+fn ones() -> [i32; 4] {
+  return [1; 4];
+}
+
+fn mixed(n: i32) -> [[i32; 2]; 3] {
+  let row: [i32; 2] = [n, n + 1];
+  let grid: [[i32; 2]; 3] = [row; 3];
+  let lists: [[i32; 2]; 2] = [[1; 2], [2, 3]];
+  let spaced: [i64; 8] = [ -1 ; 8 ];
+  let computed: [i32; 4] = [n * 2 + 1; 4];
+  let called: [i32; 4] = [square(n); 4];
+  let mut acc: [i32; 4] = [0; 4];
+  acc = [acc[0]; 4];
+  return grid;
+}
+
+fn square(v: i32) -> i32 {
+  return v * v;
+}
+
+// Counts the type checker refuses, which still parse.
+fn odd_counts() {
+  let a: [i32; 4] = [0; 2 + 2];
+  let b: [i32; 4] = [0; (4)];
+  let c: [i32; 4] = [0; LEN];
+}

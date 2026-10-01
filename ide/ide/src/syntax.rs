@@ -738,6 +738,7 @@ call_probe(arg_name: arg_value);\n\
 idx_array[idx_index];\n\
 let s: StructTy = StructTy { field_probe: field_value };\n\
 let arr: [i32; 2] = [elem_a, elem_b];\n\
+let rep: [i32; 2] = [rep_value; 2];\n\
 type_expr_probe i32';\n\
 return 1;\n\
 }";
@@ -755,7 +756,8 @@ return 1;\n\
                 "field_probe",
                 "field_value", // struct literal: name, field, value
                 "elem_a",
-                "elem_b", // array literal elements
+                "elem_b",    // array literal elements
+                "rep_value", // repeated array literal value
                 "type_expr_probe",
                 "i32", // generic name in expr position (Expr::Type + generic)
             ],

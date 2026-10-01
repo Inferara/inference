@@ -867,6 +867,21 @@ mod tests {
     }
 
     #[test]
+    fn hits_the_value_and_count_of_a_repeated_array_literal() {
+        let source = "fn f(n: i32) { let xs: [i32; 64] = [n; 64]; }";
+        let (arena, file) = single_file(source);
+        let repeat = source.find("[n; 64]").unwrap();
+
+        let value = hit_test(&arena, file, (repeat + 1) as u32).expect("covers the repeated value");
+        assert_eq!(hit_text(&arena, source, &value), "n");
+        assert!(value.ancestors.iter().any(|a| matches!(a, NodeId::Expr(_))));
+
+        let count = hit_test(&arena, file, (repeat + 4) as u32).expect("covers the repeat count");
+        assert_eq!(hit_text(&arena, source, &count), "64");
+        assert!(matches!(count.node, NodeId::Expr(_)));
+    }
+
+    #[test]
     fn hits_the_base_and_parameter_of_a_generic_type() {
         // `Vec i32'` is a generic type: its base and each type argument are stored
         // as identifiers under the type node.

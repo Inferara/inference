@@ -2616,6 +2616,32 @@ mod tests {
         );
     }
 
+    /// Every position a repeat can take, nested repeats and repeats beside
+    /// lists included, parses into one `ArrayRepeat` node per repeat.
+    #[test]
+    fn corpus_array_repeat_inf_parses_clean() {
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_data/array_repeat.inf"
+        ));
+        let (root, errors) = parse_to_cst(src);
+        assert!(
+            !has_error_node(&root),
+            "array_repeat.inf produced Error node(s):\n{}",
+            root.debug_tree(src)
+        );
+        assert!(
+            errors.is_empty(),
+            "array_repeat.inf produced parse errors: {errors:?}"
+        );
+        assert_eq!(
+            count_kind(&root, SyntaxKind::ArrayRepeat),
+            15,
+            "{}",
+            root.debug_tree(src)
+        );
+    }
+
     #[test]
     fn corpus_debug_inf_parses_clean() {
         let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/debug.inf"));

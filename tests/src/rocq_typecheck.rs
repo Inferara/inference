@@ -144,6 +144,7 @@ pub(crate) mod gate {
         ("rocq_unique_spec.inf", "rocq_unique_spec"),
         ("spec_mixed_kinds.inf", "spec_mixed_kinds"),
         ("spec_aggregate_values.inf", "spec_aggregate_values"),
+        ("spec_array_repeat.inf", "spec_array_repeat"),
         ("spec_bounded_iteration.inf", "spec_bounded_iteration"),
         ("spec_bounds_realization.inf", "spec_bounds_realization"),
         (
@@ -3577,6 +3578,75 @@ End Host.
         );
     }
 
+    /// Committed `.v` golden for the repeated-array-literal fixture. Regenerate
+    /// with the `#[ignore]`d [`regenerate::regenerate_array_repeat_v`] after an
+    /// intentional emitter change.
+    fn array_repeat_golden_path() -> PathBuf {
+        get_test_data_path().join("rocq").join("spec_array_repeat.v")
+    }
+
+    /// The proof-mode `.v` for the repeated-array-literal fixture must match a
+    /// committed golden byte-for-byte, and the golden must carry what a repeat
+    /// means in a specification: the value's term at every element, so a read
+    /// of either end of `[v; 4]` is `v` itself, the repeat and the list it
+    /// abbreviates compare leaf by leaf as the same terms, and a nested repeat
+    /// reads its constant two levels down.
+    #[test]
+    fn spec_array_repeat_matches_committed_v_golden() {
+        let generated = generate_v("spec_array_repeat.inf", "spec_array_repeat");
+        let golden_path = array_repeat_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_array_repeat_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_array_repeat.inf drifted from the committed golden {}; \
+             if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_array_repeat_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Contract shape, asserted independently of the byte compare so a
+        // future regeneration cannot launder an encoding regression into the
+        // committed file.
+        let spec = |n: u32| {
+            let head = format!("Definition spec_array_repeat__ArrayRepeat_hspec{n} : hassert :=");
+            let start = golden
+                .find(&head)
+                .unwrap_or_else(|| panic!("no hspec{n} in:\n{golden}"));
+            let body = &golden[start + head.len()..];
+            body[..body.find("\nDefinition").unwrap_or(body.len())].to_string()
+        };
+        let ends_read = "T_relop T_i32 (Relop_i ROI_eq) (T_local 0%N) (T_local 0%N)";
+        assert_eq!(
+            spec(1).matches(ends_read).count(),
+            2,
+            "both ends of `[v; 4]` must read the drawn `v` itself:\n{}",
+            spec(1)
+        );
+        assert_eq!(
+            spec(2).matches("term_eq (T_local 0%N) (T_local 0%N)").count(),
+            3,
+            "`[v; 3] == [v, v, v]` must be three leafwise equalities of `v` with \
+             itself:\n{}",
+            spec(2)
+        );
+        assert!(
+            spec(3).contains("(T_const (Vi32 7)) (T_const (Vi32 7))"),
+            "a nested repeat must read its value two levels down:\n{}",
+            spec(3)
+        );
+        assert!(
+            !golden.contains("HA_pto") && !golden.contains("HA_iter"),
+            "a repeat's value tree is pure — no memory atom may appear:\n{golden}"
+        );
+    }
+
     /// Committed `.v` golden for the aggregate-values fixture. Regenerate with
     /// the `#[ignore]`d [`regenerate::regenerate_aggregate_values_v`] after an
     /// intentional emitter change.
@@ -4312,11 +4382,12 @@ End Host.
     #[cfg(test)]
     mod regenerate {
         use super::{
-            aggregate_values_golden_path, bounded_iteration_golden_path, bounded_prime_golden_path,
-            bounds_realization_golden_path, exists_spec_golden_path, false_certificate_golden_path,
-            generate_v, linked_corpus_entry_v, linked_extern_golden_path, literal_ctx_golden_path,
-            narrow_discharge_golden_path, overflow_realization_golden_path, prime_golden_path,
-            quantifier_alternation_golden_path, unique_spec_golden_path,
+            aggregate_values_golden_path, array_repeat_golden_path, bounded_iteration_golden_path,
+            bounded_prime_golden_path, bounds_realization_golden_path, exists_spec_golden_path,
+            false_certificate_golden_path, generate_v, linked_corpus_entry_v,
+            linked_extern_golden_path, literal_ctx_golden_path, narrow_discharge_golden_path,
+            overflow_realization_golden_path, prime_golden_path, quantifier_alternation_golden_path,
+            unique_spec_golden_path,
         };
         use std::path::{Path, PathBuf};
 
@@ -4387,6 +4458,13 @@ End Host.
         fn regenerate_unique_spec_v() {
             let v = generate_v("rocq_unique_spec.inf", "rocq_unique_spec");
             write_golden(&v, &unique_spec_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_array_repeat_v() {
+            let v = generate_v("spec_array_repeat.inf", "spec_array_repeat");
+            write_golden(&v, &array_repeat_golden_path());
         }
 
         #[test]

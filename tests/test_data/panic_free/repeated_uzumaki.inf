@@ -1,0 +1,10 @@
+// `@` repeated: the value of `[value; N]` is evaluated once, so `[@; 4]` would
+// draw one value for every element. The type checker refuses it, naming the
+// whole-array `@` that draws each element.
+
+spec Draws {
+    fn every_element() forall {
+        let xs: [i32; 4] = [@; 4];
+        assert(xs[0] == xs[3]);
+    }
+}
