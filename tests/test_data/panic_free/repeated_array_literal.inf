@@ -1,0 +1,36 @@
+// A repeated array literal in every position that lowers one: a `let` and a
+// `const` initializer, an assignment, an assignment whose value reads the
+// array it replaces, a return through the result pointer, a struct field, an
+// element of a list, a repeat inside a repeat, and a specification body. Each
+// position reaches a different store path, so each is a lowering of its own
+// rather than a repetition of one.
+
+struct Frame {
+    cells: [i32; 4];
+    len: i32;
+}
+
+fn filled() -> [i32; 3] {
+    return [9; 3];
+}
+
+pub fn positions(v: i32) -> i32 {
+    let a: [i32; 5] = [v; 5];
+    const Z: [i32; 2] = [0; 2];
+    let mut b: [i32; 4] = [1, 2, 3, 4];
+    b = [7; 4];
+    b = [b[1]; 4];
+    let r: [i32; 3] = filled();
+    let f: Frame = Frame { cells: [2; 4], len: 4 };
+    let rows: [[i32; 2]; 2] = [[3; 2], [4, 5]];
+    let grid: [[i32; 2]; 3] = [[6; 2]; 3];
+    return a[4] + Z[1] + b[3] + r[2] + f.cells[3] + rows[0][1] + grid[2][1];
+}
+
+spec Repeats {
+    fn drawn_value_repeated() forall {
+        let v: i32 = @;
+        let xs: [i32; 3] = [v; 3];
+        assert(xs[2] == v);
+    }
+}

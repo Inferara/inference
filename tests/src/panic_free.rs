@@ -36,21 +36,21 @@
 //! missing; [`gate::every_panic_free_fixture_is_listed`] closes it in both
 //! directions so a file cannot escape the table by being added beside it.
 //!
-//! The three sources, 220 fixtures and 440 compilations between them:
+//! The three sources, 225 fixtures and 450 compilations between them:
 //!
 //! - `tests/test_data/inf/` — the language corpus, every `.inf` in the
-//!   directory: 50.
+//!   directory: 51.
 //! - `tests/test_data/codegen/wasm/` — the canonical paired golden fixtures,
 //!   selected by the rule that a fixture's file stem equals its parent directory
-//!   name: 148. That rule admits both paired layouts, the one with a module
+//!   name: 149. That rule admits both paired layouts, the one with a module
 //!   directory above the fixture directory and the flat one without, and the 22
 //!   files it excludes are exactly the multi-file project trees under `src/`,
 //!   whose `use` clauses need a project driver this in-process pipeline does not
 //!   have.
 //! - `tests/test_data/panic_free/` — one minimal program per construct whose
-//!   verdict this sweep is written to pin, 22 of them; one is stopped by the
-//!   type checker before its rule is reached. Each is a single offence, so that
-//!   the stage it stops at is attributable to the construct it is named for.
+//!   verdict this sweep is written to pin, 25 of them; three are stopped by
+//!   the type checker. Each is a single offence, so that the stage it stops at
+//!   is attributable to the construct it is named for.
 //!
 //! ## The single-offence constraint
 //!
@@ -125,19 +125,20 @@ mod gate {
     /// Every `.inf` under `tests/test_data/panic_free/`.
     ///
     /// Most of these name a construct the compiler once had no lowering for and
-    /// has since gained either a lowering or a rule that refuses it. Six run to
-    /// a module, fifteen are refused by analysis, and one is stopped by the type
-    /// checker before its rule is reached; each analysis row names the rule that
-    /// owns the construct. A construct in that group is refused by analysis
+    /// has since gained either a lowering or a rule that refuses it. Seven run
+    /// to a module, fifteen are refused by analysis, and three are stopped by
+    /// the type checker: one before its rule is reached, and the two repeated
+    /// array literal shapes the type checker owns. Each analysis row names the
+    /// rule that owns the construct. A construct in that group is refused by analysis
     /// rather than by code generation because analysis runs first — the code
     /// generation backstop behind each of them is pinned separately, by the
     /// negative codegen tests that skip analysis to reach it.
     ///
-    /// One row is here for the opposite reason. `arith_modes` names a construct
-    /// that lowers everywhere it can be written, and its value is the breadth:
-    /// a lowering missing from one position out of five is a `todo!()` on a
-    /// program the front end accepted, which is exactly what this sweep is
-    /// for.
+    /// Two rows are here for the opposite reason. `arith_modes` and
+    /// `repeated_array_literal` name constructs that lower everywhere they can
+    /// be written, and their value is the breadth: a lowering missing from one
+    /// position out of several is a `todo!()` on a program the front end
+    /// accepted, which is exactly what this sweep is for.
     const SHAPES: &[Shape] = &[
         Shape {
             stem: "bare_type_parameter",
@@ -182,6 +183,20 @@ mod gate {
             declared: Module,
             why: "the unnamed parameter spends slot 0 and the reachability body's choice suffix \
                   begins after it, which is the alignment the frame plan asserts",
+        },
+        Shape {
+            stem: "repeat_count_not_literal",
+            declared: TypeCheck,
+            why: "a repeat count is held to the rule for an array type's size, so an \
+                  arithmetic count is refused where the length is decided, before anything \
+                  needs it",
+        },
+        Shape {
+            stem: "repeated_uzumaki",
+            declared: TypeCheck,
+            why: "the value of `[value; N]` is evaluated once, so `[@; N]` would draw one value \
+                  for every element; the type checker refuses it in favour of the whole-array \
+                  `@`",
         },
         Shape {
             stem: "string_array_element",
@@ -266,6 +281,14 @@ mod gate {
                   every position one is written — a return expression, a method body, a \
                   comparison of sums, an annotation nested in another, and a `const` \
                   initializer — so the pipeline runs to a module through each of them",
+        },
+        Shape {
+            stem: "repeated_array_literal",
+            declared: Module,
+            why: "`[value; N]` stores its value once and copies it, through a different store \
+                  path in each position — `let`, `const`, assignment, self-referencing \
+                  assignment, sret return, struct field, list element, nested repeat and a \
+                  specification body — so the pipeline runs to a module through each of them",
         },
     ];
 

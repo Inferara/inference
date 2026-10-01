@@ -503,6 +503,14 @@ Test data includes:
   zero-fill), that mixed-value arrays emit stores only for non-zero elements, that sret
   returns via `return [0, 0, 0]` always store (no elision), and that `[true, false, true]`
   emits stores for the `true` elements but not `false`; validated and executed via wasmtime
+- `array_repeat.inf` - Repeated array literals `[value; N]`: counts that are and are not
+  powers of two (the doubling copies leave a partial last one), byte and 8-byte elements, a
+  256-byte array whose large copies take the looped form, an all-zero repeat that emits no
+  stores, a value computed by a call that is made once, struct, nested and row-of-rows
+  elements, plain and self-referencing reassignment (the latter staged in scratch), an sret
+  return, a struct field, a `const`, and a zero repeat inside a loop that still stores; also
+  compiled at the bulk-memory level, where each copy is one `memory.copy`; validated and
+  executed via wasmtime
 - `array_index.inf` - Array index read access (both constant and variable indices) with i32
   and bool arrays, including reading array elements for use in conditions; validated and
   executed via wasmtime

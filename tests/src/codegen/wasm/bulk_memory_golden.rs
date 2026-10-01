@@ -61,6 +61,7 @@ mod bulk_memory_golden_tests {
         ("base", "array_nondet"),
         ("base", "array_of_structs"),
         ("base", "array_params"),
+        ("base", "array_repeat"),
         ("base", "array_self_ref_reassign"),
         ("base", "array_zero_literal"),
         ("base", "const_array"),

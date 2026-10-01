@@ -447,6 +447,21 @@ fn use_it(p: P) -> i32 { let v: i32 = helper(); return v; }";
         assert_eq!(hover.contents_markdown, "```inference\ni32\n```");
     }
 
+    /// The count of a repeat is a literal like any other, typed as the
+    /// `i32` an array size is, and the binding a repeat initializes has the
+    /// repeat's `[T; N]`.
+    #[test]
+    fn hover_repeat_count_and_binding_show_their_types() {
+        let source = "fn f() -> u8 { let buf: [u8; 64] = [0; 64]; return buf[0]; }";
+        let count = hover_at(source, at(source, "64]; return")).expect("hover");
+        assert_eq!(count.contents_markdown, "```inference\ni32\n```");
+        let binding = hover_at(source, at(source, "buf[0]")).expect("hover");
+        assert_eq!(
+            binding.contents_markdown,
+            "```inference\nbuf: [u8; 64]\n```"
+        );
+    }
+
     #[test]
     fn hover_method_call_shows_the_method_signature() {
         let source = "struct Q { y: i32; fn getq(self) -> i32 { return self.y; } }\n\

@@ -42,8 +42,8 @@
 //!   asserts about it. The *merged* artifact is gated by the linked corpus in
 //!   `rocq_typecheck.rs`.
 //!
-//! So the table's split is 40 valid and 9 rejected, where `infc --mode proof`
-//! run over the same directory reaches 33 modules and refuses 16: the seven
+//! So the table's split is 41 valid and 10 rejected, where `infc --mode proof`
+//! run over the same directory reaches 34 modules and refuses 17: the seven
 //! linked fixtures are the difference, in the direction of this gate covering
 //! more rather than less.
 
@@ -239,6 +239,12 @@ mod gate {
             expected: StockValid(AggregateLeaves),
             why: "compound `@` at array, matrix and record type — one choice parameter per \
                   scalar leaf",
+        },
+        Fixture {
+            stem: "spec_array_repeat",
+            expected: StockValid(ScalarChoice),
+            why: "repeated array literals in executable code and in `forall` bodies, which \
+                  draw a scalar and repeat the binding, since `@` itself cannot be repeated",
         },
         Fixture {
             stem: "spec_assume_body_modifier",

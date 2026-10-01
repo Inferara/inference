@@ -1,0 +1,9 @@
+// A repeat count an array type's size could not spell. The count is held to
+// the rule for the size in `[T; N]`, an integer literal, so the type checker
+// refuses an arithmetic count rather than code generation meeting a length it
+// cannot compute.
+
+pub fn four() -> i32 {
+    let xs: [i32; 4] = [0; 2 + 2];
+    return xs[3];
+}

@@ -1,0 +1,111 @@
+// The repeated array literal `[value; N]`: the value is stored once into
+// element 0 and copied into the rest by doubling regions.
+
+struct Point { x: i32; y: i32; }
+struct Tally { cells: [i32; 4]; count: i32; }
+
+fn seven() -> i32 {
+    return 7;
+}
+
+// A power-of-two count: 1 -> 2 -> 4 -> 8, three copies.
+pub fn fill_eight() -> i32 {
+    let a: [i32; 8] = [3; 8];
+    return a[0] + a[7];
+}
+
+// A count that is not a power of two: the last copy is partial, 1 -> 2 -> 4 -> 5.
+pub fn fill_five() -> i32 {
+    let a: [i32; 5] = [2; 5];
+    return a[0] + a[4];
+}
+
+// Byte elements: a 7-byte array is copied in 4, 2 and 1-byte units.
+pub fn fill_bytes() -> u8 {
+    let a: [u8; 7] = [255; 7];
+    return a[6];
+}
+
+// 8-byte elements.
+pub fn fill_wide() -> i64 {
+    let a: [i64; 3] = [-1; 3];
+    return a[2];
+}
+
+// 256 bytes: the large copies pass the straight-line limit and loop.
+pub fn fill_long() -> i32 {
+    let a: [i32; 64] = [1; 64];
+    return a[32] + a[63];
+}
+
+// An all-zero value initializing a binding emits no stores at all.
+pub fn zeros() -> i32 {
+    let a: [i32; 16] = [0; 16];
+    return a[15];
+}
+
+// The value is evaluated once: one call, however many elements.
+pub fn from_call() -> i32 {
+    let a: [i32; 4] = [seven(); 4];
+    return a[0] + a[3];
+}
+
+pub fn points() -> i32 {
+    let ps: [Point; 3] = [Point { x: 1, y: 2 }; 3];
+    return ps[2].x * 10 + ps[2].y;
+}
+
+pub fn nested() -> i32 {
+    let g: [[i32; 2]; 3] = [[4; 2]; 3];
+    return g[0][0] + g[2][1];
+}
+
+pub fn rows() -> i32 {
+    let row: [i32; 2] = [5, 6];
+    let g: [[i32; 2]; 3] = [row; 3];
+    return g[2][0] * 10 + g[2][1];
+}
+
+pub fn reassigned() -> i32 {
+    let mut a: [i32; 4] = [1, 2, 3, 4];
+    a = [8; 4];
+    return a[0] + a[3];
+}
+
+// The value reads the array it is assigned to, so it is built in scratch
+// against the old array and then copied over it.
+pub fn self_referencing() -> i32 {
+    let mut a: [i32; 4] = [1, 2, 3, 4];
+    a = [a[3]; 4];
+    return a[0] * 10 + a[3];
+}
+
+// Returned through the caller's result pointer.
+pub fn returned() -> [i32; 3] {
+    return [9; 3];
+}
+
+pub fn field() -> i32 {
+    let t: Tally = Tally { cells: [6; 4], count: 4 };
+    return t.cells[3] + t.count;
+}
+
+pub fn constant() -> i32 {
+    const C: [i32; 3] = [11; 3];
+    return C[0] + C[2];
+}
+
+// Inside a loop the frame is not known to be zero on the second pass, so the
+// zero repeat stores its zeros there.
+pub fn rezeroed() -> i32 {
+    let mut seen: i32 = 0;
+    let mut i: i32 = 0;
+    loop i < 2 {
+        let mut a: [i32; 4] = [0; 4];
+        seen = seen + a[0] + a[3];
+        a[0] = 5;
+        a[3] = 6;
+        i = i + 1;
+    }
+    return seen;
+}

@@ -3873,6 +3873,108 @@ mod base_codegen_tests {
         );
     }
 
+    /// The repeated array literal fixture. The marks pin which path each
+    /// repeat takes: `let`, `const` and plain-assignment repeats lower through
+    /// `lower_expression`, while the self-referencing assignment, the sret
+    /// return, the struct field and the inner repeat of a nested one store
+    /// through their own callers; only `zeros` is elided outright, since the
+    /// zero repeat in `rezeroed` runs inside a loop.
+    #[test]
+    fn array_repeat_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_repeat, 13);
+        cov_mark::check_count!(wasm_codegen_array_repeat_zero_elided, 1);
+        let test_name = "array_repeat";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn array_repeat_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "array_repeat";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let expected_i32: &[(&str, i32)] = &[
+            ("fill_eight", 6),
+            ("fill_five", 4),
+            // `u8` 255 crosses the boundary zero-extended.
+            ("fill_bytes", 255),
+            ("fill_long", 2),
+            ("zeros", 0),
+            ("from_call", 14),
+            ("points", 12),
+            ("nested", 8),
+            ("rows", 56),
+            ("reassigned", 16),
+            // `a[3]` read before any store: 4 everywhere, not 1 or a mix.
+            ("self_referencing", 44),
+            ("field", 10),
+            ("constant", 22),
+            // Both passes read the zeros; skipping the stores on the second
+            // would read the 5 and 6 the first pass left.
+            ("rezeroed", 0),
+        ];
+        for &(name, want) in expected_i32 {
+            let func: TypedFunc<(), i32> = instance
+                .get_typed_func(&mut store, name)
+                .unwrap_or_else(|e| panic!("Failed to get '{name}': {e}"));
+            assert_eq!(
+                func.call(&mut store, ()).unwrap_or_else(|e| panic!("{name} failed: {e}")),
+                want,
+                "{name} returned the wrong value"
+            );
+        }
+
+        let fill_wide: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "fill_wide")
+            .expect("Failed to get 'fill_wide'");
+        assert_eq!(fill_wide.call(&mut store, ()).expect("fill_wide failed"), -1);
+
+        let returned: TypedFunc<i32, ()> = instance
+            .get_typed_func(&mut store, "returned")
+            .expect("Failed to get 'returned'");
+        let sret_ptr: i32 = 0;
+        returned.call(&mut store, sret_ptr).expect("returned failed");
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should export memory");
+        let data = memory.data(&store);
+        for i in 0..3 {
+            let offset = (sret_ptr as usize) + i * 4;
+            let val = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+            assert_eq!(val, 9, "returned[{i}] should be 9");
+        }
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("__stack_pointer export missing");
+        assert_eq!(
+            stack_pointer.get(&mut store).i32().unwrap(),
+            65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
     #[test]
     fn struct_params_test() {
         cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 1);
@@ -8435,6 +8537,26 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "array_self_ref_reassign");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_repeat_wasm() {
+        let dir = base_test_dir().join("array_repeat");
+        let source_code = std::fs::read_to_string(dir.join("array_repeat.inf"))
+            .expect("Failed to read array_repeat.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("array_repeat.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_repeat");
     }
 
     #[test]

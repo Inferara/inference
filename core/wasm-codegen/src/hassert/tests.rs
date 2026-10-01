@@ -6279,7 +6279,7 @@ fn no_reachability_fixture_reaches_an_overflow_guard() {
          failure rather than a narrowing"
     );
     assert_eq!(
-        examined, 47,
+        examined, 48,
         "the corpus this sweep examines is pinned; a fixture added to it belongs in this count"
     );
     assert_eq!(
