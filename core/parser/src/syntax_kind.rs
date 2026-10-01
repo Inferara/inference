@@ -59,6 +59,7 @@
 //! | `TypeMemberAccessExpression`  | `type_member_access_expression`  |
 //! | `StructExpression`            | `struct_expression`              |
 //! | `ArrayLiteral`                | `array_literal`                  |
+//! | `ArrayRepeat`                 | `array_repeat`                   |
 //! | `BoolLiteral`                 | `bool_literal`                   |
 //! | `StringLiteral`               | `string`                         |
 //! | `NumberLiteral`               | `number`                         |
@@ -236,6 +237,9 @@ pub enum SyntaxKind {
     TypeMemberAccessExpression,
     StructExpression,
     ArrayLiteral,
+    /// `[ expression ; expression ]`: an array of one value repeated a count of
+    /// times. The first child is the value, the second the count.
+    ArrayRepeat,
     BoolLiteral,
     StringLiteral,
     NumberLiteral,

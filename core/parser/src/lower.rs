@@ -935,6 +935,7 @@ impl<'s> Lowering<'s> {
             | SyntaxKind::StringLiteral
             | SyntaxKind::NumberLiteral
             | SyntaxKind::ArrayLiteral
+            | SyntaxKind::ArrayRepeat
             | SyntaxKind::UnitLiteral => self.lower_literal(node),
             SyntaxKind::UzumakiKeyword => self.arena.exprs.alloc(ExprData {
                 location,
@@ -1172,6 +1173,17 @@ impl<'s> Lowering<'s> {
                 self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::ArrayLiteral { elements },
+                })
+            }
+            SyntaxKind::ArrayRepeat => {
+                // guaranteed: `array_literal` opens a repeat only after parsing
+                // its value; the count may be missing from a truncated `[v;`,
+                // so it falls back to an `<error>` expression (design §8).
+                let value = self.lower_expression_or_error(node.nth_node(0), node);
+                let count = self.lower_expression_or_error(node.nth_node(1), node);
+                self.arena.exprs.alloc(ExprData {
+                    location,
+                    kind: Expr::ArrayRepeat { value, count },
                 })
             }
             SyntaxKind::BoolLiteral => {
@@ -1753,6 +1765,7 @@ fn is_expression_node(kind: SyntaxKind) -> bool {
             | SyntaxKind::TypeMemberAccessExpression
             | SyntaxKind::StructExpression
             | SyntaxKind::ArrayLiteral
+            | SyntaxKind::ArrayRepeat
             | SyntaxKind::BoolLiteral
             | SyntaxKind::StringLiteral
             | SyntaxKind::NumberLiteral
@@ -3338,6 +3351,36 @@ mod tests {
             Expr::ArrayLiteral { elements } => assert_eq!(elements.len(), 3),
             other => panic!("expected array literal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_array_repeat() {
+        let arena = lower("fn f() { [7; 3]; }");
+        match single_expr(&arena) {
+            Expr::ArrayRepeat { value, count } => {
+                assert!(
+                    matches!(&arena[*value].kind, Expr::NumberLiteral { value } if value == "7")
+                );
+                assert!(
+                    matches!(&arena[*count].kind, Expr::NumberLiteral { value } if value == "3")
+                );
+            }
+            other => panic!("expected array repeat, got {other:?}"),
+        }
+    }
+
+    /// A truncated repeat still lowers to one, with an error expression for the
+    /// missing count, so later phases see the shape the user was writing.
+    #[test]
+    fn lowers_a_repeat_with_a_missing_count() {
+        let result = parse("fn f() { [7; ]; }");
+        assert!(!result.errors.is_empty(), "the missing count is reported");
+        let found = result
+            .arena
+            .exprs
+            .iter()
+            .any(|(_, data)| matches!(data.kind, Expr::ArrayRepeat { .. }));
+        assert!(found, "the repeat survives recovery");
     }
 
     #[test]

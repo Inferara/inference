@@ -929,6 +929,29 @@ pub enum TypeCheckError {
     )]
     PowOperatorNotSupported { location: Location },
 
+    /// The count of a repeated array literal is neither an integer literal nor
+    /// a name: `[0; n + 1]`, `[0; len()]`.
+    ///
+    /// The count follows the rule an array type's size does, and that rule
+    /// admits only an integer literal; a named count is reported as
+    /// [`TypeCheckError::NonLiteralArraySize`], as a named type size is. The
+    /// parser accepts any expression in the position so this can name it.
+    #[error(
+        "{location}: the count of a repeated array literal must be an integer literal, as in `[0; 4]`"
+    )]
+    RepeatCountNotLiteral { location: Location },
+
+    /// A repeated array literal whose value contains `@`: `[@; 4]`.
+    ///
+    /// The value of `[value; N]` is evaluated once and copied into every
+    /// element, so `[@; N]` would draw a single value — not the `N` independent
+    /// draws it reads as. A non-deterministic array is already spelled `@` for
+    /// the whole array, which draws every element.
+    #[error(
+        "{location}: `@` cannot be repeated: the value of `[value; N]` is evaluated once and copied into every element, so it would draw one value for all of them; write `@` for the whole array to draw each element"
+    )]
+    RepeatedUzumaki { location: Location },
+
     /// A required field is missing from a struct literal.
     #[error("{location}: missing field `{field_name}` in struct literal `{struct_name}`")]
     MissingStructField {
@@ -1262,6 +1285,8 @@ impl TypeCheckError {
             | TypeCheckError::InvalidArraySize { location, .. }
             | TypeCheckError::NonLiteralArraySize { location, .. }
             | TypeCheckError::PowOperatorNotSupported { location }
+            | TypeCheckError::RepeatCountNotLiteral { location }
+            | TypeCheckError::RepeatedUzumaki { location }
             | TypeCheckError::MissingStructField { location, .. }
             | TypeCheckError::UnknownStructField { location, .. }
             | TypeCheckError::DuplicateStructField { location, .. }
@@ -2153,6 +2178,30 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: array size must be an integer literal; named constant `N` is not yet supported as an array size"
+        );
+    }
+
+    #[test]
+    fn repeat_count_not_literal_display() {
+        let err = TypeCheckError::RepeatCountNotLiteral {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: the count of a repeated array literal must be an integer literal, as in `[0; 4]`"
+        );
+    }
+
+    #[test]
+    fn repeated_uzumaki_display() {
+        let err = TypeCheckError::RepeatedUzumaki {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: `@` cannot be repeated: the value of `[value; N]` is evaluated once and copied \
+             into every element, so it would draw one value for all of them; write `@` for the \
+             whole array to draw each element"
         );
     }
 

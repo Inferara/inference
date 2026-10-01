@@ -137,6 +137,10 @@ pub(crate) fn expr_children(
                 visit(*elem);
             }
         }
+        // The count is not visited: it is the array's length, an integer literal
+        // the type checker has already held to the size rule, and is never
+        // evaluated — it sits where a type's size does, which no rule walks.
+        Expr::ArrayRepeat { value, .. } => visit(*value),
         Expr::Identifier(_)
         | Expr::NumberLiteral { .. }
         | Expr::BoolLiteral { .. }

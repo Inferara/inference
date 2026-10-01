@@ -5,6 +5,7 @@ mod algo_i64_mixed;
 mod algo_iter;
 mod arith_mode;
 mod arith_overflow;
+mod array_repeat;
 mod base;
 mod binops_bool;
 mod binops_compound;

@@ -463,6 +463,9 @@ impl PlanBuilder<'_> {
                     self.walk_expr(element);
                 }
             }
+            // The type checker refuses an `@` anywhere in a repeat's value, so
+            // this finds none; it is walked so the refusal is the only reason.
+            Expr::ArrayRepeat { value, .. } => self.walk_expr(*value),
             Expr::Uzumaki => self.plan_choice(expr_id, false),
             Expr::Identifier(_)
             | Expr::NumberLiteral { .. }

@@ -1927,6 +1927,44 @@ mod tests {
         assert_eq!(count_kind(&a, SyntaxKind::NumberLiteral), 3);
     }
 
+    /// `[value; count]` is its own node with the value and the count as its two
+    /// children, and a list keeps parsing as a list.
+    #[test]
+    fn array_repeat_atom() {
+        let src = "fn f() { x = [0; 4]; }";
+        assert_clean(src);
+        let a = first(src, SyntaxKind::ArrayRepeat);
+        assert_eq!(count_kind(&a, SyntaxKind::NumberLiteral), 2);
+        assert!(find(&parse_to_cst(src).0, SyntaxKind::ArrayLiteral).is_none());
+    }
+
+    /// The value and the count are whole expressions: a struct literal or a
+    /// nested repeat as the value, and a name as the count, all parse — the
+    /// type checker is what holds the count to a literal.
+    #[test]
+    fn array_repeat_takes_any_expressions() {
+        for src in [
+            "fn f() { x = [P { a: 1 }; 2]; }",
+            "fn f() { x = [[0; 3]; 2]; }",
+            "fn f() { x = [y; n]; }",
+            "fn f() { x = [g(1); 2 + 1]; }",
+        ] {
+            assert_clean(src);
+            assert!(
+                find(&parse_to_cst(src).0, SyntaxKind::ArrayRepeat).is_some(),
+                "{src}"
+            );
+        }
+    }
+
+    /// A list cannot continue into a repeat: `[1, 2; 3]` is refused at the
+    /// `;`, rather than read as either form.
+    #[test]
+    fn a_list_followed_by_a_count_is_refused() {
+        let (_, errors) = parse_to_cst("fn f() { x = [1, 2; 3]; }");
+        assert!(!errors.is_empty(), "a list with a count must not parse");
+    }
+
     #[test]
     fn unit_literal_atom() {
         let src = "fn f() { x = (); }";

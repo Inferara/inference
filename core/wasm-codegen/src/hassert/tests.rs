@@ -3496,6 +3496,23 @@ fn array_literal_elements_resolve_by_constant_index() {
     );
 }
 
+/// A repeated array literal is the value tree of its value copied into every
+/// element, so any constant index reads the value's own term.
+#[test]
+fn array_repeat_elements_resolve_to_the_value() {
+    assert_eq!(
+        obligation_of("", "forall { let v: [i32; 4] = [7; 4]; assert(v[3] == 7); }"),
+        nz(eqs(i32c(7), i32c(7)))
+    );
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let m: [[i32; 2]; 3] = [[1, 2]; 3]; assert(m[2][1] == 2); }"
+        ),
+        nz(eqs(i32c(2), i32c(2)))
+    );
+}
+
 /// A struct literal's fields reorder from source order to field-layout order;
 /// access is by name, so the reordering is unobservable.
 #[test]
@@ -4068,6 +4085,24 @@ fn an_out_of_surface_literal_keeps_the_pre_existing_p002() {
     };
     one_p002("let ps: [P; 2] = [P { x: 1 }, P { x: 2 }];");
     one_p002("const ps: [P; 2] = [P { x: 1 }, P { x: 2 }];");
+}
+
+/// A repeat of an out-of-surface element type takes the same path as a list
+/// and names itself in the same `P002`.
+#[test]
+fn an_out_of_surface_repeat_keeps_the_p002() {
+    let src = "struct P { x: i32; }\nspec S { fn f() forall { let ps: [P; 2] = [P { x: 1 }; 2]; \
+               assert(ps[0].x == 1); } }\n";
+    let ctx = type_check(src);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].contains("error[P002]"), "{diagnostics:?}");
+    assert!(
+        diagnostics[0].contains(
+            "a repeated array literal has no encoding in the verification assertion language"
+        ),
+        "{diagnostics:?}"
+    );
 }
 
 /// The other way an out-of-surface literal is reached — as an operand of an

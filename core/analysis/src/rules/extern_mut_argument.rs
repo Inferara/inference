@@ -328,7 +328,9 @@ fn argument_root(arena: &AstArena, expr_id: ExprId) -> ArgumentRoot {
         Expr::StructLiteral { name, .. } => {
             ArgumentRoot::Temporary(format!("{} {{ … }}", arena[*name].name))
         }
-        Expr::ArrayLiteral { .. } => ArgumentRoot::Temporary("[…]".to_string()),
+        Expr::ArrayLiteral { .. } | Expr::ArrayRepeat { .. } => {
+            ArgumentRoot::Temporary("[…]".to_string())
+        }
         Expr::FunctionCall { function, .. } => {
             ArgumentRoot::Temporary(match &arena[*function].kind {
                 Expr::Identifier(ident_id) => format!("{}(…)", arena[*ident_id].name),

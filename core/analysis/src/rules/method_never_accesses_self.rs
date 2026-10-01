@@ -134,6 +134,7 @@ fn expr_references_self(arena: &AstArena, expr_id: ExprId) -> bool {
         Expr::ArrayLiteral { elements } => elements
             .iter()
             .any(|elem| expr_references_self(arena, *elem)),
+        Expr::ArrayRepeat { value, .. } => expr_references_self(arena, *value),
         Expr::NumberLiteral { .. }
         | Expr::BoolLiteral { .. }
         | Expr::StringLiteral { .. }

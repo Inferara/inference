@@ -393,6 +393,7 @@ fn max_self_ref_scratch(ctx: &TypedContext, block_id: BlockId, module_path: &[St
                         Expr::ArrayLiteral { elements } => elements
                             .iter()
                             .any(|e| expr_reads_var(arena, *e, dest)),
+                        Expr::ArrayRepeat { value, .. } => expr_reads_var(arena, *value, dest),
                         _ => false,
                     };
                     if self_ref
@@ -456,6 +457,7 @@ fn expr_reads_var(arena: &AstArena, expr_id: ExprId, dest: &str) -> bool {
         Expr::ArrayLiteral { elements } => elements
             .iter()
             .any(|elem| expr_reads_var(arena, *elem, dest)),
+        Expr::ArrayRepeat { value, .. } => expr_reads_var(arena, *value, dest),
         Expr::NumberLiteral { .. }
         | Expr::BoolLiteral { .. }
         | Expr::StringLiteral { .. }
