@@ -31,7 +31,7 @@ crate::rule! {
                 && matches!(arena[*left].kind, Expr::MemberAccess { .. } | Expr::ArrayIndexAccess { .. })
                 && matches!(
                     arena[*right].kind,
-                    Expr::StructLiteral { .. } | Expr::ArrayLiteral { .. }
+                    Expr::StructLiteral { .. } | Expr::ArrayLiteral { .. } | Expr::ArrayRepeat { .. }
                 )
             {
                 errors.push(LabeledDiagnostic::new(

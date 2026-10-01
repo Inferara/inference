@@ -268,7 +268,12 @@ impl AstArena {
     /// grouping arms are the ones a partial walk loses first: `return x + @` and
     /// `f(@)` are non-deterministic, and a walk that matched only the root node
     /// answers `false` for both.
-    fn expr_contains_non_det_anywhere(&self, expr_id: ExprId) -> bool {
+    ///
+    /// Public for the type checker, which refuses a repeated array literal whose
+    /// value holds an uzumaki anywhere: `[[0, @]; 2]` would draw once for all of
+    /// its copies, exactly as `[@; 2]` would.
+    #[must_use]
+    pub fn expr_contains_non_det_anywhere(&self, expr_id: ExprId) -> bool {
         match &self[expr_id].kind {
             Expr::Uzumaki => true,
             Expr::Binary { left, right, .. } => {
@@ -296,6 +301,10 @@ impl AstArena {
             Expr::ArrayLiteral { elements } => elements
                 .iter()
                 .any(|&element| self.expr_contains_non_det_anywhere(element)),
+            Expr::ArrayRepeat { value, count } => {
+                self.expr_contains_non_det_anywhere(*value)
+                    || self.expr_contains_non_det_anywhere(*count)
+            }
             // Leaves, and a type in expression position, which carries no value.
             Expr::Identifier(_)
             | Expr::NumberLiteral { .. }
@@ -933,6 +942,13 @@ mod tests {
                 "an array literal element",
                 Expr::ArrayLiteral {
                     elements: vec![plain, inner],
+                },
+            ),
+            (
+                "a repeated array literal's value",
+                Expr::ArrayRepeat {
+                    value: inner,
+                    count: plain,
                 },
             ),
         ]

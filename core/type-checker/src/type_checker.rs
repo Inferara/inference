@@ -1709,6 +1709,43 @@ impl TypeChecker {
         }
     }
 
+    /// The count of a repeated array literal, or `None` after reporting why it
+    /// is not one.
+    ///
+    /// Held to the rule [`Self::validate_array_size`] holds an array type's size
+    /// to — an integer literal of at least 1 that fits in 32 bits — with the
+    /// same diagnostics, so `[0; 0]` and `[0; N]` read as `[i32; 0]` and
+    /// `[i32; N]` do. Any other expression, which a type's size cannot spell, is
+    /// [`TypeCheckError::RepeatCountNotLiteral`]. A literal count is typed like
+    /// any other literal, so every expression the tree holds has a type.
+    fn repeat_count(&mut self, count: ExprId, ctx: &mut TypedContext) -> Option<u32> {
+        let location = ctx.arena()[count].location;
+        match ctx.arena()[count].kind.clone() {
+            Expr::NumberLiteral { value } => {
+                self.infer_expression(count, ctx);
+                match value.parse::<u32>() {
+                    Ok(n @ 1..) => Some(n),
+                    Ok(0) | Err(_) => {
+                        self.push_error(TypeCheckError::InvalidArraySize {
+                            size: value,
+                            location,
+                        });
+                        None
+                    }
+                }
+            }
+            Expr::Identifier(ident_id) => {
+                let name = ctx.arena()[ident_id].name.clone();
+                self.push_error(TypeCheckError::NonLiteralArraySize { name, location });
+                None
+            }
+            _ => {
+                self.push_error(TypeCheckError::RepeatCountNotLiteral { location });
+                None
+            }
+        }
+    }
+
     /// Type-check the body of a free function (phase 5, top-level functions).
     ///
     /// Pushes a fresh scope, registers each named argument as a local
@@ -3008,6 +3045,39 @@ impl TypeChecker {
                     return Some(array_type);
                 }
                 None
+            }
+            Expr::ArrayRepeat { value, count } => {
+                // A recorded type answers unconditionally, as for a list.
+                if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
+                    return Some(type_info);
+                }
+                let count = self.repeat_count(count, ctx);
+                // Checked before the value is inferred: an `@` there has no type
+                // to be given, so inferring it would add a second, less helpful
+                // diagnostic about the same `@`.
+                if ctx.arena().expr_contains_non_det_anywhere(value) {
+                    self.push_error(TypeCheckError::RepeatedUzumaki {
+                        location: ctx.arena()[value].location,
+                    });
+                    return None;
+                }
+                // `[T; N]` expected of the repeat is `T` expected of its value,
+                // exactly as it is of every element of a list.
+                let element_expected = match expected.map(|e| &e.ty.kind) {
+                    Some(TypeInfoKind::Array(element_type, _)) => Some((**element_type).clone()),
+                    _ => None,
+                };
+                let element_source = TypeMismatchContext::ArrayElement;
+                let element_expected = element_expected
+                    .as_ref()
+                    .map(|ty| Expected::new(ty, &element_source));
+                let element_type = self.infer_expression_expecting(value, element_expected, ctx)?;
+                let array_type = TypeInfo {
+                    kind: TypeInfoKind::Array(Box::new(element_type), count?),
+                    type_params: vec![],
+                };
+                ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
+                Some(array_type)
             }
             Expr::BoolLiteral { .. } => {
                 ctx.set_node_typeinfo(NodeId::Expr(expr_id), TypeInfo::boolean());

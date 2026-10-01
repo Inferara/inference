@@ -1,3 +1,4 @@
+mod array_repeat;
 mod rules_a006_a011;
 mod rules_a012_a022;
 mod rules_a020;

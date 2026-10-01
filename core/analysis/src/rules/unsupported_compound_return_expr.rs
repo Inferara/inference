@@ -48,6 +48,7 @@ fn is_supported_sret_expr(arena: &AstArena, expr_id: ExprId) -> bool {
         &arena[expr_id].kind,
         Expr::Identifier(_)
             | Expr::ArrayLiteral { .. }
+            | Expr::ArrayRepeat { .. }
             | Expr::StructLiteral { .. }
             | Expr::FunctionCall { .. }
             | Expr::MemberAccess { .. }

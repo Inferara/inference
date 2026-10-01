@@ -96,10 +96,10 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, CompoundFieldLayout, FrameLayout, RegionEmit, StructSlot, align_to,
-    align_to_frame, compute_struct_field_layout, emit_array_param_copy, emit_memcpy_via_stack,
-    emit_ptr_offset_addr, emit_sret_copy, emit_stack_epilogue, emit_stack_prologue,
-    emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
+    self, ArraySlot, CompoundFieldLayout, FrameLayout, MemAddr, RegionEmit, StructSlot, align_to,
+    align_to_frame, compute_struct_field_layout, emit_array_param_copy, emit_memcpy_via_locals,
+    emit_memcpy_via_stack, emit_ptr_offset_addr, emit_sret_copy, emit_stack_epilogue,
+    emit_stack_prologue, emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
 };
 
 /// Origin of a function definition being lowered.
@@ -3081,6 +3081,9 @@ impl Compiler {
                     visit(element);
                 }
             }
+            // The count is the array's length, never lowered or evaluated, so it
+            // is not a child any scan can learn something from.
+            Expr::ArrayRepeat { value, .. } => visit(*value),
             Expr::Identifier(_)
             | Expr::NumberLiteral { .. }
             | Expr::BoolLiteral { .. }
@@ -3475,6 +3478,7 @@ impl Compiler {
             | Expr::TypeMemberAccess { .. }
             | Expr::StructLiteral { .. }
             | Expr::ArrayLiteral { .. }
+            | Expr::ArrayRepeat { .. }
             | Expr::NumberLiteral { .. }
             | Expr::BoolLiteral { .. }
             | Expr::StringLiteral { .. }
@@ -4081,10 +4085,8 @@ impl Compiler {
                                 (*max_align).max(memory::max_struct_alignment(&slot.fields));
                         }
                     }
-                    Expr::ArrayLiteral { elements }
-                        if elements
-                            .iter()
-                            .any(|e| Self::expr_reads_var(arena, *e, dest)) =>
+                    Expr::ArrayLiteral { .. } | Expr::ArrayRepeat { .. }
+                        if Self::array_value_reads_var(arena, *right, dest) =>
                     {
                         if let Some(slot) = array_offsets.get(dest) {
                             let size = slot.elem_size.checked_mul(slot.length).expect(
@@ -4801,6 +4803,22 @@ impl Compiler {
                 };
                 let elements = elements.clone();
                 self.lower_array_literal(arena, expr_id, &elements, var_name, ctx);
+            }
+            Expr::ArrayRepeat { value, .. } => {
+                cov_mark::hit!(wasm_codegen_emit_array_repeat);
+                // A repeat is an array literal and is stored the same way: into
+                // the owning binding's frame slot, which a position that names
+                // no binding does not have.
+                let Some(var_name) = enclosing_var_name else {
+                    self.poison(CodegenError::UnsupportedConstruct {
+                        construct: "an array literal in a position that binds no variable"
+                            .to_string(),
+                        rule: "the compound-literal-position family (A012, A015)",
+                        location: Some(arena[expr_id].location),
+                    });
+                    return;
+                };
+                self.lower_array_repeat(arena, expr_id, value, var_name, ctx);
             }
             Expr::BoolLiteral { value } => {
                 self.func()
@@ -5725,7 +5743,10 @@ impl Compiler {
                     .frame_layout
                     .as_ref()
                     .is_some_and(|layout| layout.struct_offsets.contains_key(name));
-                let is_array_literal = matches!(&arena[right].kind, Expr::ArrayLiteral { .. });
+                let is_array_literal = matches!(
+                    &arena[right].kind,
+                    Expr::ArrayLiteral { .. } | Expr::ArrayRepeat { .. }
+                );
                 let is_array_type = self
                     .frame_layout
                     .as_ref()
@@ -5739,9 +5760,9 @@ impl Compiler {
                     Expr::StructLiteral { fields, .. } => fields
                         .iter()
                         .any(|(_, fe)| Self::expr_reads_var(arena, *fe, name)),
-                    Expr::ArrayLiteral { elements } => elements
-                        .iter()
-                        .any(|e| Self::expr_reads_var(arena, *e, name)),
+                    Expr::ArrayLiteral { .. } | Expr::ArrayRepeat { .. } => {
+                        Self::array_value_reads_var(arena, right, name)
+                    }
                     _ => false,
                 };
                 if is_struct_literal && !self_ref {
@@ -5883,7 +5904,28 @@ impl Compiler {
         );
         let elements: Vec<ExprId> = match &arena[right].kind {
             Expr::ArrayLiteral { elements } => elements.clone(),
-            _ => unreachable!("caller guarantees an ArrayLiteral RHS"),
+            // Staged like a list: the value is built into the scratch region
+            // and replicated there, so it reads the destination before any of
+            // the destination is written.
+            Expr::ArrayRepeat { value, .. } => {
+                let value = *value;
+                let (elem_kind, count) = Self::repeat_shape(ctx, right);
+                self.store_array_repeat(
+                    arena,
+                    value,
+                    &elem_kind,
+                    count,
+                    frame_ptr_local,
+                    scratch_off,
+                    ctx,
+                    false,
+                );
+                self.func().instruction(&Instruction::LocalGet(local_idx));
+                emit_ptr_offset_addr(self.func(), frame_ptr_local, scratch_off);
+                self.emit_memory_copy(total_size);
+                return;
+            }
+            _ => unreachable!("caller guarantees an array literal RHS"),
         };
         if let Some(field_slots) = element_layout {
             self.lower_array_literal_struct_elements(
@@ -6011,6 +6053,19 @@ impl Compiler {
                         self.func().instruction(&store_instr);
                     }
                 }
+            }
+            Expr::ArrayRepeat { value, .. } => {
+                let value = *value;
+                self.store_array_repeat(
+                    arena,
+                    value,
+                    &return_info.elem_kind,
+                    return_info.length,
+                    sret_idx,
+                    0,
+                    ctx,
+                    false,
+                );
             }
             Expr::FunctionCall { function, args, .. } => {
                 self.lower_sret_return_call_forwarding(arena, *function, args, sret_idx, ctx)?;
@@ -7653,6 +7708,161 @@ impl Compiler {
         }
     }
 
+    /// Lowers `[value; count]` bound to `enclosing_var_name` into that binding's
+    /// frame slot and pushes the slot's address, as [`Self::lower_array_literal`]
+    /// does for a list.
+    fn lower_array_repeat(
+        &mut self,
+        arena: &AstArena,
+        expr_id: ExprId,
+        value: ExprId,
+        enclosing_var_name: &str,
+        ctx: &TypedContext,
+    ) {
+        let Some(ref layout) = self.frame_layout else {
+            self.func().instruction(&Instruction::I32Const(0));
+            return;
+        };
+        let slot_offset = layout
+            .array_offsets
+            .get(enclosing_var_name)
+            .unwrap_or_else(|| {
+                panic!("Array variable '{enclosing_var_name}' not found in frame layout offsets")
+            })
+            .offset;
+        let frame_ptr_local = layout.frame_ptr_local;
+        let (elem_kind, count) = Self::repeat_shape(ctx, expr_id);
+        self.store_array_repeat(
+            arena,
+            value,
+            &elem_kind,
+            count,
+            frame_ptr_local,
+            slot_offset,
+            ctx,
+            self.init_zero_elision,
+        );
+        memory::emit_ptr_offset_addr(self.func(), frame_ptr_local, slot_offset);
+    }
+
+    /// The element type and length a repeated array literal was typed with.
+    ///
+    /// The type checker stamps `[T; N]` on every repeat it accepts, and only an
+    /// accepted program reaches code generation.
+    fn repeat_shape(ctx: &TypedContext, expr_id: ExprId) -> (TypeInfoKind, u32) {
+        match ctx.get_node_typeinfo(NodeId::Expr(expr_id)).map(|info| info.kind) {
+            Some(TypeInfoKind::Array(elem, count)) => (elem.kind, count),
+            other => panic!("repeated array literal has non-array type info: {other:?}"),
+        }
+    }
+
+    /// Stores `[value; count]` into the region at `base_local + base_offset`:
+    /// `value` once into element 0, then element 0 copied into the rest.
+    ///
+    /// The value is evaluated once, which is the language's semantics for a
+    /// repeat and also what keeps the lowering small: element 0 takes exactly
+    /// the store sequence a one-element list would (a scalar, a struct
+    /// literal's fields, a nested list or repeat, or a whole-element copy of a
+    /// binding), whatever the count.
+    ///
+    /// The copies double: element 0 fills element 1, elements `[0, 2)` fill
+    /// `[2, 4)`, and so on, the last copy taking only what remains. That is
+    /// `ceil(log2(count))` copies, each between two disjoint regions, so each
+    /// is an ordinary [`memory::emit_memcpy_via_locals`] — a single
+    /// `memory.copy` under bulk memory, straight-line loads and stores for a
+    /// short region, and a loop for a long one. Copying one element at a time
+    /// would emit `count - 1` copies; copying the whole tail from element 0 at
+    /// once would read bytes it has not written yet.
+    ///
+    /// Under `skip_zero_stores` a value whose every leaf is a syntactic zero
+    /// emits nothing at all: the prologue has already zeroed the frame, which
+    /// is the same reasoning that elides a zero element of a list.
+    #[allow(clippy::too_many_arguments)]
+    fn store_array_repeat(
+        &mut self,
+        arena: &AstArena,
+        value: ExprId,
+        elem_kind: &TypeInfoKind,
+        count: u32,
+        base_local: u32,
+        base_offset: u32,
+        ctx: &TypedContext,
+        skip_zero_stores: bool,
+    ) {
+        if skip_zero_stores && Self::is_all_zero(arena, value) {
+            cov_mark::hit!(wasm_codegen_array_repeat_zero_elided);
+            return;
+        }
+        self.store_array_literal_elements(
+            arena,
+            &[value],
+            elem_kind,
+            base_offset,
+            base_local,
+            ctx,
+            skip_zero_stores,
+        );
+        let elem_size = type_byte_size(elem_kind, ctx, &self.current_module_path)
+            .expect("element byte size must be computable for a repeated array literal");
+        let mut filled: u32 = 1;
+        while filled < count {
+            let copied = filled.min(count - filled);
+            let dst_offset = filled
+                .checked_mul(elem_size)
+                .and_then(|bytes| base_offset.checked_add(bytes))
+                .expect("repeated array literal element offset overflow");
+            let byte_size = copied
+                .checked_mul(elem_size)
+                .expect("repeated array literal byte size overflow");
+            let (func, region) = self.func_and_region();
+            emit_memcpy_via_locals(
+                func,
+                MemAddr {
+                    local: base_local,
+                    offset: dst_offset,
+                },
+                MemAddr {
+                    local: base_local,
+                    offset: base_offset,
+                },
+                byte_size,
+                region,
+            );
+            filled += copied;
+        }
+    }
+
+    /// Whether every leaf `expr_id` would store is a syntactic zero — a
+    /// [`Self::is_syntactic_zero`] scalar, or a list, repeat or struct literal
+    /// all of whose leaves are.
+    fn is_all_zero(arena: &AstArena, expr_id: ExprId) -> bool {
+        if let Some(inner) = arena.transparent_inner(expr_id) {
+            return Self::is_all_zero(arena, inner);
+        }
+        match &arena[expr_id].kind {
+            Expr::ArrayLiteral { elements } => {
+                elements.iter().all(|&element| Self::is_all_zero(arena, element))
+            }
+            Expr::ArrayRepeat { value, .. } => Self::is_all_zero(arena, *value),
+            Expr::StructLiteral { fields, .. } => {
+                fields.iter().all(|&(_, field)| Self::is_all_zero(arena, field))
+            }
+            _ => Self::is_syntactic_zero(arena, expr_id),
+        }
+    }
+
+    /// Whether an array literal — a list or a repeat — reads the binding `dest`
+    /// in any element, which makes assigning it to `dest` self-referential.
+    fn array_value_reads_var(arena: &AstArena, expr_id: ExprId, dest: &str) -> bool {
+        match &arena[expr_id].kind {
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|&element| Self::expr_reads_var(arena, element, dest)),
+            Expr::ArrayRepeat { value, .. } => Self::expr_reads_var(arena, *value, dest),
+            _ => false,
+        }
+    }
+
     /// Recursively stores the leaves of a (possibly multi-dimensional) scalar
     /// array literal into the frame slot at `dest_base_offset`.
     ///
@@ -7746,8 +7956,20 @@ impl Compiler {
             }
 
             match elem_kind {
-                TypeInfoKind::Array(inner, _) => {
-                    if let Expr::ArrayLiteral {
+                TypeInfoKind::Array(inner, inner_len) => {
+                    if let Expr::ArrayRepeat { value, .. } = &arena[element_id].kind {
+                        let value = *value;
+                        self.store_array_repeat(
+                            arena,
+                            value,
+                            &inner.kind,
+                            *inner_len,
+                            frame_ptr_local,
+                            off,
+                            ctx,
+                            skip_zero_stores,
+                        );
+                    } else if let Expr::ArrayLiteral {
                         elements: inner_elements,
                     } = &arena[element_id].kind
                     {
@@ -8047,7 +8269,19 @@ impl Compiler {
         ctx: &TypedContext,
         skip_zero_stores: bool,
     ) {
-        if let Expr::ArrayLiteral { elements } = &arena[field_value_expr_id].kind {
+        if let Expr::ArrayRepeat { value, .. } = &arena[field_value_expr_id].kind {
+            let value = *value;
+            self.store_array_repeat(
+                arena,
+                value,
+                elem_kind,
+                length,
+                base_ptr_local,
+                offset,
+                ctx,
+                skip_zero_stores,
+            );
+        } else if let Expr::ArrayLiteral { elements } = &arena[field_value_expr_id].kind {
             let elements: Vec<_> = elements.clone();
             if let Some(elem_field_slots) =
                 compute_element_layout_if_struct(elem_kind, ctx, &self.current_module_path)
@@ -10503,6 +10737,13 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
                     elements: vec![base],
                 },
             );
+            let array_repeat = expr(
+                arena,
+                Expr::ArrayRepeat {
+                    value: base,
+                    count: index,
+                },
+            );
             let number = expr(
                 arena,
                 Expr::NumberLiteral {
@@ -10538,6 +10779,7 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
                 type_member,
                 struct_literal,
                 array_literal,
+                array_repeat,
                 number,
                 boolean,
                 string,
@@ -10568,6 +10810,7 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
                 | Expr::TypeMemberAccess { .. }
                 | Expr::StructLiteral { .. }
                 | Expr::ArrayLiteral { .. }
+                | Expr::ArrayRepeat { .. }
                 | Expr::NumberLiteral { .. }
                 | Expr::BoolLiteral { .. }
                 | Expr::StringLiteral { .. }
@@ -10728,6 +10971,7 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
                 Expr::TypeMemberAccess { .. }
                 | Expr::StructLiteral { .. }
                 | Expr::ArrayLiteral { .. }
+                | Expr::ArrayRepeat { .. }
                 | Expr::BoolLiteral { .. }
                 | Expr::StringLiteral { .. }
                 | Expr::UnitLiteral

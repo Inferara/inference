@@ -349,12 +349,24 @@ pub(crate) fn string_literal(p: &mut Parser) -> CompletedMarker {
     m.complete(p, SyntaxKind::StringLiteral)
 }
 
-/// `[ [ sep1(expr, ,) ] ]` (`array_literal`).
+/// `[ [ sep1(expr, ,) ] ]` (`array_literal`), or `[ expr ; expr ]`
+/// (`array_repeat`).
+///
+/// The two share their opening: only the token after the first element tells
+/// a list (`,` or `]`) from a repeat (`;`). The count is parsed as a whole
+/// expression rather than the `number_literal | name` an array type takes, so a
+/// count that is not a literal is refused by the type checker with a diagnostic
+/// naming the count, instead of by the parser with one naming a bracket.
 fn array_literal(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump(SyntaxKind::LBracket);
     if !p.at(SyntaxKind::RBracket) {
         expr(p);
+        if p.eat(SyntaxKind::Semi) {
+            expr(p);
+            p.expect(SyntaxKind::RBracket);
+            return m.complete(p, SyntaxKind::ArrayRepeat);
+        }
         while p.eat(SyntaxKind::Comma) {
             if p.at(SyntaxKind::RBracket) {
                 break;

@@ -1889,6 +1889,10 @@ impl<'a> SpecFnTranslator<'a> {
                 self.error_no_encoding(self.arena[expr].location, "an array literal");
                 zero_sentinel()
             }
+            Expr::ArrayRepeat { .. } => {
+                self.error_no_encoding(self.arena[expr].location, "a repeated array literal");
+                zero_sentinel()
+            }
             Expr::StringLiteral { .. } => {
                 self.error_no_encoding(self.arena[expr].location, "a string literal");
                 zero_sentinel()
@@ -2953,7 +2957,7 @@ impl<'a> SpecFnTranslator<'a> {
             Expr::MemberAccess { .. } | Expr::ArrayIndexAccess { .. } => {
                 self.access_chain(expr, mode)
             }
-            Expr::ArrayLiteral { .. } | Expr::StructLiteral { .. } => {
+            Expr::ArrayLiteral { .. } | Expr::ArrayRepeat { .. } | Expr::StructLiteral { .. } => {
                 self.literal_introduction(expr, mode)
             }
             _ => {
@@ -3522,6 +3526,19 @@ impl<'a> SpecFnTranslator<'a> {
                         .collect(),
                 )
             }
+            // The value is translated once and its tree copied into every
+            // element, as the value is evaluated once and copied at run time:
+            // a term with a pending witness is then one witness, not one per
+            // element.
+            Expr::ArrayRepeat { value, .. } => {
+                let value = *value;
+                let AggShape::Array(elem_shape, len) = shape else {
+                    self.error_non_scalar_expr(expr);
+                    return AggValue::Sentinel;
+                };
+                let element = self.literal_child(value, elem_shape, mode);
+                AggValue::Array(vec![element; *len as usize])
+            }
             Expr::StructLiteral { fields, .. } => {
                 let fields = fields.clone();
                 let AggShape::Struct(field_shapes) = shape else {
@@ -3569,7 +3586,7 @@ impl<'a> SpecFnTranslator<'a> {
             return AggValue::Scalar(term);
         }
         match &self.arena[child].kind {
-            Expr::ArrayLiteral { .. } | Expr::StructLiteral { .. } => {
+            Expr::ArrayLiteral { .. } | Expr::ArrayRepeat { .. } | Expr::StructLiteral { .. } => {
                 self.literal_value(child, shape, mode)
             }
             _ => self.agg_value(child, mode),
@@ -4196,6 +4213,11 @@ fn render_expr(arena: &AstArena, expr_id: ExprId) -> String {
                 elements.iter().map(|e| render_expr(arena, *e)).collect();
             format!("[{}]", elements.join(", "))
         }
+        Expr::ArrayRepeat { value, count } => format!(
+            "[{}; {}]",
+            render_expr(arena, *value),
+            render_expr(arena, *count)
+        ),
         Expr::Identifier(ident_id) => arena[*ident_id].name.clone(),
         Expr::NumberLiteral { value } => value.clone(),
         Expr::BoolLiteral { value } => value.to_string(),

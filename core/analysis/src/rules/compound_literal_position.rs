@@ -98,6 +98,21 @@ fn check_expr(
                 check_expr(arena, module_path, *elem, true, errors);
             }
         }
+        // A repeat is an array literal, held to the same positions; its value
+        // is an element and may be a compound literal as any element may.
+        Expr::ArrayRepeat { value, .. } => {
+            if !allowed {
+                errors.push(LabeledDiagnostic::new(
+                    module_path.to_vec(),
+                    AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition {
+                        kind: "array",
+                        location: arena[expr_id].location,
+                    },
+                ));
+                return;
+            }
+            check_expr(arena, module_path, *value, true, errors);
+        }
         Expr::StructLiteral { fields, .. } => {
             if !allowed {
                 errors.push(LabeledDiagnostic::new(

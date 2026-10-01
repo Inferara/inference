@@ -26,7 +26,9 @@ crate::rule! {
                     if let Expr::FunctionCall { args, .. } = &arena[sub_id].kind {
                         for (_, arg_expr) in args {
                             let kind = match &arena[*arg_expr].kind {
-                                Expr::ArrayLiteral { .. } => Some("Array"),
+                                Expr::ArrayLiteral { .. } | Expr::ArrayRepeat { .. } => {
+                                    Some("Array")
+                                }
                                 Expr::StructLiteral { .. } => Some("Struct"),
                                 _ => None,
                             };

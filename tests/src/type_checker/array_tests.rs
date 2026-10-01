@@ -1571,3 +1571,136 @@ fn f() -> [i32; N] { let a: [i32; 3] = [1, 2, 3]; return a; }";
         );
     }
 }
+
+/// `[value; N]`: an array whose every element is `value` (#218).
+mod array_repeat {
+    use super::*;
+    use inference_type_checker::errors::TypeCheckError;
+    use inference_type_checker::type_info::{NumberType, TypeInfoKind};
+    use inference_type_checker::check_with_diagnostics;
+
+    fn diagnostics(source: &str) -> Vec<TypeCheckError> {
+        let arena = build_ast(source.to_string());
+        check_with_diagnostics(arena)
+            .errors
+            .into_iter()
+            .map(|d| d.error)
+            .collect()
+    }
+
+    /// Asserts `source` type-checks with no diagnostic.
+    fn clean(source: &str) {
+        let errors = diagnostics(source);
+        assert!(errors.is_empty(), "`{source}` must type-check, got: {errors:?}");
+    }
+
+    /// The repeat takes the element type its position expects, at every width,
+    /// and the declared length — so it is accepted wherever a list of the same
+    /// length would be.
+    #[test]
+    fn a_repeat_has_the_declared_array_type() {
+        for source in [
+            "fn f() -> i64 { let a: [i64; 3] = [5; 3]; return a[0]; }",
+            "fn f() -> u8 { let a: [u8; 16] = [255; 16]; return a[0]; }",
+            "fn f() -> bool { let a: [bool; 2] = [true; 2]; return a[1]; }",
+            "fn f() -> i32 { let mut a: [i32; 4] = [1, 2, 3, 4]; a = [0; 4]; return a[0]; }",
+            "fn f() -> [i32; 4] { return [7; 4]; }",
+            "const A: [i32; 8] = [0; 8];",
+        ] {
+            clean(source);
+        }
+    }
+
+    /// The literal records `[T; N]`, with `T` taken from the declared element
+    /// type rather than the `i32` a bare literal would default to.
+    #[test]
+    fn the_repeat_records_its_array_type() {
+        let source = "fn f() -> i64 { let a: [i64; 3] = [5; 3]; return a[0]; }";
+        let arena = build_ast(source.to_string());
+        let ctx = TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type-checks")
+            .typed_context();
+        let repeat = ctx
+            .arena()
+            .exprs
+            .iter()
+            .find(|(_, data)| matches!(data.kind, inference_ast::nodes::Expr::ArrayRepeat { .. }))
+            .map(|(id, _)| id)
+            .expect("the source holds a repeat");
+        let ty = ctx
+            .get_node_typeinfo(inference_ast::ids::NodeId::Expr(repeat))
+            .expect("the repeat is typed");
+        match ty.kind {
+            TypeInfoKind::Array(element, 3) => {
+                assert_eq!(element.kind, TypeInfoKind::Number(NumberType::I64));
+            }
+            other => panic!("expected `[i64; 3]`, got {other:?}"),
+        }
+    }
+
+    /// Repeats nest, and the value may be a struct literal or a binding.
+    #[test]
+    fn repeats_nest_and_repeat_compound_values() {
+        clean("fn f() -> i32 { let g: [[i32; 3]; 2] = [[1; 3]; 2]; return g[1][2]; }");
+        clean(
+            "struct P { x: i32; y: i32; }\n\
+             fn f() -> i32 { let ps: [P; 4] = [P { x: 1, y: 2 }; 4]; return ps[3].y; }",
+        );
+        clean(
+            "fn f() -> i32 { let row: [i32; 2] = [1, 2]; let g: [[i32; 2]; 3] = [row; 3]; \
+             return g[2][1]; }",
+        );
+    }
+
+    /// A count that disagrees with the declared length is a type mismatch,
+    /// naming both array types.
+    #[test]
+    fn a_count_other_than_the_declared_length_is_a_mismatch() {
+        let errors = diagnostics("fn f() -> i32 { let a: [i32; 3] = [0; 4]; return a[0]; }");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let rendered = errors[0].to_string();
+        assert!(
+            rendered.contains("[i32; 3]") && rendered.contains("[i32; 4]"),
+            "{rendered}"
+        );
+    }
+
+    /// The count follows the rule an array type's size follows, with the same
+    /// diagnostics: zero and out-of-range literals are invalid sizes, and a
+    /// name is a non-literal size.
+    #[test]
+    fn the_count_is_held_to_the_array_size_rule() {
+        for (source, expected) in [
+            ("fn f() { let a: [i32; 1] = [0; 0]; }", "InvalidArraySize"),
+            ("fn f() { let a: [i32; 1] = [0; 5000000000]; }", "InvalidArraySize"),
+            ("fn f() { let a: [i32; 1] = [0; -1]; }", "InvalidArraySize"),
+            ("fn f() { let n: i32 = 1; let a: [i32; 1] = [0; n]; }", "NonLiteralArraySize"),
+            ("fn f() { let a: [i32; 2] = [0; 1 + 1]; }", "RepeatCountNotLiteral"),
+        ] {
+            let errors = diagnostics(source);
+            assert!(
+                errors.iter().any(|e| format!("{e:?}").starts_with(expected)),
+                "`{source}` must report {expected}, got: {errors:?}"
+            );
+        }
+    }
+
+    /// The value is evaluated once, so `@` in it would draw once for every
+    /// element; it is refused, wherever in the value it sits, with the remedy.
+    #[test]
+    fn an_uzumaki_in_the_value_is_refused() {
+        for source in [
+            "fn f() { forall { let a: [i32; 4] = [@; 4]; } }",
+            "fn f() { forall { let g: [[i32; 2]; 2] = [[0, @]; 2]; } }",
+        ] {
+            let errors = diagnostics(source);
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, TypeCheckError::RepeatedUzumaki { .. })),
+                "`{source}` must refuse the repeated `@`, got: {errors:?}"
+            );
+        }
+        clean("fn f() { forall { let a: [i32; 4] = @; } }");
+    }
+}

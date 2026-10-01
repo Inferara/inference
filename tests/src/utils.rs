@@ -959,6 +959,10 @@ fn collect_exprs_from_expr(
                 collect_exprs_from_expr(arena, elem, predicate, results);
             }
         }
+        Expr::ArrayRepeat { value, count } => {
+            collect_exprs_from_expr(arena, *value, predicate, results);
+            collect_exprs_from_expr(arena, *count, predicate, results);
+        }
         Expr::Identifier(_)
         | Expr::NumberLiteral { .. }
         | Expr::BoolLiteral { .. }

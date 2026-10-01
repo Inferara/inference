@@ -230,6 +230,10 @@ fn expr_children(arena: &AstArena, id: ExprId) -> Vec<NodeId> {
                 out.push(NodeId::Expr(element));
             }
         }
+        Expr::ArrayRepeat { value, count } => {
+            out.push(NodeId::Expr(*value));
+            out.push(NodeId::Expr(*count));
+        }
         Expr::Type(ty) => out.push(NodeId::Type(*ty)),
         Expr::NumberLiteral { .. }
         | Expr::BoolLiteral { .. }

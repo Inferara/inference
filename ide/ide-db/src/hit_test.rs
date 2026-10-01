@@ -349,6 +349,11 @@ fn expr_children(arena: &AstArena, id: ExprId) -> Vec<NodeId> {
                 out.push(NodeId::Expr(element));
             }
         }
+        // The count is a node the cursor can rest on, as an array type's size is.
+        Expr::ArrayRepeat { value, count } => {
+            out.push(NodeId::Expr(*value));
+            out.push(NodeId::Expr(*count));
+        }
         Expr::Type(ty) => out.push(NodeId::Type(*ty)),
         Expr::NumberLiteral { .. }
         | Expr::BoolLiteral { .. }

@@ -138,6 +138,7 @@ fn check_expr_children_only(
                 check_expr(ctx, module_path, *elem, errors);
             }
         }
+        Expr::ArrayRepeat { value, .. } => check_expr(ctx, module_path, *value, errors),
         Expr::Identifier(_)
         | Expr::NumberLiteral { .. }
         | Expr::BoolLiteral { .. }

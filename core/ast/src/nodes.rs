@@ -583,6 +583,17 @@ pub enum Expr {
     ArrayLiteral {
         elements: Vec<ExprId>,
     },
+    /// `[value; count]`: an array whose every element is `value`.
+    ///
+    /// `value` is evaluated once and its result copied into every element, as
+    /// in Rust. `count` is an expression only so the parser can hand any count
+    /// to the type checker, which accepts an integer literal of at least 1 —
+    /// the rule an array type's size follows — and stamps the array type, from
+    /// which every later phase reads the length.
+    ArrayRepeat {
+        value: ExprId,
+        count: ExprId,
+    },
     UnitLiteral,
     Uzumaki,
     /// A type in expression position (e.g., type annotations stored as expressions).
