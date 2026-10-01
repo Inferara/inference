@@ -777,6 +777,26 @@ fn test() {
 }
 ```
 
+### `RepeatCountNotLiteral`
+
+The count of a repeated array literal `[value; N]` is an expression an array type's size could
+not spell. The count is held to the same rule as the size in `[T; N]` — an integer literal of at
+least 1 that fits in 32 bits — so a zero or out-of-range count is `InvalidArraySize` and a named
+count is `NonLiteralArraySize`, exactly as in a type. Anything else is this error.
+
+**Message format**: `` {location}: the count of a repeated array literal must be an integer literal, as in `[0; 4]` ``
+
+**Example**:
+
+```rust
+fn test() {
+    let arr: [i32; 4] = [0; 2 + 2];  // Error: the count ... must be an integer literal
+}
+```
+
+A count that disagrees with a declared type is an ordinary `TypeMismatch` between `[i32; 3]` and
+`[i32; 4]`.
+
 ---
 
 ## Generic Type Errors
@@ -848,6 +868,22 @@ forall {
 ```rust
 forall {
     let x: i32 = @;  // OK: uzumaki produces an i32
+}
+```
+
+### `RepeatedUzumaki`
+
+A repeated array literal whose value contains `@`, at any depth: `[@; 4]`, `[P { x: @, y: 0 }; 4]`.
+The value of `[value; N]` is evaluated once and copied into every element, so `[@; 4]` would draw
+one value for all four elements rather than the four independent draws it reads as.
+
+**Message format**: `` {location}: `@` cannot be repeated: the value of `[value; N]` is evaluated once and copied into every element, so it would draw one value for all of them; write `@` for the whole array to draw each element ``
+
+**Solution**: Write `@` for the whole array, which draws every element:
+
+```rust
+forall {
+    let xs: [i32; 4] = @;  // OK: four independent draws
 }
 ```
 

@@ -78,6 +78,7 @@ AstNode
 │   └── Uzumaki
 ├── Literal
 │   ├── Array
+│   ├── ArrayRepeat
 │   ├── Bool
 │   ├── String
 │   ├── Number
@@ -894,6 +895,25 @@ pub struct ArrayLiteral {
 [1, 2, 3]
 [x, y, z]
 []  // Empty array
+```
+
+### ArrayRepeat
+
+Repeated array literal: `count` copies of `value`. Unlike the other literals it is an arena
+expression with two child expressions rather than a list of elements.
+
+```rust
+Expr::ArrayRepeat { value: ExprId, count: ExprId }
+```
+
+The value is evaluated once. The count is held to the rule for the size in `[T; N]` (an integer
+literal of at least 1), and the type checker records the repeat's `[T; N]` type on the node.
+
+**Example source:**
+```inference
+[0; 64]
+[Point { x: 0, y: 0 }; 8]
+[row; 4]
 ```
 
 ### UnitLiteral

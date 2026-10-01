@@ -237,6 +237,30 @@ i32.const 0              ;; false
 i32.store8               ;; 1 byte at offset 3
 ```
 
+### Repeated Array Literals
+
+A repeated array literal `[value; N]` is an array of `N` copies of `value`, typed `[T; N]`:
+
+```inference
+let zeros: [u8; 64] = [0; 64];
+let points: [Point; 8] = [Point { x: 1, y: 2 }; 8];
+let grid: [[i32; 3]; 4] = [row; 4];
+```
+
+The count is an integer literal of at least 1, the same rule as the size in `[T; N]`, and `@`
+cannot appear in the value: the value is evaluated once, so `[@; N]` would draw one value for
+every element. A non-deterministic array is written `@` for the whole array.
+
+The lowering stores `value` once into element 0, with the same stores a one-element list would
+emit, and then fills the rest by copying the filled prefix onto the next stretch of the array,
+doubling it each time: element 0 to element 1, elements 0–1 to 2–3, 0–3 to 4–7, the last copy
+taking only what remains. `[x; 13]` takes four copies (1, 2, 4 and 5 elements), and an array of
+`N` elements takes `ceil(log2 N)`. Each copy is between two disjoint regions, so it is the
+ordinary region copy the compiler emits for any compound value: a single `memory.copy` when the
+build enables bulk memory, otherwise straight-line loads and stores for a short region and a loop
+for a long one. A repeat whose value is zero at every leaf emits nothing
+at all when it initializes a binding, because the prologue has already zeroed the frame.
+
 ## Array Index Read
 
 Reading `arr[i]` emits a load instruction. The exact instruction sequence depends on whether the index is zero, a non-zero compile-time constant, or a runtime expression.
@@ -631,6 +655,8 @@ The implementation uses coverage marks to verify that each code path is exercise
 | `wasm_codegen_emit_stack_prologue` | Frame allocation at function entry |
 | `wasm_codegen_emit_stack_epilogue` | Frame deallocation at all exit points |
 | `wasm_codegen_emit_array_literal` | Element stores for array initialization |
+| `wasm_codegen_emit_array_repeat` | Element 0 and the doubling copies of a repeated array literal |
+| `wasm_codegen_array_repeat_zero_elided` | A repeat whose value is zero at every leaf initializes a binding with no stores |
 | `wasm_codegen_emit_array_index_read` | Element load via base+offset |
 | `wasm_codegen_emit_array_index_write` | Element store via base+offset |
 | `wasm_codegen_emit_array_param_copy` | Copy-on-entry for an array parameter that was given a frame slot |
