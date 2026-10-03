@@ -232,7 +232,6 @@ impl AstArena {
     /// assignment, codegen emission, and Rocq output, so artifacts are
     /// reproducible regardless of import-discovery order. A single-file arena
     /// trivially satisfies the invariant.
-    #[must_use]
     pub fn source_files(&self) -> impl ExactSizeIterator<Item = &SourceFileData> + '_ {
         self.source_files.values()
     }
