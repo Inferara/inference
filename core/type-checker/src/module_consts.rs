@@ -35,14 +35,15 @@
 //! signed types and logical ones for unsigned. `+`, `-`, `*` and unary `-` are
 //! checked unless a `wrapping(...)` encloses them, exactly as in a function
 //! body. Where a run of the program would trap — an overflowing checked
-//! operator, a division by zero, a shift count past the width, an index past
-//! the end — there is no value to emit, and the build is refused with
+//! operator, a division by zero, or an index past the end — there is no value
+//! to emit, and the build is refused with
 //! [`TypeCheckError::ConstEvaluationFailed`] at the failing operation.
 //!
 //! A shift count is the one place the evaluator is stricter than the machine:
-//! the emitted shift takes its count modulo the width, but a constant count at
-//! or past the width is always a mistake, and analysis rule A043 already refuses
-//! it when the count is a literal.
+//! the emitted shift takes its count modulo the width and does not trap, but a
+//! constant count that is negative or at or past the width is always a mistake,
+//! so the evaluator refuses it with the same error. Analysis rule A044 already
+//! refuses such a count when it is a literal.
 //!
 //! # Byte layout
 //!
