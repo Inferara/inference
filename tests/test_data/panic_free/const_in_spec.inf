@@ -1,0 +1,12 @@
+// A `const` declared inside a `spec` block registers in the spec's own scope,
+// where no evaluation or placement reaches it. A032 refuses it at the
+// declaration, naming the module-scope `const` the spec's functions can read.
+spec Bounds {
+    const LIMIT: i32 = 10;
+
+    fn within() forall {
+        let v: i32 = @;
+        assume { assert(v < 5); }
+        assert(v < 10);
+    }
+}

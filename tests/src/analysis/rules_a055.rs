@@ -726,7 +726,7 @@ mod analysis_rules_tests {
             };
             let analysis = crate::utils::analysis_options(&options);
             assert_eq!(analysis.target.as_str(), target.as_str());
-            assert_eq!(analysis.stack_budget_bytes, options.layout.stack_size());
+            assert_eq!(analysis.layout, options.layout);
         }
     }
 

@@ -247,6 +247,21 @@ pub(crate) struct TypeChecker {
     /// message — and leaves an unrelated duplicate of either name still able to
     /// report its own.
     same_file_extern_collisions: FxHashSet<DefId>,
+    /// `(file scope id, name)` of every module-scope `const`, mapped to its
+    /// declaration.
+    ///
+    /// An intra-file use of a constant resolves through the scope variable the
+    /// constant registers, and a scope variable carries no declaration. A
+    /// variable found in a *file* scope can only be a module constant, so the
+    /// scope the lookup lands in, together with the name, is what ties the use
+    /// back to the value it reads. A `const` inside a `spec` block registers in
+    /// the spec's scope and is deliberately absent: it is not a module constant.
+    module_const_defs: FxHashMap<(u32, String), DefId>,
+    /// Set while a module-scope `const` initializer is being checked, so a
+    /// constant named there is recorded as read by another constant rather than
+    /// by a body — the distinction that decides whether a compound constant
+    /// needs bytes of its own in the static data region.
+    checking_const_initializer: bool,
 }
 
 /// RAII guard that enters a spec scope on construction and pops it on drop.
@@ -1046,6 +1061,7 @@ impl TypeChecker {
                         const_type,
                         vis.clone(),
                         location,
+                        def_id,
                     ) {
                         self.push_error(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Variable,
@@ -1071,6 +1087,7 @@ impl TypeChecker {
     /// cross-file `const` chain (guaranteed acyclic by `check_definition_cycles`)
     /// therefore type-checks.
     fn check_const_initializers(&mut self, ctx: &mut TypedContext) {
+        self.checking_const_initializer = true;
         for (module_path, defs) in Self::files_with_defs(ctx) {
             self.enter_file(&module_path);
             for def_id in defs {
@@ -1087,6 +1104,7 @@ impl TypeChecker {
             }
         }
         self.exit_files();
+        self.checking_const_initializer = false;
     }
 
     /// Validates function, method and `external fn` signature types, run after
@@ -1325,6 +1343,11 @@ impl TypeChecker {
                         reason: Some(err.to_string()),
                         location,
                     });
+                } else if let Some(scope_id) = self.symbol_table.current_scope_id()
+                    && self.symbol_table.enclosing_file_scope(scope_id) == scope_id
+                {
+                    self.module_const_defs
+                        .insert((scope_id, const_name), def_id);
                 }
             }
             Def::Function {
@@ -1972,16 +1995,30 @@ impl TypeChecker {
         let kind = stmt_data.kind.clone();
         match kind {
             Stmt::Assign { left, right } => {
+                let mut refused_write = false;
                 if let Some(name) = self.extract_root_variable_name(ctx.arena(), left) {
                     if let Some(mutability) = self.symbol_table.lookup_binding_mutability(&name)
                         && !mutability.permits_write()
                     {
+                        refused_write = true;
                         self.push_error(TypeCheckError::AssignToImmutable { name, location });
                     }
                 } else {
                     self.push_error(TypeCheckError::InvalidAssignmentTarget { location });
                 }
                 let target_type = self.infer_expression(left, ctx);
+                // A constant brought in by an item import is no scope variable,
+                // so the scope walk above finds no declaration to refuse the
+                // write with. Inference has just tied the target's root to the
+                // constant, which is as much a `const` as an intra-file one.
+                if !refused_write
+                    && let Some(root) = Self::root_access_expr(ctx.arena(), left)
+                    && ctx.module_const_ref(root).is_some()
+                    && let Expr::Identifier(ident_id) = &ctx.arena()[root].kind
+                {
+                    let name = ctx.arena()[*ident_id].name.clone();
+                    self.push_error(TypeCheckError::AssignToImmutable { name, location });
+                }
                 let arena = ctx.arena();
                 if let Expr::Uzumaki = &arena[right].kind {
                     if let Some(target) = &target_type {
@@ -3120,12 +3157,31 @@ impl TypeChecker {
                 let name = ctx.arena()[ident_id].name.clone();
                 let as_variable = self.symbol_table.lookup_variable(&name);
                 // Mutability is recorded only for a name that resolves to a
-                // variable, and only here: the answer comes from the scope the
+                // binding, and only here: the answer comes from the scope the
                 // cursor currently sits in, which no later phase can reconstruct.
                 if as_variable.is_some()
                     && let Some(mutability) = self.symbol_table.lookup_binding_mutability(&name)
                 {
                     ctx.set_binding_mutability(expr_id, mutability);
+                }
+                // A module constant is reached either as the scope variable it
+                // registers in its own file scope, or — from another file — as
+                // the symbol an item import binds. Either way the use is tied to
+                // the declaration here, while the cursor still says which of a
+                // constant and a same-named local the name resolved to.
+                let module_const = if as_variable.is_some() {
+                    self.symbol_table
+                        .lookup_variable_scope(&name)
+                        .and_then(|scope_id| self.module_const_defs.get(&(scope_id, name.clone())))
+                        .copied()
+                } else {
+                    self.symbol_table.lookup_constant_def(&name)
+                };
+                if let Some(def_id) = module_const {
+                    ctx.set_module_const_ref(expr_id, def_id, !self.checking_const_initializer);
+                    // An imported constant is no scope variable, so the arm above
+                    // recorded nothing for it; it is a `const` all the same.
+                    ctx.set_binding_mutability(expr_id, BindingMutability::Constant);
                 }
                 if let Some(var_ty) =
                     as_variable.or_else(|| self.symbol_table.lookup_constant(&name))
@@ -3198,6 +3254,7 @@ impl TypeChecker {
             return None;
         };
         let const_type = info.type_info.clone();
+        ctx.set_module_const_ref(expr_id, info.def_id, !self.checking_const_initializer);
         self.check_and_report_visibility(
             &info.visibility,
             def_scope_id,
@@ -5630,6 +5687,18 @@ impl TypeChecker {
     /// Handles array index access (`arr[i]`), member access (`p.x`), and any
     /// nesting thereof (`p.x[0]`, `arr[0].x`, `p.x.y`). Returns `None` for
     /// non-identifier bases.
+    /// The identifier at the root of an access chain (`a` in `a`, `a[i]`,
+    /// `a.f[0]`), or `None` when the chain is rooted at anything else. The
+    /// expression-id twin of [`Self::extract_root_variable_name`].
+    fn root_access_expr(arena: &AstArena, expr_id: ExprId) -> Option<ExprId> {
+        match &arena[expr_id].kind {
+            Expr::Identifier(_) => Some(expr_id),
+            Expr::ArrayIndexAccess { array, .. } => Self::root_access_expr(arena, *array),
+            Expr::MemberAccess { expr, .. } => Self::root_access_expr(arena, *expr),
+            _ => None,
+        }
+    }
+
     fn extract_root_variable_name(&self, arena: &AstArena, expr_id: ExprId) -> Option<String> {
         match &arena[expr_id].kind {
             Expr::Identifier(ident_id) => Some(arena[*ident_id].name.clone()),

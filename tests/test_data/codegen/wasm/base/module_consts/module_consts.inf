@@ -1,0 +1,77 @@
+// Module-scope constants. A scalar is an immediate at every use; an array or
+// struct a body reads is bytes of the one active data segment, which sits
+// directly above the stack. `UNREAD` is read only by another constant's
+// initializer, so it is folded into `DERIVED` and takes no bytes.
+
+struct Point { x: i32; y: i32; }
+enum Dir { North, East, South, West }
+
+const LEN: i32 = 4;
+const SCALE: i64 = wrapping(9223372036854775807 + 2);
+const PRIMES: [i32; 4] = [2, 3, 5, 7];
+const STEPS: [i8; 3] = [-1, 0, 1];
+const ORIGIN: Point = Point { x: 3, y: -4 };
+const CORNERS: [Point; 2] = [ORIGIN, Point { x: 10, y: 20 }];
+const HEADING: Dir = Dir::South;
+const LANES: [Dir; 2] = [Dir::West, HEADING];
+const ONES: [u16; 64] = [1; 64];
+const UNREAD: [i64; 8] = [5; 8];
+const DERIVED: i32 = PRIMES[3] * LEN - ORIGIN.y;
+
+fn primes() -> [i32; 4] {
+    return PRIMES;
+}
+
+pub fn prime_sum() -> i32 {
+    let mut i: i32 = 0;
+    let mut sum: i32 = 0;
+    loop i < LEN {
+        sum = sum + PRIMES[i];
+        i = i + 1;
+    }
+    return sum;
+}
+
+pub fn step(i: i32) -> i8 {
+    if i >= 0 && i < 3 {
+        return STEPS[i];
+    }
+    return 0;
+}
+
+pub fn corner_x() -> i32 {
+    return CORNERS[1].x + ORIGIN.x;
+}
+
+pub fn heading() -> Dir {
+    return LANES[1];
+}
+
+pub fn scale() -> i64 {
+    return SCALE;
+}
+
+pub fn ones() -> u16 {
+    let mut i: i32 = 0;
+    let mut sum: u16 = 0;
+    loop i < 64 {
+        sum = sum + ONES[i];
+        i = i + 1;
+    }
+    return sum;
+}
+
+pub fn derived() -> i32 {
+    return DERIVED;
+}
+
+pub fn copy_then_write() -> i32 {
+    let mut p: [i32; 4] = PRIMES;
+    p[0] = 100;
+    return p[0] + PRIMES[0];
+}
+
+pub fn returned() -> i32 {
+    let p: [i32; 4] = primes();
+    return p[3];
+}

@@ -6,6 +6,7 @@
 use crate::{
     errors::TypeMismatchContext,
     extern_index::ExternIndex,
+    module_consts::{ConstValue, StaticData},
     symbol_table::{
         BindingMutability, EnumInfo, ExternOrigin, ResolvedNominalType, StructInfo, SymbolTable,
     },
@@ -17,7 +18,7 @@ use inference_ast::{
     ids::{DefId, ExprId, NodeId},
     nodes::{SourceFileData, Visibility},
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Builds the file-local canonical key for a bare type name in the file whose
 /// module path is `module_path`: the `::`-joined module path followed by the
@@ -179,6 +180,33 @@ pub struct TypedContext {
     /// introduces it. A pure function of the arena, so it is built at
     /// construction and is already answering queries while type checking runs.
     extern_index: ExternIndex,
+    /// The module-scope `const` each value expression that names one resolves
+    /// to, keyed by the expression's id: a bare identifier (`TABLE`), a bare
+    /// item import (`use lib::t::{TABLE};` then `TABLE`), or a qualified path
+    /// (`lib::t::TABLE`, recorded on the outermost `TypeMemberAccess`).
+    ///
+    /// **Contract.** An entry exists exactly when name resolution *landed on*
+    /// the module constant, so a parameter or local that shadows one has no
+    /// entry and keeps reading the binding it names. Code generation reads an
+    /// entry as "this expression is that constant's value", which is why the
+    /// entry has to be written by the identifier arm of inference, where the
+    /// scope cursor still knows which of the two a name resolved to.
+    module_const_refs: FxHashMap<ExprId, DefId>,
+    /// Every module-scope `const` some function, method or spec function body
+    /// names. A compound constant occupies the static data region only when it
+    /// is in this set: one named only by another constant's initializer is
+    /// folded into that constant's value and needs no bytes of its own.
+    body_const_refs: FxHashSet<DefId>,
+    /// The value of every module-scope `const` whose initializer evaluated, in
+    /// the representation [`crate::module_consts`] defines. Absent for a
+    /// constant whose initializer was rejected (with its own diagnostic) or
+    /// could not be typed.
+    module_const_values: FxHashMap<DefId, ConstValue>,
+    /// Where each compound module constant a body names lives in the static
+    /// data region. Laid out once, after evaluation, so analysis (which sizes
+    /// the region against the memory) and code generation (which emits it)
+    /// read one placement rather than computing two that have to agree.
+    static_data: StaticData,
 }
 
 // Compile-time assertion: TypedContext is Send + Sync. Its symbol table is an
@@ -205,7 +233,67 @@ impl TypedContext {
             resolved_call_targets: FxHashMap::default(),
             literal_type_sources: FxHashMap::default(),
             binding_mutability: FxHashMap::default(),
+            module_const_refs: FxHashMap::default(),
+            body_const_refs: FxHashSet::default(),
+            module_const_values: FxHashMap::default(),
+            static_data: StaticData::default(),
         }
+    }
+
+    /// Records that the value expression at `expr_id` names the module-scope
+    /// `const` declared by `def_id`, and whether it does so from a body (as
+    /// opposed to another constant's initializer). See the contract on
+    /// [`Self::module_const_refs`].
+    pub(crate) fn set_module_const_ref(&mut self, expr_id: ExprId, def_id: DefId, from_body: bool) {
+        self.module_const_refs.insert(expr_id, def_id);
+        if from_body {
+            self.body_const_refs.insert(def_id);
+        }
+    }
+
+    /// The module-scope `const` the value expression at `expr_id` names, or
+    /// `None` when it names a local, a parameter or no constant at all.
+    ///
+    /// A bare identifier, a bare item import and a qualified path all answer
+    /// here; for a qualified path the outermost `TypeMemberAccess` carries the
+    /// entry. Resolution has already decided shadowing, so a caller that finds
+    /// an entry is reading the constant and one that finds none is not.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn module_const_ref(&self, expr_id: ExprId) -> Option<DefId> {
+        self.module_const_refs.get(&expr_id).copied()
+    }
+
+    /// Whether some function, method or spec function body names the module
+    /// constant `def_id`, which is what earns a compound constant its bytes in
+    /// the static data region.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn is_const_named_by_a_body(&self, def_id: DefId) -> bool {
+        self.body_const_refs.contains(&def_id)
+    }
+
+    /// The computed value of the module-scope `const` declared by `def_id`, or
+    /// `None` when its initializer was rejected or could not be typed (both of
+    /// which carry their own diagnostic).
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn module_const_value(&self, def_id: DefId) -> Option<&ConstValue> {
+        self.module_const_values.get(&def_id)
+    }
+
+    /// Records the evaluated values of the program's module constants.
+    pub(crate) fn set_module_const_values(&mut self, values: FxHashMap<DefId, ConstValue>) {
+        self.module_const_values = values;
+    }
+
+    /// Where each compound module constant a body names is placed in the static
+    /// data region, relative to the region's start. See [`StaticData`].
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn static_data(&self) -> &StaticData {
+        &self.static_data
+    }
+
+    /// Records the static data placement computed after evaluation.
+    pub(crate) fn set_static_data(&mut self, static_data: StaticData) {
+        self.static_data = static_data;
     }
 
     /// Records the position that gave the integer literal at `expr_id` its

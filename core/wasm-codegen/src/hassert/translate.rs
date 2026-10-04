@@ -265,6 +265,7 @@ use inference_ast::nodes::{
 };
 use inference_fn_key::{FnKey, merged_name};
 use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HTerm};
+use inference_type_checker::module_consts::ConstValue;
 use inference_type_checker::{ExternIndex, ExternKind};
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
@@ -1835,6 +1836,15 @@ impl<'a> SpecFnTranslator<'a> {
                 self.number_literal(expr, &value)
             }
             Expr::BoolLiteral { value } => HTerm::Const(HConst::I32(i32::from(*value))),
+            // A module constant, bare or qualified, is its computed value. Asked
+            // first: a qualified constant has an enum variant's shape, and name
+            // resolution has already decided that a local of the same name
+            // shadows it by recording no constant for the expression.
+            Expr::Identifier(_) | Expr::TypeMemberAccess { .. }
+                if self.ctx.module_const_ref(expr).is_some() =>
+            {
+                self.module_const_term(expr)
+            }
             Expr::TypeMemberAccess {
                 expr: type_expr,
                 name,
@@ -1946,6 +1956,29 @@ impl<'a> SpecFnTranslator<'a> {
                 zero_sentinel()
             }
         }
+    }
+
+    /// A scalar module constant read in term position: its computed value, as
+    /// the constant code generation emits for it. An aggregate one read whole
+    /// is rejected exactly as an aggregate binding is — an aggregate is not a
+    /// term — and one with no value has its own diagnostic already, so it
+    /// stays silent.
+    fn module_const_term(&mut self, expr: ExprId) -> HTerm {
+        match self.module_const_value(expr) {
+            Some(AggValue::Scalar(term)) => term,
+            Some(AggValue::Array(_) | AggValue::Struct(_)) => {
+                self.error_non_scalar_expr(expr);
+                zero_sentinel()
+            }
+            Some(AggValue::Sentinel) | None => zero_sentinel(),
+        }
+    }
+
+    /// The value tree of the module constant `expr` names, or `None` when the
+    /// expression names none or its initializer has no value.
+    fn module_const_value(&self, expr: ExprId) -> Option<AggValue> {
+        let def_id = self.ctx.module_const_ref(expr)?;
+        self.ctx.module_const_value(def_id).map(const_agg_value)
     }
 
     /// An enum variant reference, lowered to its zero-based tag constant.
@@ -2943,6 +2976,9 @@ impl<'a> SpecFnTranslator<'a> {
     fn agg_value(&mut self, expr: ExprId, mode: Mode) -> AggValue {
         if let Some(inner) = self.arena.transparent_inner(expr) {
             return self.agg_value(inner, mode);
+        }
+        if let Some(value) = self.module_const_value(expr) {
+            return value;
         }
         match &self.arena[expr].kind {
             Expr::Identifier(ident_id) => {
@@ -4310,6 +4346,34 @@ fn binop(ty: HNumType, op: HBinop, l: HTerm, r: HTerm) -> HTerm {
 
 fn relop(ty: HNumType, op: HRelop, l: HTerm, r: HTerm) -> HTerm {
     HTerm::Relop(ty, op, Box::new(l), Box::new(r))
+}
+
+/// A module constant's computed value as an aggregate value tree, its scalar
+/// leaves the constants code generation emits for them: the low 32 or 64 bits
+/// of the two's-complement value, a `bool` as 0 or 1, an enum as its tag.
+#[allow(clippy::cast_possible_truncation)]
+fn const_agg_value(value: &ConstValue) -> AggValue {
+    match value {
+        ConstValue::Int { value, number } => AggValue::Scalar(HTerm::Const(match number {
+            NumberType::I64 | NumberType::U64 => HConst::I64(*value as i64),
+            _ => HConst::I32(*value as i64 as i32),
+        })),
+        ConstValue::Bool(value) => AggValue::Scalar(HTerm::Const(HConst::I32(i32::from(*value)))),
+        ConstValue::Enum { tag } => AggValue::Scalar(HTerm::Const(HConst::I32(tag.cast_signed()))),
+        ConstValue::Array(elements) => {
+            AggValue::Array(elements.iter().map(const_agg_value).collect())
+        }
+        ConstValue::Repeat { value, count } => {
+            let element = const_agg_value(value);
+            AggValue::Array(vec![element; *count as usize])
+        }
+        ConstValue::Struct(fields) => AggValue::Struct(
+            fields
+                .iter()
+                .map(|(name, field)| (name.clone(), const_agg_value(field)))
+                .collect(),
+        ),
+    }
 }
 
 fn zero_sentinel() -> HTerm {

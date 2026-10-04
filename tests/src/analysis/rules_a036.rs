@@ -2,7 +2,7 @@
 ///
 /// - A036: StackDepthExceeded — the cumulative shadow-stack usage along a
 ///   root-to-leaf call chain must not exceed the stack budget carried by
-///   `AnalysisOptions::stack_budget_bytes` (65_536 by default). Only
+///   stack `AnalysisOptions::layout` leaves once static data is placed (65_536 by default). Only
 ///   array/struct frames consume the shadow stack; scalars live in WASM locals.
 ///   Because A035 forbids recursion the call graph is a DAG, so A036 reports the
 ///   maximum-weight call chain.
@@ -71,7 +71,7 @@ mod analysis_rules_tests {
         let over = inference_analysis::analyze_with_options(
             &ctx,
             inference_analysis::AnalysisOptions {
-                stack_budget_bytes: 32_768,
+                layout: stack_layout(32_768, 1),
                 ..inference_analysis::AnalysisOptions::default()
             },
         );
@@ -134,7 +134,7 @@ mod analysis_rules_tests {
         let over = inference_analysis::analyze_with_options(
             &ctx,
             inference_analysis::AnalysisOptions {
-                stack_budget_bytes: 131_072,
+                layout: stack_layout(131_072, 2),
                 ..inference_analysis::AnalysisOptions::default()
             },
         );
@@ -144,7 +144,7 @@ mod analysis_rules_tests {
         );
     }
 
-    /// The `budget_bytes` of every A036 error in `result`.
+    /// The stack every A036 error in `result` measured against.
     fn stack_depth_errors(
         result: &Result<AnalysisResult, AnalysisErrors>,
     ) -> impl Iterator<Item = u32> + '_ {
@@ -154,9 +154,23 @@ mod analysis_rules_tests {
             .into_iter()
             .flat_map(|errors| errors.errors().iter())
             .filter_map(|e| match e {
-                AnalysisDiagnostic::StackDepthExceeded { budget_bytes, .. } => Some(*budget_bytes),
+                AnalysisDiagnostic::StackDepthExceeded { layout, .. } => Some(layout.stack_size()),
                 _ => None,
             })
+    }
+
+    /// A requested `stack_size` in a memory of `pages` pages, as a build would
+    /// ask for it.
+    fn stack_layout(stack_size: u32, pages: u32) -> inference_analysis::MemoryLayout {
+        inference_analysis::MemoryLayout::resolve(
+            inference_analysis::MemoryRequest {
+                pages: Some(pages),
+                max_pages: None,
+                stack_size: Some(stack_size),
+            },
+            inference_wasm_codegen::MemoryLayoutSource::Flag,
+        )
+        .expect("a layout a build can request")
     }
 
     /// Returns true if any analysis error is a `StackDepthExceeded` (A036).
@@ -1487,9 +1501,9 @@ mod budget_matches_emitted_stack {
     #[test]
     fn default_stack_budget_equals_default_emitted_stack_size() {
         assert_eq!(
-            inference_analysis::AnalysisOptions::default().stack_budget_bytes,
-            inference_wasm_codegen::MemoryLayout::default().stack_size(),
-            "A036's default budget must be the stack region a default build emits"
+            inference_analysis::AnalysisOptions::default().layout,
+            inference_wasm_codegen::MemoryLayout::default(),
+            "A036's default layout must be the one a default build emits"
         );
     }
 }

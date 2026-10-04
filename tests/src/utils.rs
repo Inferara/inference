@@ -198,7 +198,7 @@ pub(crate) fn analysis_options(
     options: &inference_wasm_codegen::CodegenOptions,
 ) -> inference_analysis::AnalysisOptions {
     inference_analysis::AnalysisOptions {
-        stack_budget_bytes: options.layout.stack_size(),
+        layout: options.layout,
         target: target_name(options.target),
         bounds_checks: options.bounds_checks,
     }
@@ -446,6 +446,26 @@ pub(crate) fn wasm_codegen_with_layout(
     .unwrap()
     .wasm()
     .to_vec()
+}
+
+/// Generates code under an explicit memory layout without running analysis,
+/// returning code generation's refusal instead of panicking on it.
+///
+/// The seam for the backstops a caller that skips analysis meets: a program
+/// whose static data does not fit beside the stack its layout requests is
+/// refused by A058 in the full pipeline, and only by code generation here.
+pub(crate) fn codegen_attempt_with_layout_no_analysis(
+    source_code: &str,
+    layout: inference_wasm_codegen::MemoryLayout,
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    codegen_impl_with_options(
+        source_code,
+        AnalysisMode::Skip,
+        inference_wasm_codegen::CodegenOptions {
+            layout,
+            ..Default::default()
+        },
+    )
 }
 
 /// Builds a multi-file arena from `(module_path, source)` pairs, type-checks,

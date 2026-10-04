@@ -1,0 +1,55 @@
+// Module-scope constants in every position a body can read one: a scalar as a
+// loop bound and an operand, an array indexed by a literal and by a guarded
+// value, a struct field, a whole constant copied into a binding, passed as an
+// argument, returned through the result pointer and placed in a literal, an
+// enum constant, a repeated array, a constant built from another, and a read
+// in a specification body.
+struct Pair { a: i32; b: i64; }
+enum Mode { Off, On }
+
+const N: i32 = 3;
+const XS: [i32; 3] = [4, 5, 6];
+const P: Pair = Pair { a: 1, b: 2 };
+const PAIRS: [Pair; 2] = [P, Pair { a: 3, b: 4 }];
+const MODE: Mode = Mode::On;
+const FILL: [i32; 32] = [9; 32];
+const SUM: i32 = XS[0] + XS[1] + XS[2] + P.a;
+
+fn first(xs: [i32; 3]) -> i32 {
+    return xs[0];
+}
+
+fn whole() -> [i32; 3] {
+    return XS;
+}
+
+fn pair() -> Pair {
+    return PAIRS[1];
+}
+
+pub fn reads(i: i32) -> i32 {
+    let mut total: i32 = 0;
+    let mut k: i32 = 0;
+    loop k < N {
+        total = total + XS[k];
+        k = k + 1;
+    }
+    if i >= 0 && i < N {
+        total = total + XS[i];
+    }
+    let copy: [i32; 3] = XS;
+    let w: [i32; 3] = whole();
+    let p: Pair = pair();
+    let nested: [[i32; 3]; 2] = [XS, copy];
+    let on: bool = MODE == Mode::On;
+    if on {
+        total = total + 1;
+    }
+    return total + XS[2] + P.a + PAIRS[0].a + first(XS) + w[1] + p.a + nested[1][0] + SUM + FILL[31];
+}
+
+spec Consts {
+    fn sum_is_known() forall {
+        assert(SUM == 16 && XS[1] == 5 && P.b == 2);
+    }
+}

@@ -86,13 +86,15 @@ use inference_ast::nodes::{
 use inference_hassert::HSpecMap;
 use inference_type_checker::{
     EnumInfo, ExternIndex,
+    module_consts::ConstValue,
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::{DeclarationScope, TypedContext},
 };
 use wasm_encoder::{
-    BlockType as WasmBlockType, CodeSection, ConstExpr, EntityType, ExportKind, ExportSection,
-    Function, FunctionSection, GlobalSection, GlobalType, ImportSection, IndirectNameMap,
-    Instruction, MemorySection, MemoryType, Module, NameMap, NameSection, TypeSection, ValType,
+    BlockType as WasmBlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind,
+    ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
+    IndirectNameMap, Instruction, MemorySection, MemoryType, Module, NameMap, NameSection,
+    TypeSection, ValType,
 };
 
 use crate::memory::{
@@ -584,9 +586,16 @@ pub(crate) struct Compiler {
     /// The linear memory the module declares and the share of it the shadow
     /// stack occupies. Set once by [`crate::codegen`] for the whole module and
     /// read by the memory section, the `__stack_pointer` initializer, and the
-    /// per-frame size assertion; `Compiler::new` call sites keep the default
-    /// one-page layout.
+    /// per-frame size check; `Compiler::new` call sites keep the default
+    /// one-page layout. Set with the program's static data already placed, so
+    /// its stack is the one the module declares and its data base is where the
+    /// data segment lands.
     memory_layout: MemoryLayout,
+    /// The bytes of the static data region: every compound module constant a
+    /// body reads, at its offset from [`MemoryLayout::data_base`]. Emitted as
+    /// one active data segment at that base; empty for a program with none,
+    /// which then gets no data section at all.
+    static_data: Vec<u8>,
     /// The region fill and copy state for the function being compiled: the
     /// permitted features plus the lazily allocated scratch locals, numbered from
     /// one past the last eagerly declared local. Rebuilt per function alongside
@@ -851,6 +860,7 @@ impl Compiler {
             local_declarations: Vec::new(),
             emit_features: EmitFeatures::default(),
             memory_layout: MemoryLayout::default(),
+            static_data: Vec::new(),
             region_emit: RegionEmit::new(0, EmitFeatures::default()),
             poisoned: None,
             current_fn_returns_value: false,
@@ -1021,6 +1031,17 @@ impl Compiler {
     /// those of a single all-stack page.
     pub(crate) fn set_memory_layout(&mut self, layout: MemoryLayout) {
         self.memory_layout = layout;
+    }
+
+    /// Sets the static data region's bytes, which the module writes into its
+    /// memory at [`MemoryLayout::data_base`] with one active data segment. A
+    /// non-empty region needs a memory to live in whether or not any function
+    /// has a frame, so it declares one.
+    pub(crate) fn set_static_data(&mut self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            self.has_memory = true;
+        }
+        self.static_data = bytes;
     }
 
     /// Enables or disables runtime array bounds-check emission.
@@ -3834,10 +3855,18 @@ impl Compiler {
         }
 
         let total_size = align_to_frame(current_offset);
-        assert!(
-            total_size <= stack_size,
-            "Frame size ({total_size} bytes) exceeds available stack memory ({stack_size} bytes)"
-        );
+        // One frame larger than the whole stack can never be allocated: its
+        // prologue's zero-fill would store below address 0 and trap on entry.
+        // A036 rejects it with a source location, because a one-function chain
+        // is a chain; this is the refusal for a caller that skipped analysis.
+        if total_size > stack_size {
+            cov_mark::hit!(wasm_codegen_frame_exceeds_stack);
+            return Err(CodegenError::FrameExceedsStack {
+                frame_bytes: total_size,
+                stack_bytes: stack_size,
+                location: arena[block_id].location,
+            });
+        }
 
         Ok(Some(FrameLayout {
             total_size,
@@ -4346,17 +4375,9 @@ impl Compiler {
         let is_sret_call =
             is_compound_type && self.is_sret_function_call(arena, value_expr_id, ctx);
 
-        let is_array_copy = is_array_type
-            && matches!(
-                arena[value_expr_id].kind,
-                Expr::Identifier(_) | Expr::ArrayIndexAccess { .. } | Expr::MemberAccess { .. }
-            );
-
-        let is_struct_copy = is_struct_type
-            && matches!(
-                arena[value_expr_id].kind,
-                Expr::Identifier(_) | Expr::MemberAccess { .. } | Expr::ArrayIndexAccess { .. }
-            );
+        let reads_a_place = Self::reads_compound_place(arena, value_expr_id, ctx);
+        let is_array_copy = is_array_type && reads_a_place;
+        let is_struct_copy = is_struct_type && reads_a_place;
 
         if is_sret_call {
             self.lower_sret_var_init(arena, value_expr_id, local_idx, name, ctx);
@@ -4471,6 +4492,100 @@ impl Compiler {
             self.func().instruction(&Instruction::I32Add);
         }
         self.func().instruction(&Instruction::LocalSet(local_idx));
+    }
+
+    /// Whether a compound initializer reads an existing value in place — a
+    /// binding, a field or element of one, or a module constant — so that the
+    /// binding has to receive a copy of its bytes rather than its address.
+    ///
+    /// Parentheses and arithmetic-mode annotations are seen through: `(a)` is
+    /// the same place as `a`, and taking its address instead of copying would
+    /// make the new binding an alias, through which a write would change the
+    /// source — a module constant's bytes in the static data region included.
+    fn reads_compound_place(arena: &AstArena, expr_id: ExprId, ctx: &TypedContext) -> bool {
+        if let Some(inner) = arena.transparent_inner(expr_id) {
+            return Self::reads_compound_place(arena, inner, ctx);
+        }
+        ctx.module_const_ref(expr_id).is_some()
+            || matches!(
+                arena[expr_id].kind,
+                Expr::Identifier(_) | Expr::ArrayIndexAccess { .. } | Expr::MemberAccess { .. }
+            )
+    }
+
+    /// Lowers a read of a module-scope constant.
+    ///
+    /// A scalar constant is its value, emitted as an immediate in the
+    /// representation every scalar of its type has on the operand stack. An
+    /// array or struct constant is the address of its bytes in the static data
+    /// region — exactly what a compound binding's local holds for its frame
+    /// slot — so indexing, field access, copying and passing it as an argument
+    /// all lower unchanged. Nothing ever writes through that address: the type
+    /// checker refuses an assignment rooted at a constant, a callee copies a
+    /// parameter it writes into its own frame, a binding initialized from one
+    /// copies it (see [`Self::reads_compound_place`]), and A047 refuses a
+    /// constant at a `mut` parameter of an `external fn`.
+    fn lower_module_const(&mut self, arena: &AstArena, expr_id: ExprId, ctx: &TypedContext) {
+        let location = Some(arena[expr_id].location);
+        let Some(def_id) = ctx.module_const_ref(expr_id) else {
+            return;
+        };
+        let Some(value) = ctx.module_const_value(def_id) else {
+            cov_mark::hit!(wasm_codegen_module_const_without_value);
+            self.poison(CodegenError::UnsupportedConstruct {
+                construct: format!(
+                    "the module constant `{}`, whose initializer has no value",
+                    arena.def_name(def_id)
+                ),
+                rule: "the type checker",
+                location,
+            });
+            return;
+        };
+        if value.is_compound() {
+            let Some(entry) = ctx.static_data().entry(def_id) else {
+                self.poison(CodegenError::UnsupportedConstruct {
+                    construct: format!(
+                        "the module constant `{}`, which a body reads but the static data \
+                         region does not hold",
+                        arena.def_name(def_id)
+                    ),
+                    rule: "the type checker",
+                    location,
+                });
+                return;
+            };
+            cov_mark::hit!(wasm_codegen_module_const_compound_read);
+            // The layout placed the region below the end of a 32-bit memory, so
+            // every address in it fits an `i32.const`.
+            let address = u64::from(self.memory_layout.data_base()) + entry.offset;
+            #[allow(clippy::cast_possible_truncation)]
+            let address = (address as u32).cast_signed();
+            self.func().instruction(&Instruction::I32Const(address));
+        } else {
+            cov_mark::hit!(wasm_codegen_module_const_scalar_read);
+            let instruction = Self::scalar_const_instruction(value);
+            self.func().instruction(&instruction);
+        }
+    }
+
+    /// The immediate a scalar constant value is emitted as: the low 32 or 64
+    /// bits of its two's-complement representation, which is sign-extended for
+    /// a signed sub-word type and zero-extended for an unsigned one because the
+    /// value is in its type's range.
+    #[allow(clippy::cast_possible_truncation)]
+    fn scalar_const_instruction(value: &ConstValue) -> Instruction<'static> {
+        match value {
+            ConstValue::Int { value, number } => match number {
+                NumberType::I64 | NumberType::U64 => Instruction::I64Const(*value as i64),
+                _ => Instruction::I32Const(*value as i64 as i32),
+            },
+            ConstValue::Bool(value) => Instruction::I32Const(i32::from(*value)),
+            ConstValue::Enum { tag } => Instruction::I32Const(tag.cast_signed()),
+            ConstValue::Array(_) | ConstValue::Repeat { .. } | ConstValue::Struct(_) => {
+                unreachable!("a compound constant is read through its address")
+            }
+        }
     }
 
     /// Lowers array copy initialization for a variable definition.
@@ -4652,6 +4767,15 @@ impl Compiler {
             }
             Expr::MemberAccess { expr, name } => {
                 self.lower_member_access(arena, expr_id, expr, name, ctx);
+            }
+            // A module constant, bare or qualified. A qualified one
+            // (`lib::t::TABLE`) has the shape of an enum variant and a bare one
+            // that of a local; the type checker has recorded which it is, and a
+            // local of the same name shadows it by having no such record.
+            Expr::Identifier(_) | Expr::TypeMemberAccess { .. }
+                if ctx.module_const_ref(expr_id).is_some() =>
+            {
+                self.lower_module_const(arena, expr_id, ctx);
             }
             Expr::TypeMemberAccess {
                 expr: type_expr,
@@ -6013,6 +6137,13 @@ impl Compiler {
         );
 
         match &arena[return_expr_id].kind {
+            // A module constant is copied from the static data region the way a
+            // field or element access is copied from a frame.
+            _ if ctx.module_const_ref(return_expr_id).is_some() => {
+                self.func().instruction(&Instruction::LocalGet(sret_idx));
+                self.lower_expression(arena, return_expr_id, ctx, None);
+                self.emit_memory_copy(byte_size);
+            }
             Expr::Identifier(ident_id) => {
                 let name = &arena[*ident_id].name;
                 let (source_local, _) = self
@@ -6093,6 +6224,11 @@ impl Compiler {
         return_info: &StructReturnInfo,
     ) -> Result<(), CodegenError> {
         match &arena[return_expr_id].kind {
+            _ if ctx.module_const_ref(return_expr_id).is_some() => {
+                self.func().instruction(&Instruction::LocalGet(sret_idx));
+                self.lower_expression(arena, return_expr_id, ctx, None);
+                self.emit_memory_copy(return_info.total_size);
+            }
             Expr::Identifier(ident_id) => {
                 let name = &arena[*ident_id].name;
                 let (source_local, _) = self
@@ -8487,6 +8623,7 @@ impl Compiler {
 
         if let Some(ref layout) = self.frame_layout
             && let Expr::Identifier(ident_id) = &arena[struct_expr_id].kind
+            && ctx.module_const_ref(struct_expr_id).is_none()
         {
             let var_name = &arena[*ident_id].name;
             if let Some(struct_slot) = layout.struct_offsets.get(var_name) {
@@ -8627,7 +8764,29 @@ impl Compiler {
     /// left to the program's use, which keeps a default build of a memoryless
     /// program byte-identical to what it always was.
     fn declares_memory(&self) -> bool {
-        self.has_memory || self.memory_layout != MemoryLayout::default()
+        self.has_memory || !self.memory_layout.is_default_memory()
+    }
+
+    /// Writes the static data region, once at instantiation, directly above
+    /// the stack: one active segment of the whole region, zero padding
+    /// included, so a constant's address is its base plus its offset with no
+    /// per-segment bookkeeping. Nothing for a program with no region. No
+    /// `DataCount` section accompanies it: one is required only by
+    /// `memory.init` and `data.drop`, which nothing emits, and the `SpaceWasm`
+    /// interpreter cannot decode one. Data is section 11, so this runs after
+    /// the Code section and before the custom sections.
+    fn emit_data_section(&self, module: &mut Module) {
+        if self.static_data.is_empty() {
+            return;
+        }
+        cov_mark::hit!(wasm_codegen_emit_data_section);
+        let mut data_section = DataSection::new();
+        data_section.active(
+            0,
+            &ConstExpr::i32_const(self.memory_layout.data_base().cast_signed()),
+            self.static_data.iter().copied(),
+        );
+        module.section(&data_section);
     }
 
     /// Assembles the complete WASM binary from accumulated sections AND
@@ -8729,6 +8888,8 @@ impl Compiler {
             code_section.function(body);
         }
         module.section(&code_section);
+
+        self.emit_data_section(&mut module);
 
         let mut name_section = NameSection::new();
         name_section.module(&self.module_name);

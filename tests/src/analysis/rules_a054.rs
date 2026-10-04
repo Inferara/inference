@@ -227,4 +227,21 @@ mod analysis_rules_tests {
             assert_eq!(count_a054(&meaningful), 0, "{width}");
         }
     }
+
+    /// A module-scope `const` initializer is computed under the default mode,
+    /// so an annotation naming it there restates the default exactly as one at
+    /// the top of a body does.
+    #[test]
+    fn a_module_scope_initializer_annotation_naming_the_default_is_redundant() {
+        let source = format!(
+            "const K: i32 = {}(2 + 3);\npub fn f() -> i32 {{ return K; }}",
+            redundant_spelling()
+        );
+        assert_eq!(a054_rule_ids(&source), vec!["A054"]);
+        let meaningful = format!(
+            "const K: i32 = {}(2 + 3);\npub fn f() -> i32 {{ return K; }}",
+            meaningful_spelling()
+        );
+        assert_eq!(count_a054(&meaningful), 0);
+    }
 }

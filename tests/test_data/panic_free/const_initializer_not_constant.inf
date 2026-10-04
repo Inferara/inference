@@ -1,0 +1,9 @@
+// A module-scope `const` initialized by a function call: a module constant has
+// no function to run its initializer in, so the compiler computes it, and a
+// call has no value before the program runs. The type checker refuses it,
+// naming the constant and the call.
+fn three() -> i32 { return 3; }
+
+const X: i32 = three();
+
+pub fn f() -> i32 { return X; }

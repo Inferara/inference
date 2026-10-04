@@ -11,6 +11,7 @@ use inference_ast::ids::{BlockId, DefId, ExprId, StmtId, TypeId};
 use inference_ast::nodes::{Def, Expr, Stmt, TypeNode};
 
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
+use crate::rule::TypedContext;
 
 crate::rule! {
     /// Return expressions in compound-returning functions must be simple forms.
@@ -28,11 +29,7 @@ crate::rule! {
     }
 }
 
-fn has_compound_return_type(
-    ctx: &inference_type_checker::typed_context::TypedContext,
-    arena: &AstArena,
-    returns: Option<TypeId>,
-) -> bool {
+fn has_compound_return_type(ctx: &TypedContext, arena: &AstArena, returns: Option<TypeId>) -> bool {
     let Some(type_id) = returns else {
         return false;
     };
@@ -43,21 +40,26 @@ fn has_compound_return_type(
     }
 }
 
-fn is_supported_sret_expr(arena: &AstArena, expr_id: ExprId) -> bool {
-    matches!(
-        &arena[expr_id].kind,
-        Expr::Identifier(_)
-            | Expr::ArrayLiteral { .. }
-            | Expr::ArrayRepeat { .. }
-            | Expr::StructLiteral { .. }
-            | Expr::FunctionCall { .. }
-            | Expr::MemberAccess { .. }
-            | Expr::ArrayIndexAccess { .. }
-    )
+/// Whether code generation can write `expr_id` through the hidden result
+/// pointer. A module constant is among them under whatever name reaches it — a
+/// qualified `lib::t::TABLE` included — because it is read from the static data
+/// region exactly as a field or element access is read from a frame.
+fn is_supported_sret_expr(ctx: &TypedContext, arena: &AstArena, expr_id: ExprId) -> bool {
+    ctx.module_const_ref(expr_id).is_some()
+        || matches!(
+            &arena[expr_id].kind,
+            Expr::Identifier(_)
+                | Expr::ArrayLiteral { .. }
+                | Expr::ArrayRepeat { .. }
+                | Expr::StructLiteral { .. }
+                | Expr::FunctionCall { .. }
+                | Expr::MemberAccess { .. }
+                | Expr::ArrayIndexAccess { .. }
+        )
 }
 
 fn check_defs(
-    ctx: &inference_type_checker::typed_context::TypedContext,
+    ctx: &TypedContext,
     arena: &AstArena,
     module_path: &[String],
     defs: &[DefId],
@@ -68,7 +70,7 @@ fn check_defs(
             Def::Function {
                 returns, body, ..
             } if has_compound_return_type(ctx, arena, *returns) => {
-                check_block_for_returns(arena, module_path, *body, errors);
+                check_block_for_returns(ctx, arena, module_path, *body, errors);
             }
             Def::Struct { methods, .. } => {
                 for &method_id in methods {
@@ -77,7 +79,7 @@ fn check_defs(
                     } = &arena[method_id].kind
                         && has_compound_return_type(ctx, arena, *returns)
                     {
-                        check_block_for_returns(arena, module_path, *body, errors);
+                        check_block_for_returns(ctx, arena, module_path, *body, errors);
                     }
                 }
             }
@@ -88,6 +90,7 @@ fn check_defs(
 }
 
 fn check_block_for_returns(
+    ctx: &TypedContext,
     arena: &AstArena,
     module_path: &[String],
     block_id: BlockId,
@@ -95,18 +98,19 @@ fn check_block_for_returns(
 ) {
     let block = &arena[block_id];
     for &stmt_id in &block.stmts {
-        check_stmt_for_returns(arena, module_path, stmt_id, errors);
+        check_stmt_for_returns(ctx, arena, module_path, stmt_id, errors);
     }
 }
 
 fn check_stmt_for_returns(
+    ctx: &TypedContext,
     arena: &AstArena,
     module_path: &[String],
     stmt_id: StmtId,
     errors: &mut Vec<LabeledDiagnostic>,
 ) {
     match &arena[stmt_id].kind {
-        Stmt::Return { expr } if !is_supported_sret_expr(arena, *expr) => {
+        Stmt::Return { expr } if !is_supported_sret_expr(ctx, arena, *expr) => {
             errors.push(LabeledDiagnostic::new(module_path.to_vec(), AnalysisDiagnostic::UnsupportedCompoundReturnExpression {
                 location: arena[*expr].location,
             }));
@@ -116,16 +120,16 @@ fn check_stmt_for_returns(
             else_block,
             ..
         } => {
-            check_block_for_returns(arena, module_path, *then_block, errors);
+            check_block_for_returns(ctx, arena, module_path, *then_block, errors);
             if let Some(else_id) = else_block {
-                check_block_for_returns(arena, module_path, *else_id, errors);
+                check_block_for_returns(ctx, arena, module_path, *else_id, errors);
             }
         }
         Stmt::Loop { body, .. } => {
-            check_block_for_returns(arena, module_path, *body, errors);
+            check_block_for_returns(ctx, arena, module_path, *body, errors);
         }
         Stmt::Block(block_id) => {
-            check_block_for_returns(arena, module_path, *block_id, errors);
+            check_block_for_returns(ctx, arena, module_path, *block_id, errors);
         }
         _ => {}
     }

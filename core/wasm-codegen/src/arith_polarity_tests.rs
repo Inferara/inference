@@ -105,7 +105,8 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<Fixture>) {
 /// Compiles `source` with the fallback arithmetic mode set to `mode`,
 /// reproducing the configuration the golden was produced under: the default
 /// target's compile mode, MVP features, bounds checks on, module name
-/// `output`.
+/// `output`, and the default memory with the program's static data placed in
+/// it as `crate::codegen` places it.
 ///
 /// Analysis is not run. It does not reach the emitter, and several corpus
 /// fixtures exist precisely because a rule refuses them.
@@ -121,6 +122,11 @@ fn compile_under(source: &str, mode: ArithMode) -> Option<Vec<u8>> {
     compiler.set_emit_features(EmitFeatures::default());
     compiler.set_emit_bounds_checks(true);
     compiler.set_default_arith_mode(mode);
+    let layout = crate::MemoryLayout::default()
+        .with_static_data(ctx.static_data().size())
+        .ok()?;
+    compiler.set_memory_layout(layout);
+    compiler.set_static_data(ctx.static_data().image(&ctx));
     let hspecs =
         traverse_t_ast_with_compiler(&ctx, &mut compiler, CompilationMode::Compile).ok()?;
     Some(compiler.finish_and_take(&hspecs).0)

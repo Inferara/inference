@@ -28,10 +28,12 @@
 //! annotation is somewhere other than where the author meant to put it, and no
 //! change to the language's default makes it right.
 //!
-//! The initializer of a body-level `const` is walked like any other expression,
-//! so an annotation written there is held to exactly this rule; top-level
-//! `const` declarations do not exist in the language yet (A032 rejects them),
-//! and when they do their initializers have to join this walk.
+//! The initializer of a `const` is walked like any other expression, so an
+//! annotation written there is held to exactly this rule — a body-level one as
+//! a statement of its body, and a module-scope one, which no body walk reaches,
+//! through [`crate::walker::for_each_module_const_initializer`]. The type
+//! checker computes a module constant under the same arithmetic a body runs, so
+//! an annotation there governs exactly what it would in a body.
 //!
 //! ## Where the line with A054 falls
 //!
@@ -44,7 +46,9 @@
 use inference_ast::nodes::Expr;
 
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
-use crate::walker::{contains_governed_operator, for_each_stmt_expr, walk_expr};
+use crate::walker::{
+    contains_governed_operator, for_each_module_const_initializer, for_each_stmt_expr, walk_expr,
+};
 
 crate::rule! {
     /// An arithmetic-mode annotation must contain an operator it can govern.
@@ -55,25 +59,29 @@ crate::rule! {
     fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let arena = ctx.arena();
         let mut errors = Vec::new();
+        let mut check_expr = |expr_id, module_path: &[String]| {
+            walk_expr(arena, expr_id, &mut |node| {
+                let Expr::ArithMode { mode, .. } = &arena[node].kind else {
+                    return;
+                };
+                if contains_governed_operator(ctx, node) {
+                    return;
+                }
+                errors.push(LabeledDiagnostic::new(
+                    module_path.to_vec(),
+                    AnalysisDiagnostic::ArithModeGovernsNothing {
+                        mode: *mode,
+                        location: arena[node].location,
+                    },
+                ));
+            });
+        };
         crate::walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
             for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
-                walk_expr(arena, expr_id, &mut |node| {
-                    let Expr::ArithMode { mode, .. } = &arena[node].kind else {
-                        return;
-                    };
-                    if contains_governed_operator(ctx, node) {
-                        return;
-                    }
-                    errors.push(LabeledDiagnostic::new(
-                        walk_ctx.module_path.clone(),
-                        AnalysisDiagnostic::ArithModeGovernsNothing {
-                            mode: *mode,
-                            location: arena[node].location,
-                        },
-                    ));
-                });
+                check_expr(expr_id, &walk_ctx.module_path);
             });
         });
+        for_each_module_const_initializer(ctx, &mut check_expr);
         errors
     }
 }

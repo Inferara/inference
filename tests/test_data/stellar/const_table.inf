@@ -1,0 +1,10 @@
+// A method reading a module-scope constant table. The table is bytes of the one
+// active data segment directly above the stack, so the contract carries a data
+// section the host writes into memory at instantiation, beside the memory and
+// the `__stack_pointer` export every compound-holding contract has.
+const RATES: [u32; 4] = [5, 10, 25, 50];
+
+pub fn rate(index: u32) -> u32 {
+    if index >= 4 { return 0; }
+    return RATES[index];
+}

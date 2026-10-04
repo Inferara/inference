@@ -878,8 +878,10 @@ pub fn link(
 /// This wrapper is **not** interchangeable with
 /// [`inference_wasm_linker::link_with_warnings`] on an empty `externals`. The
 /// no-op path below returns the input bytes without running the linker at all,
-/// so main-side shapes the linker rejects are accepted here: a data or element
-/// segment, a start function, a table, a second memory, a float, `v128`, or
+/// so main-side shapes the linker rejects are accepted here: a passive data
+/// segment or one over another memory or at a computed offset (the merge
+/// carries only the active, `i32.const`-placed segments this compiler emits for
+/// module constants), an element segment, a start function, a table, a second memory, a float, `v128`, or
 /// reference-typed value in one of main's own signatures, and a duplicated or
 /// malformed `inference.spec_funcs` or `inference.hspecs` custom section. The
 /// same holds for a malformed `contracts` argument: a list holding two entries

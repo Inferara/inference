@@ -8243,6 +8243,122 @@ fn project_build_rejects_an_unknown_memory_key() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Module-scope constants and the static footprint
+//
+// A project's array constants are bytes of the data segment above the stack.
+// With no `[memory]` table the default stack makes room for them; with a
+// `stack-size` that leaves none, the build stops at A058 naming the manifest
+// key that fixes it.
+// ---------------------------------------------------------------------------
+
+/// A project whose `main` reads an array constant.
+const PROJECT_CONSTS_SRC: &str = "const SQUARES: [i32; 4] = [0, 1, 4, 9];\n\n\
+     pub fn main() -> i32 {\n    return SQUARES[3] + SQUARES[2];\n}\n";
+
+/// A project with constant tables builds in the default page without any
+/// `[memory]` table: the stack gives up the 16 bytes the table needs and the
+/// segment lands at its top.
+#[test]
+fn project_build_places_module_constants_above_the_default_stack() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_CONSTS_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+
+    let wat = wasmprinter::print_bytes(read_project_artifact(&temp))
+        .expect("the artifact must be printable");
+    assert!(
+        wat.contains("(memory (;0;) 1 1)")
+            && wat.contains("(global (;0;) (mut i32) i32.const 65520)"),
+        "the default page keeps the stack, less the data's room:\n{wat}"
+    );
+    assert!(
+        wat.contains("(data (;0;) (i32.const 65520)"),
+        "the constant's bytes sit at the top of the stack:\n{wat}"
+    );
+}
+
+/// A `stack-size` that fills the page leaves the constant data no room: the
+/// build is refused by A058, which names the `[memory]` key that fixes it, and
+/// following that advice builds.
+#[test]
+fn project_build_refuses_constant_data_beside_a_full_page_stack() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_CONSTS_SRC,
+        "[memory]\nstack-size = 65536\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    let assert = cmd.assert().failure();
+    let output = assert.get_output();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("the program's constant data does not fit in linear memory"),
+        "got:\n{text}"
+    );
+    assert!(text.contains("16 bytes for `SQUARES`"), "got:\n{text}");
+    assert!(
+        text.contains("`pages = 2` under `[memory]`"),
+        "got:\n{text}"
+    );
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_CONSTS_SRC,
+        "[memory]\nstack-size = 65536\npages = 2\n",
+    );
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+}
+
+/// The running module reads the constant: wasmtime prints `main`'s result,
+/// which only a correctly placed and initialized segment produces.
+#[test]
+fn project_run_reads_a_module_constant() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_CONSTS_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("13"));
+}
+
 // [memory] max-pages forwarding
 //
 // The maximum travels the route the other two keys do, but it is gated on its

@@ -58,7 +58,8 @@
 //! - A029: Compound literal in compound element assignment
 //! - A030: (removed — uzumaki on scalar arrays now supported at any depth)
 //! - A031: Unsupported expression form in compound-returning function return
-//! - A032: Top-level (module-scope) `const` declaration (not yet implemented)
+//! - A032: A `const` declared inside a `spec` block (not yet implemented;
+//!   module-scope `const` is supported)
 //! - A038: Uzumaki (`@`) on a struct- or array-typed struct-literal field
 //! - A039: Struct uzumaki (`@`) passed directly as a function argument
 //! - A040: Uzumaki (`@`) on a struct- or array-typed array-literal element
@@ -99,14 +100,18 @@
 //!
 //! - A035: Direct or indirect (mutual) recursion is forbidden (Power of 10, Rule 1)
 //!
-//! ### Stack Depth (A036)
+//! ### Static Memory Footprint (A036, A058)
 //!
 //! - A036: Cumulative shadow-stack usage along a call chain must not exceed the
-//!   configured stack budget (64 KB by default). Because A035 makes the call
-//!   graph acyclic, the worst-case usage is the maximum-weight root-to-leaf path
-//!   (node weight = that function's compound-frame size). The estimator
+//!   stack the build's layout leaves once the program's static data is placed
+//!   (64 KB by default, less what constant data needs). Because A035 makes the
+//!   call graph acyclic, the worst-case usage is the maximum-weight root-to-leaf
+//!   path (node weight = that function's compound-frame size). The estimator
 //!   over-approximates each frame to stay sound against codegen; see
 //!   [`rules::stack_depth`].
+//! - A058: The shadow stack and the constant data placed above it must fit the
+//!   memory's pages. Together with A036 this proves a program never needs more
+//!   linear memory than it declares; see [`rules::static_data_footprint`].
 //!
 //! ### Array Bounds (A037, A056, A057)
 //!
@@ -332,7 +337,7 @@ pub use inference_type_checker::errors::TypeMismatchContext;
 /// [`AnalysisOptions::bounds_checks`] are these: a caller that can set the
 /// fields must be able to build the values, without a direct dependency on
 /// `inference-compiler-interface` to name their types.
-pub use inference_compiler_interface::{BoundsChecks, TargetName};
+pub use inference_compiler_interface::{BoundsChecks, MemoryLayout, MemoryRequest, TargetName};
 
 /// The facts about the artifact a program will be compiled into that some rules
 /// must measure the program against.
@@ -349,10 +354,14 @@ pub use inference_compiler_interface::{BoundsChecks, TargetName};
 /// generation the accesses it proved in bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnalysisOptions {
-    /// The shadow-stack size in bytes A036 measures cumulative call-chain frame
-    /// usage against. Must equal the stack region code generation emits for the
-    /// same build, or the rule polices a budget the artifact does not have.
-    pub stack_budget_bytes: u32,
+    /// The linear memory the build declares, as resolved from its request and
+    /// before the program's static data is placed in it. A036 measures the
+    /// deepest call chain against the stack this leaves once the data is
+    /// placed, and A058 judges the stack and the data together against the
+    /// pages. Must be the layout code generation is handed for the same build:
+    /// both place the same data the same way, so they then agree on the stack
+    /// the artifact has.
+    pub layout: MemoryLayout,
     /// The runtime the build targets. A055 measures each function's parameter
     /// words against the limit that runtime sets, and is silent for a runtime
     /// that sets none. Must name the target code generation builds for, or the
@@ -379,7 +388,7 @@ pub struct AnalysisOptions {
 impl Default for AnalysisOptions {
     fn default() -> Self {
         Self {
-            stack_budget_bytes: 65_536,
+            layout: MemoryLayout::default(),
             target: TargetName::DEFAULT,
             bounds_checks: BoundsChecks::DEFAULT,
         }
@@ -498,11 +507,11 @@ mod tests {
             AnalysisDiagnostic::UzumakiOnStructInArray { location: dummy_location() },
             AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location: dummy_location() },
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location: dummy_location() },
-            AnalysisDiagnostic::TopLevelConstNotSupported { name: "X".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::ConstInSpecNotSupported { name: "X".to_string(), spec_name: "S".to_string(), location: dummy_location() },
             AnalysisDiagnostic::CombinedUnaryOperators { op_outer: "-", op_inner: "~", location: dummy_location() },
             AnalysisDiagnostic::VisibilityInsideSpec { spec_name: "S".to_string(), def_name: "f".to_string(), def_kind: "fn", location: dummy_location() },
             AnalysisDiagnostic::RecursionDetected { cycle: "f -> f".to_string(), location: dummy_location() },
-            AnalysisDiagnostic::StackDepthExceeded { chain: "a -> b".to_string(), depth_bytes: 80_000, budget_bytes: 65_536, location: dummy_location() },
+            AnalysisDiagnostic::StackDepthExceeded { chain: errors::StackChain { frames: Vec::new() }, layout: MemoryLayout::default(), location: dummy_location() },
             AnalysisDiagnostic::ArrayIndexConstOutOfBounds { index: "3".to_string(), length: 3, location: dummy_location() },
             AnalysisDiagnostic::UzumakiOnCompoundField { field: "i".to_string(), ty: "Inner".to_string(), location: dummy_location() },
             AnalysisDiagnostic::StructUzumakiAsArgument { location: dummy_location() },
@@ -524,6 +533,7 @@ mod tests {
             AnalysisDiagnostic::ParamWordsExceeded { function: "f".to_string(), words: errors::ParamWords { receiver: false, params: Vec::new(), result_pointer: None }, location: dummy_location() },
             AnalysisDiagnostic::ArrayIndexNotProvenInBounds { index: Some("i".to_string()), number: inference_type_checker::type_info::NumberType::I32, length: 8, lo: -1, hi: 7, location: dummy_location() },
             AnalysisDiagnostic::AssertAlwaysFails { location: dummy_location() },
+            AnalysisDiagnostic::StaticDataExceedsMemory { data: errors::ConstantData { items: Vec::new(), total: 0 }, refusal: inference_compiler_interface::StaticDataError { data_bytes: 0, stack_bytes: 0, stack_requested: false, pages: 1 }, chain_bytes: 0, layout: MemoryLayout::default(), location: dummy_location() },
         ];
 
         let rules = rules::all_rules();
