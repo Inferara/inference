@@ -4940,6 +4940,45 @@ fn a_constant_compared_whole_counts_its_leaves() {
     );
 }
 
+/// Every shape of constant reads as its computed value: a `bool` as 0 or 1, an
+/// enum as its tag, and a struct compared whole as one equality per field. An
+/// array named where a term is required is the aggregate-is-not-a-term `P004`
+/// an aggregate binding gets, raised without building the array.
+#[test]
+fn constants_of_every_shape_read_as_their_values() {
+    assert_eq!(
+        obligation_of("const ON: bool = true;", "forall { assert(ON); }"),
+        nz(i32c(1))
+    );
+    assert_eq!(
+        obligation_of(
+            "enum Color { Red, Green, Blue }\nconst FAV: Color = Color::Blue;",
+            "forall { assert(FAV == Color::Blue); }"
+        ),
+        nz(eqs(i32c(2), i32c(2)))
+    );
+    assert_eq!(
+        obligation_of(
+            "struct Limits { low: i32; high: i32; }\n\
+             const B: Limits = Limits { low: -1, high: 1 };",
+            "forall { let p: Limits = @; assert(p == B); }"
+        ),
+        imp(
+            and(guard(0), guard(1)),
+            and(teq(local(0), i32c(-1)), teq(local(1), i32c(1)))
+        )
+    );
+
+    let e = err("fn g(a: [i32; 2]) -> i32 { return a[0]; }\n\
+                 const W: [i32; 2] = [1, 2];\n\
+                 spec S { fn f() forall { assert(g(W) > 0); } }");
+    assert!(e.contains("error[P004]"), "{e}");
+    assert!(
+        e.contains("type `[i32; 2]` is an aggregate, and a term is one scalar value"),
+        "{e}"
+    );
+}
+
 /// A module constant written as an element of a literal is part of that
 /// literal's introduction, whose count already includes its leaves: 32
 /// quantified leaves against a 32-leaf literal fill the budget exactly, and
