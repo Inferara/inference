@@ -29,9 +29,11 @@ cargo +nightly fuzz run link core/wasm-linker/fuzz/seeds/link
 `seeds/link/` holds a committed seed corpus of the audit reproductions — the
 round-2 control-flow-join (C-1), param-nulling-arithmetic (C-2), call-laundering
 (C-3), memory64 (C-4), deep-nesting (H-3), over-declared-locals (M-1), and
-main-data-segment (M-2) cases, plus a positive control that must merge. Each seed
-imports from the empty module `""` so the target's first-external binding
-satisfies it and the seed reaches the real closure / provenance / merge logic.
+main-passive-data-segment (M-2b) cases, plus two positive controls that must
+merge: a pure external, and a main carrying an active data segment (M-2), which
+the merge once dropped and now re-emits. Each seed imports from the empty module
+`""` so the target's first-external binding satisfies it and the seed reaches the
+real closure / provenance / merge logic.
 
 The seeds are reproducible and continuously verified by two tests in
 `core/wasm-linker/tests/fuzz_seeds.rs`:

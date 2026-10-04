@@ -74,17 +74,43 @@
 //! The practical consequence is worth stating plainly, because it is easy to
 //! read the contract above as stronger than it is: **an admitted external can
 //! address anywhere in the shared linear memory.** What limits the damage today
-//! is not this analysis but a single declared page — an out-of-region address is
-//! usually out of bounds and traps. That is an *accidental backstop*, not a
-//! guarantee, and it weakens as soon as the memory is larger than what the
-//! program actually uses. The linear memory is configurable, so a merge that
-//! admits a Tier-B closure into more than one page says so:
-//! [`crate::LinkWarning::TierBInMultiPageMemory`].
+//! is not this analysis but the end of the memory: an address past everything
+//! the program placed in it is out of bounds and traps. That is an *accidental
+//! backstop*, not a guarantee. It never covered the regions the program itself
+//! occupies — the shadow stack and, when the program declares module constants,
+//! the data region above it (see below) — and it weakens as soon as the memory
+//! is larger than what the program actually uses. The linear memory is
+//! configurable, so a merge that admits a Tier-B closure into more than one
+//! page says so: [`crate::LinkWarning::TierBInMultiPageMemory`].
 //!
 //! Closing the gap needs a numeric/interval domain over addresses (with
 //! occurrence multiplicity, so a repeated parameter cannot fold away) plus
 //! declared pointee sizes for `external fn` parameters, which no channel
 //! currently carries into this crate. Tracked in issue #420.
+//!
+//! ### The constant region above the stack
+//!
+//! The main module's linear memory is the shadow stack at `[0, stack_size)`
+//! and, when the program declares module-scope compound constants, a data
+//! region at `[stack_size, stack_size + data_bytes)` that one active data
+//! segment initializes and that the merge carries into the output unchanged.
+//! Nothing in the program writes the region, since a `const` is immutable.
+//!
+//! A Tier-B external writes through what it was handed, so the declared path
+//! into the region would be a `mut` parameter whose argument is data-resident —
+//! and the compiler never passes one. Analysis rule A047 refuses a compound
+//! argument at a `mut` `external fn` parameter unless it is rooted at a `mut`
+//! binding, and a `const` is not one; the repair it offers copies the constant
+//! into a `mut` binding on the stack, and that copy is what the external then
+//! writes. Should a data-resident argument reach a parameter not declared
+//! `mut`, the write-set check — in the checked mode the compiler always links
+//! under — refuses a closure that stores through that parameter.
+//!
+//! That closes the declared path and nothing more. The derivation-not-containment
+//! gap above applies to the region exactly as it applies to the stack: a scalar
+//! `i32` the program passes, or a displacement past a granted buffer, can
+//! address a constant just as it can address a caller's frame, and nothing here
+//! sees the difference. Closing it is the same issue #420.
 //!
 //! ## The lattice
 //!

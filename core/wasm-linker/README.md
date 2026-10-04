@@ -64,6 +64,43 @@ entries as more external closures are merged in. Only **type-section entries**
 deduplicated or dropped by this step. Unreachable functions are excluded earlier
 by the transitive closure walk, before any output index is committed.
 
+### Main-Module Data Segments
+
+Inference codegen places module-scope compound constants (arrays and structs) in
+linear memory above the shadow stack, at `[stack_size, stack_size + data_bytes)`,
+and initializes that region with a single active data segment. The merge carries
+the main module's segments into the output unchanged — same order, same
+`i32.const` offsets, same bytes — in a Data section written right after the Code
+section. A module with no segments gets no Data section, so the output for a
+data-free program is byte-identical to what it was before segments were carried.
+
+"Unchanged" is correct here rather than merely convenient, on three facts:
+
+- **No data index moves.** Only `memory.init` and `data.drop` name a segment by
+  index. Inference codegen emits neither, the main-body re-encoder refuses both,
+  and an external closure using either is Tier C, so no external segment ever
+  joins the data index space to shift main's.
+- **No offset moves.** Main's memory stays memory 0 of the output, so a constant
+  offset names the same byte before and after the merge.
+- **The segment still fits.** Memory reconciliation only ever widens the minimum
+  from main's and keeps main's maximum, so a segment that fit main's memory fits
+  the output's.
+
+The output never carries a `DataCount` section (id 12): SpaceWasm cannot decode
+it, and the validator requires one only of code that names a segment, which the
+first fact rules out.
+
+Every other main-side segment shape is refused with `LinkError::UnsupportedConstruct`
+naming the segment and what disqualifies it: a **passive** segment (it exists
+only to be named by a `memory.init` the merge does not carry), a segment over a
+**memory other than 0** (the output has one shared memory), and an **offset
+expression other than a lone `i32.const`** (a constant expression codegen never
+emits, which would need its own argument that it still denotes the same address
+after the merge). A main body that names a segment with `memory.init` or
+`data.drop` is refused the same way, since carrying it would need the `DataCount`
+section the output withholds. External modules' data segments are a different
+question and stay Tier C — see [Declaration versus use](#declaration-versus-use).
+
 ### Name Section
 
 The linker preserves the `name` custom section so the Rocq translator emits
@@ -463,18 +500,33 @@ the lattice tracks that and rejects a sum whose two operands may share a
 parameter.
 
 **In practice this means an admitted external can address anywhere in the shared
-linear memory.** What limits the damage today is not this analysis but a single
-declared page: an out-of-region address is usually out of bounds and traps. That
-is an accidental backstop, not a guarantee, and it weakens as the declared memory
-grows beyond what the program uses. Issue #420 tracks closing the gap with a
-numeric/interval domain plus declared pointee sizes for `external fn`
-parameters. #333 supplies a related but narrower channel: a declared **write
-set** — which of an external's parameters its merged body may store through,
-via `mut` on the `external fn` declaration — checked by the linker at link
-time (see [Declared Write-Set Check](#declared-write-set-check)). That check
-narrows *which* parameter a store may be attributed to; it says nothing about
-which bytes within that parameter's region are touched, so it does not by
-itself close the gap this section describes.
+linear memory.** What limits the damage today is not this analysis but the end of
+the memory: an address past everything the program placed in it is out of bounds
+and traps. That is an accidental backstop, not a guarantee. It never covered the
+regions the program itself occupies — the shadow stack and, when the program
+declares module constants, the data region above it (see
+[Main-Module Data Segments](#main-module-data-segments)) — and it weakens as the
+declared memory grows beyond what the program uses. Issue #420 tracks closing
+the gap with a numeric/interval domain plus declared pointee sizes for
+`external fn` parameters. #333 supplies a related but narrower channel: a
+declared **write set** — which of an external's parameters its merged body may
+store through, via `mut` on the `external fn` declaration — checked by the
+linker at link time (see [Declared Write-Set Check](#declared-write-set-check)).
+That check narrows *which* parameter a store may be attributed to; it says
+nothing about which bytes within that parameter's region are touched, so it does
+not by itself close the gap this section describes.
+
+The constant region is worth a sentence of its own, because nothing in the
+program writes it. The declared path into it would be a `mut` parameter whose
+argument is data-resident, and the compiler never passes one: analysis rule
+A047 refuses a compound argument at a `mut` `external fn` parameter unless it is
+rooted at a `mut` binding, which a `const` is not, and the repair it offers
+copies the constant into a `mut` binding on the stack. Should a data-resident
+argument reach a parameter not declared `mut`, the write-set check — in the
+checked mode the compiler always links under — refuses a closure that stores
+through it. That closes the declared path and nothing more:
+a scalar `i32` the program passes, or a displacement past a granted buffer, can
+reach a constant exactly as it can reach a caller's frame.
 
 Because the memory is now configurable, a link that admits a Tier-B external into
 a reconciled memory of more than one page raises a
@@ -646,8 +698,12 @@ collapsed into one.
 An *active* **data segment** writes linear memory at instantiation whether or not
 any instruction names it, so an unreferenced one still changes what the merged
 program observes. That is a correctness argument. A *passive* segment would be
-inert, but the parser retains only `data_count` and discards each segment's kind,
-so the two cannot be distinguished here and both are rejected.
+inert, so dropping one is in principle unobservable. The parser now records each
+segment's kind — the merge needs it to carry the *main* module's active segments
+(see [Main-Module Data Segments](#main-module-data-segments)) — but this gate still
+keys on declaration alone and rejects both kinds in an external: admitting a
+passive one by dropping it is a relaxation to make deliberately, not a side
+effect of the parser having learned the difference.
 
 An **element segment** is rejected as *conservatism*, not on the data-segment
 argument. Dropping one is in fact unobservable: the merged output declares no
@@ -809,7 +865,7 @@ to a same-named `sum` exported by a different module.
 | `LinkError::UnsatisfiedImport { field }` | No external module exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
-| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, or data/element segments. The message names the specific construct. |
+| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, an element segment, or a data segment that is passive, targets a memory other than 0, or has an offset other than a lone `i32.const` (an active memory-0 `i32.const` segment is carried; see [Main-Module Data Segments](#main-module-data-segments)), and when a main body names a data segment with `memory.init`/`data.drop`. The message names the specific construct. |
 | `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature outside the supported subset: any floating-point type or instruction, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls. The `details` field carries the validator's feature-named diagnostic. |
 | `LinkError::UndeclaredExternWrite { module, field, param_index, param_name }` | Checked mode only: a Tier-B closure's attributed write set is not covered by its `external fn` declaration's `mut` parameters. Names the offending parameter by index and, when the declaration used a named form, by name; when it used an unnamed form, the message says to name it first. See [Declared Write-Set Check](#declared-write-set-check). |
 | `LinkError::UnresolvedObligationSymbol { symbol, merged_roots }` | A function symbol the main module's `inference.hspecs` obligations apply is carried by no function of the merged output. `merged_roots` lists every `<module>::<field>` the merge did satisfy, so the message can say what was on offer. |
@@ -856,10 +912,16 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
 - Reference-typed values (`funcref`, `externref`) and `v128` in merged signatures or bodies
   are rejected as `UnsupportedConstruct`. The Inference codegen output uses only `i32`/`i64`,
   so this limit does not affect Inference-generated main modules.
-- The main module must not declare a start function, a table section, data or element
+- The main module must not declare a start function, a table section, element
   segments, or non-function imports — the static merge does not preserve these sections, so
   each is rejected up front rather than silently dropped. Inference codegen emits none of
   them; the guards apply to hand-built or third-party main modules fed to the public `link()`.
+- The main module's data segments are carried only in the shape Inference codegen emits:
+  active, over memory 0, at a lone `i32.const` offset, with no main body naming a segment
+  through `memory.init`/`data.drop`. A passive segment, a segment over another memory, or a
+  computed offset is rejected as `UnsupportedConstruct` (see
+  [Main-Module Data Segments](#main-module-data-segments)). An external's data segments,
+  of any kind, remain Tier C.
 - One `.wasm` library version per logical name. Multi-version resolution is
   deferred to the manifest layer (issue #96).
 - Adoption carries a library's universal obligations only. `exists`/`unique`
@@ -871,12 +933,12 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
 | File | Responsibility |
 |------|---------------|
 | `src/lib.rs` | Public API (`link`, `link_with_warnings`, `link_with_options`, `LinkOptions`, `ExternalSpecPolicy`, `LinkError`, `LinkWarning`), crate-level documentation |
-| `src/parse.rs` | `ParsedModule` — section-by-section owned representation; `ParsedModule::parse`, and `ParsedModule::parse_external`, which decodes a library's verification sections only when adoption asks for them |
+| `src/parse.rs` | `ParsedModule` — section-by-section owned representation, including each data segment's kind, offset and bytes (`DataSegment`); `ParsedModule::parse`, and `ParsedModule::parse_external`, which decodes a library's verification sections only when adoption asks for them |
 | `src/closure.rs` | `compute` — transitive closure via BFS; `ClosureEffects` for tier classification |
 | `src/tier.rs` | `classify` — Tier A/B/C feasibility decision, plus `check_write_contract`, the declared write-set check that gates Tier-B admission |
 | `src/provenance.rs` | `verify_param_addressing` — the address-provenance abstract interpretation proving Tier-B addresses are parameter-derived; also runs the root write-set attribution and returns it |
 | `src/provenance/attribution.rs` | `root_write_set` — the forward least-fixpoint pass computing, for a memory-touching closure, which of the *root export's* parameters each `Store` access's address may be attributed to |
-| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode, the `inference.checked` remap and its reachability check, the `inference.bounds_elided` remap, and the external-specification policy (the dropped-obligations report, and the adoption of a library's universal obligations) |
+| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, the main module's data segments, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode, the `inference.checked` remap and its reachability check, the `inference.bounds_elided` remap, and the external-specification policy (the dropped-obligations report, and the adoption of a library's universal obligations) |
 | `src/rewrite.rs` | `reencode_body` — operator-level re-encoding under a new index space; `call_edges` — the call targets of one body, read off the same operator stream |
 | `src/checked.rs` | The `inference.checked` custom section — the guarded-function list the reachability check in `src/merge.rs` reads — decoded through `src/func_list.rs` |
 | `src/bounds_elided.rs` | The `inference.bounds_elided` custom section — the functions holding an array access emitted without its bounds guard, carried through the merge — decoded through `src/func_list.rs` |
@@ -909,6 +971,12 @@ Test coverage includes:
 - **Dead-code exclusion** — an unreferenced `unused` function is not merged
 - **Tier B** — `store_at` writes to a caller address; merge succeeds; memory export survives
 - **Tier C (data segment)** — `lookup` using `memory.init` is rejected with a data-segment reason
+- **Main-module data segments** — an active memory-0 `i32.const` segment survives
+  the merge with its offset and bytes, no DataCount section is emitted, and the
+  linked module reads the constant under wasmtime; two segments keep their order
+  inside a memory a Tier-B external widened; a data-free merge emits no Data
+  section; a passive segment, a segment over memory 1, a computed offset, and a
+  main body using `data.drop` are each refused by name
 - **Merged globals** — a global-reading external links and its body names the *external's* remapped global, not main's; two externals' structurally identical globals stay distinct; a global-bearing external merges onto a globalless main; a global used to address memory is still rejected by provenance
 - **Tier C (indirect call)** — `call_indirect` use is rejected with a table/element reason
 - **Multiple externals** — `sum` from one library and `sub` from another; both satisfied

@@ -28,7 +28,8 @@
 //!
 //! A committed seed corpus of the audit reproductions (the round-2
 //! control-flow-join / param-nulling / call-laundering / memory64 / deep-nesting
-//! / over-declared-locals / main-data-segment cases, plus a positive control)
+//! / over-declared-locals / main-passive-data-segment cases, plus positive
+//! controls for a pure external and an active main-side data segment)
 //! lives at `core/wasm-linker/fuzz/seeds/link/`. Start the fuzzer from it for
 //! fast coverage:
 //!
