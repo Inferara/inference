@@ -280,7 +280,7 @@ match parse(source) {
 
 ## Limitations
 
-- **Top-level `const` in codegen**: Top-level `const` declarations do not reach codegen (analysis rule A032 / issue #171). Cross-file `const` type-checking works and will feed into codegen when #171 lands.
+- **`const` inside a `spec` block**: A `const` declared inside a `spec` block is refused (analysis rule A032). Module-scope `const` declarations, including cross-file ones, are computed by the type checker and emitted by code generation (#211).
 - **No import aliasing**: `use a::b as c;` is not yet supported.
 - **Error recovery**: Some parse errors prevent AST construction.
 

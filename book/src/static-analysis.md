@@ -297,11 +297,11 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-Fifty-four rules are registered in `all_rules()`. Forty-eight are
+Fifty-five rules are registered in `all_rules()`. Forty-nine are
 error-severity — they block compilation — and six are warnings; no
 info-severity rule has been defined yet. Three ids in the numbering range
 (A013, A021, A030) are currently unassigned, so the assigned ids run from
-A001 to A057. The tables below group the rules by the invariant family they
+A001 to A058. The tables below group the rules by the invariant family they
 protect; the descriptions are condensed from the rules' own doc comments.
 
 ### Control flow and termination
@@ -315,7 +315,7 @@ protect; the descriptions are condensed from the rules' own doc comments.
 | A005 | `return` must not appear inside a non-deterministic block |
 | A007 | non-void functions must return on all code paths |
 | A035 | direct and mutual/indirect recursion is forbidden |
-| A036 | cumulative shadow-stack depth must not exceed the stack budget |
+| A036 | cumulative shadow-stack depth must not exceed the stack the build's memory leaves |
 
 This family carries the core verification argument. A `break` with no
 enclosing loop (A001) has no target — the WASM `br` it would lower to would be
@@ -490,7 +490,7 @@ second layer of protection for size and speed (see
 |----|------------------|
 | A024 | calls to unbound external functions are not supported in codegen |
 | A025 | variable declarations must have an initializer |
-| A032 | top-level `const` declarations are not yet supported |
+| A032 | a `const` declared inside a `spec` block is not yet supported |
 | A033 | combined unary operators are prohibited |
 | A041 | a function-local name is declared at most once per function body |
 | A042 | non-deterministic constructs (`forall`/`exists`/`assume`/`unique`) are only valid inside a `spec` declaration |
@@ -630,6 +630,64 @@ left to the post-link check, which is the only place its words exist.
 The editor measures a file for the target its project's `Inference.toml`
 names under `[build] target`, so a `spacewasm` project shows A055 where it is
 written (see [The Language Server](the-language-server.md)).
+
+### Static memory footprint
+
+| ID | What it enforces |
+|----|------------------|
+| A036 | the deepest call chain's frames fit the shadow stack |
+| A058 | the shadow stack and the constant data above it fit the memory's pages |
+
+An Inference program allocates nothing at run time, so everything it will ever
+hold in linear memory is known before it runs: the shadow stack at
+`[0, stack-size)`, and directly above it the **static data region** — the
+bytes of every array and struct module constant a function reads, written once
+by an active data segment when the module is instantiated. These two rules
+together prove that the program can never need more memory than it declares
+(Power of Ten, Rule 3): every call chain fits the stack, and the stack and the
+data fit the `pages` the module is guaranteed at instantiation.
+
+The type checker computes every module constant and lays the region out; the
+build's memory layout places it. A stack the build did not size keeps its
+default 64 KiB when the memory has room for the data above it and otherwise
+gives up exactly the part the data needs, rounded to the 16-byte frame grid —
+so a program with a few constant tables builds in the default page without a
+`[memory]` table, and A036 measures its call chains against the smaller stack.
+A `stack-size` the build asked for is never shrunk. A058 fires when the data
+leaves a default stack less than one frame, or when a requested stack and the
+data together need more than the pages hold. Both rules read the same
+placement code generation emits, so the stack they measure is the stack the
+module declares.
+
+Both findings say what makes up the footprint and how to fix it, in the
+manifest's spelling and the command line's (`infs` forwards the manifest as
+flags, so the compiler cannot tell which one the build used):
+
+```text
+error[A036]: maximum stack depth main -> work -> alloc uses 98304 bytes, exceeding the 65536-byte stack by 32768 bytes; reduce array/struct frame sizes along this call chain
+note: its frames are 32768 bytes for `main` and 65536 bytes for `alloc`
+note: the stack is the default 65536 bytes, the whole of the 1-page memory
+help: or give the stack the 98304 bytes it needs: `stack-size = 98304` and `pages = 2` under `[memory]`, or `--stack-size 98304 --memory-pages 2`
+```
+
+```text
+error[A058]: the program's constant data does not fit in linear memory: the 65536-byte shadow stack and 4100 bytes of static data need 69636 bytes, 4100 more than the 1-page (65536-byte) linear memory holds
+note: the constant data is 4000 bytes for `TABLE`, 96 bytes for `lib::LUT` and 4 bytes of alignment padding
+help: raise the memory to 2 pages: `pages = 2` under `[memory]`, or `--memory-pages 2`
+help: or lower the stack to at most 61424 bytes, which still holds the deepest call chain's 1024: `stack-size = 61424` under `[memory]`, or `--stack-size 61424`
+```
+
+The suggested layout is computed by `MemoryLayout` itself, so it is never one
+the build would refuse, and following it clears the finding. A036's frame
+sizes are upper bounds of the frames code generation allocates, so a
+suggestion can over-ask but never under-ask. A058 is anchored at the first
+constant that no longer fits, in the file that declares it, and names the
+largest constants by the path the entry file would use for them.
+
+What lies outside these rules is not a static allocation: the bytes a host
+writes into memory for an exported function's compound parameters, and the
+stores an admitted Tier-B external makes through a pointer it is handed (see
+[The WASM Linker](the-wasm-linker.md)). Neither is allocated by the program.
 
 ### Advisory rules
 
