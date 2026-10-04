@@ -171,6 +171,15 @@ fn a_shift_by_the_width_or_more_is_refused() {
         }
     );
     assert_eq!(
+        failure("const S: i32 = -1;\nconst X: i32 = 8 >> S;"),
+        ConstEvalFailure::ShiftCountOutOfRange {
+            op: ">>",
+            count: -1,
+            number: NumberType::I32
+        },
+        "a negative count is refused too, though the instruction would mask it"
+    );
+    assert_eq!(
         value_of("const X: u8 = 1 << 7;", "X"),
         int(128, NumberType::U8)
     );
