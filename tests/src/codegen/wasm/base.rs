@@ -3897,6 +3897,84 @@ mod base_codegen_tests {
         assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
+    /// The module-scope constants fixture. The marks pin how each use lowers:
+    /// a scalar constant as an immediate, a compound one as the address of its
+    /// bytes in the one data segment the module carries.
+    #[test]
+    fn module_consts_test() {
+        cov_mark::check_count!(wasm_codegen_emit_data_section, 1);
+        cov_mark::check_count!(wasm_codegen_module_const_scalar_read, 3);
+        cov_mark::check_count!(wasm_codegen_module_const_compound_read, 9);
+        let test_name = "module_consts";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn module_consts_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "module_consts";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let expected_i32: &[(&str, i32)] = &[
+            ("prime_sum", 17),
+            ("corner_x", 13),
+            // `Dir::South` is tag 2.
+            ("heading", 2),
+            ("ones", 64),
+            ("derived", 32),
+            // The copy is written; the constant is not.
+            ("copy_then_write", 102),
+            ("returned", 7),
+        ];
+        for &(name, want) in expected_i32 {
+            let func: TypedFunc<(), i32> = instance
+                .get_typed_func(&mut store, name)
+                .unwrap_or_else(|e| panic!("Failed to get '{name}': {e}"));
+            assert_eq!(
+                func.call(&mut store, ())
+                    .unwrap_or_else(|e| panic!("{name} failed: {e}")),
+                want,
+                "{name} returned the wrong value"
+            );
+        }
+
+        let step: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "step")
+            .expect("Failed to get 'step'");
+        // `i8` -1 crosses the boundary sign-extended.
+        assert_eq!(step.call(&mut store, 0).expect("step failed"), -1);
+        assert_eq!(step.call(&mut store, 2).expect("step failed"), 1);
+
+        let scale: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "scale")
+            .expect("Failed to get 'scale'");
+        assert_eq!(
+            scale.call(&mut store, ()).expect("scale failed"),
+            i64::MIN + 1
+        );
+    }
+
     #[test]
     fn array_repeat_execution_test() {
         use wasmtime::{Engine, Module, Store, TypedFunc};
@@ -8557,6 +8635,26 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "array_repeat");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_module_consts_wasm() {
+        let dir = base_test_dir().join("module_consts");
+        let source_code = std::fs::read_to_string(dir.join("module_consts.inf"))
+            .expect("Failed to read module_consts.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("module_consts.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "module_consts");
     }
 
     #[test]

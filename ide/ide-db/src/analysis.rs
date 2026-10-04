@@ -9,7 +9,7 @@ use inference_project_model::{
 };
 use inference_analysis::errors::{LabeledDiagnostic, Severity};
 use inference_analysis::rules::all_rules;
-use inference_analysis::{AnalysisOptions, TargetName};
+use inference_analysis::{AnalysisOptions, MemoryLayout, TargetName};
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{DefId, SourceFileId};
 use inference_base_db::LineIndex;
@@ -98,10 +98,11 @@ pub(crate) struct EntryRoot {
     /// The runtime the build targets, which a rule such as A055 measures the
     /// program against. The default target when no manifest names one.
     pub(crate) target: TargetName,
-    /// The shadow-stack size in bytes a build emits, which A036 measures
-    /// call-chain frame usage against. The default layout's stack when no
-    /// manifest configures one.
-    pub(crate) stack_budget_bytes: u32,
+    /// The linear memory a build lays out, before the program's static data is
+    /// placed in it: A036 measures call-chain frame usage against the stack it
+    /// leaves, and A058 the stack and the data against its pages. The default
+    /// layout when no manifest configures one.
+    pub(crate) layout: MemoryLayout,
 }
 
 /// The memoized analysis of one file treated as its own project entry.
@@ -397,17 +398,17 @@ fn build_closure_files(
 /// still valid. A rule is trusted not to panic on partial data; a panic here is
 /// a compiler bug to surface, not to suppress.
 ///
-/// The target and the stack budget are the ones the entry's project builds
+/// The target and the memory layout are the ones the entry's project builds
 /// with, so a rule that measures the program against its artifact (A055 against
 /// `SpaceWasm`'s parameter words, A036 against the shadow stack the project's
-/// `[memory]` table lays out) reports in the editor what a build of the project
-/// would. The bounds-check policy stays the default: it decides only whether a
+/// `[memory]` table lays out, A058 against its pages) reports in the editor what
+/// a build of the project would. The bounds-check policy stays the default: it decides only whether a
 /// passing analysis also computes the accesses code generation may leave
 /// unguarded, and no rule's findings depend on it.
 fn run_analysis_rules(typed_context: &TypedContext, root: &EntryRoot) -> Vec<AnalysisFinding> {
     let options = AnalysisOptions {
         target: root.target,
-        stack_budget_bytes: root.stack_budget_bytes,
+        layout: root.layout,
         ..AnalysisOptions::default()
     };
     let mut findings = Vec::new();

@@ -78,7 +78,9 @@
 
 pub mod errors;
 
-pub use crate::errors::{BoundsChecksError, MemoryLayoutError, TargetError, WasmFeatureError};
+pub use crate::errors::{
+    BoundsChecksError, MemoryLayoutError, StaticDataError, TargetError, WasmFeatureError,
+};
 
 /// Breaking ABI changes: incompatible CLI flag removal/rename, stdout contract
 /// changes, exit-code semantics changes.
@@ -1006,7 +1008,9 @@ pub struct MemoryRequest {
     /// The most pages the memory may grow to. Unset means the memory's own
     /// size — whatever `pages` resolves to — so the memory is fixed.
     pub max_pages: Option<u32>,
-    /// Shadow stack size in bytes. Unset means 64 KiB.
+    /// Shadow stack size in bytes. Unset means 64 KiB, less whatever part of
+    /// it the program's static data needs when the memory has no other room
+    /// for it (see [`MemoryLayout::with_static_data`]).
     pub stack_size: Option<u32>,
 }
 
@@ -1038,13 +1042,21 @@ pub struct MemoryRequest {
 ///
 /// Code generation places the shadow stack at the bottom of memory: it spans
 /// `[0, stack_size)` and `__stack_pointer` grows downward from `stack_size`
-/// toward 0. Whatever lies between `stack_size` and `pages * 64 KiB` is the data
-/// region — nothing this compiler emits reads or writes it today, and it is the
-/// reason the stack size is an independent value rather than simply the whole
-/// memory. It is ordinary addressable memory, not a hole: an access that strays
-/// into it succeeds rather than trapping, so a stack larger than the program
-/// needs is not free (see `core/wasm-linker`, which today leans on an
-/// out-of-region address usually being out of bounds).
+/// toward 0. Directly above it, from `stack_size`, lies the **static data
+/// region**: the bytes of the program's array and struct module constants,
+/// which one active data segment writes at instantiation and which nothing the
+/// compiler emits ever writes again. Whatever lies above the region, up to
+/// `pages * 64 KiB`, is ordinary addressable memory nothing the compiler emits
+/// touches. None of it is a hole: an access that strays there succeeds rather
+/// than trapping, so a stack larger than the program needs is not free (see
+/// `core/wasm-linker`, which leans on an out-of-region address usually being out
+/// of bounds).
+///
+/// A layout [`Self::resolve`] returns places no data yet: how much the program
+/// needs is known only once it has been type-checked.
+/// [`Self::with_static_data`] places it, and is the one place the stack and the
+/// data are judged together — the program's whole static footprint, which must
+/// fit the pages the module is guaranteed at instantiation.
 ///
 /// The three numbers form one type because none is checkable alone: a stack
 /// size is only sane relative to the memory it must fit in, a page count is only
@@ -1057,7 +1069,7 @@ pub struct MemoryRequest {
 /// [`Self::pages()`], [`Self::max_pages()`] and [`Self::stack_size()`] without
 /// owing anyone a validation step, and no caller can assemble a memory the
 /// emitter would have to refuse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MemoryLayout {
     /// Linear memory size in 64 KiB pages: the memory section's minimum, and
     /// every page a module is guaranteed at instantiation.
@@ -1068,6 +1080,13 @@ pub struct MemoryLayout {
     max_pages: u32,
     /// Size of the shadow-stack region in bytes, occupying `[0, stack_size)`.
     stack_size: u32,
+    /// Whether the build asked for `stack_size`. A requested stack is kept as
+    /// asked, and static data has to fit beside it; a default one gives up the
+    /// part of its 64 KiB the data needs when the memory has no other room.
+    stack_requested: bool,
+    /// Bytes of static data placed at `[stack_size, stack_size + data_size)`.
+    /// Zero until [`Self::with_static_data`] places some.
+    data_size: u32,
 }
 
 /// Implemented by hand rather than derived: a derived `Default` would produce a
@@ -1080,10 +1099,15 @@ impl Default for MemoryLayout {
         Self {
             pages: 1,
             max_pages: 1,
-            stack_size: PAGE_SIZE,
+            stack_size: DEFAULT_STACK_SIZE,
+            stack_requested: false,
+            data_size: 0,
         }
     }
 }
+
+/// The shadow stack a build gets when it asks for no size: one page.
+const DEFAULT_STACK_SIZE: u32 = PAGE_SIZE;
 
 /// The largest linear memory a 32-bit WebAssembly module may declare: 65536
 /// pages of 64 KiB each is the whole 4 GiB address space.
@@ -1137,6 +1161,8 @@ impl MemoryLayout {
             pages,
             max_pages: max_pages.unwrap_or(pages),
             stack_size: stack_size.unwrap_or(defaults.stack_size),
+            stack_requested: stack_size.is_some(),
+            data_size: 0,
         };
         layout
             .validate()
@@ -1172,6 +1198,141 @@ impl MemoryLayout {
         self.stack_size
     }
 
+    /// Whether the build asked for the stack size, rather than taking the
+    /// default. Only a default stack gives way to static data.
+    #[must_use]
+    pub fn is_stack_requested(self) -> bool {
+        self.stack_requested
+    }
+
+    /// Bytes of static data the layout places above the stack. Zero for a
+    /// layout no data has been placed in.
+    #[must_use]
+    pub fn data_size(self) -> u32 {
+        self.data_size
+    }
+
+    /// The address the static data region starts at: the top of the stack.
+    #[must_use]
+    pub fn data_base(self) -> u32 {
+        self.stack_size
+    }
+
+    /// Whether the layout describes exactly the memory a build that configures
+    /// nothing gets: one fixed page, all of it stack, no data.
+    ///
+    /// Compares the memory, not how it was asked for, so `--stack-size 65536`
+    /// written out is the default memory too. Code generation reads this to
+    /// decide whether a program that touches no memory still has to declare
+    /// one.
+    #[must_use]
+    pub fn is_default_memory(self) -> bool {
+        let default = Self::default();
+        self.pages == default.pages
+            && self.max_pages == default.max_pages
+            && self.stack_size == default.stack_size
+            && self.data_size == 0
+    }
+
+    /// The layout with `data_bytes` of static data placed directly above the
+    /// stack: the program's whole static footprint, judged against the memory.
+    ///
+    /// A requested stack is kept, and the data has to fit between its top and
+    /// the end of the `pages` the module is guaranteed. A default stack keeps
+    /// its 64 KiB when the memory has room for the data above it and otherwise
+    /// gives up exactly the part the data needs, rounded to the frame grid —
+    /// so a one-page program with 2 KiB of constant tables gets a 62 KiB stack
+    /// rather than a build error, and analysis measures its call chains
+    /// against that. The data is measured against `pages`, not `max_pages`:
+    /// it is written at instantiation, before any growth.
+    ///
+    /// Placing is idempotent from the build's request: a layout that already
+    /// holds data is re-placed as if it held none, so a caller holding either
+    /// gets the same answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the footprint that does not fit: a requested stack and the data
+    /// that need more than the memory, or data that leaves a default stack less
+    /// than one frame.
+    pub fn with_static_data(self, data_bytes: u64) -> Result<Self, StaticDataError> {
+        let memory_bytes = u64::from(self.pages) * u64::from(PAGE_SIZE);
+        let refused = |stack_bytes: u32| StaticDataError {
+            data_bytes,
+            stack_bytes,
+            stack_requested: self.stack_requested,
+            pages: self.pages,
+        };
+        let stack_size = if self.stack_requested {
+            if u64::from(self.stack_size) + data_bytes > memory_bytes {
+                return Err(refused(self.stack_size));
+            }
+            self.stack_size
+        } else {
+            let room = memory_bytes.saturating_sub(data_bytes);
+            let room = room - room % u64::from(FRAME_ALIGNMENT);
+            if room < u64::from(FRAME_ALIGNMENT) {
+                return Err(refused(FRAME_ALIGNMENT));
+            }
+            // `room` is below the memory size, and so below 2^32 for every
+            // layout `resolve` accepts.
+            u32::try_from(room.min(u64::from(DEFAULT_STACK_SIZE))).unwrap_or(DEFAULT_STACK_SIZE)
+        };
+        let data_size = u32::try_from(data_bytes).map_err(|_| refused(stack_size))?;
+        Ok(Self {
+            stack_size,
+            data_size,
+            ..self
+        })
+    }
+
+    /// The smallest change to the build's request that gives the stack at
+    /// least `stack_bytes` and still holds `data_bytes` of static data above it,
+    /// or `None` when no layout can.
+    ///
+    /// Only what has to change is set: the page count when the memory has to
+    /// grow, the stack size when a default stack would not be enough or a
+    /// requested one is too small, and the maximum when a growable memory's cap
+    /// is below the new size. A fixed memory stays fixed. The answer is checked
+    /// by [`Self::resolve`] and [`Self::with_static_data`] themselves, so a
+    /// suggestion is never a layout either would refuse.
+    #[must_use = "returns the request to suggest without modifying the layout"]
+    pub fn request_to_fit(self, stack_bytes: u32, data_bytes: u64) -> Option<MemoryRequest> {
+        let grid = u64::from(FRAME_ALIGNMENT);
+        let needed = u64::from(stack_bytes).div_ceil(grid) * grid;
+        let page = u64::from(PAGE_SIZE);
+        let keep_default_stack = !self.stack_requested && needed <= u64::from(DEFAULT_STACK_SIZE);
+        let stack = if keep_default_stack {
+            needed
+        } else {
+            needed.max(u64::from(self.stack_size))
+        };
+        let pages_needed = (stack + data_bytes).div_ceil(page);
+        let pages = u32::try_from(pages_needed.max(u64::from(self.pages))).ok()?;
+        let request = MemoryRequest {
+            pages: (pages > self.pages).then_some(pages),
+            max_pages: (self.is_growable() && pages > self.max_pages).then_some(pages),
+            stack_size: if keep_default_stack {
+                None
+            } else {
+                let stack = u32::try_from(stack).ok()?;
+                (!self.stack_requested || stack > self.stack_size).then_some(stack)
+            },
+        };
+        let effective = MemoryRequest {
+            pages: Some(pages),
+            max_pages: Some(self.max_pages.max(pages)),
+            stack_size: request
+                .stack_size
+                .or(self.stack_requested.then_some(self.stack_size)),
+        };
+        let fitted = Self::resolve(effective, MemoryLayoutSource::Flag)
+            .ok()?
+            .with_static_data(data_bytes)
+            .ok()?;
+        (u64::from(fitted.stack_size) >= needed).then_some(request)
+    }
+
     /// Checks that the three numbers describe a linear memory a module can
     /// actually declare and code generation can actually address.
     ///
@@ -1189,10 +1350,15 @@ impl MemoryLayout {
     /// value. Callers surface it verbatim, so it must read as an explanation of
     /// the number the build asked for, not of the check that rejected it.
     fn validate(self) -> Result<(), String> {
+        // The data region is judged by `with_static_data`, against the stack
+        // this check has already accepted; whether the stack was asked for
+        // changes no bound here.
         let Self {
             pages,
             max_pages,
             stack_size,
+            stack_requested: _,
+            data_size: _,
         } = self;
         let page_size = u64::from(PAGE_SIZE);
         let memory_bytes = u64::from(pages) * page_size;
@@ -1741,6 +1907,157 @@ mod tests {
             requested(None, None, Some(32_768)).expect("half a page of stack fits the default page");
         assert_eq!(stack_only.pages(), MemoryLayout::default().pages());
         assert_eq!(stack_only.stack_size(), 32_768);
+    }
+
+    /// A default stack keeps its 64 KiB while the memory has room for the data
+    /// above it, and gives up exactly what the data needs, on the frame grid,
+    /// when it does not. Without the second half a one-page program could not
+    /// hold a single constant table without a `[memory]` table.
+    #[test]
+    fn a_default_stack_gives_way_to_static_data_only_when_the_memory_is_full() {
+        let one_page = MemoryLayout::default()
+            .with_static_data(2_000)
+            .expect("2000 bytes of data fit a page beside a smaller stack");
+        // 65536 - 2000 = 63536, already on the 16-byte grid.
+        assert_eq!(one_page.stack_size(), 63_536);
+        assert_eq!(one_page.data_base(), one_page.stack_size());
+        assert_eq!(one_page.data_size(), 2_000);
+        assert!(one_page.stack_size() + 2_000 <= PAGE_SIZE);
+
+        let two_pages = requested(Some(2), None, None)
+            .expect("two pages")
+            .with_static_data(2_000)
+            .expect("the data fits above a full default stack");
+        assert_eq!(two_pages.stack_size(), 65_536);
+        assert_eq!(two_pages.data_base(), 65_536);
+    }
+
+    /// A stack the build asked for is never shrunk: the data has to fit beside
+    /// it, and the refusal carries the numbers a diagnostic needs.
+    #[test]
+    fn a_requested_stack_is_kept_and_the_data_must_fit_beside_it() {
+        let layout = requested(None, None, Some(65_536)).expect("a full-page stack");
+        let err = layout
+            .with_static_data(100)
+            .expect_err("no room is left above a full-page requested stack");
+        assert_eq!(
+            err,
+            StaticDataError {
+                data_bytes: 100,
+                stack_bytes: 65_536,
+                stack_requested: true,
+                pages: 1,
+            }
+        );
+        assert_eq!(err.overflow_bytes(), 100);
+        assert!(
+            err.to_string()
+                .contains("100 more than the 1-page (65536-byte)"),
+            "{err}"
+        );
+
+        let fits = requested(None, None, Some(32_768))
+            .expect("half a page")
+            .with_static_data(32_768)
+            .expect("the other half holds the data exactly");
+        assert_eq!(fits.stack_size(), 32_768);
+        assert_eq!(fits.data_size(), 32_768);
+    }
+
+    /// Data that would leave a default stack less than one frame is refused
+    /// rather than handed a zero-byte stack.
+    #[test]
+    fn data_that_leaves_no_frame_for_a_default_stack_is_refused() {
+        let err = MemoryLayout::default()
+            .with_static_data(65_530)
+            .expect_err("six bytes are not a frame");
+        assert!(!err.stack_requested);
+        assert!(
+            err.to_string()
+                .contains("leave no room for the shadow stack"),
+            "{err}"
+        );
+    }
+
+    /// Placing again re-places from the request, so a caller holding a layout
+    /// that already carries data gets the answer one holding none would.
+    #[test]
+    fn placing_static_data_is_idempotent() {
+        let once = MemoryLayout::default()
+            .with_static_data(4_096)
+            .expect("fits");
+        assert_eq!(once.with_static_data(4_096), Ok(once));
+        assert_eq!(once.with_static_data(0), Ok(MemoryLayout::default()));
+    }
+
+    /// The memory a build that configures nothing gets is recognized by its
+    /// numbers, so asking for the default stack size explicitly changes nothing
+    /// about what is emitted.
+    #[test]
+    fn the_default_memory_is_recognized_however_it_was_asked_for() {
+        assert!(MemoryLayout::default().is_default_memory());
+        let spelled_out = requested(None, None, Some(65_536)).expect("the default stack");
+        assert_ne!(
+            spelled_out,
+            MemoryLayout::default(),
+            "the request is remembered"
+        );
+        assert!(spelled_out.is_default_memory());
+        assert!(
+            !MemoryLayout::default()
+                .with_static_data(16)
+                .expect("fits")
+                .is_default_memory()
+        );
+    }
+
+    /// A suggestion changes only what has to change, and is itself a layout the
+    /// constructor and the placement accept with room for the stack asked for.
+    #[test]
+    fn a_request_to_fit_changes_only_what_has_to_change() {
+        // The default stack is enough; the memory has to grow for the data.
+        assert_eq!(
+            MemoryLayout::default().request_to_fit(64_000, 2_048),
+            Some(MemoryRequest {
+                pages: Some(2),
+                max_pages: None,
+                stack_size: None
+            })
+        );
+        // More than a default stack: the stack has to be asked for, and the
+        // memory grown to hold it.
+        assert_eq!(
+            MemoryLayout::default().request_to_fit(80_000, 0),
+            Some(MemoryRequest {
+                pages: Some(2),
+                max_pages: None,
+                stack_size: Some(80_000)
+            })
+        );
+        // A requested stack that is already large enough stays unstated.
+        let requested_stack = requested(None, None, Some(32_768)).expect("half a page");
+        assert_eq!(
+            requested_stack.request_to_fit(16_000, 40_000),
+            Some(MemoryRequest {
+                pages: Some(2),
+                max_pages: None,
+                stack_size: None
+            })
+        );
+        // A growable memory whose cap is below the new size raises the cap too.
+        let capped = growable(1, 1, 65_536).expect("fixed one page");
+        assert_eq!(
+            capped.request_to_fit(70_000, 0).map(|r| r.max_pages),
+            Some(None),
+            "a fixed memory stays fixed: the maximum follows the size"
+        );
+        let growable_two = growable(1, 2, 65_536).expect("growable to two");
+        assert_eq!(
+            growable_two
+                .request_to_fit(65_536, 70_000)
+                .map(|r| (r.pages, r.max_pages)),
+            Some((Some(3), Some(3)))
+        );
     }
 
     /// Filling happens before checking, so a partial request is judged as the

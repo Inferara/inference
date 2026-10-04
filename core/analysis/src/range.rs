@@ -58,6 +58,7 @@
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, ExprId, NodeId, StmtId};
 use inference_ast::nodes::{ArithMode, Def, Expr, OperatorKind, Stmt, UnaryOperatorKind};
+use inference_type_checker::module_consts::ConstValue;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -660,6 +661,15 @@ impl Interpreter<'_> {
         let arena = self.arena;
         let value = match &arena[expr].kind {
             Expr::NumberLiteral { value } => value.parse::<i128>().ok().map(Interval::exact),
+            // A module constant is one value on every run, which the type
+            // checker has already computed; a local of the same name shadows
+            // it, which name resolution has already decided by recording no
+            // constant for the identifier.
+            Expr::Identifier(_) | Expr::TypeMemberAccess { .. }
+                if self.ctx.module_const_ref(expr).is_some() =>
+            {
+                self.module_const_interval(expr)
+            }
             Expr::Identifier(ident) => env.get(&arena[*ident].name).map(|tracked| tracked.range),
             Expr::Parenthesized { expr } => self.value_of(*expr, env, mode),
             Expr::ArithMode { mode, expr } => self.value_of(*expr, env, *mode),
@@ -745,7 +755,11 @@ impl Interpreter<'_> {
                 let Some(number) = self.integer_type_of(NodeId::Expr(expr)) else {
                     return Some(env);
                 };
-                if self.ctx.binding_mutability(expr).is_none() {
+                // A module constant has one value on every run, which no
+                // comparison narrows; and it is no local the environment tracks.
+                if self.ctx.binding_mutability(expr).is_none()
+                    || self.ctx.module_const_ref(expr).is_some()
+                {
                     return Some(env);
                 }
                 let name = &arena[*ident].name;
@@ -785,6 +799,16 @@ impl Interpreter<'_> {
     }
 
     /// The integer type the type checker recorded at `node`, if it is one.
+    /// The exact interval of the integer module constant `expr` names, or
+    /// `None` when it names a compound constant or one with no value.
+    fn module_const_interval(&self, expr: ExprId) -> Option<Interval> {
+        let def_id = self.ctx.module_const_ref(expr)?;
+        match self.ctx.module_const_value(def_id)? {
+            ConstValue::Int { value, .. } => Some(Interval::exact(*value)),
+            _ => None,
+        }
+    }
+
     fn integer_type_of(&self, node: NodeId) -> Option<NumberType> {
         match self.ctx.get_node_typeinfo(node)?.kind {
             TypeInfoKind::Number(number) => Some(number),

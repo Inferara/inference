@@ -84,6 +84,7 @@ mod bulk_memory_golden_tests {
         ("base", "method_return_struct"),
         ("base", "method_self_mutate"),
         ("base", "method_three_fields"),
+        ("base", "module_consts"),
         ("base", "multidim_array_literal"),
         ("base", "multidim_array_uzumaki"),
         ("base", "narrow_uzumaki"),

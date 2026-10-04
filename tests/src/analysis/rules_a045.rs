@@ -449,10 +449,10 @@ mod analysis_rules_tests {
         );
     }
 
-    /// Pins that A045 reports the shape in its own right rather than resting on
-    /// A032's temporary rejection of top-level `const`.
+    /// A045 reports the shape in its own right: now that a module-scope
+    /// `const` is supported, it is the rule that refuses a field-less one.
     #[test]
-    fn a045_and_a032_both_fire_for_a_fieldless_top_level_const() {
+    fn a045_rejects_a_fieldless_top_level_const() {
         let source = r#"
             struct E { }
             const X: E = E { };
@@ -463,15 +463,8 @@ mod analysis_rules_tests {
             errors
                 .errors()
                 .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::TopLevelConstNotSupported { .. })),
-            "A032 must still reject the top-level `const`"
-        );
-        assert!(
-            errors
-                .errors()
-                .iter()
                 .any(|e| matches!(e, AnalysisDiagnostic::FieldLessStructValue { .. })),
-            "A045 must fire alongside A032, not instead of it"
+            "A045 must reject the field-less top-level `const`"
         );
     }
 
@@ -489,27 +482,23 @@ mod analysis_rules_tests {
     }
 
     /// The `const` arm must key on the struct being field-less, not on the
-    /// declaration being top-level: A032 rejects this one, A045 must not.
+    /// declaration being top-level: a top-level `const` of a struct with fields
+    /// passes analysis.
     #[test]
     fn a045_top_level_const_of_struct_with_fields_accepted() {
         let source = r#"
             struct P { x: i32; }
             const P0: P = P { x: 1 };
-            pub fn main() -> i32 { return 0; }
+            pub fn main() -> i32 { return P0.x; }
         "#;
         assert_eq!(
             count_a045(source),
             0,
             "a struct with a field is never zero-sized"
         );
-        let errors = analyze(source).expect_err("A032 still rejects the top-level `const`");
-        assert!(
-            errors
-                .errors()
-                .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::TopLevelConstNotSupported { .. })),
-            "the top-level `const` must still be rejected, by A032 alone"
-        );
+        if let Err(errors) = analyze(source) {
+            panic!("the top-level `const` must pass analysis, got: {errors}");
+        }
     }
 
     /// The definition pass recurses through `Def::Spec`, so a `const` declared

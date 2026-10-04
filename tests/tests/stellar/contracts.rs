@@ -137,8 +137,8 @@ struct Case {
 /// computed from an unsigned argument, a negative integer round trip, the most
 /// negative integer there is, two methods in one contract, the widest method
 /// the host will dispatch to, a body that needs linear memory, a private
-/// function sitting ahead of the exported ones, and `main` beside another
-/// method.
+/// function sitting ahead of the exported ones, `main` beside another
+/// method, and a method reading a module constant from the data segment.
 const CASES: &[Case] = &[
     Case {
         fixture: "params_only",
@@ -231,6 +231,18 @@ const CASES: &[Case] = &[
         method: "widest",
         args: WIDEST_ARGS,
         expect: Answer::U32(1217),
+    },
+    Case {
+        fixture: "const_table",
+        method: "rate",
+        args: &[Arg::U32(2)],
+        expect: Answer::U32(25),
+    },
+    Case {
+        fixture: "const_table",
+        method: "rate",
+        args: &[Arg::U32(7)],
+        expect: Answer::U32(0),
     },
     Case {
         fixture: "array_local",
@@ -510,8 +522,16 @@ fn every_exported_method_is_invoked_by_a_case() {
 /// red on its own. These are the two numbers it states.
 #[test]
 fn the_measured_record_states_the_counts_this_table_holds() {
-    assert_eq!(by_fixture().len(), 13, "MEASURED_ABI.md says thirteen fixtures");
-    assert_eq!(CASES.len(), 23, "MEASURED_ABI.md says twenty-three invocations");
+    assert_eq!(
+        by_fixture().len(),
+        14,
+        "MEASURED_ABI.md says fourteen fixtures"
+    );
+    assert_eq!(
+        CASES.len(),
+        25,
+        "MEASURED_ABI.md says twenty-five invocations"
+    );
 }
 
 /// The one fixture whose body needs a frame, and a scalar-only fixture beside
@@ -550,8 +570,20 @@ fn the_memory_fixture_deploys_with_linear_memory_and_its_two_exports() {
     );
     assert_eq!(
         with_memory.data_segments, 0,
-        "the emitter emits no data segment; MEASURED_ABI.md records that, and this is what \
-         would notice it starting to"
+        "a local array is initialized by stores, not by a segment; only a module constant a \
+         body reads puts bytes in the data section"
+    );
+
+    let with_data = Shape::of(&compile_for_stellar(&fixture_source("const_table")));
+    assert_eq!(
+        with_data.data_segments, 1,
+        "a module constant a method reads is one active data segment, which the host writes \
+         at instantiation; MEASURED_ABI.md records the shape"
+    );
+    assert_eq!(
+        with_data.memories.len(),
+        1,
+        "the segment needs a memory to live in"
     );
 
     let scalar_only = Shape::of(&compile_for_stellar(&fixture_source("return_only")));

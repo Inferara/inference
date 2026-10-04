@@ -299,7 +299,7 @@ mirrors `Spec::new` with the same readers and the same depth limit rather than
 taking `soroban-spec-tools` as a second dependency.
 
 **What is asserted, for every compiled fixture** (`spec.rs`; the fixtures are
-the thirteen of [Compiled contracts](#compiled-contracts), read off the same
+the fourteen of [Compiled contracts](#compiled-contracts), read off the same
 case table):
 
 | Test | Asserts |
@@ -328,7 +328,7 @@ admitted and one of 33 refused — but nothing there ties those numbers to the
 XDR field widths. No fixture comes near either width: the longest names there
 are `passthrough` and `index`. Three tests hold the copies against the
 original, with an inline contract rather than a fixture, so the counts of
-[Compiled contracts](#compiled-contracts), thirteen fixtures and twenty-three
+[Compiled contracts](#compiled-contracts), fourteen fixtures and twenty-five
 invocations, stay as they are:
 
 | Test | Asserts |
@@ -553,15 +553,17 @@ measured on. `contracts::the_memory_fixture_deploys_with_linear_memory_and_its_t
 asserts all of it, with `return_only` beside it as the control that declares no
 memory.
 
-**No data segment is emitted today.** The array local above is initialized by
-stores rather than by a segment, and its compiled contract carries no data
-section — asserted beside the memory it does carry, so the day that changes is
-visible. Nor could one reach a contract by another path right now: the linker
-every Stellar build runs refuses a main module that declares a data segment,
-because it rebuilds the module section by section and would drop it. The
-data-segment rows below therefore measure a host rule ahead of the emitter
-reaching it, deliberately: it is the rule an emitter that started using data
-segments would have to satisfy.
+**A data segment is emitted for module constants, and only for them.** The
+array local above is initialized by stores rather than by a segment, and its
+compiled contract carries no data section — asserted beside the memory it does
+carry. A module-scope `const` array or struct a method reads is different: its
+bytes are one active data segment over memory 0, at the top of the shadow
+stack, inside the memory's initial pages (`const_table.inf`, whose contract is
+asserted to carry exactly one segment and is deployed and invoked through the
+host). The linker every Stellar build runs carries such a segment through
+unchanged. The data-segment rows below measure the host rule that segment has
+to satisfy: it must lie within the initial memory, which analysis rule A058
+guarantees before code generation places it.
 
 The module builder here takes an initial page count, an export name for the
 memory, and one active data segment.
@@ -614,13 +616,14 @@ answer, an answer with no parameters, both together, neither, the widest method
 the host will dispatch to (32 `u32` parameters), a boolean round trip, a boolean
 computed from an unsigned argument, a negative integer round trip, `i32::MIN`
 and `i32::MAX` passed through, `u32::MAX` passed through, and two methods in one
-contract. Three more are about the module rather than about the scalar set: a
+contract. Four more are about the module rather than about the scalar set: a
 body whose array local forces linear memory and the two extra exports that come
-with it, a private function sitting ahead of the exported ones so the exported
-indices are neither zero-based nor contiguous, and a `main` beside another
-method, `main` being the one export the emitter reaches through a branch of its
-own. Thirteen fixtures and twenty-three invocations in all; every invocation
-returns the value the source says it must.
+with it, a method reading a module constant table out of the one active data
+segment the host writes at instantiation, a private function sitting ahead of
+the exported ones so the exported indices are neither zero-based nor
+contiguous, and a `main` beside another method, `main` being the one export the
+emitter reaches through a branch of its own. Fourteen fixtures and twenty-five
+invocations in all; every invocation returns the value the source says it must.
 
 Both counts are pinned by
 `contracts::the_measured_record_states_the_counts_this_table_holds`, and the
@@ -632,7 +635,7 @@ the first cannot see a method added to a fixture that already has a case.
 Measured: appending one exported method to `u32_methods.inf` and no case for it
 leaves every other test in this binary green and turns exactly that one red.
 
-**Every fixture's spec decodes and matches.** The same thirteen contracts are
+**Every fixture's spec decodes and matches.** The same fourteen contracts are
 read back the way the tooling reads them, in `spec.rs`: each one's
 `contractspecv0` section decodes with `soroban-spec` into exactly the methods
 the export descriptor lists — the names in order, every parameter's name and

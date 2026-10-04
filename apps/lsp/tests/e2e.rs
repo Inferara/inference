@@ -496,6 +496,50 @@ fn a036_follows_the_stack_the_project_declares() {
     client.shutdown_exit_ok();
 }
 
+// --- 6d. constant data shares the memory with the stack (A058) --------------
+
+/// A program reading a 4000-byte constant table.
+const TABLE_SOURCE: &str = "\
+const TABLE: [i32; 1000] = [7; 1000];
+pub fn f() -> i32 { return TABLE[999]; }
+";
+
+/// The editor reports what a build of the project would: with no `[memory]`
+/// table the default stack makes room for the table, and with a full-page
+/// `stack-size` A058 names the table, the page count that holds it, and the
+/// declaration it is anchored at.
+#[test]
+fn a058_follows_the_memory_the_project_declares() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let (_default_dir, default_uri) =
+        project_fixture("a058-default-stack", Some(PACKAGE_MANIFEST), TABLE_SOURCE);
+    let published = client.did_open(&default_uri, TABLE_SOURCE, 1);
+    assert!(
+        published.by_code("A058").is_none() && published.by_code("A036").is_none(),
+        "the default stack makes room for the table, got {:?}",
+        published.diagnostics
+    );
+
+    let full = format!("{PACKAGE_MANIFEST}\n[memory]\nstack-size = 65536\n");
+    let (_full_dir, full_uri) = project_fixture("a058-full-stack", Some(&full), TABLE_SOURCE);
+    let published = client.did_open(&full_uri, TABLE_SOURCE, 1);
+    let finding = published.by_code("A058").expect("an A058 finding");
+    let message = finding["message"].as_str().unwrap_or_default();
+    assert!(message.contains("4000 bytes for `TABLE`"), "got {message}");
+    assert!(
+        message.contains("`pages = 2` under `[memory]`"),
+        "got {message}"
+    );
+    assert_eq!(
+        finding["range"]["start"]["line"], 0,
+        "anchored at the declaration of TABLE, got {finding}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
 // --- 7. hover ---------------------------------------------------------------
 
 #[test]

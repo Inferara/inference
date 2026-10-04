@@ -1,0 +1,58 @@
+// Module-scope constants in executable code and in specification bodies. A
+// constant is one value on every run: in a specification a scalar constant is
+// its value's term and an array or struct constant a value tree of them, so a
+// constant-index read is the element's own term. In the module an array or
+// struct constant is bytes of the data segment above the stack, which the
+// translation carries as the memory the module starts with.
+struct Limits {
+  low: i32;
+  high: i32;
+}
+
+const COUNT: i32 = 4;
+const WEIGHTS: [i32; 4] = [1, 2, 4, 8];
+const BOUNDS: Limits = Limits { low: -100, high: 100 };
+const TOTAL: i32 = WEIGHTS[0] + WEIGHTS[1] + WEIGHTS[2] + WEIGHTS[3];
+
+// The weights, summed by the program from the data segment.
+pub fn weight_sum() -> i32 {
+  let mut s: i32 = 0;
+  let mut i: i32 = 0;
+  loop i < COUNT {
+    s = s + WEIGHTS[i];
+    i = i + 1;
+  }
+  return s;
+}
+
+// A value clamped into the constant bounds.
+pub fn clamp(v: i32) -> i32 {
+  if v < BOUNDS.low {
+    return BOUNDS.low;
+  }
+  if v > BOUNDS.high {
+    return BOUNDS.high;
+  }
+  return v;
+}
+
+spec ModuleConsts {
+  // A constant read in a specification is its computed value.
+  fn total_is_the_sum_of_the_weights() forall {
+    assert(TOTAL == 15);
+    assert(WEIGHTS[3] == 8 && COUNT == 4);
+  }
+
+  // The executable function reads the same bytes the specification reads the
+  // values of.
+  fn the_program_sums_the_same_weights() forall {
+    assert(weight_sum() == TOTAL);
+  }
+
+  // Every result of `clamp` lies within the constant bounds.
+  fn clamp_stays_within_the_bounds() forall {
+    let v: i32 = @;
+    let r: i32 = clamp(v);
+    assert(r >= BOUNDS.low && r <= BOUNDS.high);
+  }
+}

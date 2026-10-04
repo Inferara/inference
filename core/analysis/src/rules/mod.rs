@@ -13,6 +13,7 @@ pub mod compound_literal_member_assign;
 pub mod compound_literal_position;
 pub mod compound_return_call_assignment;
 pub mod compound_return_call_position;
+pub mod const_in_spec;
 pub mod constant_arithmetic_overflow;
 pub mod dead_code;
 pub mod duplicate_local_name;
@@ -41,9 +42,9 @@ pub mod shift_count_out_of_range;
 pub mod spaced_negative_literal;
 pub mod stack_depth;
 pub mod standalone_uzumaki;
+pub mod static_data_footprint;
 pub mod string_not_supported;
 pub mod struct_uzumaki_as_argument;
-pub mod top_level_const;
 pub mod uninitialized_variable;
 pub mod unit_as_value;
 pub mod unnamed_parameter;
@@ -71,6 +72,7 @@ use compound_literal_member_assign::CompoundLiteralMemberAssign;
 use compound_literal_position::CompoundLiteralPosition;
 use compound_return_call_assignment::CompoundReturnCallAssignment;
 use compound_return_call_position::CompoundReturnCallPosition;
+use const_in_spec::ConstInSpecNotSupported;
 use constant_arithmetic_overflow::ConstantArithmeticOverflow;
 use dead_code::DeadCode;
 use duplicate_local_name::DuplicateLocalName;
@@ -96,9 +98,9 @@ use shift_count_out_of_range::ShiftCountOutOfRange;
 use spaced_negative_literal::SpacedNegativeLiteral;
 use stack_depth::StackDepthExceeded;
 use standalone_uzumaki::StandaloneUzumaki;
+use static_data_footprint::StaticDataExceedsMemory;
 use string_not_supported::StringNotSupported;
 use struct_uzumaki_as_argument::StructUzumakiAsArgument;
-use top_level_const::TopLevelConstNotSupported;
 use uninitialized_variable::UninitializedVariable;
 use unit_as_value::UnitAsValue;
 use unnamed_parameter::UnnamedParameter;
@@ -148,7 +150,7 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &UzumakiOnStructInArray,
         &CompoundLiteralMemberAssign,
         &UnsupportedCompoundReturnExpr,
-        &TopLevelConstNotSupported,
+        &ConstInSpecNotSupported,
         &CombinedUnaryOperators,
         &VisibilityInsideSpec,
         &RecursionDetected,
@@ -174,5 +176,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &ParamWordsExceeded,
         &ArrayIndexNotProven,
         &AssertAlwaysFails,
+        &StaticDataExceedsMemory,
     ]
 }

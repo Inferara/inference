@@ -53,7 +53,8 @@ use rustc_hash::FxHashSet;
 
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic, RedundantArithMode};
 use crate::walker::{
-    arith_mode_under, contains_governed_operator, for_each_stmt_expr, walk_expr_with_arith_mode,
+    arith_mode_under, contains_governed_operator, for_each_module_const_initializer,
+    for_each_stmt_expr, walk_expr_with_arith_mode,
 };
 
 crate::rule! {
@@ -71,39 +72,46 @@ crate::rule! {
         // suppressed by the stack it sits in rather than only by a layer that
         // produced a finding.
         let mut accounted: FxHashSet<ExprId> = FxHashSet::default();
+        // A module-scope `const` initializer is computed under the default
+        // mode, as a body's top-level expression is, so it is walked from the
+        // same "no enclosing annotation" start.
+        let mut check_expr = |expr_id, module_path: &[String]| {
+            walk_expr_with_arith_mode(arena, expr_id, None, &mut |node, enclosing| {
+                let Expr::ArithMode { mode, .. } = &arena[node].kind else {
+                    return;
+                };
+                if *mode != arith_mode_under(arena, enclosing) {
+                    return;
+                }
+                if !contains_governed_operator(ctx, node) {
+                    return;
+                }
+                let suppressed = enclosing.is_some_and(|outer| accounted.contains(&outer));
+                accounted.insert(node);
+                if suppressed {
+                    return;
+                }
+                let enclosure = if enclosing.is_some() {
+                    RedundantArithMode::InsideTheSameAnnotation
+                } else {
+                    RedundantArithMode::AgainstTheDefault
+                };
+                findings.push(LabeledDiagnostic::new(
+                    module_path.to_vec(),
+                    AnalysisDiagnostic::ArithModeChangesNothing {
+                        mode: *mode,
+                        enclosure,
+                        location: arena[node].location,
+                    },
+                ));
+            });
+        };
         crate::walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
             for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
-                walk_expr_with_arith_mode(arena, expr_id, None, &mut |node, enclosing| {
-                    let Expr::ArithMode { mode, .. } = &arena[node].kind else {
-                        return;
-                    };
-                    if *mode != arith_mode_under(arena, enclosing) {
-                        return;
-                    }
-                    if !contains_governed_operator(ctx, node) {
-                        return;
-                    }
-                    let suppressed = enclosing.is_some_and(|outer| accounted.contains(&outer));
-                    accounted.insert(node);
-                    if suppressed {
-                        return;
-                    }
-                    let enclosure = if enclosing.is_some() {
-                        RedundantArithMode::InsideTheSameAnnotation
-                    } else {
-                        RedundantArithMode::AgainstTheDefault
-                    };
-                    findings.push(LabeledDiagnostic::new(
-                        walk_ctx.module_path.clone(),
-                        AnalysisDiagnostic::ArithModeChangesNothing {
-                            mode: *mode,
-                            enclosure,
-                            location: arena[node].location,
-                        },
-                    ));
-                });
+                check_expr(expr_id, &walk_ctx.module_path);
             });
         });
+        for_each_module_const_initializer(ctx, &mut check_expr);
         findings
     }
 }

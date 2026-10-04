@@ -247,6 +247,12 @@ mod gate {
                   draw a scalar and repeat the binding, since `@` itself cannot be repeated",
         },
         Fixture {
+            stem: "spec_module_consts",
+            expected: StockValid(ScalarChoice),
+            why: "module-scope constants read by executable code from the data segment and \
+                  by `forall` bodies as their computed values, beside one drawn scalar",
+        },
+        Fixture {
             stem: "spec_assume_body_modifier",
             expected: Rejected(Codegen("P001")),
             why: "an `assume` function body states no property, so there is no obligation to \

@@ -51,6 +51,28 @@ pub(crate) fn walk_function_bodies(
     }
 }
 
+/// Calls `visitor` with the initializer of every module-scope `const` and the
+/// module path of the file it is declared in.
+///
+/// No function-body walk reaches these, and a rule that checks an expression
+/// form wherever it is written has to visit them too: an initializer is
+/// computed under the same arithmetic a body is, so an annotation or a literal
+/// in one means what it would in a body. A `const` inside a `spec` block is not
+/// visited — A032 rejects it before its initializer could mean anything.
+pub(crate) fn for_each_module_const_initializer(
+    typed_context: &TypedContext,
+    visitor: &mut dyn FnMut(ExprId, &[String]),
+) {
+    let arena = typed_context.arena();
+    for source_file in typed_context.source_files() {
+        for &def_id in &source_file.defs {
+            if let Def::Constant { value, .. } = &arena[def_id].kind {
+                visitor(*value, &source_file.module_path);
+            }
+        }
+    }
+}
+
 /// Extracts top-level expressions from a statement and calls the callback
 /// for each one. Covers variable definitions, expression statements,
 /// assignments, returns, asserts, if conditions, loop conditions, and

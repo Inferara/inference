@@ -1497,8 +1497,10 @@ fn run() {
                 process::exit(1);
             }
             Ok(tctx) => {
-                // A036's budget is the stack this build will actually emit, not
-                // the default one, and A055's limit is the one the requested
+                // A036 and A058 measure the program against the memory this
+                // build will actually emit — the layout code generation is handed
+                // below, which both place the program's static data in the same
+                // way — not the default one, and A055's limit is the one the requested
                 // target's runtime sets. Analysis runs ahead of code generation
                 // on every `infc` path that reaches it, which is what keeps a
                 // program whose frame exceeds the stack a diagnostic here rather
@@ -1508,7 +1510,7 @@ fn run() {
                 // decides whether a passing analysis also proves the accesses
                 // code generation may emit without a guard.
                 let options = AnalysisOptions {
-                    stack_budget_bytes: layout.stack_size(),
+                    layout,
                     target: target_name,
                     bounds_checks,
                 };

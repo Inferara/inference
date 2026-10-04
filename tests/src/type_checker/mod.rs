@@ -13,6 +13,7 @@ mod extern_index;
 mod extern_name_collision;
 mod features;
 mod literal_typing;
+mod module_consts;
 mod multi_file;
 mod multi_file_matrix;
 mod named_call_arguments;

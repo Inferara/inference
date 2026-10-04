@@ -1,0 +1,6 @@
+// Constant data that fills the default one-page memory, leaving no frame for
+// the shadow stack. A058 refuses it at the constant, naming the bytes and the
+// page count that holds both.
+const FULL: [u8; 65536] = [1; 65536];
+
+pub fn f() -> u8 { return FULL[0]; }

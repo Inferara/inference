@@ -103,11 +103,11 @@ struct Compiled {
     exports: Vec<ExportSignature>,
 }
 
-/// Every fixture of the case table in `contracts`, compiled: the thirteen
+/// Every fixture of the case table in `contracts`, compiled: the fourteen
 /// `MEASURED_ABI.md` counts, so every sweep over them proves it swept.
 fn compiled_fixtures() -> Vec<Compiled> {
     let compiled: Vec<Compiled> = fixture_names().into_iter().map(compiled).collect();
-    assert_eq!(compiled.len(), 13, "MEASURED_ABI.md says thirteen fixtures");
+    assert_eq!(compiled.len(), 14, "MEASURED_ABI.md says fourteen fixtures");
     compiled
 }
 
