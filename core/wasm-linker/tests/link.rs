@@ -5917,11 +5917,16 @@ fn round2_probes() -> Vec<Probe> {
         expect: Expect::Rejected,
     });
 
-    // M-2: a main module carrying an active data segment. `emit` rebuilds the
-    // main without a data section, so a surviving merge would silently drop the
-    // initializer; the guard must reject it.
+    // M-2: a main module carrying an active data segment. The audit finding was
+    // that `emit` rebuilt the main without a data section and silently dropped
+    // the initializer; the fix that first closed it refused the segment, and
+    // the merge now carries it instead — this is the shape Inference codegen
+    // emits for module-scope constants. So the probe is a positive control: it
+    // must merge, and the sweep's `Ok ⇒ valid` arm holds the re-emitted data
+    // section to validating. That the segment survives unchanged is pinned by
+    // `main_module_active_data_segment_is_preserved`.
     probes.push(Probe {
-        label: "M-2 main-side data segment",
+        label: "M-2 main-side active data segment (must merge)",
         main: wasm(
             r#"
             (module
@@ -5929,6 +5934,27 @@ fn round2_probes() -> Vec<Probe> {
               (import "mathlib" "sum" (func (;0;) (type 0)))
               (memory (;0;) 1 1)
               (data (;0;) (i32.const 0) "\2a\00\00\00")
+              (func (;1;) (type 0) (param i32 i32) (result i32)
+                local.get 0 local.get 1 call 0)
+              (export "compute" (func 1)))
+            "#,
+        ),
+        externals: vec![mathlib_pure()],
+        expect: Expect::Merges,
+    });
+
+    // M-2b: the data-segment shape the merge still cannot carry. A passive
+    // segment is refused rather than re-emitted, so a merge here would mean the
+    // main-side guard no longer runs at all.
+    probes.push(Probe {
+        label: "M-2b main-side passive data segment",
+        main: wasm(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32) (result i32)))
+              (import "mathlib" "sum" (func (;0;) (type 0)))
+              (memory (;0;) 1 1)
+              (data (;0;) "\2a\00\00\00")
               (func (;1;) (type 0) (param i32 i32) (result i32)
                 local.get 0 local.get 1 call 0)
               (export "compute" (func 1)))
@@ -6657,7 +6683,10 @@ fn proof_mode_main_nondet_and_uzumaki_survive_the_merge() {
 // *assumed* pre-validated externals (the CLI driver validates, the library API
 // did not). These tests pin the two universal backstops: a structural
 // pre-validation gate over every external (M-1) and a main-side data/element
-// guard (M-2).
+// guard (M-2). The data half of M-2 no longer refuses every segment: the merge
+// now carries an active memory-0 `i32.const` segment, the shape Inference
+// codegen emits for module constants, and refuses only the shapes it cannot
+// carry unchanged.
 
 /// Appends `value` as a little-endian base-128 (unsigned LEB128) varint, the
 /// encoding WASM uses for counts and indices.
@@ -6767,32 +6796,263 @@ fn over_declared_locals_external_via_link_is_rejected_without_huge_alloc() {
     );
 }
 
+/// One active data segment as the output carries it: `(memory, offset, bytes)`.
+type ActiveSegment = (u32, i32, Vec<u8>);
+
+/// Every data segment of `bytes`, in data-index order, panicking on any segment
+/// that is not active at a lone `i32.const` offset — the only shape the merge
+/// emits, so anything else in an output is itself the failure.
+fn active_data_segments(bytes: &[u8]) -> Vec<ActiveSegment> {
+    let mut segments = Vec::new();
+    for payload in Parser::new(0).parse_all(bytes) {
+        if let Payload::DataSection(reader) = payload.unwrap() {
+            for data in reader {
+                let data = data.unwrap();
+                let inf_wasmparser::DataKind::Active {
+                    memory_index,
+                    offset_expr,
+                } = data.kind
+                else {
+                    panic!("the merged output carries a passive data segment");
+                };
+                let mut ops = offset_expr.get_operators_reader();
+                let Operator::I32Const { value } = ops.read().unwrap() else {
+                    panic!("the merged output carries a non-`i32.const` data offset");
+                };
+                assert!(
+                    ops.is_end_then_eof(),
+                    "the data offset is not a lone `i32.const`"
+                );
+                segments.push((memory_index, value, data.data.to_vec()));
+            }
+        }
+    }
+    segments
+}
+
+/// Whether `bytes` carries a `DataCount` section (id 12), which the merge must
+/// never emit: SpaceWasm cannot decode it.
+fn has_data_count_section(bytes: &[u8]) -> bool {
+    Parser::new(0)
+        .parse_all(bytes)
+        .any(|payload| matches!(payload.unwrap(), Payload::DataCountSection { .. }))
+}
+
+/// Whether `bytes` carries a `DataSection` at all, however many segments it
+/// holds.
+fn has_data_section(bytes: &[u8]) -> bool {
+    Parser::new(0)
+        .parse_all(bytes)
+        .any(|payload| matches!(payload.unwrap(), Payload::DataSection(_)))
+}
+
 #[test]
-fn main_module_with_a_data_segment_is_rejected_cleanly() {
-    // M-2: a main module carrying an active data segment must be rejected, not
-    // silently merged. `emit` rebuilds the main module without a `DataSection`,
-    // so a surviving merge would drop the initializer — a valid-but-wrong
-    // `.wasm`/`.v`. The guard rejects up front with a clean diagnostic.
+fn main_module_active_data_segment_is_preserved() {
+    // M-2, inverted. A main module's active segment is what holds Inference's
+    // module-scope compound constants, so the merge must carry it — at its own
+    // offset, with its own bytes — rather than drop it into a valid module that
+    // reads zeroes where the constants should be. The main is shaped like
+    // codegen output for such a program: one page, a single active segment at
+    // an `i32.const` offset, and a body that reads the word it initializes.
     let main = wasm(
         r#"
         (module
           (type (;0;) (func (param i32 i32) (result i32)))
           (import "mathlib" "sum" (func (;0;) (type 0)))
           (memory (;0;) 1 1)
-          (data (;0;) (i32.const 0) "\2a\00\00\00")
           (func (;1;) (type 0) (param i32 i32) (result i32)
             local.get 0
             local.get 1
-            call 0)
+            call 0
+            i32.const 1024
+            i32.load
+            i32.add)
+          (data (;0;) (i32.const 1024) "\01\02\03\04")
           (export "compute" (func 1)))
         "#,
     );
     let lib = mathlib_pure();
 
-    let err = link(&main, &[&lib]).expect_err("a main-side data segment must be rejected");
+    let linked = link(&main, &[&lib]).expect("an active main-side data segment must link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(
+        active_data_segments(&linked),
+        vec![(0, 1024, vec![0x01, 0x02, 0x03, 0x04])],
+        "the main module's segment must survive the merge unchanged"
+    );
     assert!(
-        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("data segment")),
-        "expected an UnsupportedConstruct naming the main-side data segment, got {err:?}"
+        !has_data_count_section(&linked),
+        "the merge must never emit a DataCount section"
+    );
+
+    // And the bytes it carries are the bytes the program reads: `compute` adds
+    // the merged `sum` to the little-endian word at 1024.
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &linked).expect("linked module compiles");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("linked module instantiates");
+    let compute = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "compute")
+        .expect("`compute` is exported");
+    assert_eq!(
+        compute.call(&mut store, (1, 2)).expect("`compute` runs"),
+        3 + 0x0403_0201
+    );
+}
+
+#[test]
+fn main_module_data_segments_keep_their_order_in_a_widened_memory() {
+    // Two segments, and a Tier-B external whose memory widens the reconciled
+    // minimum past main's. The segments keep their data-index order and their
+    // offsets, and still land in memory 0: the reconciled memory only ever
+    // grows from main's, so a segment that fit before the merge fits after it.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "mathlib" "poke" (func (;0;) (type 0)))
+          (memory (;0;) 1 2)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (data (;0;) (i32.const 2048) "second-in-memory")
+          (data (;1;) (i32.const 16) "first-in-memory")
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 2)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "poke" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a Tier-B external must link beside main's data");
+    assert_valid(&linked);
+    assert_eq!(memory_limits(&linked), Some((2, Some(2))));
+    assert_eq!(
+        active_data_segments(&linked),
+        vec![
+            (0, 2048, b"second-in-memory".to_vec()),
+            (0, 16, b"first-in-memory".to_vec()),
+        ],
+        "segments must keep their data-index order and offsets"
+    );
+    assert!(!has_data_count_section(&linked));
+}
+
+#[test]
+fn a_data_free_main_module_links_without_a_data_section() {
+    // Carrying segments must not invent a section for a module that has none,
+    // which is what keeps a data-free output exactly what it was before
+    // segments were carried at all.
+    let linked = link(&main_with_sum_and_sub(), &[&mathlib_pure()]).expect("pure link");
+    assert!(
+        !has_data_section(&linked),
+        "a data-free merge must emit no DataSection"
+    );
+    assert!(!has_data_count_section(&linked));
+}
+
+/// Links a main declaring `memories` and `data` against [`mathlib_pure`], and
+/// returns the `UnsupportedConstruct` message the link must be refused with.
+fn main_data_refusal(memories: &str, data: &str) -> String {
+    let main = wasm(&format!(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          {memories}
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          {data}
+          (export "compute" (func 1)))
+        "#
+    ));
+    match link(&main, &[&mathlib_pure()]) {
+        Err(LinkError::UnsupportedConstruct(msg)) => msg,
+        other => panic!("expected an UnsupportedConstruct refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn main_module_with_a_passive_data_segment_is_rejected_cleanly() {
+    // A passive segment initializes nothing until a `memory.init` names it, and
+    // the merge carries no main body that does; it is refused rather than
+    // carried as a segment nothing can reach.
+    let msg = main_data_refusal("(memory (;0;) 1 1)", r#"(data (;0;) "\2a\00\00\00")"#);
+    assert!(
+        msg.contains("data segment 0") && msg.contains("passive"),
+        "the refusal must name the segment and say it is passive, got `{msg}`"
+    );
+}
+
+#[test]
+fn main_module_with_a_data_segment_over_another_memory_is_rejected_cleanly() {
+    // Multi-memory is on under the entry validator's default features, so this
+    // main is valid WASM. The output has one shared memory, so a segment over
+    // memory 1 has nowhere to land.
+    let msg = main_data_refusal(
+        "(memory (;0;) 1 1) (memory (;1;) 1 1)",
+        r#"(data (;0;) (memory 1) (i32.const 0) "\2a")"#,
+    );
+    assert!(
+        msg.contains("data segment 0") && msg.contains("memory 1"),
+        "the refusal must name the segment and its memory, got `{msg}`"
+    );
+}
+
+#[test]
+fn main_module_with_a_computed_data_offset_is_rejected_cleanly() {
+    // An extended-constant offset opens on an `i32.const` and is still not a
+    // lone one: reading only its first operand would place the segment at 8
+    // rather than 16. The merge refuses to evaluate it.
+    let msg = main_data_refusal(
+        "(memory (;0;) 1 1)",
+        r#"(data (;0;) (offset i32.const 8 i32.const 8 i32.add) "\2a")"#,
+    );
+    assert!(
+        msg.contains("data segment 0") && msg.contains("offset"),
+        "the refusal must name the segment and its offset, got `{msg}`"
+    );
+}
+
+#[test]
+fn main_body_naming_a_data_segment_is_rejected_cleanly() {
+    // The segment itself is carriable; the body is not. `data.drop` obliges the
+    // module to carry a DataCount section, which the merge never emits, so the
+    // body is refused by name rather than surfacing as a post-merge validation
+    // failure that would blame the linker's own output.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            data.drop 0
+            local.get 0
+            local.get 1
+            call 0)
+          (data (;0;) (i32.const 0) "\2a\00\00\00")
+          (export "compute" (func 1)))
+        "#,
+    );
+    let err = link(&main, &[&mathlib_pure()]).expect_err("a main body naming a segment");
+    assert!(
+        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("data.drop")),
+        "expected an UnsupportedConstruct naming `data.drop`, got {err:?}"
     );
 }
 
