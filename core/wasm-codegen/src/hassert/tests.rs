@@ -4835,6 +4835,121 @@ fn a_folded_constant_index_in_a_reachability_body_is_untouched() {
     assert_eq!(sole_obligation(&ok(src), "S"), teq(i32c(2), local(1)));
 }
 
+// ----- 15e. module constants read in a specification -----------------------
+
+/// A constant-index read of a module constant takes the one element it names
+/// out of the computed value. Every value tree a compound constant becomes is
+/// counted against the leaf budget before it is built, and this body has spent
+/// the whole budget already, so each read translating at all shows that the
+/// million-leaf constant behind it was not expanded.
+#[test]
+fn a_constant_index_into_a_large_constant_expands_nothing_else() {
+    let prelude = "\
+struct Holder { tag: i32; xs: [i32; 100000]; }
+const TABLE: [i32; 1000000] = [7; 1000000];
+const GRID: [[i32; 1000]; 1000] = [[3; 1000]; 1000];
+const HOLDER: Holder = Holder { tag: 1, xs: [5; 100000] };
+";
+    let guards = (0..63).rev().fold(guard(63), |rest, n| and(guard(n), rest));
+    for (read, value) in [
+        ("TABLE[999999]", 7),
+        ("GRID[999][998]", 3),
+        ("HOLDER.xs[99999]", 5),
+    ] {
+        let body = format!("forall {{ let a: [i32; 64] = @; assert(a[63] == {read}); }}");
+        assert_eq!(
+            obligation_of(prelude, &body),
+            imp(guards.clone(), nz(eqs(local(63), i32c(value)))),
+            "{read}"
+        );
+    }
+}
+
+/// A constant index past the end of a module constant is the same `P014` a
+/// bound array's is, found without building the array.
+#[test]
+fn p014_rejects_a_constant_index_past_a_module_constant() {
+    let e = err("const TABLE: [i32; 1000000] = [7; 1000000];\n\
+                 spec S { fn f() forall { assert(TABLE[1000000] == 7); } }");
+    assert!(e.contains("error[P014]"), "{e}");
+    assert!(
+        e.contains(
+            "array index 1000000 is out of bounds for array of length 1000000; valid indices \
+             are 0..1000000"
+        ),
+        "{e}"
+    );
+}
+
+/// A non-constant index into a module constant defines the element by one
+/// case per element, so the constant costs its leaves as a literal of the same
+/// value would: a small one splits as before, and one past the budget is
+/// `P013`, refused before a single case is built. Unrefused, a split over a
+/// million-element table nests a million cases and overflows the stack.
+#[test]
+fn a_non_constant_index_into_a_constant_counts_its_leaves() {
+    ok("const W: [i32; 3] = [1, 2, 4];\nspec S { fn f(i: i32) forall { assert(W[i] > 0); } }");
+
+    let src = "const TABLE: [i32; 65] = [7; 65];\n\
+               spec S { fn f(i: i32) forall { assert(TABLE[i] == 7); } }";
+    let ctx = type_check(src);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].contains("error[P013]"), "{diagnostics:?}");
+    assert!(
+        diagnostics[0].contains(
+            "this `[i32; 65]` constant value has 65 scalar leaves, and this specification \
+             already quantifies 0 of the 64 one function may hold: each leaf becomes a term \
+             of its own, a comparison against the value or a non-constant index into it nests \
+             one conjunct per leaf, and the assertion encoding caps how deeply one obligation \
+             may nest; read the elements you need at constant indices, or state the property \
+             over a smaller constant"
+        ),
+        "{diagnostics:?}"
+    );
+}
+
+/// A module constant compared whole is the leafwise conjunction against its
+/// computed values, and its leaves count toward the budget with the other
+/// side's.
+#[test]
+fn a_constant_compared_whole_counts_its_leaves() {
+    assert_eq!(
+        obligation_of(
+            "const W: [i32; 2] = [1, 2];",
+            "forall { let a: [i32; 2] = @; assert(a == W); }"
+        ),
+        imp(
+            and(guard(0), guard(1)),
+            and(teq(local(0), i32c(1)), teq(local(1), i32c(2)))
+        )
+    );
+
+    let src = "const T: [i32; 40] = [1; 40];\n\
+               spec S { fn f() forall { let a: [i32; 40] = @; assert(a == T); } }";
+    let ctx = type_check(src);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].contains("error[P013]"), "{diagnostics:?}");
+    assert!(
+        diagnostics[0].contains(
+            "this `[i32; 40]` constant value has 40 scalar leaves, and this specification \
+             already quantifies 40 of the 64 one function may hold"
+        ),
+        "{diagnostics:?}"
+    );
+}
+
+/// A module constant written as an element of a literal is part of that
+/// literal's introduction, whose count already includes its leaves: 32
+/// quantified leaves against a 32-leaf literal fill the budget exactly, and
+/// counting each constant again would push the body past it.
+#[test]
+fn a_constant_inside_a_literal_is_counted_once() {
+    ok("const ROW: [i32; 16] = [1; 16];\n\
+        spec S { fn f() forall { let a: [[i32; 16]; 2] = @; assert(a == [ROW, ROW]); } }");
+}
+
 // ----- 16. quantifier alternation (the nested universal binder) ------------
 
 /// A `@` bound inside a `forall` block adds a `+` over the enclosing
