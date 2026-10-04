@@ -107,9 +107,16 @@ mod bounds_elision_tests {
         Some(output.wasm().to_vec())
     }
 
+    /// An engine that meters fuel and initializes linear memory the same way on
+    /// every host. With copy-on-write images, which Wasmtime builds only on
+    /// Linux, an active data segment is mapped in; without them, as on macOS
+    /// and Windows, it is written by metered code at instantiation. Turning
+    /// the images off runs that code here too, so a Linux run sees what the
+    /// other hosts see.
     fn engine() -> Engine {
         let mut config = Config::new();
         config.consume_fuel(true);
+        config.memory_init_cow(false);
         Engine::new(&config).expect("an engine with fuel metering")
     }
 
@@ -134,6 +141,9 @@ mod bounds_elision_tests {
     impl Running {
         fn new(engine: &Engine, linker: &Linker<()>, module: &Module) -> Self {
             let mut store = Store::new(engine, ());
+            // Writing an active data segment at instantiation is metered, and
+            // a new store holds no fuel.
+            store.set_fuel(FUEL).expect("fuel metering is on");
             let instance = linker
                 .instantiate(&mut store, module)
                 .unwrap_or_else(|e| panic!("the module instantiates: {e}"));
