@@ -4383,56 +4383,27 @@ mod gallina_escaping {
         out
     }
 
-    fn leb128_u32(mut value: u32) -> Vec<u8> {
-        let mut out = Vec::new();
-        loop {
-            let byte = (value & 0x7f) as u8;
-            value >>= 7;
-            if value == 0 {
-                out.push(byte);
-                break;
-            }
-            out.push(byte | 0x80);
-        }
-        out
+    /// Spells `text` inside a WAT string or quoted identifier: printable ASCII
+    /// other than `"` and `\` as itself, every other byte as a `\hh` escape.
+    /// `wat` writes a quoted local identifier `$"…"` into the name section
+    /// byte for byte, so any non-empty name under test can be spelled without
+    /// hand-encoding the section.
+    fn wat_quoted(text: &str) -> String {
+        text.bytes()
+            .map(|byte| match byte {
+                0x20..=0x7e if byte != b'"' && byte != b'\\' => char::from(byte).to_string(),
+                _ => format!("\\{byte:02x}"),
+            })
+            .collect()
     }
 
-    fn wasm_name(text: &str) -> Vec<u8> {
-        let mut out = leb128_u32(u32::try_from(text.len()).expect("fixture name fits"));
-        out.extend_from_slice(text.as_bytes());
-        out
-    }
-
-    /// A module whose single function has one named local, the name hand-encoded
-    /// because `wat` derives local names from symbolic identifiers and cannot
-    /// spell the delimiters under test.
+    /// A module whose single function has one named local, read twice, so the
+    /// name reaches the `.v` as two `(*name*)` comments.
     fn module_with_local_named(name: &str) -> Vec<u8> {
-        let mut naming = leb128_u32(1);
-        naming.extend(leb128_u32(0));
-        naming.extend(wasm_name(name));
-
-        let mut per_function = leb128_u32(1);
-        per_function.extend(leb128_u32(0));
-        per_function.extend(naming);
-
-        let mut subsection = vec![0x02];
-        subsection.extend(leb128_u32(
-            u32::try_from(per_function.len()).expect("fixture subsection fits"),
-        ));
-        subsection.extend(per_function);
-
-        let mut content = wasm_name("name");
-        content.extend(subsection);
-
-        let mut section = vec![0x00];
-        section.extend(leb128_u32(
-            u32::try_from(content.len()).expect("fixture section fits"),
-        ));
-        section.extend(content);
-
-        let mut bytes = wat(r#"(module (func (local i32) local.get 0 drop))"#);
-        bytes.extend(section);
-        bytes
+        wat(&format!(
+            r#"(module (func (local $"{}" i32) local.get 0 drop local.get 0 drop))"#,
+            wat_quoted(name),
+        ))
     }
 
     /// Every comparison below is only as strong as the oracle it runs through,
