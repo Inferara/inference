@@ -505,10 +505,12 @@ fn parse(
                                     func_locals_name_map.entry(index).or_default();
                                     // Neutralized here rather than at the three
                                     // emission sites: a local name is only ever
-                                    // rendered inside a `(* … *)` comment, so no
-                                    // consumer needs the raw form, and one
+                                    // rendered inside a `(*{name}*)` comment, so
+                                    // no consumer needs the raw form, and one
                                     // boundary cannot drift out of step with
-                                    // itself the way three call sites can.
+                                    // itself the way three call sites can. The
+                                    // rewrite is complete for exactly that
+                                    // frame; see `neutralize_comment_delimiters`.
                                     for naming in local.names {
                                         let naming = naming?;
                                         func_locals_name_map.get_mut(&index).unwrap().insert(
