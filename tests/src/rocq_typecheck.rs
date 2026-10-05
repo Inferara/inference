@@ -2726,8 +2726,8 @@ pub(crate) mod gate {
     /// into `(*name*)` comments.
     ///
     /// One value builds both the module and the oracle that checks it, so a
-    /// reduced instance changes the two together and the body length the
-    /// oracle expects is derived rather than stated. Inference source cannot
+    /// reduced instance changes the two together and the instructions the
+    /// oracle expects are derived rather than stated. Inference source cannot
     /// produce any of these names: its export names are ASCII identifiers and
     /// its imports are merged away before translation. The only route is the
     /// public `wasm_to_v` API on a foreign binary, which is the route this
@@ -2751,14 +2751,28 @@ pub(crate) mod gate {
     }
 
     impl HostileNames<'_> {
-        /// One `local.get`/`drop` pair per local, plus one `unreachable`.
-        fn body_len(&self) -> usize {
-            2 * self.locals.len() + 1
+        /// The function body, one entry per instruction: its WAT spelling and
+        /// the term the translator emits for it, less the name comment. One
+        /// `local.get`/`drop` pair per local, with one `unreachable` after
+        /// the first pair, between the first two locals' names, or alone when
+        /// there are no locals.
+        fn body(&self) -> Vec<(String, String)> {
+            let mut body = Vec::new();
+            for index in 0..self.locals.len() {
+                body.push((format!("local.get {index}"), format!("BI_local_get {index}%N")));
+                body.push(("drop".to_string(), "BI_drop".to_string()));
+                if index == 0 {
+                    body.push(("unreachable".to_string(), "BI_unreachable".to_string()));
+                }
+            }
+            if body.is_empty() {
+                body.push(("unreachable".to_string(), "BI_unreachable".to_string()));
+            }
+            body
         }
 
         /// The fixture module. Its one defined function is `$hostile_body`, so
-        /// the `.v` names its definition `hostile_body`, and the `unreachable`
-        /// follows the first pair, between the first two locals' names.
+        /// the `.v` names its definition `hostile_body`.
         fn wat(&self) -> String {
             let mut fields = String::new();
             if let Some((module, field)) = self.import {
@@ -2773,10 +2787,7 @@ pub(crate) mod gate {
                 .iter()
                 .map(|name| format!(" (local $\"{}\" i32)", wat_escaped(name)))
                 .collect();
-            let mut body: Vec<String> = (0..self.locals.len())
-                .map(|index| format!("local.get {index} drop"))
-                .collect();
-            body.insert(body.len().min(1), "unreachable".to_string());
+            let body: Vec<String> = self.body().into_iter().map(|(wat, _)| wat).collect();
             fields.push_str(&format!(
                 "(func $hostile_body{locals}\n  {})\n",
                 body.join("\n  ")
@@ -2791,8 +2802,10 @@ pub(crate) mod gate {
         }
 
         /// `Example`s about the module record `module` that `eq_refl` closes
-        /// only if the body kept every instruction and each literal denotes
-        /// exactly its name.
+        /// only if the body is exactly the instructions the fixture was
+        /// assembled from, in order, and each literal denotes exactly its
+        /// name. Comparing the whole list rather than its length also catches
+        /// a name that swaps an instruction for another.
         ///
         /// The stub's `byte` and `list_byte_of_string` are opaque, so bytes
         /// cannot be compared directly. Both sides go through
@@ -2803,10 +2816,14 @@ pub(crate) mod gate {
         /// translator is responsible for, the string each literal denotes.
         fn oracle(&self, module: &str) -> String {
             let mut out = String::from(ORACLE_MARKER);
+            let body: String = self
+                .body()
+                .into_iter()
+                .map(|(_, term)| format!("{term} :: "))
+                .collect();
             out.push_str(&format!(
                 "Example hostile_body_intact : \
-                 List.length (modfunc_body hostile_body) = {} := eq_refl.\n",
-                self.body_len()
+                 modfunc_body hostile_body = ({body}nil) := eq_refl.\n"
             ));
             if let Some(export) = self.export {
                 out.push_str(&format!(
@@ -2852,9 +2869,9 @@ pub(crate) mod gate {
     /// A WASM name may carry any character, including the delimiters that end
     /// a Gallina literal or comment (#406). The text rows in `core/wasm-to-v`
     /// show the escapes leave the emitted code intact; this gate has `coqc`
-    /// confirm it. The module elaborates, the function body keeps every
-    /// instruction, and every literal denotes exactly its name's bytes,
-    /// backslash, control bytes and UTF-8 included.
+    /// confirm it. The module elaborates, the function body is exactly the
+    /// instructions it was assembled from, and every literal denotes exactly
+    /// its name's bytes, backslash, control bytes and UTF-8 included.
     #[test]
     fn hostile_names_elaborate_and_round_trip_under_coqc() {
         // The audit's safety net cannot notice this member missing from
