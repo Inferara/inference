@@ -636,7 +636,7 @@ fn test() { const P: Point = Point { x: 1, y: 2 }; }"#;
     assert!(
         matches!(&arena[value].kind, Expr::StructLiteral { .. }),
         "const initializer should parse as StructLiteral, got {:?}",
-        &arena[value].kind
+        arena[value].kind
     );
 }
 
@@ -648,7 +648,7 @@ fn test_parse_const_initializer_accepts_array_literal() {
     assert!(
         matches!(&arena[value].kind, Expr::ArrayLiteral { .. }),
         "const initializer should parse as ArrayLiteral, got {:?}",
-        &arena[value].kind
+        arena[value].kind
     );
 }
 
@@ -664,7 +664,7 @@ fn test() {
     assert!(
         matches!(&arena[value].kind, Expr::Identifier(_)),
         "const initializer should parse as Identifier, got {:?}",
-        &arena[value].kind
+        arena[value].kind
     );
 }
 
@@ -677,7 +677,7 @@ fn test() { const ARR: [i32; 3] = make(); }"#;
     assert!(
         matches!(&arena[value].kind, Expr::FunctionCall { .. }),
         "const initializer should parse as FunctionCall, got {:?}",
-        &arena[value].kind
+        arena[value].kind
     );
 }
 

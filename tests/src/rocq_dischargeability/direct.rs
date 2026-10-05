@@ -877,9 +877,7 @@ mod tests {
     }
 
     fn retained_evidence_path(rendered: &str) -> Option<PathBuf> {
-        let Some((_, suffix)) = rendered.split_once("evidence=") else {
-            return None;
-        };
+        let (_, suffix) = rendered.split_once("evidence=")?;
         let locator = suffix
             .split_once("; diagnostic=")
             .map_or(suffix, |(locator, _)| locator);
