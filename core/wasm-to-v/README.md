@@ -234,7 +234,7 @@ WASM loop instructions are translated to Rocq loop constructs. Branch instructio
 
 ## Name Preservation
 
-The translator extracts and preserves debug information from WASM's custom name section:
+The translator reads the WASM custom `name` section and keeps its names in the generated Rocq:
 
 **WASM Custom Section:**
 ```
@@ -242,30 +242,28 @@ name section:
   module name: "MyModule"
   function names:
     0: "add"
-    1: "multiply"
   local names:
     0: {0: "a", 1: "b"}
-    1: {0: "x", 1: "y"}
 ```
 
 **Generated Rocq Code:**
 ```coq
 Definition add : module_func := {|
-  (* Parameters a and b are preserved *)
+  modfunc_type := 0%N;
   modfunc_locals := nil;
-  modfunc_body := ...
-|}.
-
-Definition multiply : module_func := {|
-  (* Parameters x and y are preserved *)
-  modfunc_locals := nil;
-  modfunc_body := ...
+  modfunc_body :=
+    BI_local_get 0%N (*a*) ::
+    BI_local_get 1%N (*b*) ::
+    BI_binop T_i32 (Binop_i BOI_add) ::
+    nil;
 |}.
 
 Definition MyModule : module := ...
 ```
 
-This dramatically improves readability of generated Rocq code and makes verification work more intuitive by preserving original source-level names.
+Function and module names become `Definition` identifiers: a function name is sanitized into a legal Rocq identifier, and a module name that is not one, or that the preamble already defines, is rejected. Local names have no place in the Rocq model, so each appears as a `(*name*)` comment after the `BI_local_get`, `BI_local_set` or `BI_local_tee` that uses it.
+
+A name is data copied out of the binary and may carry any character, including the delimiters that end a string literal or a comment. [ROCQ_CONTRACT.md](ROCQ_CONTRACT.md#names-copied-from-the-binary) describes how each form is escaped so that a name never ends the construct it sits in.
 
 ## Error Handling
 
