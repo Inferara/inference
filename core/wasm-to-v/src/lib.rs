@@ -4332,13 +4332,22 @@ mod gallina_escaping {
     /// The literal scan honours Coq's doubled-quote escape, so an escaped `""`
     /// stays inside its literal rather than ending it — the precise behaviour
     /// under test.
+    ///
+    /// Literals are lexed at every comment depth, because Coq lexes them
+    /// there too: a `"` inside a comment opens a string, and a `(*` or `*)`
+    /// inside that string is inert. A lone quote in a local-name comment
+    /// therefore swallows the comment's closer, and a scan that ignored
+    /// in-comment strings would report a module whose instructions were
+    /// commented away as unchanged. A literal still open at the end of input
+    /// consumes the rest and contributes no code; Coq rejects that file with
+    /// `Unterminated string`.
     fn code_outside_literals_and_comments(v: &str) -> String {
         let chars: Vec<char> = v.chars().collect();
         let mut out = String::new();
         let mut index = 0;
         let mut comment_depth = 0usize;
         while index < chars.len() {
-            if comment_depth == 0 && chars[index] == '"' {
+            if chars[index] == '"' {
                 index += 1;
                 while index < chars.len() {
                     if chars[index] == '"' {
@@ -4351,7 +4360,9 @@ mod gallina_escaping {
                     }
                     index += 1;
                 }
-                out.push_str("\"\"");
+                if comment_depth == 0 {
+                    out.push_str("\"\"");
+                }
                 continue;
             }
             if chars[index] == '(' && chars.get(index + 1) == Some(&'*') {
@@ -4422,6 +4433,49 @@ mod gallina_escaping {
         let mut bytes = wat(r#"(module (func (local i32) local.get 0 drop))"#);
         bytes.extend(section);
         bytes
+    }
+
+    /// Every comparison below is only as strong as the oracle it runs through,
+    /// so the oracle's string handling inside comments is pinned directly.
+    /// Each input in the loop was checked against `coqc`: with `X` replaced
+    /// by a definition, every one compiles and defines it. The first, fourth
+    /// and fifth are the ones a depth-0-only scan misreads; the doubled-quote
+    /// rows pin that `""` inside a comment reads as one string.
+    #[test]
+    fn the_oracle_lexes_strings_inside_comments_like_rocq() {
+        for input in [
+            r#"(* " *) " *) X"#,
+            r#"(* "" *) X"#,
+            r#"(* "a""b" *) X"#,
+            r#"(* "(*" *) X"#,
+            r#"(* (* "*)" *) *) X"#,
+        ] {
+            assert_eq!(
+                code_outside_literals_and_comments(input).trim(),
+                "X",
+                "Coq reads only `X` as code in {input:?}",
+            );
+        }
+        assert_eq!(
+            code_outside_literals_and_comments(r#""a""b" X"#).trim(),
+            r#""" X"#,
+            "a top-level literal still empties to `\"\"` and is not code",
+        );
+    }
+
+    /// Coq rejects both inputs with `Unterminated string`; `'"'` opens a
+    /// string as well, since Coq has no character literals to exempt it. The
+    /// oracle cannot reject, so it lets the open string consume the rest of
+    /// the input: whatever follows the quote is not code.
+    #[test]
+    fn an_unterminated_string_inside_a_comment_consumes_the_rest() {
+        for input in [r#"(* " *) X"#, r#"(* '"' *) X"#] {
+            assert_eq!(
+                code_outside_literals_and_comments(input),
+                "",
+                "nothing after the open quote in {input:?} is code",
+            );
+        }
     }
 
     /// The payload closes the string literal and continues in Gallina, so the
