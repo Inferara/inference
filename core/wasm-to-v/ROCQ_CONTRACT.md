@@ -606,6 +606,47 @@ Notes on the shape, in emission order:
   theorem by replacing `Admitted.` with a real proof ending in `Qed.`;
   proof closure requires a downstream admission/assumption audit.
 
+### Names copied from the binary
+
+Names from the `.wasm` reach the `.v` in three forms. Each form gets the
+one rewrite that keeps a name from ending the construct it sits in:
+
+| Name | Emitted as | Rewrite |
+|------|------------|---------|
+| Import module and field, export name | string literal: `Mi "m" "n" (…)`, `Me "n" (…)` | every `"` doubled |
+| Name-section local name | comment after `BI_local_get`/`set`/`tee`: `(*n*)` | every `"` doubled, `(*` → `( *`, `*)` → `* )`, a trailing `(` followed by a space |
+| Function name | `Definition` identifier | `sanitize_rocq_identifier` (see [T_app resolution discipline](#t_app-resolution-discipline)) |
+| Module name | `Definition` identifier | validated: a name that is not a legal identifier, or that the preamble already defines, is rejected |
+
+In a literal, `""` is Gallina's only escape, so `"` is the only byte
+rewritten. Every other byte is emitted raw and denotes itself: a
+backslash (`"say\"` is the four bytes `say\`), control bytes, and
+non-ASCII UTF-8. No `Open Scope` is needed. `Mi` and `Me` take their
+names at type `string`, so an argument literal is read in
+`string_scope`, the scope bound to `string`.
+
+A comment needs more, because Coq lexes string literals inside comments.
+An odd quote opens a string in which `*)` no longer ends the comment, and
+the comment then runs on, hiding the code after it. The `.v` can still
+compile: two locals named `a"` and `b"` once removed every instruction
+between their reads. With every quote doubled, quote runs are even and
+lex as complete strings. With both delimiters split, none lies inside a
+name. The trailing-`(` space stops the one delimiter that could form
+across the edge of the `(*n*)` frame, a `(` meeting the closer's `*`.
+Codegen's own local names contain none of these characters, so they
+are emitted unchanged.
+
+Inference source cannot produce any of these names. Its export names are
+ASCII identifiers, its imports are merged away before translation, and
+only the entry module's local names survive linking. The rewrites
+protect a foreign `.wasm` handed to the public `wasm_to_v` API. The
+`coqc` gate `hostile_names_elaborate_and_round_trip_under_coqc` in
+`tests/src/rocq_typecheck.rs` compiles a module whose names carry each
+hazard. Its `eq_refl` checks confirm that the body keeps every
+instruction and that each literal denotes exactly its name. On Windows,
+`coqc` reads `.v` files in text mode, so a raw CR-LF pair or `0x1A` in a
+name may not survive. The gate runs on Linux.
+
 ### Reachability additions to the anatomy
 
 The following is the complete, unedited `.v` output for
