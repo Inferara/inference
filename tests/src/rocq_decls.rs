@@ -97,10 +97,25 @@ pub(crate) fn is_punct(tokens: &[Tok<'_>], at: usize, c: char) -> bool {
 /// One divergence from Rocq's own lexer, deliberately not modelled: Rocq
 /// recognises a string literal *inside* a comment, so `(* "*)" *)` is one
 /// comment, while this ends it at the inner `*)` and reads the rest as an
-/// unterminated literal that swallows the file. Nothing writes such a
-/// comment — the stub's are prose, the emitter's are `(*name*)`
-/// annotations from the WASM name section — and a name that could produce
-/// one would already be emitting `.v` that `coqc` rejects.
+/// unterminated literal that swallows the file.
+///
+/// This reads three sources, and on the two this repository writes the
+/// readings agree. The emitter's comments are its fixed proof placeholder
+/// and its `(*name*)` annotations, which carry quotes only in even runs:
+/// local names have every `"` doubled, and an even run lexes as complete
+/// strings that end before the closer. The stub's comments are prose whose
+/// quoted spans are balanced and contain no comment delimiter. When this was
+/// written, a Rocq-faithful lexer read the stub and every `.v` golden exactly
+/// as this does. The third source, the pinned upstream libraries the drift
+/// lane strips, lives outside this repository, so agreement there is assumed
+/// rather than checked.
+///
+/// Where the readings differ, the error can run either way, and the file can
+/// still compile. This reads code that Rocq comments out when a comment holds
+/// an odd quote: such a quote in a local name once made Rocq comment out the
+/// instructions between two names while `coqc` accepted the file. And it
+/// hides code that Rocq reads when a comment holds a quoted `*)`, as in the
+/// example above.
 pub(crate) fn strip_rocq_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();

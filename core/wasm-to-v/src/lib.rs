@@ -4290,10 +4290,17 @@ mod rejection_totality {
 
 /// Import names, export names, and name-section local names are *data* copied
 /// out of a `.wasm` into Gallina syntax — a string literal for the first two, a
-/// `(* … *)` comment for the third. A WASM name may carry any byte, including
-/// the delimiters that end those constructs, so an unescaped name does not
-/// merely look wrong: it closes its construct early and the remainder is read
-/// as Gallina, fabricating module content the binary never contained.
+/// `(* … *)` comment for the third. A WASM name may carry any character,
+/// including the delimiters that end those constructs, so an unescaped name
+/// does not merely look wrong: it closes its construct early and the remainder
+/// is read as Gallina, fabricating module content the binary never contained.
+///
+/// A literal has one such delimiter, `"`. A comment has three: `*)` ends it,
+/// `(*` nests a second one that must also be closed, and `"` opens a string
+/// literal, which Coq lexes inside comments too and in which a `*)` does not
+/// end the comment. The third can also *remove* content: a comment that runs
+/// on past its own closer swallows the code after it, and the `.v` can still
+/// compile.
 ///
 /// Each row below asserts on what the injection actually *produces* rather than
 /// on the delimiter it uses. A quote count or a substring search stays green
@@ -4403,6 +4410,18 @@ mod gallina_escaping {
         wat(&format!(
             r#"(module (func (local $"{}" i32) local.get 0 drop local.get 0 drop))"#,
             wat_quoted(name),
+        ))
+    }
+
+    /// A module whose single function reads two named locals with an
+    /// `unreachable` between the reads, so a comment that runs from the first
+    /// name to the second would swallow it.
+    fn module_with_locals_named(first: &str, second: &str) -> Vec<u8> {
+        wat(&format!(
+            r#"(module (func (local $"{}" i32) (local $"{}" i32)
+                 local.get 0 drop unreachable local.get 1 drop))"#,
+            wat_quoted(first),
+            wat_quoted(second),
         ))
     }
 
@@ -4537,22 +4556,119 @@ mod gallina_escaping {
         );
     }
 
-    /// The other half: an opener with no closer.
+    /// The other half: an opener with no closer. Unclosed, it would turn
+    /// everything after it into comment, so the emitted code must still be the
+    /// ordinary module's.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn an_unclosed_comment_opener_in_a_local_name_is_neutralized() {
-        let v = translate(&module_with_local_named("(*"));
+        let injected = translate(&module_with_local_named("(*"));
+        let ordinary = translate(&module_with_local_named("x"));
         assert_eq!(
-            v.matches("(*").count(),
-            v.matches("*)").count(),
-            "an opener in a local name must not leave the file unbalanced:\n{v}",
+            code_outside_literals_and_comments(&injected),
+            code_outside_literals_and_comments(&ordinary),
+            "an opener in a local name must not swallow the code after it:\n{injected}",
         );
+    }
+
+    /// Coq lexes a string literal inside a comment, so a quote in a local name
+    /// opens one, and a `*)` inside it does not end the comment. With locals
+    /// named `a"` and `b"`, Coq read one comment from the first name to the
+    /// second: the `.v` compiled, and the body lost the instructions in
+    /// between. The `unreachable` sits between the two reads, so a body that
+    /// lost it describes a different program.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn quotes_in_two_local_names_cannot_comment_out_the_code_between() {
+        let injected = translate(&module_with_locals_named("a\"", "b\""));
+        let ordinary = translate(&module_with_locals_named("x", "y"));
+        let code = code_outside_literals_and_comments(&injected);
+        assert_eq!(
+            code,
+            code_outside_literals_and_comments(&ordinary),
+            "quotes in local names may change comment text and nothing else:\n{injected}",
+        );
+        assert!(
+            code.contains("BI_unreachable"),
+            "the `unreachable` between the two reads must stay code:\n{injected}",
+        );
+    }
+
+    /// A lone quote has no partner in its own comment, so the string it opens
+    /// runs on to the next quote in the file: the opening quote of the `Mi`
+    /// literal in the module record, which follows every body. The literal's
+    /// contents then lex as comment text, and a raw `*)` in the import name,
+    /// legal inside a literal, closed the comment and turned the rest of the
+    /// name into code.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_lone_quote_in_a_local_name_cannot_reach_into_a_literal() {
+        fn module(local: &str) -> Vec<u8> {
+            wat(&format!(
+                r#"(module (import "m" "x*) :: BI_unreachable :: (*" (func))
+                     (func (local $"{}" i32) local.get 0 drop))"#,
+                wat_quoted(local),
+            ))
+        }
+        let injected = translate(&module("q\""));
+        let ordinary = translate(&module("q"));
+        assert_eq!(
+            code_outside_literals_and_comments(&injected),
+            code_outside_literals_and_comments(&ordinary),
+            "a quote in a local name must not pull the import name into code:\n{injected}",
+        );
+    }
+
+    /// The emitter frames a name as `(*{name}*)`, so a name ending in `(`
+    /// pairs with the closer's `*` into a nested opener, and the comment never
+    /// closes.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_local_name_ending_in_an_open_paren_cannot_open_a_nested_comment() {
+        let injected = translate(&module_with_local_named("x("));
+        let ordinary = translate(&module_with_local_named("x"));
+        assert_eq!(
+            code_outside_literals_and_comments(&injected),
+            code_outside_literals_and_comments(&ordinary),
+            "a trailing `(` must not reopen the comment it ends:\n{injected}",
+        );
+    }
+
+    /// Every name over the characters the comment hazards are made of, plus
+    /// `x`, up to length 5, through the real translator. Each is read twice,
+    /// so the name meets both edges of its own frame and the gap between two
+    /// frames. A rewrite that misses one interaction, whether inside a name or
+    /// across the frame's edge, leaves some name here whose code differs from
+    /// the ordinary module's.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn no_local_name_over_the_delimiter_alphabet_changes_the_code() {
+        let control = code_outside_literals_and_comments(&translate(&module_with_local_named("x")));
+        let mut names = vec![String::new()];
+        let mut checked = 0usize;
+        for _ in 0..5 {
+            names = names
+                .iter()
+                .flat_map(|name| ['(', '*', ')', '"', 'x'].map(|c| format!("{name}{c}")))
+                .collect();
+            for name in &names {
+                let v = translate(&module_with_local_named(name));
+                assert_eq!(
+                    code_outside_literals_and_comments(&v),
+                    control,
+                    "local name {name:?} changed the emitted code:\n{v}",
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 5 + 25 + 125 + 625 + 3125);
     }
 
     /// The byte-identity control. `__frame_ptr` is the local codegen emits for
     /// every array-using program; routing local names through identifier
     /// sanitization would render it `f_frame_ptr` and move every byte-compared
-    /// `.v` golden. Only the two comment delimiters may ever be touched.
+    /// `.v` golden. Only `(*`, `*)`, `"` and a trailing `(` may ever be
+    /// touched, and an identifier contains none of them.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn an_ordinary_local_name_renders_unchanged() {
