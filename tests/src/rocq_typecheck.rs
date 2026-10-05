@@ -572,6 +572,10 @@ pub(crate) mod gate {
     /// unlisted member is a member [`gated_modules`] does not compile, so
     /// whichever declarations it was written to produce come back unproduced
     /// from [`every_stub_declaration_has_a_producer`].
+    ///
+    /// That net only catches a member that is the sole producer of some
+    /// declaration. [`Self::HostileNames`] exists for the names it carries, not
+    /// the constructors it uses, so its gate checks its membership directly.
     #[derive(Clone, Copy)]
     enum HandbuiltModule {
         ForeignSegments,
@@ -579,6 +583,7 @@ pub(crate) mod gate {
         InstructionSurface,
         Obligations,
         Reachability,
+        HostileNames,
     }
 
     impl HandbuiltModule {
@@ -589,6 +594,7 @@ pub(crate) mod gate {
             Self::InstructionSurface,
             Self::Obligations,
             Self::Reachability,
+            Self::HostileNames,
         ];
 
         /// The name the translator is given; also the `.v` basename and the
@@ -600,6 +606,7 @@ pub(crate) mod gate {
                 Self::InstructionSurface => "instruction_surface",
                 Self::Obligations => "handbuilt_obligations",
                 Self::Reachability => "handbuilt_reachability",
+                Self::HostileNames => "hostile_names",
             }
         }
 
@@ -614,6 +621,7 @@ pub(crate) mod gate {
                 Self::InstructionSurface => translate_wat(module, &instruction_surface_wat()),
                 Self::Obligations => handbuilt_obligations_v(module),
                 Self::Reachability => handbuilt_reachability_v(module),
+                Self::HostileNames => translate_wat(module, &HostileNames::FULL.wat()),
             };
             GatedModule {
                 source: module,
@@ -1662,6 +1670,14 @@ pub(crate) mod gate {
     /// `covered` completes the skip line so a local run says exactly which half
     /// of the gate did and did not happen.
     fn type_check_with_coqc(module: &GatedModule, covered: &str) {
+        type_check_with_coqc_suffix(module, "", covered);
+    }
+
+    /// [`type_check_with_coqc`], with `suffix` appended to the file `coqc`
+    /// compiles. `module.v` itself stays the raw translator output that
+    /// [`gated_modules`] hands the audit and the real-library lane; only this
+    /// compile sees the suffix, which opens with [`ORACLE_MARKER`].
+    fn type_check_with_coqc_suffix(module: &GatedModule, suffix: &str, covered: &str) {
         let Some(coqc) = find_coqc() else {
             eprintln!(
                 "skipped: coqc not found (set COQC or put coqc on PATH). \
@@ -1671,7 +1687,7 @@ pub(crate) mod gate {
         };
         let work = compile_stub(&coqc, module.module);
         let v_path = work.join(format!("{}.v", module.module));
-        std::fs::write(&v_path, &module.v)
+        std::fs::write(&v_path, format!("{}{suffix}", module.v))
             .unwrap_or_else(|e| panic!("write {}.v: {e}", module.module));
         if let Err(log) = coqc_compile(&coqc, &work, &v_path) {
             panic!(
@@ -2680,6 +2696,199 @@ pub(crate) mod gate {
             &module,
             "Reachability probe generated and its record-literal, partition \
              and kind-selected theorem shapes verified",
+        );
+    }
+
+    /// The import module name in [`HostileNames::FULL`]: a quote, a comment
+    /// opener, two- and three-byte UTF-8, and a trailing backslash, which would
+    /// escape the closing quote in a language whose literals have backslash
+    /// escapes. Gallina's literals have one escape, `""`.
+    const HOSTILE_IMPORT_MODULE: &str = "m\"(*é日\\";
+    /// The import field name: TAB, a CR with no LF beside it, a separate LF and
+    /// NUL, all raw bytes in a literal, then a comment closer and a backslash
+    /// whose following quote must still double.
+    const HOSTILE_IMPORT_FIELD: &str = "f\tc\rl\nn\0*)\\\"q";
+    /// The #438 payload: unescaped, it closes the export literal and adds a
+    /// second export to the module record.
+    const HOSTILE_EXPORT: &str = "\" (MED_func 0%N) :: Me \"b";
+    /// One local per comment hazard, in body order: `a"` and `b"` are lone
+    /// quotes that would pair up across the `unreachable` between their reads,
+    /// `x(` meets the comment's closer, `"*)` hides a closer behind a quote,
+    /// and `(*` is an opener with no closer.
+    const HOSTILE_LOCALS: &[&str] = &["a\"", "b\"", "x(", "\"*)", "(*"];
+
+    /// The first line of every oracle suffix, so a kept work directory shows
+    /// where the translator's output ends.
+    const ORACLE_MARKER: &str = "(* ---- test oracle, not translator output ---- *)\n";
+
+    /// Names a foreign `.wasm` can carry into Gallina syntax: an import's
+    /// module and field and an export name into string literals, local names
+    /// into `(*name*)` comments.
+    ///
+    /// One value builds both the module and the oracle that checks it, so a
+    /// reduced instance changes the two together and the body length the
+    /// oracle expects is derived rather than stated. Inference source cannot
+    /// produce any of these names: its export names are ASCII identifiers and
+    /// its imports are merged away before translation. The only route is the
+    /// public `wasm_to_v` API on a foreign binary, which is the route this
+    /// fixture takes.
+    ///
+    /// No name carries `0x1A` or a CR-LF pair, which a text-mode read on
+    /// Windows may not deliver unchanged; `coqc` gates run on Linux.
+    struct HostileNames<'a> {
+        import: Option<(&'a str, &'a str)>,
+        export: Option<&'a str>,
+        locals: &'a [&'a str],
+    }
+
+    impl HostileNames<'static> {
+        /// Every hostile name at once: the instance the gate compiles.
+        const FULL: Self = Self {
+            import: Some((HOSTILE_IMPORT_MODULE, HOSTILE_IMPORT_FIELD)),
+            export: Some(HOSTILE_EXPORT),
+            locals: HOSTILE_LOCALS,
+        };
+    }
+
+    impl HostileNames<'_> {
+        /// One `local.get`/`drop` pair per local, plus one `unreachable`.
+        fn body_len(&self) -> usize {
+            2 * self.locals.len() + 1
+        }
+
+        /// The fixture module. Its one defined function is `$hostile_body`, so
+        /// the `.v` names its definition `hostile_body`, and the `unreachable`
+        /// follows the first pair, between the first two locals' names.
+        fn wat(&self) -> String {
+            let mut fields = String::new();
+            if let Some((module, field)) = self.import {
+                fields.push_str(&format!(
+                    "(import \"{}\" \"{}\" (func))\n",
+                    wat_escaped(module),
+                    wat_escaped(field)
+                ));
+            }
+            let locals: String = self
+                .locals
+                .iter()
+                .map(|name| format!(" (local $\"{}\" i32)", wat_escaped(name)))
+                .collect();
+            let mut body: Vec<String> = (0..self.locals.len())
+                .map(|index| format!("local.get {index} drop"))
+                .collect();
+            body.insert(body.len().min(1), "unreachable".to_string());
+            fields.push_str(&format!(
+                "(func $hostile_body{locals}\n  {})\n",
+                body.join("\n  ")
+            ));
+            if let Some(export) = self.export {
+                fields.push_str(&format!(
+                    "(export \"{}\" (func $hostile_body))\n",
+                    wat_escaped(export)
+                ));
+            }
+            format!("(module\n{fields})")
+        }
+
+        /// `Example`s about the module record `module` that `eq_refl` closes
+        /// only if the body kept every instruction and each literal denotes
+        /// exactly its name.
+        ///
+        /// The stub's `byte` and `list_byte_of_string` are opaque, so bytes
+        /// cannot be compared directly. Both sides go through
+        /// `list_byte_of_string` instead, which `eq_refl` closes only when the
+        /// two strings are convertible: the emitted literal on the left, and
+        /// on the right a string rebuilt from the expected bytes by the
+        /// standard library's `string_of_list_byte`. That pins what the
+        /// translator is responsible for, the string each literal denotes.
+        fn oracle(&self, module: &str) -> String {
+            let mut out = String::from(ORACLE_MARKER);
+            out.push_str(&format!(
+                "Example hostile_body_intact : \
+                 List.length (modfunc_body hostile_body) = {} := eq_refl.\n",
+                self.body_len()
+            ));
+            if let Some(export) = self.export {
+                out.push_str(&format!(
+                    "Example hostile_export_bytes : \
+                     List.map modexp_name (mod_exports {module}) = {} :: nil := eq_refl.\n",
+                    rebuilt_string(export)
+                ));
+            }
+            if let Some((import_module, field)) = self.import {
+                out.push_str(&format!(
+                    "Example hostile_import_bytes : \
+                     List.map (fun i => (imp_module i, imp_name i)) (mod_imports {module}) \
+                     = ({}, {}) :: nil := eq_refl.\n",
+                    rebuilt_string(import_module),
+                    rebuilt_string(field)
+                ));
+            }
+            out
+        }
+    }
+
+    /// Spells `text` inside a WAT string or quoted identifier: printable ASCII
+    /// other than `"` and `\` as itself, every other byte as a `\hh` escape.
+    fn wat_escaped(text: &str) -> String {
+        text.bytes()
+            .map(|byte| match byte {
+                0x20..=0x7e if byte != b'"' && byte != b'\\' => char::from(byte).to_string(),
+                _ => format!("\\{byte:02x}"),
+            })
+            .collect()
+    }
+
+    /// `list_byte_of_string` of `text` rebuilt from its bytes, spelled without a
+    /// string literal so the oracle does not share the escape it checks.
+    fn rebuilt_string(text: &str) -> String {
+        let bytes: String = text
+            .bytes()
+            .map(|byte| format!("Byte.x{byte:02x} :: "))
+            .collect();
+        format!("list_byte_of_string (string_of_list_byte ({bytes}nil))")
+    }
+
+    /// A WASM name may carry any character, including the delimiters that end
+    /// a Gallina literal or comment (#406). The text rows in `core/wasm-to-v`
+    /// show the escapes leave the emitted code intact; this gate has `coqc`
+    /// confirm it. The module elaborates, the function body keeps every
+    /// instruction, and every literal denotes exactly its name's bytes,
+    /// backslash, control bytes and UTF-8 included.
+    #[test]
+    fn hostile_names_elaborate_and_round_trip_under_coqc() {
+        // The audit's safety net cannot notice this member missing from
+        // `ALL` (see `HandbuiltModule`), so the gate checks membership itself.
+        assert!(
+            HandbuiltModule::ALL
+                .iter()
+                .any(|member| matches!(member, HandbuiltModule::HostileNames)),
+            "`HostileNames` must be in `HandbuiltModule::ALL`, or neither the \
+             audit nor the real-library lane compiles it"
+        );
+        let module = HandbuiltModule::HostileNames.build();
+        let v = &module.v;
+
+        // Teeth without `coqc`: every delimiter reaches the `.v` escaped.
+        for needle in [
+            "Me \"\"\" (MED_func 0%N) :: Me \"\"b\" (MED_func 1%N)",
+            "Mi \"m\"\"(*é日\\\" \"f\tc\rl\nn\0*)\\\"\"q\" (MID_func 0%N)",
+            "(*a\"\"*)",
+            "(*b\"\"*)",
+            "(*x( *)",
+            "(*\"\"* )*)",
+            "(*( **)",
+        ] {
+            assert!(
+                v.contains(needle),
+                "the hostile names must be emitted as `{needle}`; got:\n{v}"
+            );
+        }
+
+        type_check_with_coqc_suffix(
+            &module,
+            &HostileNames::FULL.oracle(module.module),
+            "Hostile-name module generated and its escaped spellings verified",
         );
     }
 
