@@ -97,21 +97,39 @@ on:
 jobs:
   rocq-typecheck:
     name: coqc round-trip gate
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04 is pinned rather than `ubuntu-latest` for its apt Coq: 8.20.1,
+    # the Coq the real coq-wasm and wasm-verifier libraries are built with
+    # (`ci/real-library-coqc.sh`) and the one developers run the gate under.
+    # `ubuntu-latest` (24.04) ships 8.18.0, so the stub and the emitted `.v`
+    # would be checked by a Coq nothing else uses.
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4.1.3
 
       # apt ships a Coq whose `coqc` the gate finds on PATH. The stub uses only
       # maximally-portable vernacular (Parameter/Axiom/Inductive/Record + plain
-      # notation), so it compiles on both this apt Coq and a local brew Rocq 9.x.
+      # notation), so it also compiles under other Coq and Rocq releases, but
+      # the gate's verdict is only claimed for the version asserted below.
       - name: Install Coq (apt)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends coq
 
-      - name: Report Coq version
-        run: coqc --version
+      # A runner image that moved its apt Coq would otherwise change the
+      # checking Coq without a diff in this repository.
+      - name: Assert the Coq version
+        env:
+          ROCQ_GATE_COQ_VERSION: '8.20.1'
+        run: |
+          set -euo pipefail
+          version=$(coqc --version)
+          echo "$version"
+          if ! grep -q "version $ROCQ_GATE_COQ_VERSION\b" <<< "$version"; then
+            echo "::error::the coqc round-trip gate expects Coq $ROCQ_GATE_COQ_VERSION, \
+          the version the real libraries are built with"
+            exit 1
+          fi
 
       # `cargo test <filter>` exits 0 when the filter selects nothing, printing
       # `0 passed`. The gate below is one filtered invocation, so a renamed

@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - The test suites and `core/wasm-linker`'s in-crate tests run on Wasmtime 48.0.3 instead of 47.0.3, and `ci/rocq-discharge.cargo-lock` moves with them. `cargo audit` refused 47.0.4 for RUSTSEC-2026-0315 (`call_ref` and exception `catch` can drop fuel accounting) and RUSTSEC-2026-0316 (dynamic record lifting can allocate past the hostcall fuel limit), both fixed in 48.0.3. The 49 line would carry the same fixes but needs `wat` 1.258, which the workspace's `wasm-encoder` 0.254 pin does not admit, so it waits for that family to move. Wasmtime is linked only by test code; no shipped binary depends on it ([#212])
+- The `coqc` round-trip gate runs on `ubuntu-26.04` instead of `ubuntu-latest`, so it checks the vendored stub and the emitted `.v` with apt's Coq 8.20.1 instead of 8.18.0. 8.20 is the Coq the real coq-wasm and wasm-verifier libraries are built with, and the one developers run the gate under. A new step fails the job if `coqc` reports any other version, so a runner image that moves its apt Coq cannot change the checking Coq without a change here ([#405])
 
 ### Testing
 
