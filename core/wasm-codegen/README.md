@@ -369,7 +369,7 @@ fn compile(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
     // Generate WASM bytecode from typed AST
     let output = codegen(
         typed_context,
-        "module",
+        "MyModule",
         CodegenOptions {
             target: Target::Wasm32,
             mode: CompilationMode::Compile,

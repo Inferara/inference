@@ -198,7 +198,7 @@ use inference_wasm_codegen::{EmitFeatures, MemoryLayout, MemoryLayoutSource, Mem
 use parser::{Cli, CliMode};
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{self},
 };
 use toolchain::BuildProfile;
@@ -640,6 +640,51 @@ fn proof_artifact_refusal(
     ))
 }
 
+/// Refuses a build that would write a `.v` for a source file whose name is not
+/// valid UTF-8.
+///
+/// The `.v` takes its module name from the source file's stem: the module
+/// record, its validity theorem and every spec proof name are spelled from it,
+/// and a stem that is not UTF-8 cannot spell them. The `.wasm` falls back to
+/// the name `module`, but that is a name this compiler chose rather than the
+/// user's, and the proof contract declares `module` too, so the translation
+/// would refuse it as `module`, a name the user never wrote, and print the
+/// file name with its invalid bytes replaced by U+FFFD.
+///
+/// The fallback is shared: a real `module.inf` builds to the same
+/// `out/module.wasm` and `out/module.v`, so the stale-output clearing that runs
+/// before this refusal removes that file's artifacts too, as a default-mode
+/// build of a non-UTF-8 file name overwrites them.
+///
+/// A path with no stem at all (`..`, a root) is not refused here: it names no
+/// file, and reading it fails with the error that says so.
+///
+/// Keyed on `writes_v`, whether this run will write a `.v`, rather than on the
+/// request alone: `--parse --mode proof` asks for a `.v` and writes none, and
+/// must still succeed. A run that writes no `.v` keeps the fallback, which
+/// names nothing in Rocq, and which `infs run` relies on to find the `.wasm`.
+fn non_utf8_stem_refusal(path: &Path, writes_v: bool) -> Option<String> {
+    match path.file_stem().map(std::ffi::OsStr::to_str) {
+        Some(None) if writes_v => {
+            // `Debug` escapes the bytes that are not UTF-8 (`"caf\xE9.inf"`),
+            // plus quotes and backslashes, where `Display` would replace the
+            // offending bytes with U+FFFD and lose them.
+            #[allow(clippy::unnecessary_debug_formatting)]
+            let message = format!(
+                "error: the source file name {:?} is not valid UTF-8, so the .v has no name to \
+                 give its Rocq module.\n\n  \
+                 The .v names its Rocq module after the source file: the module record, its \
+                 validity theorem and every spec proof name are spelled from the file's stem. \
+                 Rename the source file to an ASCII name of letters, digits and underscores, \
+                 such as 'program.inf'.",
+                path.file_name().unwrap_or_default()
+            );
+            Some(message)
+        }
+        _ => None,
+    }
+}
+
 /// The host imports a build is allowed to bind, keyed by import module.
 ///
 /// A map of modules to fields rather than a flat set of pairs, because the
@@ -1069,7 +1114,11 @@ fn host_import_inventory(declared: &[HostImport], allowlisted: bool) -> Option<S
 /// not currently have a way to tell which source the name came from —
 /// labelling it "source filename" when the offender was a spec name was a
 /// wrong guess.
-fn eprint_translation_error(e: &anyhow::Error) {
+///
+/// `source` is the file the build compiled, whose name a module-name rename
+/// hint spells, extension included.
+#[allow(clippy::too_many_lines)]
+fn eprint_translation_error(e: &anyhow::Error, source: &Path) {
     use inference::{InvalidIdentifierReason, WasmToVError};
     if let Some(wte) = e.downcast_ref::<WasmToVError>() {
         match wte {
@@ -1135,9 +1184,14 @@ fn eprint_translation_error(e: &anyhow::Error) {
                 eprint_spec_join_boundary_error(offender_kind, offender, joined, fix_hint);
                 return;
             }
-            WasmToVError::ModuleNameShadowsPreambleHelper { name, fix_hint } => {
-                eprint_module_name_shadow_error(name, fix_hint);
-                return;
+            WasmToVError::ModuleNameReserved {
+                name,
+                owner,
+                fix_hint,
+            } => {
+                if eprint_module_name_reserved_error(name, *owner, fix_hint, source) {
+                    return;
+                }
             }
             WasmToVError::WasmParse(msg) => {
                 eprintln!(
@@ -1196,10 +1250,56 @@ fn eprint_spec_join_boundary_error(
     );
 }
 
+/// Renders the diagnostic for an output module name the generated `.v`
+/// reserves, in the words its owner needs. Returns `false`, having printed
+/// nothing, for an owner added after this CLI was written (`ReservedNameOwner`
+/// is `#[non_exhaustive]`), so the caller's generic message renders it from the
+/// error's own description instead.
+fn eprint_module_name_reserved_error(
+    name: &str,
+    owner: inference::ReservedNameOwner,
+    fix_hint: &str,
+    source: &Path,
+) -> bool {
+    use inference::ReservedNameOwner;
+    let rename = source_file_rename(source, fix_hint);
+    match owner {
+        ReservedNameOwner::PreambleHelper => {
+            eprint_module_name_preamble_helper_error(name, &rename);
+        }
+        ReservedNameOwner::Contract { library } => eprint_module_name_contract_error(
+            name,
+            library,
+            owner.is_imported_conditionally(),
+            &rename,
+        ),
+        ReservedNameOwner::HostSectionBinder => {
+            eprint_module_name_host_binder_error(name, &rename);
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// The file rename that frees a reserved module name, as the diagnostics print
+/// it: the source file as given, then `fix_hint` with the same extension, so
+/// `host.inf` becomes `'host.inf' -> 'host_module.inf'` and `ho.txt` becomes
+/// `'ho.txt' -> 'ho_module.txt'`.
+fn source_file_rename(source: &Path, fix_hint: &str) -> String {
+    let file_name = source
+        .file_name()
+        .unwrap_or(source.as_os_str())
+        .to_string_lossy();
+    let extension = source
+        .extension()
+        .map_or_else(String::new, |extension| format!(".{}", extension.to_string_lossy()));
+    format!("'{file_name}' -> '{fix_hint}{extension}'")
+}
+
 /// Renders the diagnostic for an output module name the generated `.v` already
 /// spends on one of its preamble helpers. The module name comes from the source
-/// file's stem, so the concrete fix is a file rename.
-fn eprint_module_name_shadow_error(name: &str, fix_hint: &str) {
+/// file's stem, so the concrete fix is `rename`, a file rename.
+fn eprint_module_name_preamble_helper_error(name: &str, rename: &str) {
     eprintln!(
         "error: the output module name '{name}' is one of the helper definitions \
          every generated .v opens with, so '{name}' would name two top-level \
@@ -1208,9 +1308,73 @@ fn eprint_module_name_shadow_error(name: &str, fix_hint: &str) {
          again on 'Definition {name}' for the module record and on 'Theorem \
          valid_{name}'. Rocq definitions are not overloadable, so a name claimed \
          twice makes the whole file fail to compile. Rename the source file: \
-         '{name}.inf' -> '{fix_hint}.inf'.\n\n  \
+         {rename}.\n\n  \
          Why not auto-rename: proof-mode names appear verbatim in your .v file, \
          so a proof that imports '{name}' would silently lose its subject."
+    );
+}
+
+/// Renders the diagnostic for an output module name the proof contract
+/// declares. The `.v` may define it, but the record then shadows the library's
+/// name, in a proof that imports the `.v` after the library and wherever the
+/// `.v` spells the name again. Code written for the library's name then gets
+/// the record. That usually fails to compile, but not always: a shadowed
+/// nullary constructor in a pattern silently becomes a pattern variable.
+///
+/// `imported_conditionally` qualifies the one claim that is not true of every
+/// library: a `.v` imports `WasmVerifier.Exists` only when the program has a
+/// reachability obligation, so for a name that library declares the message
+/// says when the import happens, and why the name is refused without one.
+fn eprint_module_name_contract_error(
+    name: &str,
+    library: &str,
+    imported_conditionally: bool,
+    rename: &str,
+) {
+    let (imported, why_refused_without_one) = if imported_conditionally {
+        (
+            "the generated .v imports whenever the program has a reachability ('exists' or \
+             'unique') obligation",
+            "\n\n  Why refuse it in a program without one: the name is reserved in every .v, \
+             so adding an 'exists' or 'unique' obligation later never makes the file name \
+             invalid.",
+        )
+    } else {
+        ("every generated .v imports", "")
+    };
+    eprintln!(
+        "error: the output module name '{name}' is already declared by '{library}', a proof \
+         library {imported}.\n\n  \
+         The module name comes from the source filename, and the .v gives it to the module \
+         record: 'Definition {name} : module'. Rocq lets that definition shadow the library's \
+         '{name}': in any proof that imports this .v after the library, and in this .v \
+         wherever it spells '{name}' again, '{name}' names your module record, so code \
+         written for the library's '{name}' breaks there. Rename the source file: \
+         {rename}.{why_refused_without_one}\n\n  \
+         Why not auto-rename: the module name is the .v's identity — its file name, the \
+         subject of 'Theorem valid_{name}', and the prefix of every spec proof name — so \
+         renaming it silently would rename the artifact your proofs import."
+    );
+}
+
+/// Renders the diagnostic for an output module name spelled like the binder
+/// every generated `.v` gives its host instance. Inside `Section Host` the
+/// name means the host instance, which is not a module, so every theorem that
+/// names the module record there fails to type-check.
+fn eprint_module_name_host_binder_error(name: &str, rename: &str) {
+    eprintln!(
+        "error: the output module name '{name}' is the name every generated .v gives its \
+         host instance ('Section Host. Context `{{{name}: host}}.'), so inside that section \
+         '{name}' would mean the host instance, not your module record.\n\n  \
+         The theorems name the module record inside that section — 'Theorem valid_{name} : \
+         ValidModule {name}' — where '{name}' is the host instance, which is not a module, \
+         so the file fails to compile. Rename the source file: {rename}.\n\n  \
+         Why not auto-rename: the module name is the .v's identity — its file name, the \
+         subject of 'Theorem valid_{name}', and the prefix of every spec proof name — so \
+         renaming it silently would rename the artifact your proofs import. Nor is the \
+         binder renamed: it is the proof library's own name for the host instance, and the \
+         spec theorems take the instance as an implicit argument named '{name}', which \
+         proofs may pass as '({name} := h)'."
     );
 }
 
@@ -1455,6 +1619,16 @@ fn run() {
     // on this run actually emitting something.
     if need_codegen && (args.generate_wasm_output || args.generate_v_output) {
         clear_stale_outputs(&output_path, &source_fname);
+    }
+
+    // Refuse a `.v` for a source file name that is not UTF-8 before any phase
+    // runs, and after the clearing above, so the refusal leaves no artifact an
+    // earlier build wrote under the `module` fallback, as the translation's own
+    // module-name rejections (`Me.inf`, `host.inf`) leave none.
+    let writes_v = need_codegen && args.generate_v_output;
+    if let Some(message) = non_utf8_stem_refusal(&path, writes_v) {
+        eprintln!("{message}");
+        process::exit(1);
     }
 
     let mut t_ast = None;
@@ -1866,7 +2040,7 @@ fn run() {
             ) {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    eprint_translation_error(&e);
+                    eprint_translation_error(&e, &path);
                     process::exit(1);
                 }
             }
@@ -2517,6 +2691,93 @@ mod tests {
             "absence of --mode and -v must resolve to compile"
         );
         assert!(!args.generate_v_output);
+    }
+
+    /// A path with no file stem at all names no file, so it is left to the read
+    /// that reports exactly that, even when the run would write a `.v`.
+    #[test]
+    fn non_utf8_stem_refusal_leaves_a_missing_stem_to_the_read_error() {
+        for path in ["..", "dir/..", ""] {
+            for writes_v in [true, false] {
+                assert_eq!(
+                    non_utf8_stem_refusal(Path::new(path), writes_v),
+                    None,
+                    "`{path}` has no stem to refuse (writes_v = {writes_v})"
+                );
+            }
+        }
+    }
+
+    /// Any UTF-8 stem passes, however unusual: whether it is a legal module
+    /// name is the translation's question, which answers it with a diagnostic
+    /// that names the stem.
+    #[test]
+    fn non_utf8_stem_refusal_accepts_every_utf8_stem() {
+        for path in [
+            "prog.inf",
+            "dir/prog.inf",
+            "prog",
+            "a.b.inf",
+            ".inf",
+            "módulo.inf",
+            "module.inf",
+        ] {
+            assert_eq!(
+                non_utf8_stem_refusal(Path::new(path), true),
+                None,
+                "`{path}` has a UTF-8 stem"
+            );
+        }
+    }
+
+    /// A stem that is not UTF-8 is refused when the run writes a `.v`, naming
+    /// the file with only its invalid bytes escaped. Built from raw bytes,
+    /// which `OsStrExt::from_bytes` takes on Unix only.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_stem_refusal_refuses_a_non_utf8_stem() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = Path::new("dir").join(std::ffi::OsStr::from_bytes(b"caf\xe9.inf"));
+        assert_eq!(
+            non_utf8_stem_refusal(&path, true).as_deref(),
+            Some(
+                "error: the source file name \"caf\\xE9.inf\" is not valid UTF-8, so the .v has \
+                 no name to give its Rocq module.\n\n  \
+                 The .v names its Rocq module after the source file: the module record, its \
+                 validity theorem and every spec proof name are spelled from the file's stem. \
+                 Rename the source file to an ASCII name of letters, digits and underscores, \
+                 such as 'program.inf'."
+            ),
+        );
+        assert_eq!(
+            non_utf8_stem_refusal(&path, false),
+            None,
+            "a run that writes no .v keeps the fallback"
+        );
+    }
+
+    /// The same refusal on Windows, where a file name is UTF-16 and may be ill
+    /// formed: an unpaired surrogate has no UTF-8 spelling either.
+    #[cfg(windows)]
+    #[test]
+    fn non_utf8_stem_refusal_refuses_an_ill_formed_utf16_stem() {
+        use std::os::windows::ffi::OsStringExt;
+        let wide: Vec<u16> = "caf"
+            .encode_utf16()
+            .chain([0xD800])
+            .chain(".inf".encode_utf16())
+            .collect();
+        let name = std::ffi::OsString::from_wide(&wide);
+        let path = Path::new(&name);
+        assert!(
+            non_utf8_stem_refusal(path, true).is_some(),
+            "an ill-formed UTF-16 stem must be refused when a .v is written"
+        );
+        assert_eq!(
+            non_utf8_stem_refusal(path, false),
+            None,
+            "a run that writes no .v keeps the fallback"
+        );
     }
 
     /// Returns the path to the test data directory.

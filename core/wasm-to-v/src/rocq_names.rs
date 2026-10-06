@@ -6,13 +6,15 @@
 //! the file already defines is an error. Defining a name the file *imports* is
 //! legal, but the new definition shadows the import for the rest of the file,
 //! so every later reference resolves to it instead. Function names follow the
-//! same split:
+//! same split; module names, which cannot move, are rejected instead:
 //!
-//! | Contested name | A function named after it |
-//! |---|---|
-//! | A keyword, a curated prelude name, or a name the proof contract declares | Escaped with a trailing `_` by [`sanitize_rocq_identifier`] |
-//! | Spent by the file on its own scaffolding: a preamble helper, the module record, or `valid_<module>` | Disambiguated with `_<abs_idx>`, from the set `reserved_top_level_names` seeds |
-//! | The `Section Host` binder, `HOST_INSTANCE_BINDER` | Left alone: nothing inside that section names a function |
+//! | Contested name | A function named after it | A module named after it |
+//! |---|---|---|
+//! | A keyword or a curated prelude name | Escaped with a trailing `_` by [`sanitize_rocq_identifier`] | Rejected by [`validate_rocq_identifier`] |
+//! | A name the proof contract declares | Escaped with a trailing `_` by [`sanitize_rocq_identifier`] | Rejected by `validate_module_name_available` |
+//! | A preamble helper, which the file spends on its own scaffolding | Disambiguated with `_<abs_idx>`, from the set `reserved_top_level_names` seeds | Rejected by `validate_module_name_available` |
+//! | The rest of that scaffolding: the module record, or `valid_<module>` | Disambiguated the same way | Not contested: the module name is what spells them |
+//! | The `Section Host` binder, `HOST_INSTANCE_BINDER` | Left alone: nothing inside that section names a function | Rejected by `validate_module_name_available`: the theorems in that section name the module |
 //!
 //! An escaped spelling depends only on the name, so it survives added or
 //! reordered functions, unless another name in the module ends up spelled `X_`
@@ -20,20 +22,24 @@
 //! escapes onto the same spelling (`BI.call` and `BI_call` both become
 //! `BI_call_`). Then they contest `X_` like any duplicate: the module name, or
 //! whichever function comes first, keeps it, and the others are disambiguated
-//! off it. The escape
-//! applies whether or not the file imports the declaring library (`Exists` is
-//! imported only with a reachability obligation), so that adding a spec never
-//! renames a function. Only the curated prelude list is escaped: the other
-//! names `List`, `String`, `BinNat` and `ZArith` bring in (`length`, `app`, `N`)
-//! are not, since nothing the emitter writes after a function spells one.
+//! off it. The escape applies whether or not the file imports the declaring
+//! library (`Exists` is imported only with a reachability obligation), so that
+//! adding a spec never renames a function. Only the curated prelude list is
+//! escaped: the other names `List`, `String`, `BinNat` and `ZArith` bring in
+//! (`length`, `app`, `N`) are not, since nothing the emitter writes after a
+//! function spells one.
 //!
 //! A module name is the artifact's identity, so it is rejected rather than
-//! renamed when it is a keyword or a curated prelude name
-//! ([`validate_rocq_identifier`]) or a preamble helper
-//! (`validate_module_name_available`). Spec names are only ever emitted joined
+//! renamed: when it is a keyword or a curated prelude name
+//! ([`validate_rocq_identifier`]), and when it is a preamble helper, a name the
+//! proof contract declares, or the host binder
+//! (`validate_module_name_available`). A contract name is rejected whether or
+//! not the file imports the declaring library, for the reason a function is
+//! escaped either way: adding a reachability obligation must not turn a valid
+//! file name into a rejected one. Spec names are only ever emitted joined
 //! (`<module>__<spec>…`), so they cannot shadow an import.
 
-use crate::errors::{InvalidIdentifierReason, WasmToVError};
+use crate::errors::{InvalidIdentifierReason, ReservedNameOwner, WasmToVError};
 use rustc_hash::FxHashSet;
 
 /// Names auto-imported from the Rocq standard library whose shadowing
@@ -95,7 +101,8 @@ pub(crate) const PREAMBLE_HELPER_NAMES: &[&str] =
 /// rest of the file. A later body applying `BI_call`, or a later function's
 /// `: module_func` annotation, then names the user's function, and `coqc`
 /// rejects the file. [`sanitize_rocq_identifier`] therefore escapes every name
-/// here, as it escapes `nat`.
+/// here, as it escapes `nat`. A module name cannot move, so a module named
+/// after one is rejected instead, by `validate_module_name_available`.
 ///
 /// Type names are listed alongside the constructors, record fields,
 /// `Definition`s and `Parameter`s, because the emitted text spells several of
@@ -103,13 +110,16 @@ pub(crate) const PREAMBLE_HELPER_NAMES: &[&str] =
 /// `module` on the record, `hassert` and `reachability_spec` on the
 /// obligations, and `host` on the section binder.
 ///
-/// Two kinds of name are not listed, because no emitted term can be captured
-/// through them. The names Rocq derives from a declaration, the `Build_*`
-/// record constructors and the `_rect`/`_ind`/`_rec`/`_sind` eliminators, are
-/// never spelled by the emitter. And `Wasm_int`, the module `int_of_Z` is
-/// declared in, is a *module* name: modules live in their own namespace, so a
-/// `Definition Wasm_int` leaves the preamble's `Wasm_int.int_of_Z` resolving to
-/// the module.
+/// Three kinds of name are not listed, because no emitted term can be
+/// captured through them. The names Rocq derives from a declaration, the
+/// `Build_*` record constructors and the `_rect`/`_ind`/`_rec`/`_sind`
+/// eliminators, are never spelled by the emitter. `Wasm_int` is a *module*
+/// name: modules live in their own namespace, so a `Definition Wasm_int` leaves
+/// the preamble's `Wasm_int.int_of_Z` resolving to the module. And `int_of_Z`,
+/// declared inside `Module Wasm_int`, is only ever spelled qualified, as
+/// `Wasm_int.int_of_Z`, which a top-level `Definition int_of_Z` cannot
+/// capture. The list is therefore exactly the top-level declarations of the
+/// contract.
 ///
 /// The boundary is the vendored stub in `rocq-stub/`, not the full upstream
 /// libraries. The emitted text names only contract declarations the stub
@@ -122,17 +132,18 @@ pub(crate) const PREAMBLE_HELPER_NAMES: &[&str] =
 /// this list to the stub, library by library, as set equality: a name the stub
 /// gains must be added here, and a name it loses must be removed. That test
 /// reads the stub with the tests crate's Rocq declaration reader, so on its own
-/// it is exactly as complete as that reader. Wherever `coqc` runs,
+/// it is exactly as complete as that reader. The reader collects one name the
+/// list leaves out, `int_of_Z`, because it does not track `Module` scope; the
+/// test allows that name by name, and fails if the reader stops collecting it
+/// or the list starts carrying it. Wherever `coqc` runs,
 /// `the_contract_deny_list_matches_what_coqc_records` checks the list a second,
-/// independent way: against the declarations `coqc` itself records in the
-/// `.glob` files it writes while compiling the stub. A declaration form the
-/// reader misses (a mutual `Inductive … with …`, say) still turns that test
-/// red. The list keeps the reader's one known over-collection: `int_of_Z` is
-/// declared inside `Module Wasm_int` and only ever spelled qualified, so
-/// escaping it is harmless but unnecessary.
+/// independent way: against the top-level declarations `coqc` itself records
+/// in the `.glob` files it writes while compiling the stub, with no allowance.
+/// A declaration form the reader misses (a mutual `Inductive … with …`, say)
+/// still turns that test red.
 pub const ROCQ_CONTRACT_NAMES: &[(&str, &[&str])] = &[
     ("Wasm.bytes", &["byte", "encode", "list_byte_of_string"]),
-    ("Wasm.numerics", &["i32", "i32m", "i64", "i64m", "int_of_Z"]),
+    ("Wasm.numerics", &["i32", "i32m", "i64", "i64m"]),
     (
         "Wasm.datatypes",
         &[
@@ -351,6 +362,32 @@ pub const ROCQ_CONTRACT_NAMES: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The one library in [`ROCQ_CONTRACT_NAMES`] a generated `.v` does not always
+/// import: a generated `.v` imports it only when its module carries a
+/// reachability obligation. Every other library is imported by every `.v`.
+const REACHABILITY_CONTRACT_LIBRARY: &str = "WasmVerifier.Exists";
+
+impl ReservedNameOwner {
+    /// Whether a generated `.v` imports this owner's name only when its module
+    /// carries a reachability (`exists` or `unique`) obligation, rather than in
+    /// every file.
+    ///
+    /// True exactly for a name `WasmVerifier.Exists` declares. Every other
+    /// contract library is imported by every generated `.v`, and every
+    /// generated `.v` also defines the preamble helpers and binds the host
+    /// binder, so no other owner is conditional either. The name is reserved
+    /// either way, so that adding a reachability obligation never turns a valid
+    /// file name into a rejected one; only the explanation differs, because the
+    /// file being rejected may not import the library.
+    #[must_use = "the answer decides how a diagnostic words the import"]
+    pub fn is_imported_conditionally(self) -> bool {
+        matches!(
+            self,
+            Self::Contract { library } if library == REACHABILITY_CONTRACT_LIBRARY
+        )
+    }
+}
+
 /// The name every generated `.v` gives its host instance, in the
 /// ``Section Host. Context `{ho: host}.`` block its theorems are stated under.
 ///
@@ -507,7 +544,7 @@ pub fn validate_rocq_identifier(name: &str) -> Result<(), WasmToVError> {
     Ok(())
 }
 
-/// Rejects an output module name that a preamble helper already occupies.
+/// Rejects an output module name that the generated `.v` reserves.
 ///
 /// The module name has nowhere to be disambiguated to: it is the `.v` file's
 /// identity, the subject of the emitted
@@ -515,19 +552,47 @@ pub fn validate_rocq_identifier(name: &str) -> Result<(), WasmToVError> {
 /// spec-derived proof name. Renaming it silently would rename the artifact a
 /// downstream proof imports, so the name is rejected with a hint instead.
 ///
-/// The preamble helpers are the only names the module name can define twice. It
-/// cannot spell a spec-derived name (`<module>__<spec>_specs` and its
-/// siblings), because [`validate_rocq_identifier`] has already rejected the
-/// `__` separator every one of them carries; and `valid_<module>` is derived
-/// from it rather than competing with it.
+/// A module name that is a legal identifier (callers run
+/// [`validate_rocq_identifier`] first, which owns the keywords and the curated
+/// prelude names) can still contest three things, checked in this order:
+/// - **the preamble**: the file defines [`PREAMBLE_HELPER_NAMES`] before the
+///   record, so the record would define one of them twice, which `coqc`
+///   rejects ([`ReservedNameOwner::PreambleHelper`]);
+/// - **the contract's vocabulary**: the file imports [`ROCQ_CONTRACT_NAMES`],
+///   so the record would shadow the imported name for every later line, and
+///   for a proof that imports the `.v` after the library
+///   ([`ReservedNameOwner::Contract`]). A name
+///   [`REACHABILITY_CONTRACT_LIBRARY`] declares is rejected even in a file
+///   that does not import that library, so that adding a reachability
+///   obligation never turns a valid file name into a rejected one;
+/// - **the binder its own validity theorem is stated under**: inside
+///   `Section Host`, [`HOST_INSTANCE_BINDER`] means the host instance, so the
+///   theorems would read the module name as the host instance rather than as
+///   the record ([`ReservedNameOwner::HostSectionBinder`]).
+///
+/// No name belongs to two of these, so the order is never observable. Every
+/// owner gets the same hint, `<name>_module`, which none of them holds.
+///
+/// The module name cannot define a spec-derived name twice
+/// (`<module>__<spec>_specs` and its siblings), because
+/// [`validate_rocq_identifier`] has already rejected the `__` separator every
+/// one of them carries; and `valid_<module>` is derived from it rather than
+/// competing with it.
 pub(crate) fn validate_module_name_available(name: &str) -> Result<(), WasmToVError> {
-    if PREAMBLE_HELPER_NAMES.contains(&name) {
-        return Err(WasmToVError::ModuleNameShadowsPreambleHelper {
-            name: name.to_string(),
-            fix_hint: format!("{name}_module"),
-        });
-    }
-    Ok(())
+    let owner = if PREAMBLE_HELPER_NAMES.contains(&name) {
+        ReservedNameOwner::PreambleHelper
+    } else if let Some(library) = contract_library_of(name) {
+        ReservedNameOwner::Contract { library }
+    } else if name == HOST_INSTANCE_BINDER {
+        ReservedNameOwner::HostSectionBinder
+    } else {
+        return Ok(());
+    };
+    Err(WasmToVError::ModuleNameReserved {
+        name: name.to_string(),
+        owner,
+        fix_hint: format!("{name}_module"),
+    })
 }
 
 /// The top-level Rocq names an emitted module claims before it names a single
@@ -713,9 +778,10 @@ mod tests {
     use super::{
         HOST_INSTANCE_BINDER, PREAMBLE_HELPER_NAMES, REJECTED_ROCQ_KEYWORDS,
         REJECTED_ROCQ_STDLIB_NAMES, ROCQ_CONTRACT_NAMES, contract_library_of,
-        sanitize_rocq_identifier, validate_rocq_identifier, validate_spec_join_boundary,
+        sanitize_rocq_identifier, validate_module_name_available, validate_rocq_identifier,
+        validate_spec_join_boundary,
     };
-    use crate::errors::WasmToVError;
+    use crate::errors::{ReservedNameOwner, WasmToVError};
     use rustc_hash::{FxHashMap, FxHashSet};
 
     /// A trailing `_` on the module name abuts the `__` separator (`app_` ->
@@ -857,7 +923,7 @@ mod tests {
             ("encode", "encode_"),
             ("list_byte_of_string", "list_byte_of_string_"),
             ("i32", "i32_"),
-            ("int_of_Z", "int_of_Z_"),
+            ("i64m", "i64m_"),
             ("BI_call", "BI_call_"),
             ("Tf", "Tf_"),
             ("modfunc_body", "modfunc_body_"),
@@ -971,7 +1037,9 @@ mod tests {
     /// derived by Rocq and never spelled by the emitter. `Wasm_int` is declared
     /// by the contract, but as a module, and a module lives in its own
     /// namespace: a `Definition Wasm_int` leaves `Wasm_int.int_of_Z` resolving
-    /// to the module.
+    /// to the module. And `int_of_Z` is declared inside that module, so the
+    /// file only ever spells it qualified, which a `Definition int_of_Z`
+    /// cannot capture.
     #[test]
     fn names_no_emitted_term_can_capture_are_unchanged() {
         for name in [
@@ -982,6 +1050,7 @@ mod tests {
             "module_func_rec",
             "module_func_sind",
             "Wasm_int",
+            "int_of_Z",
         ] {
             assert_eq!(sanitize_rocq_identifier(name), name, "`{name}`");
             assert_eq!(contract_library_of(name), None, "`{name}`");
@@ -1079,5 +1148,196 @@ mod tests {
     fn over_length_names_are_truncated() {
         let out = assert_sanitized_is_valid(&"a".repeat(400));
         assert!(out.len() <= 255, "must respect the 255-char cap: {}", out.len());
+    }
+
+    /// Asserts that `name` is refused as a module name because
+    /// `expected_owner` holds it, with the rename `<name>_module`.
+    fn assert_module_name_reserved(name: &str, expected_owner: ReservedNameOwner) {
+        match validate_module_name_available(name) {
+            Err(WasmToVError::ModuleNameReserved {
+                name: reported,
+                owner,
+                fix_hint,
+            }) => {
+                assert_eq!(reported, name, "the contested name");
+                assert_eq!(owner, expected_owner, "what holds `{name}`");
+                assert_eq!(fix_hint, format!("{name}_module"), "the rename for `{name}`");
+            }
+            other => panic!("`{name}` must be held by {expected_owner:?}; got {other:?}"),
+        }
+    }
+
+    /// Every reserved module name, paired with what holds it, read from the
+    /// lists the check itself reads.
+    fn reserved_module_names() -> Vec<(&'static str, ReservedNameOwner)> {
+        let helpers = PREAMBLE_HELPER_NAMES
+            .iter()
+            .map(|&helper| (helper, ReservedNameOwner::PreambleHelper));
+        let contract = ROCQ_CONTRACT_NAMES.iter().flat_map(|&(library, names)| {
+            names
+                .iter()
+                .map(move |&name| (name, ReservedNameOwner::Contract { library }))
+        });
+        let binder = [(HOST_INSTANCE_BINDER, ReservedNameOwner::HostSectionBinder)];
+        helpers.chain(contract).chain(binder).collect()
+    }
+
+    /// Every contract name, not a sample, is refused as a module name, under
+    /// the library [`contract_library_of`] reports for it. So is the host
+    /// binder, spelled out as `ho` rather than read from its constant, so a
+    /// binder renamed in the emitter moves this test too.
+    #[test]
+    fn every_contract_name_is_rejected_as_a_module_name() {
+        for &(library, names) in ROCQ_CONTRACT_NAMES {
+            for &name in names {
+                assert_eq!(contract_library_of(name), Some(library), "`{name}`");
+                assert_module_name_reserved(name, ReservedNameOwner::Contract { library });
+            }
+        }
+        assert_module_name_reserved("ho", ReservedNameOwner::HostSectionBinder);
+    }
+
+    /// Every preamble helper is refused under its own owner, which keeps the
+    /// diagnostic the helpers have always had.
+    #[test]
+    fn every_preamble_helper_is_rejected_as_a_module_name() {
+        for &helper in PREAMBLE_HELPER_NAMES {
+            assert_module_name_reserved(helper, ReservedNameOwner::PreambleHelper);
+        }
+    }
+
+    /// No name is held by two owners, so the order the check consults them in
+    /// is never observable. And every reserved name is a legal identifier,
+    /// which is what makes the reservation reachable: callers run
+    /// [`validate_rocq_identifier`] first, and a name it already refused would
+    /// never get this far.
+    #[test]
+    fn every_reserved_module_name_has_exactly_one_owner() {
+        let mut owners: FxHashMap<&str, ReservedNameOwner> = FxHashMap::default();
+        for (name, owner) in reserved_module_names() {
+            if let Some(first) = owners.insert(name, owner) {
+                panic!("`{name}` is held by both {first:?} and {owner:?}");
+            }
+            assert!(
+                validate_rocq_identifier(name).is_ok(),
+                "`{name}` is refused before the reservation is consulted",
+            );
+        }
+    }
+
+    /// The rename every rejection offers is itself a usable module name: a
+    /// legal identifier, held by no owner, and safe to join with a spec name.
+    /// A hint refused in turn would send the user from one rejection straight
+    /// into the next.
+    #[test]
+    fn every_reserved_module_name_hint_is_accepted() {
+        for (name, _) in reserved_module_names() {
+            let Err(WasmToVError::ModuleNameReserved { fix_hint, .. }) =
+                validate_module_name_available(name)
+            else {
+                panic!("`{name}` must be refused as a module name");
+            };
+            assert!(
+                validate_rocq_identifier(&fix_hint).is_ok(),
+                "the hint `{fix_hint}` for `{name}` is not a legal identifier",
+            );
+            assert!(
+                validate_module_name_available(&fix_hint).is_ok(),
+                "the hint `{fix_hint}` for `{name}` is reserved too",
+            );
+            assert!(
+                validate_spec_join_boundary(&fix_hint, "S").is_ok(),
+                "the hint `{fix_hint}` for `{name}` cannot carry a spec",
+            );
+        }
+    }
+
+    /// Controls: a name near a reserved one is a different identifier and
+    /// stays available. Rocq names are case-sensitive, and an affix makes a
+    /// new name. `Build_module`, `Wasm_int` and `int_of_Z` are not reserved
+    /// either: Rocq derives the first and the emitter never spells it, the
+    /// second is a module, which lives in a namespace a `Definition` cannot
+    /// capture, and the third is declared inside that module, so the file only
+    /// ever spells it qualified.
+    #[test]
+    fn names_near_a_reserved_module_name_are_available() {
+        for name in [
+            "Prog",
+            "main",
+            "Host",
+            "hosts",
+            "Ho",
+            "HO",
+            "hos",
+            "Me_module",
+            "host_module",
+            "ho_module",
+            "modules",
+            "module_funcs",
+            "Build_module",
+            "Wasm_int",
+            "int_of_Z",
+        ] {
+            assert!(
+                validate_module_name_available(name).is_ok(),
+                "`{name}` must stay available",
+            );
+        }
+    }
+
+    /// Only a name `WasmVerifier.Exists` declares is imported conditionally,
+    /// spelled out here so the constant the answer reads is pinned too.
+    #[test]
+    fn only_an_exists_name_is_imported_conditionally() {
+        for (name, owner) in reserved_module_names() {
+            let expected = matches!(
+                owner,
+                ReservedNameOwner::Contract { library } if library == "WasmVerifier.Exists"
+            );
+            assert_eq!(
+                owner.is_imported_conditionally(),
+                expected,
+                "`{name}`, held by {owner:?}",
+            );
+        }
+    }
+
+    /// The one-line description of each owner, pinned whole. The preamble
+    /// helper's is the text that variant has always rendered, and must keep
+    /// every byte. A contract library is said to be imported only as far as
+    /// the generated file imports it: always for `Wasm.host`, and for
+    /// `WasmVerifier.Exists` only with a reachability obligation.
+    #[test]
+    fn module_name_reserved_descriptions() {
+        let description = |name: &str| {
+            validate_module_name_available(name)
+                .expect_err("a reserved name")
+                .to_string()
+        };
+        assert_eq!(
+            description("Me"),
+            "the output module name `Me` is one of the helper definitions the emitted Rocq \
+             preamble always occupies, so `Me` would name two top-level definitions in one file; \
+             rename it to `Me_module`",
+        );
+        assert_eq!(
+            description("host"),
+            "the output module name `host` is declared by `Wasm.host`, a proof-contract library \
+             every generated Rocq file imports, so the module record would shadow the library's \
+             `host`; rename the module to `host_module`",
+        );
+        assert_eq!(
+            description("reach_func"),
+            "the output module name `reach_func` is declared by `WasmVerifier.Exists`, a \
+             proof-contract library the generated Rocq file imports whenever the module carries \
+             a reachability obligation (the name is reserved either way), so the module record \
+             would shadow the library's `reach_func`; rename the module to `reach_func_module`",
+        );
+        assert_eq!(
+            description("ho"),
+            "the output module name `ho` is the name the generated Rocq file gives its host \
+             instance, so the file's theorems would read it as the host instance instead of the \
+             module record; rename it to `ho_module`",
+        );
     }
 }

@@ -24,7 +24,7 @@
 //! fn compile(source_code: &str) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
-//!     let codegen_output = codegen(&typed_context, "module")?;
+//!     let codegen_output = codegen(&typed_context, "MyModule")?;
 //!     Ok(codegen_output)
 //! }
 //! ```
@@ -99,7 +99,7 @@
 //! let source = "fn factorial(n: i32) -> i32 { if n <= 1 { return 1; } else { return n * factorial(n - 1); } }";
 //! let arena = parse(source)?;
 //! let typed_context = type_check(arena)?;
-//! let codegen_output = codegen(&typed_context, "module")?;
+//! let codegen_output = codegen(&typed_context, "MyModule")?;
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -121,7 +121,7 @@
 //! let source = "fn is_even(n: i32) -> bool { return n % 2 == 0; }";
 //! let arena = parse(source)?;
 //! let typed_context = type_check(arena)?;
-//! let codegen_output = codegen(&typed_context, "module")?;
+//! let codegen_output = codegen(&typed_context, "MyModule")?;
 //! // WASM bytes are directly available from codegen output:
 //! // wasm_to_v("MyModule", codegen_output.wasm(), codegen_output.spec_func_indices_by_spec())
 //! # Ok::<(), anyhow::Error>(())
@@ -183,7 +183,7 @@
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
 //!     let _analysis_result = analyze(&typed_context)?;
-//!     codegen(&typed_context, "module")
+//!     codegen(&typed_context, "MyModule")
 //! }
 //! ```
 //!
@@ -195,7 +195,7 @@
 //! fn compile_to_rocq(source_code: &str, module_name: &str) -> anyhow::Result<String> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
-//!     let codegen_output = codegen(&typed_context, "module")?;
+//!     let codegen_output = codegen(&typed_context, module_name)?;
 //!     let rocq_code = wasm_to_v(
 //!         module_name,
 //!         codegen_output.wasm(),
@@ -227,7 +227,7 @@
 //!
 //!     let arena = parse(source)?;
 //!     let typed_context = type_check(arena)?;
-//!     codegen(&typed_context, "module")
+//!     codegen(&typed_context, "MyModule")
 //! }
 //! ```
 //!
@@ -341,7 +341,9 @@ pub use rustc_hash::FxHashMap;
 /// Re-export of the [`wasm_to_v`] error types so downstream consumers (CLI,
 /// LSP, tools) can match on translation failures without taking a direct
 /// dependency on `inference-wasm-to-v-translator`.
-pub use inference_wasm_to_v_translator::errors::{InvalidIdentifierReason, WasmToVError};
+pub use inference_wasm_to_v_translator::errors::{
+    InvalidIdentifierReason, ReservedNameOwner, WasmToVError,
+};
 
 /// Re-export of the static-merge linker's error type so downstream consumers
 /// can match on link failures (e.g. an unsatisfied import or a Tier-C module)
@@ -763,8 +765,13 @@ pub fn analyze_with_options(
 /// bytes and compilation metadata.
 ///
 /// `module_name` is written into the WASM module-name subsection and flows
-/// downstream into the Rocq translator. The CLI passes the input file stem;
-/// library callers can pass any Rocq-identifier-compatible name.
+/// downstream into the Rocq translator: if the binary is translated with
+/// [`wasm_to_v`], it is the Rocq module name, taking precedence over the name
+/// passed there. The CLI passes the input file stem. Any name compiles, but the
+/// binary can be translated only under a valid Rocq identifier that the
+/// generated `.v` does not reserve; a reserved one, such as `module`, still
+/// compiles, and its translation is refused with
+/// [`WasmToVError::ModuleNameReserved`].
 ///
 /// The output stays within the WebAssembly 1.0 instruction set. For
 /// target-specific or proof-mode compilation, or to opt into a post-MVP
@@ -1122,7 +1129,7 @@ pub fn link_resolved(
 ///
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
-/// let codegen_output = codegen(&typed_context, "module")?;
+/// let codegen_output = codegen(&typed_context, "EvenChecker")?;
 /// let rocq_code = wasm_to_v(
 ///     "EvenChecker",
 ///     codegen_output.wasm(),
@@ -1149,7 +1156,7 @@ pub fn link_resolved(
 ///
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
-/// let codegen_output = codegen(&typed_context, "module")?;
+/// let codegen_output = codegen(&typed_context, "CommutativityProof")?;
 /// let rocq_code = wasm_to_v(
 ///     "CommutativityProof",
 ///     codegen_output.wasm(),
@@ -1187,8 +1194,11 @@ pub fn link_resolved(
 ///
 /// # Parameters
 ///
-/// - `mod_name`: The name of the Rocq module to generate. Should be a valid
-///   Rocq identifier (alphanumeric, starting with an uppercase letter).
+/// - `mod_name`: The name of the Rocq module to generate: a valid Rocq
+///   identifier that the generated `.v` does not reserve (see `# Errors`).
+///   A module name in the binary's `name` section, which [`codegen`] writes
+///   from its `module_name` argument, takes precedence and is checked the same
+///   way, so pass both the same name.
 /// - `wasm`: The WebAssembly binary to translate, as produced by [`codegen`].
 /// - `spec_funcs_by_spec`: WASM function indices that originated from `spec`
 ///   blocks, grouped by spec name (typically obtained from
@@ -1209,8 +1219,13 @@ pub fn link_resolved(
 ///   shadow a Rocq stdlib type
 /// - `WasmToVError::EmbeddedSpecMismatch` — the caller passed a non-empty
 ///   explicit spec map that disagrees with the binary's embedded section
-/// - `WasmToVError::ModuleNameShadowsPreambleHelper` — the module name is one
-///   of the helper definitions the emitted `.v` preamble always occupies
+/// - `WasmToVError::ModuleNameReserved` — the module name is reserved in the
+///   emitted `.v`, and its `owner` says what for:
+///   `ReservedNameOwner::PreambleHelper` (one of the helper definitions the
+///   preamble always occupies), `ReservedNameOwner::Contract` (a name the proof
+///   contract declares, with the declaring library), or
+///   `ReservedNameOwner::HostSectionBinder` (the `ho` binder the theorems are
+///   stated under)
 /// - `WasmToVError::WasmParse` — the WASM binary is malformed or contains
 ///   unsupported features
 ///

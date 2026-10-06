@@ -179,9 +179,9 @@ pub fn translate_bytes(
     // (`decode_spec_funcs_section`), so the per-spec loop inside
     // `WasmParseData::translate` is no longer needed.
     validate_rocq_identifier(mod_name)?;
-    // Syntactic legality is not availability: the emitted preamble already
-    // occupies eight top-level `Definition` names, and the module record claims
-    // this one.
+    // Syntactic legality is not availability: the generated `.v` reserves
+    // names for its preamble, the proof contract and the host binder, which
+    // the module record cannot take.
     validate_module_name_available(mod_name)?;
     for spec_name in spec_funcs_by_spec.keys() {
         validate_rocq_identifier(spec_name)?;
@@ -453,8 +453,8 @@ fn parse(
                                 // The embedded `name` section bypasses the
                                 // CLI-side validation. Re-run validation so
                                 // a hand-crafted binary cannot smuggle an
-                                // invalid identifier — or a name the emitted
-                                // preamble already occupies — into Rocq
+                                // invalid identifier — or a name the
+                                // generated `.v` reserves — into Rocq
                                 // emission.
                                 validate_rocq_identifier(&wasm_parse_data.mod_name)?;
                                 validate_module_name_available(&wasm_parse_data.mod_name)?;

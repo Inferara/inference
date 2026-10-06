@@ -33,7 +33,7 @@ fn compile(source_code: &str) -> anyhow::Result<CodegenOutput> {
     let typed_context = type_check(arena)?;
 
     // Phase 3: Generate WASM bytecode
-    let codegen_output = codegen(&typed_context, "module")?;
+    let codegen_output = codegen(&typed_context, "MyModule")?;
 
     Ok(codegen_output)
 }

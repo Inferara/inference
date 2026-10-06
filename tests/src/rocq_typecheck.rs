@@ -3217,14 +3217,20 @@ pub(crate) mod gate {
     /// `.v` imports from the contract, so a binding spelled like any of it
     /// shadows an import. It is read by `upstream_declared_names`, the reader
     /// [`the_contract_deny_list_is_the_stub_vocabulary`] holds the translator's
-    /// own copy of it to.
+    /// own copy of it to, less that reader's known over-collection,
+    /// [`READER_OVER_COLLECTION`], which no binding can shadow; so it is the
+    /// same vocabulary the translator escapes.
     fn stub_vocabulary() -> Vec<(String, String)> {
         STUB_MODULES
             .iter()
             .flat_map(|&(dir, module)| {
                 let file = format!("{dir}/{module}.v");
+                let library = stub_library(dir, module);
                 upstream_declared_names(&read_stub(dir, module))
                     .into_iter()
+                    .filter(move |name| {
+                        !READER_OVER_COLLECTION.contains(&(library.as_str(), name.as_str()))
+                    })
                     .map(move |name| (name, file.clone()))
             })
             .collect()
@@ -3274,7 +3280,9 @@ pub(crate) mod gate {
     /// cover that: the reader's shape test,
     /// `upstream_declared_names_reads_every_binding_shape`, and, wherever
     /// `coqc` runs, [`the_contract_deny_list_matches_what_coqc_records`],
-    /// which reads the declarations from `coqc` instead.
+    /// which reads the declarations from `coqc` instead. The reader's one known
+    /// over-collection, [`READER_OVER_COLLECTION`], is allowed by name, and
+    /// fails here if it goes stale.
     #[test]
     fn the_contract_deny_list_is_the_stub_vocabulary() {
         let stub: Vec<(String, BTreeSet<String>)> = STUB_MODULES
@@ -3295,6 +3303,7 @@ pub(crate) mod gate {
             let missing: Vec<String> = declared
                 .iter()
                 .filter(|name| !listed.contains(name.as_str()))
+                .filter(|name| !READER_OVER_COLLECTION.contains(&(library.as_str(), name.as_str())))
                 .map(|name| format!("            \"{name}\","))
                 .collect();
             if !missing.is_empty() {
@@ -3323,6 +3332,21 @@ pub(crate) mod gate {
                 ));
             }
         }
+        for &(library, name) in READER_OVER_COLLECTION {
+            let collected = stub.iter().any(|(stub_library, declared)| {
+                stub_library == library && declared.contains(name)
+            });
+            let listed = ROCQ_CONTRACT_NAMES
+                .iter()
+                .any(|&(listed_library, names)| listed_library == library && names.contains(&name));
+            if !collected || listed {
+                report.push(format!(
+                    "the allowance for `{name}` in {library} is stale (the reader collects it: \
+                     {collected}; ROCQ_CONTRACT_NAMES carries it: {listed}); update \
+                     READER_OVER_COLLECTION"
+                ));
+            }
+        }
         assert!(
             report.is_empty(),
             "ROCQ_CONTRACT_NAMES in core/wasm-to-v/src/rocq_names.rs has drifted from \
@@ -3341,6 +3365,15 @@ pub(crate) mod gate {
         );
     }
 
+    /// The names `upstream_declared_names` collects from the stub that are no
+    /// top-level declaration, as (library, name). The reader does not track
+    /// `Module` scope, so `int_of_Z`, declared inside `Wasm.numerics`'s
+    /// `Module Wasm_int`, comes back bare. A `.v` only ever spells it
+    /// `Wasm_int.int_of_Z`, which a top-level `Definition int_of_Z` cannot
+    /// capture, so `ROCQ_CONTRACT_NAMES` leaves it out, and
+    /// [`the_contract_deny_list_is_the_stub_vocabulary`] allows exactly these.
+    const READER_OVER_COLLECTION: &[(&str, &str)] = &[("Wasm.numerics", "int_of_Z")];
+
     /// The `.glob` kinds `coqc` tags a declaration with that a generated `.v`
     /// imports: axioms and parameters, constructors, definitions, inductive
     /// types, record projections, and records (a `Class` is recorded as one).
@@ -3353,24 +3386,14 @@ pub(crate) mod gate {
     /// through the module resolving.
     const GLOB_NON_DECLARATION_KINDS: &[&str] = &["binder", "scheme", "mod"];
 
-    /// The names `ROCQ_CONTRACT_NAMES` carries although `coqc` records them
-    /// only inside a module, as (library, module, name): the declaration
-    /// reader's one documented over-collection. A `.v` reaches such a name only
-    /// qualified, so escaping it is unnecessary. These are the only names
-    /// [`the_contract_deny_list_matches_what_coqc_records`] allows the list to
-    /// carry beyond what `coqc` records at top level.
-    const QUALIFIED_ONLY_CONTRACT_NAMES: &[(&str, &str, &str)] =
-        &[("Wasm.numerics", "Wasm_int", "int_of_Z")];
-
-    /// The declarations `coqc` recorded in one stub file's `.glob`.
+    /// The top-level declarations `coqc` recorded in one stub file's `.glob`.
     struct GlobDeclarations {
         /// The logical library `coqc` compiled the file as, from its `F` line.
         library: String,
         /// The declarations outside any module (a section does not change the
-        /// recorded path).
+        /// recorded path). One inside a module (`Wasm_int.int_of_Z`) is reached
+        /// only qualified, which no `Definition` captures, so it is not kept.
         top_level: BTreeSet<String>,
-        /// The declarations inside a module, as (module path, name).
-        qualified: BTreeSet<(String, String)>,
     }
 
     /// Reads the declarations a `.glob` file records. A declaration line is
@@ -3389,7 +3412,6 @@ pub(crate) mod gate {
         let mut declarations = GlobDeclarations {
             library,
             top_level: BTreeSet::new(),
-            qualified: BTreeSet::new(),
         };
         for line in lines {
             let is_reference = line
@@ -3413,10 +3435,6 @@ pub(crate) mod gate {
             );
             if path == "<>" {
                 declarations.top_level.insert(name.to_string());
-            } else {
-                declarations
-                    .qualified
-                    .insert((path.to_string(), name.to_string()));
             }
         }
         declarations
@@ -3433,13 +3451,12 @@ pub(crate) mod gate {
     /// constructor, which the emitter never spells), and each library's
     /// top-level declarations must equal its group as a set.
     ///
-    /// Two differences are allowed, both documented on the translator's list.
+    /// No difference is allowed beyond what the translator's list documents.
     /// Module names (`Wasm_int`) and derived eliminators are excluded by kind,
-    /// see [`GLOB_NON_DECLARATION_KINDS`]. And `int_of_Z`, which `coqc`
-    /// records inside `Module Wasm_int`, is carried by the list as the
-    /// reader's over-collection; [`QUALIFIED_ONLY_CONTRACT_NAMES`] allows it,
-    /// and fails if the allowance goes stale. The library names are `coqc`'s
-    /// own too, read from each file's `F` line.
+    /// see [`GLOB_NON_DECLARATION_KINDS`], and a declaration `coqc` records
+    /// inside a module (`int_of_Z`, inside `Module Wasm_int`) is not top-level,
+    /// so the list must not carry it. The library names are `coqc`'s own too,
+    /// read from each file's `F` line.
     ///
     /// Elaboration needs `coqc`, so this skips, saying so, where it is absent.
     #[test]
@@ -3489,37 +3506,12 @@ pub(crate) mod gate {
                 .iter()
                 .copied()
                 .filter(|name| !declarations.top_level.contains(*name))
-                .filter(|name| {
-                    !QUALIFIED_ONLY_CONTRACT_NAMES
-                        .iter()
-                        .any(|&(allowed_library, _, allowed)| {
-                            allowed_library == library && allowed == *name
-                        })
-                })
                 .collect();
             if !extra.is_empty() {
                 report.push(format!(
                     "{library}: its group lists these, which coqc records no top-level \
                      declaration of: {}",
                     extra.join(", ")
-                ));
-            }
-        }
-        for &(library, module, name) in QUALIFIED_ONLY_CONTRACT_NAMES {
-            let recorded_inside = recorded.iter().any(|declarations| {
-                declarations.library == library
-                    && declarations
-                        .qualified
-                        .contains(&(module.to_string(), name.to_string()))
-            });
-            let listed = ROCQ_CONTRACT_NAMES
-                .iter()
-                .any(|&(listed_library, names)| listed_library == library && names.contains(&name));
-            if !(recorded_inside && listed) {
-                report.push(format!(
-                    "the allowance for `{name}` inside {library}'s `{module}` is stale \
-                     (recorded inside the module: {recorded_inside}; listed: {listed}); \
-                     update QUALIFIED_ONLY_CONTRACT_NAMES"
                 ));
             }
         }
