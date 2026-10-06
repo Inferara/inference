@@ -196,6 +196,23 @@ This is a hand-written mirror, not the real libraries, so it can drift:
   `../src/hassert_print.rs`, which are the source of truth for what is
   emitted, and to the real wasm-verifier source when adding or changing a
   `WasmVerifier.*` declaration.
+- **A stale deny-list** if a declaration is added to or removed from this
+  stub alone. `ROCQ_CONTRACT_NAMES` in `../src/rocq_names.rs` is a second
+  copy of the stub's top-level vocabulary, grouped by the logical library
+  that declares each name: the translator moves a function off every name
+  in it (`fn BI_call` is emitted as `BI_call_`) and rejects a module named
+  after one. A declaration added to the stub must join the list, under its
+  library, in the same change; a declaration removed must leave it. Two
+  tests in `tests/src/rocq_typecheck.rs` enforce this, and both name the
+  library and the names that disagree when they fail:
+  `the_contract_deny_list_is_the_stub_vocabulary` compares the list with the
+  stub's text and needs no `coqc`, and
+  `the_contract_deny_list_matches_what_coqc_records` compares it with the
+  top-level declarations in the `.glob` files `coqc` writes for the stub, and
+  skips, saying so, where `coqc` is absent. A declaration inside a `Module`
+  (`int_of_Z`, in `Module Wasm_int`) is not a top-level name, so the list
+  leaves it out. See [Reserved
+  names](../ROCQ_CONTRACT.md#reserved-names).
 
 ## History: the retired Essence-fork stub
 
@@ -301,8 +318,9 @@ what the real library is too permissive to reject.
 
 `Hall`'s return is the worked example of the reverse move, and the
 template for the next name that becomes emittable: a `Definition`
-restored here, its row dropped from the table above, and a corpus fixture
-that actually emits it — because a declaration nothing produces is a
+restored here, its row dropped from the table above, the name added to
+`ROCQ_CONTRACT_NAMES` under its library, and a corpus fixture that actually
+emits it — because a declaration nothing produces is a
 declaration `coqc` never elaborates, which is the state this narrowing
 exists to prevent.
 

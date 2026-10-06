@@ -304,6 +304,21 @@ In single-file mode (`infs build path/to/file.inf`) the output always goes to
 `out/` relative to `infc`'s inherited CWD (the invoking shell's current
 directory), with no manifest `output-dir` forwarded.
 
+A build that writes a `.v` names the Rocq module after the source file's stem,
+so in single-file mode the stem has to be usable as one. `infs build term.inf
+-v` is refused in `infc`'s words, with no artifact, because `term` is a name the
+proof contract declares and the module record would shadow it for any proof
+that imports the `.v` after the contract library; the message says to rename the
+file to `term_module.inf`. Refused: a stem that is not a legal Rocq identifier
+(`my-prog`, `café`), one containing `__` or longer than 255 characters, one
+ending in `_` when the program has a `spec`, a Rocq keyword or curated prelude
+name, a preamble helper, a contract name, or `ho`; a stem that is not valid
+UTF-8 is refused too. The `infc` README lists the rules in full. The same
+file builds without `-v` or `--mode proof`, since the `.wasm` has no Rocq name.
+Project mode compiles `src/main.inf`, whose stem `main` is never reserved. The
+rule and its rationale are in [Reserved
+names](../../core/wasm-to-v/ROCQ_CONTRACT.md#reserved-names).
+
 ## `infs run`
 
 `infs run` builds and then executes the resulting WASM where the build's

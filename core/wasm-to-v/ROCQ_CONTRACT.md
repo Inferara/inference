@@ -453,9 +453,10 @@ binder is `ofs` now (#412): current emissions parse with mathcomp
 loaded first, the re-delimit line above being the only accommodation
 left, and only a `.v` generated before the rename still needs the old
 ordering. The rename covers the fixed preamble, not names the source
-supplies — emitted definition names are user identifiers printed
-verbatim, so a source function named `of` would reintroduce the
-collision for its own `Definition` line.
+supplies — emitted definition names are the user's identifiers,
+sanitized and moved off the names the `.v` reserves, but ssreflect's
+keywords are not among them, so a source function named `of` would
+reintroduce the collision for its own `Definition` line.
 
 ## Emitted-file anatomy
 
@@ -615,8 +616,8 @@ one rewrite that keeps a name from ending the construct it sits in:
 |------|------------|---------|
 | Import module and field, export name | string literal: `Mi "m" "n" (…)`, `Me "n" (…)` | every `"` doubled |
 | Name-section local name | comment after `BI_local_get`/`set`/`tee`: `(*n*)` | every `"` doubled, `(*` → `( *`, `*)` → `* )`, a trailing `(` followed by a space |
-| Function name | `Definition` identifier | `sanitize_rocq_identifier` (see [T_app resolution discipline](#t_app-resolution-discipline)) |
-| Module name | `Definition` identifier | validated: a name that is not a legal identifier, or that the preamble already defines, is rejected |
+| Function name | `Definition` identifier | `sanitize_rocq_identifier` (see [T_app resolution discipline](#t_app-resolution-discipline)): every byte outside `[A-Za-z0-9_]` becomes `_`, and a name the file imports or defines is moved off it, see [Reserved names](#reserved-names) |
+| Module name | `Definition` identifier | validated, never rewritten: a name that is not a legal identifier, or that the file imports or defines (see [Reserved names](#reserved-names)), is rejected |
 
 In a literal, `""` is Gallina's only escape, so `"` is the only byte
 rewritten. Every other byte is emitted raw and denotes itself: a
@@ -646,6 +647,96 @@ hazard. Its `eq_refl` checks confirm that the body keeps every
 instruction and that each literal denotes exactly its name. On Windows,
 `coqc` reads `.v` files in text mode, so a raw CR-LF pair or `0x1A` in a
 name may not survive. The gate runs on Linux.
+
+### Reserved names
+
+The quoting rewrites above protect names only a foreign `.wasm` can
+carry. Reserved names, like the dotted method names the function
+sanitizer handles, come from Inference source too: `fn BI_call` is a
+legal program. A generated `.v` shares one flat namespace with
+everything it imports, and Rocq lets a file define a name it imports.
+The new definition then shadows the import for the rest of the file, and
+for any proof that imports the `.v` after the contract library (or
+without it). Only later references are captured, and the capture is
+silent. It is not always a type error: a shadowed nullary constructor in
+a `match` pattern becomes a pattern variable, which `coqc` accepts.
+
+```coq
+From Wasm Require Import bytes numerics datatypes host.
+Definition BI_nop : nat := 0.
+Definition classify (i : basic_instruction) : nat :=
+  match i with
+  | BI_nop => 1
+  end.
+Lemma every_instruction_is_one : forall i, classify i = 1.
+Proof. reflexivity. Qed.
+```
+
+`coqc` accepts this file, and the lemma says that every instruction
+classifies as `1`. Delete the `Definition BI_nop` line and `coqc` rejects
+the `match` as non-exhaustive.
+
+A function is moved off such a name, because its emitted spelling is the
+translator's to choose. A module cannot move, because its name is the
+artifact's identity: the file name, the subject of `valid_<module>`, and
+the prefix of every spec proof name. So the same contested name is
+resolved in one of two ways:
+
+| The name is | A function named so is emitted as | A module named so is |
+|-------------|-----------------------------------|----------------------|
+| A Coq keyword, or a name in the curated prelude list (`nat`, `list`, `Some`, `nil`, …) | the name plus a trailing `_`: `fn nat` is `Definition nat_` | rejected |
+| A name the proof contract declares (`BI_call`, `module_func`, `module`, `ValidModule`, …) | the name plus a trailing `_`: `fn BI_call` is `Definition BI_call_` | rejected, naming the declaring library |
+| A preamble helper (`Vi32`, `Vi64`, `Mt`, `Mm`, `Mg`, `Mi`, `Me`, `Ma`) | the name plus `_<abs_idx>`, the function's absolute index: `Vi32` at index 2 is `Vi32_2` | rejected |
+| The module record, or `valid_<module>`, which the file defines for itself | the name plus `_<abs_idx>` | not contested: the module name spells both |
+| `ho`, the host binder of `Section Host` | left alone: nothing inside that section names a function | rejected: the section's theorems name the module under that binder |
+
+The contract's vocabulary is the top-level declarations of the vendored
+stub in `rocq-stub/`, grouped by the logical library that declares them
+(`Wasm.bytes`, `Wasm.numerics`, `Wasm.datatypes`, `Wasm.host`,
+`WasmVerifier.Assertions`, `WasmVerifier.Verifier`, and
+`WasmVerifier.Exists`). It is `ROCQ_CONTRACT_NAMES` in
+`src/rocq_names.rs`, and the stub is its source of truth: two tests in the
+tests crate hold the list to it, and a name the stub gains must be added
+to the list in the same change (see the stub's
+[Drift risk](rocq-stub/README.md#drift-risk)). The names of the
+`WasmVerifier.Exists` library are reserved in every file, though only a
+file with an `exists` or `unique` obligation imports it, so that adding
+such an obligation never renames a function or invalidates a file name.
+
+A function's escaped spelling depends only on its name, so it survives
+added or reordered functions. The exception is a name that another name in
+the module also ends up spelled: a function written `BI_call_`, a module
+named `BI_call_`, or a second function that escapes onto the same spelling
+(`BI.call` and `BI_call` both become `BI_call_`). The module name, or
+the function with the lowest function index (not necessarily the first in
+source order: a method declared earlier can still come later), keeps the
+spelling, and the others are moved off it with `_<abs_idx>` like any
+duplicate. The `.v` carries no
+note of a rename, so a downstream proof that names the function writes
+its escaped spelling.
+
+A module name held by a preamble helper, a contract name or `ho` is
+rejected with `WasmToVError::ModuleNameReserved`, whose `owner` says
+which of the three it is (`PreambleHelper`, `Contract { library }` or
+`HostSectionBinder`) and whose `fix_hint` is `<name>_module`. A keyword or
+curated prelude name is rejected as before, with `InvalidRocqIdentifier`
+or `RocqStdlibShadow`. The fix is to rename the source file, so `infc`
+prints the file rename (`'host.inf' -> 'host_module.inf'`) for a reserved
+name. The module name is
+normally the source file's stem. When the binary's `name` section carries
+a module name, which `codegen` writes from its `module_name` argument,
+that name takes precedence over the one passed to `wasm_to_v` and is
+checked the same way.
+
+The boundary is the stub's vocabulary, not the full real library. A name
+that only the real `Wasm` or `WasmVerifier` libraries declare is not
+reserved, so a function named after it is emitted as written and shadows
+it for a downstream proof. The file itself is unaffected: the emitter
+spells only names the stub declares, which the `coqc` gate checks for
+every gated module. The Coq standard library names beyond the curated
+prelude list (such as `length`, `app`, `N`, `Z`) are not reserved either:
+nothing the emitter writes after a function spells one, and a function so
+named shadows the standard-library name for a downstream proof.
 
 ### Reachability additions to the anatomy
 

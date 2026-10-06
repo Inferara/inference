@@ -21,8 +21,8 @@
 //! too: a function written `X_`, a module named `X_`, or another function that
 //! escapes onto the same spelling (`BI.call` and `BI_call` both become
 //! `BI_call_`). Then they contest `X_` like any duplicate: the module name, or
-//! whichever function comes first, keeps it, and the others are disambiguated
-//! off it. The escape applies whether or not the file imports the declaring
+//! the function with the lowest index, keeps it, and the others are
+//! disambiguated off it. The escape applies whether or not the file imports the declaring
 //! library (`Exists` is imported only with a reachability obligation), so that
 //! adding a spec never renames a function. Only the curated prelude list is
 //! escaped: the other names `List`, `String`, `BinNat` and `ZArith` bring in

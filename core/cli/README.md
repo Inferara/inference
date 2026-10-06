@@ -119,6 +119,16 @@ infc example.inf -v
 infc example.inf --codegen -o -v
 ```
 
+**Source file name.** The `.v` names its Rocq module after the source file's stem, so with `-v` (or `--mode proof`) the stem has to be a name the generated file can give its module record. It must start with an ASCII letter, contain only ASCII letters, digits and underscores, contain no `__`, and be at most 255 characters; a stem ending in `_` is also refused when the program has a `spec`. It must not be a Rocq keyword or a name in the curated prelude list such as `nat` or `list`. It must also not be a name the `.v` imports or defines: one of the preamble helpers (`Vi32`, `Mi`, ...), a name the proof contract declares (`module`, `host`, `term`, `ValidModule`, ...), or `ho`. `infc` refuses such a stem before it writes any artifact and, for a reserved name, the message names the rename (`<stem>_module.inf`):
+
+```bash
+infc host.inf -v
+# error: the output module name 'host' is already declared by 'Wasm.host', ...
+#   ... Rename the source file: 'host.inf' -> 'host_module.inf'.
+```
+
+`infc` does not rename the file itself: the module name is the identity of the `.v`, and renaming it silently would rename the artifact that proofs import. A stem that is not valid UTF-8 is refused too, since it has no Rocq spelling. When the build writes no `.v` (no `-v` and no `--mode proof`), neither rule applies: `host.inf` compiles to `out/host.wasm`, and a stem that is not valid UTF-8 writes `out/module.wasm`. A run that stops before codegen (`--parse` or `--analyze`, with `-v` or `--mode proof`) writes no `.v`, so it is not refused either.
+
 ### `--out-dir <path>` - Override Output Directory
 
 Redirects all output artifacts (`.wasm` and `.v`) to the given directory instead of the default `out/`. The directory is created automatically at full depth if it does not exist.

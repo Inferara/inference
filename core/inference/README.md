@@ -179,7 +179,7 @@ use std::fs;
 
 let arena = parse(source)?;
 let typed_context = type_check(arena)?;
-let codegen_output = codegen(&typed_context)?;
+let codegen_output = codegen(&typed_context, "MyModule")?;
 
 fs::write("output.wasm", codegen_output.wasm())?;
 ```
@@ -212,7 +212,7 @@ let source = r#"
 
 let arena = parse(source)?;
 let typed_context = type_check(arena)?;
-let wasm = codegen(&typed_context)?;
+let wasm = codegen(&typed_context, "MyModule")?;
 ```
 
 ### Phase 5: Rocq Translation
@@ -231,17 +231,20 @@ let source = r#"
 
 let arena = parse(source)?;
 let typed_context = type_check(arena)?;
-let codegen_output = codegen(&typed_context)?;
+let codegen_output = codegen(&typed_context, "EvenChecker")?;
 let rocq_code = wasm_to_v(
     "EvenChecker",
     codegen_output.wasm(),
     codegen_output.spec_func_indices_by_spec(),
+    codegen_output.hspecs(),
 )?;
 
 fs::write("even_checker.v", rocq_code)?;
 ```
 
 The generated Rocq code can be used with the Rocq proof assistant to verify program properties.
+
+The module name must be a valid Rocq identifier that the generated `.v` does not reserve, and it should be the same in both calls: `codegen` writes its `module_name` into the binary, and that name takes precedence over the one `wasm_to_v` receives. A name the `.v` imports or defines, such as `module`, `host`, `term` or `ho`, is rejected with `WasmToVError::ModuleNameReserved`; see [Reserved names](../wasm-to-v/ROCQ_CONTRACT.md#reserved-names).
 
 ## Architecture
 
@@ -295,7 +298,7 @@ fn compile_file(input_path: &str, output_path: &str) -> anyhow::Result<()> {
     let arena = parse(&source)?;
     let typed_context = type_check(arena)?;
     analyze(&typed_context)?;
-    let codegen_output = codegen(&typed_context)?;
+    let codegen_output = codegen(&typed_context, "MyModule")?;
 
     fs::write(output_path, codegen_output.wasm())?;
     println!("Compiled {} to {}", input_path, output_path);
@@ -315,11 +318,12 @@ fn verify_program(source_path: &str, module_name: &str) -> anyhow::Result<()> {
 
     let arena = parse(&source)?;
     let typed_context = type_check(arena)?;
-    let codegen_output = codegen(&typed_context)?;
+    let codegen_output = codegen(&typed_context, module_name)?;
     let rocq = wasm_to_v(
         module_name,
         codegen_output.wasm(),
         codegen_output.spec_func_indices_by_spec(),
+        codegen_output.hspecs(),
     )?;
 
     let output = format!("{}.v", module_name.to_lowercase());

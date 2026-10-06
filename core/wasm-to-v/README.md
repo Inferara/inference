@@ -50,7 +50,7 @@ use inference::{codegen, parse, type_check, wasm_to_v};
 let source = std::fs::read_to_string("input.inf")?;
 let arena = parse(&source)?;
 let typed_context = type_check(arena)?;
-let codegen_output = codegen(&typed_context)?;
+let codegen_output = codegen(&typed_context, "module_name")?;
 let rocq_output = wasm_to_v(
     "module_name",
     codegen_output.wasm(),
@@ -261,9 +261,9 @@ Definition add : module_func := {|
 Definition MyModule : module := ...
 ```
 
-Function and module names become `Definition` identifiers: a function name is sanitized into a legal Rocq identifier, and a module name that is not one, or that the preamble already defines, is rejected. Local names have no place in the Rocq model, so each appears as a `(*name*)` comment after the `BI_local_get`, `BI_local_set` or `BI_local_tee` that uses it.
+Function and module names become `Definition` identifiers. A function name is sanitized into a legal Rocq identifier, then moved off any name that would capture a later reference: a Coq keyword, a name in the curated prelude list (`nat`, `list`, `Some`, …) or a name the proof contract declares gains a trailing `_` (`fn BI_call` is emitted as `BI_call_`, `fn nat` as `nat_`), and a name the file already defines, such as a preamble helper or the module record, gains `_<abs_idx>`. A module name is never rewritten, because it is the artifact's identity. It is rejected when it is not a legal identifier, when it is a Coq keyword or a name in the curated prelude list (`InvalidRocqIdentifier` or `RocqStdlibShadow`), and when it is a name the `.v` imports or defines: a preamble helper, a contract name or the host binder `ho` report `WasmToVError::ModuleNameReserved`, whose `fix_hint` renames the source file to `<name>_module`. Local names have no place in the Rocq model, so each appears as a `(*name*)` comment after the `BI_local_get`, `BI_local_set` or `BI_local_tee` that uses it.
 
-A name is data copied out of the binary and may carry any character, including the delimiters that end a string literal or a comment. [ROCQ_CONTRACT.md](ROCQ_CONTRACT.md#names-copied-from-the-binary) describes how each form is escaped so that a name never ends the construct it sits in.
+A name is data copied out of the binary and may carry any character, including the delimiters that end a string literal or a comment. [ROCQ_CONTRACT.md](ROCQ_CONTRACT.md#names-copied-from-the-binary) describes how each form is escaped so that a name never ends the construct it sits in, and [Reserved names](ROCQ_CONTRACT.md#reserved-names) states the rule for names the `.v` imports or defines, why shadowing one is silent, and where the list of contract names comes from (the vendored stub in `rocq-stub/`, held to it by two tests).
 
 ## Error Handling
 
@@ -293,7 +293,7 @@ Recoverable `WasmToVError`s the translator returns:
 
 - **`UnsupportedFeature`**: a construct outside the subset the wasm-verifier proof contract covers — any floating-point, SIMD/vector, or conversion instruction; an `f32`/`f64`/`v128` value type in any position; a non-deterministic instruction in any body the emitted module retains; `memory64`, shared, or custom-page-size memories; atomics; and the proposal families (GC, exception handling, stack switching, tail calls, wide arithmetic, typed references) the contract does not cover. See [Rejection Policy](#rejection-policy).
 - **`WasmParse`**: malformed bytes, surfaced by the parser phase
-- **Identifier errors**: a module or function name that cannot be rendered as a legal Rocq identifier
+- **Identifier errors**: a module or spec name that is not a legal Rocq identifier, a Coq keyword or a name in the curated prelude list (`InvalidRocqIdentifier`, `RocqStdlibShadow`); a module or spec name ending in `_`, which `SpecNameReservesSeparator` rejects when the two are joined into a proof name; or a module name the `.v` reserves (`ModuleNameReserved`, whose `owner` is a `ReservedNameOwner`: `PreambleHelper`, `Contract { library }` or `HostSectionBinder`). A function name is never an error: it is rewritten instead
 
 The tag section (exception handling) and component model sections are silently ignored by the parser itself rather than producing errors.
 
@@ -513,7 +513,7 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
 - **Debug names, not mnemonics**: the float, vector, and rejected-conversion messages name the operator in its `wasmparser` debug form (`F32Add`), not its wat mnemonic (`f32.add`). Unambiguous, but not the spelling a reader of the `.wat` sees. Value types are the exception: they are spelled `f32`/`f64`/`v128`
 - **Control flow complexity**: Some complex control flow patterns (deeply nested blocks, unusual branch targets) may generate suboptimal or incorrect Rocq code
 - **Large data segments**: Memory initialization with large data segments produces verbose output that may be difficult to work with in Rocq
-- **Name conflicts**: Generated Rocq identifiers may conflict with reserved keywords in edge cases
+- **Reserved names are the stub's vocabulary**: a function is moved off, and a module rejected for, the names the vendored `rocq-stub/` declares, not every name the real `Wasm` and `WasmVerifier` libraries declare. A function named after a name only the real libraries declare is emitted as written and shadows that name for a downstream proof that imports the `.v`. The same holds for Coq standard-library names beyond the curated prelude list (such as `length`, `app`, `N`, `Z`)
 
 ## Future Work
 
@@ -527,9 +527,8 @@ Planned improvements for future releases:
 6. **Incremental Translation**: Support translating modified modules efficiently for faster development iteration
 7. **Proof Scaffolding**: Generate proof templates and lemmas for common verification tasks
 8. **Better Diagnostics**: Include WASM byte offsets and section names in error messages
-9. **Name Sanitization**: Automatically handle Rocq keyword conflicts in generated identifiers
-10. **Optimized Data Segments**: Represent large data segments more compactly in generated Rocq code
-11. **Float and SIMD support**: requires the wasm-verifier proof model to grow those surfaces first; until then the translator refuses them — and the float-naming conversions that depend on them — rather than emitting terms the model cannot type
+9. **Optimized Data Segments**: Represent large data segments more compactly in generated Rocq code
+10. **Float and SIMD support**: requires the wasm-verifier proof model to grow those surfaces first; until then the translator refuses them — and the float-naming conversions that depend on them — rather than emitting terms the model cannot type
 
 ## Integration with Inference Compiler
 
