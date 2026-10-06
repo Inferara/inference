@@ -12,6 +12,19 @@
 // entry function is `main`, so a module name and a function name never coincide,
 // and no amount of corpus growth in that shape can ever produce the collision.
 //
+// The seven forwarding functions between `Me` and `rocq_name_collisions` carry
+// a different class, which is not a duplicate at all. Each is named after a name
+// the proof contract declares and this `.v` imports, so each is defined only
+// once, which Rocq accepts. But a definition shadows the imported name for the
+// rest of the file, so each sits before something later that spells its name:
+// `BI_call` before a caller whose body applies the `BI_call` constructor,
+// `module_func` before every later function's type, `module` before the module
+// record's type, `hassert` and `reachability_spec` before the obligations of the
+// specs below, `host` before the host section, and `ValidModule` before the
+// validity theorem. Each must reach the `.v` escaped with a trailing `_`; if any
+// one is emitted verbatim, `coqc` reports a type error at the first later
+// mention.
+//
 // The arithmetic below is modular by construction — a bump by one and a cube of
 // a value an `assume` pins to {-1, 0, 1} — and the `wrapping(...)` spelling is
 // what keeps that true of the program that ships. Two of the specification
@@ -19,13 +32,42 @@
 // written and along with everything they call: an operator that could leave its
 // type in one of them would empty that body's observation set rather than
 // narrow its claim, and would make the three universal specs false at
-// `2147483647` as well.
+// `2147483647` as well. The forwarding chain adds no arithmetic of its own, so
+// `rocq_name_collisions(x)` is still exactly `Me(x)`.
 fn Me(x: i32) -> i32 {
     return wrapping(x + 1);
 }
 
-fn rocq_name_collisions(x: i32) -> i32 {
+fn BI_call(x: i32) -> i32 {
     return Me(x);
+}
+
+fn module_func(x: i32) -> i32 {
+    return BI_call(x);
+}
+
+fn module(x: i32) -> i32 {
+    return module_func(x);
+}
+
+fn hassert(x: i32) -> i32 {
+    return module(x);
+}
+
+fn reachability_spec(x: i32) -> i32 {
+    return hassert(x);
+}
+
+fn host(x: i32) -> i32 {
+    return reachability_spec(x);
+}
+
+fn ValidModule(x: i32) -> i32 {
+    return host(x);
+}
+
+fn rocq_name_collisions(x: i32) -> i32 {
+    return ValidModule(x);
 }
 
 fn valid_rocq_name_collisions(x: i32) -> i32 {

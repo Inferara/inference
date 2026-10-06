@@ -1,21 +1,33 @@
 //! Reader for the declarations a Rocq `.v` file binds.
 //!
-//! Two consumers share it, and they ask different questions of the same text.
-//! `rocq_typecheck`'s coverage audit asks what the *vendored stub* declares, so
-//! that every declaration can be held to having a producer. `rocq_stub_drift`
-//! asks the same of the stub and then asks the mirror question of the *real*
-//! upstream libraries, so that a stub declaration with no upstream counterpart
-//! becomes a failure rather than a fiction the local gate happily elaborates.
+//! Three questions are asked of it. `rocq_typecheck`'s coverage audit asks what
+//! the *vendored stub* declares, so that every declaration can be held to
+//! having a producer. `rocq_stub_drift` asks the same of the stub and then asks
+//! the mirror question of the *real* upstream libraries, so that a stub
+//! declaration with no upstream counterpart becomes a failure rather than a
+//! fiction the local gate happily elaborates. And `rocq_typecheck` asks
+//! everything the stub *binds*, type names included, to hold the translator's
+//! `ROCQ_CONTRACT_NAMES` to it. That list is production code: every function
+//! name the translator emits is escaped off it, so this reader decides which
+//! user functions are renamed.
 //!
-//! Those two questions need two readers, and the asymmetry is deliberate rather
+//! Those questions need two readers, and the asymmetry is deliberate rather
 //! than an oversight. [`declared_names`] reads the restricted vernacular the
 //! stub is written in — signatures only, no proofs, no tactics — and reads it
 //! narrowly: a shape it silently misses is a declaration exempted from needing a
 //! producer, which is the failure the coverage audit exists to prevent.
-//! [`upstream_declared_names`] reads full Rocq, and reads it *generously*: it is
-//! the set a stub declaration is looked up in, so a binding form it misses would
-//! condemn a perfectly real name as fiction. Narrow where a miss lets something
-//! through, generous where a miss raises a false alarm.
+//! [`upstream_declared_names`] reads full Rocq, and reads it broadly, because a
+//! miss is the costly error in both of its uses. Over the upstream libraries, a
+//! binding form it missed would condemn a perfectly real name as fiction. Over
+//! the stub, it would leave a contract name off the deny-list, free for a
+//! function to shadow.
+//!
+//! Reading broadly has a cost, though. A name it collects that a `.v` cannot
+//! actually shadow still renames every function spelled like it. The one such
+//! name is `int_of_Z`, collected from inside `Module Wasm_int` although nothing
+//! outside that module reaches it unqualified. A rename of a function nobody
+//! could shadow costs a trailing `_`; a missed contract name costs a `.v` that
+//! `coqc` rejects, so the reader keeps erring towards collecting.
 
 /// A Rocq token, at the resolution the declaration parser needs.
 ///
@@ -254,12 +266,16 @@ pub(crate) fn push_record_fields(tokens: &[Tok<'_>], at: usize, names: &mut Vec<
 /// The vernacular keywords that bind their following identifiers directly, as
 /// `Keyword name₁ … nameₙ :` or `Keyword name …`.
 ///
-/// This list is generous on purpose. It is consulted only when building the
-/// *upstream* name universe a stub declaration is looked up in, so a keyword
-/// missing here would report a real upstream name as absent; a keyword here
-/// that binds nothing merely widens a set nothing is proved about. Proof
-/// vernacular is included for that reason — `Lemma`, `Theorem` and friends do
-/// bind a name, and an upstream library is free to expose one the stub mirrors.
+/// This list errs towards inclusion. It is consulted for two sets: the
+/// *upstream* name universe a stub declaration is looked up in, where a keyword
+/// missing here would report a real upstream name as absent, and the stub's
+/// vocabulary that the translator's contract deny-list is held to, where a
+/// missing keyword would leave a contract name free to be shadowed. Proof
+/// vernacular is included for the first reason — `Lemma`, `Theorem` and
+/// friends do bind a name, and an upstream library is free to expose one the
+/// stub mirrors. What a keyword here must not do is precede identifiers it does
+/// not bind: each one is collected, and over the stub that renames every user
+/// function spelled like it.
 const BINDING_KEYWORDS: &[&str] = &[
     "Definition",
     "Parameter",
@@ -288,7 +304,9 @@ const BINDING_KEYWORDS: &[&str] = &[
     "Coercion",
 ];
 
-/// Every name an upstream `.v` file binds, in source order, read generously.
+/// Every name a full-Rocq `.v` file binds, in source order, read broadly: an
+/// upstream library's, or the vendored stub's when it is read as the contract
+/// vocabulary a generated `.v` imports.
 ///
 /// Where [`declared_names`] reads the stub's restricted signature vernacular and
 /// deliberately skips inductive and record *type* names, this reads full Rocq
@@ -305,6 +323,20 @@ const BINDING_KEYWORDS: &[&str] = &[
 /// `Class` and `Structure` are read like `Record` for the same reason: coq-wasm
 /// states its host interface as a `Class`, and a reader that skipped it would
 /// condemn every field of it.
+///
+/// It does not track scope. A name declared inside a `Module` wrapper is
+/// collected bare, like a top-level one, although outside the module it is
+/// reachable only qualified; the wrapper's own name is not collected at all,
+/// since `Module` is not a binding keyword here. That is how the stub's
+/// `int_of_Z`, declared inside `Module Wasm_int`, reaches the contract
+/// deny-list while `Wasm_int` does not.
+///
+/// It is a reader, not a Rocq parser, and it has blind spots: the second type
+/// of a mutual `Inductive a … with b …` is missed, because `with` is not a
+/// binding keyword here (teaching it one would collect every `match … with`
+/// too). Over the stub, a miss like that is caught wherever `coqc` runs, by
+/// `the_contract_deny_list_matches_what_coqc_records`, which compares the
+/// contract deny-list with the declarations `coqc` itself records.
 pub(crate) fn upstream_declared_names(source: &str) -> Vec<String> {
     let source = strip_rocq_comments(source);
     let tokens = tokenize(&source);
@@ -434,6 +466,105 @@ mod tests {
                 "field_two",
                 "inner",
                 "a_definition",
+            ]
+        );
+    }
+
+    /// [`upstream_declared_names`] defines the contract vocabulary the
+    /// translator escapes function names off, so a shape it misses is a
+    /// contract name a function can shadow, and a binder it misreads as a
+    /// declaration renames functions for nothing. This pins every shape it
+    /// handles against both outcomes.
+    ///
+    /// What it must collect: inductive (`Inductive` and `Variant`), record,
+    /// class and structure *type* names, which [`declared_names`] leaves out;
+    /// constructors with and without an annotation, with and without the first
+    /// one's leading `|`; record, class and structure fields, and an empty
+    /// class's type name with no field invented for it; every name of a
+    /// multi-name `Parameter`; an `Axiom`, an identifier-named `Notation`, a
+    /// `Definition` and a `Fixpoint`; and the name a `Lemma` binds.
+    ///
+    /// What it must not: anything inside a nested comment; a string-named
+    /// notation, or a declaration quoted inside one; the arms of a `match`,
+    /// which share the constructor's `|` but are followed by a pattern; and a
+    /// binder inside a declaration's type, as in the stub's
+    /// ``Parameter ValidSpec : forall `{ho : host}, …``.
+    ///
+    /// The `Module` wrapper is pinned as the documented over-collection: the
+    /// name declared inside it is collected bare, the way the stub's
+    /// `int_of_Z` is, and the wrapper's own name is not.
+    #[test]
+    fn upstream_declared_names_reads_every_binding_shape() {
+        let source = r##"
+    (* A comment (* nested (* twice *) *) hiding Parameter commented_out : Type. *)
+    Require Import BinNat.
+    Declare Scope fake_scope.
+    Delimit Scope fake_scope with fake.
+    Parameter opaque_type : Type.
+    Parameter first second : nat.
+    Axiom an_axiom : nat.
+    Parameter a_predicate : forall `{binder : a_class}, nat -> Prop.
+    Notation "#00" := (encode 0%Z) : fake_scope.
+    Notation "escaped ""Parameter phantom"" tail" := (list) : fake_scope.
+    Notation an_alias := list.
+    Inductive piped : Type :=
+    | Ctor_a : piped
+    | Ctor_b : nat -> piped.
+    Inductive unpiped : Type := Ctor_c : unpiped | Ctor_d : unpiped.
+    Inductive bare : Type := | Bare_a | Bare_b.
+    Variant bare_unpiped := Bare_c | Bare_d.
+    Record a_record : Type := {
+      field_one : nat;
+      field_two : option nat
+    }.
+    Class a_class : Type := { class_field : nat }.
+    Class empty_class : Type := { }.
+    Structure a_structure := { structure_field : nat }.
+    Module A_module.
+      Parameter inner : nat.
+    End A_module.
+    Definition a_definition (x : nat) : nat := x.
+    Fixpoint a_fixpoint (n : nat) : nat :=
+      match n with
+      | O => O
+      | S m => a_fixpoint m
+      end.
+    Lemma a_lemma : True.
+    Proof. exact I. Qed.
+    "##;
+        assert_eq!(
+            upstream_declared_names(source),
+            [
+                "opaque_type",
+                "first",
+                "second",
+                "an_axiom",
+                "a_predicate",
+                "an_alias",
+                "piped",
+                "Ctor_a",
+                "Ctor_b",
+                "unpiped",
+                "Ctor_c",
+                "Ctor_d",
+                "bare",
+                "Bare_a",
+                "Bare_b",
+                "bare_unpiped",
+                "Bare_c",
+                "Bare_d",
+                "a_record",
+                "field_one",
+                "field_two",
+                "a_class",
+                "class_field",
+                "empty_class",
+                "a_structure",
+                "structure_field",
+                "inner",
+                "a_definition",
+                "a_fixpoint",
+                "a_lemma",
             ]
         );
     }

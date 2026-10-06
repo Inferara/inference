@@ -30,12 +30,15 @@
 pub(crate) mod gate {
     use crate::rocq_decls::{
         Tok, declared_names, ident_at, is_punct, strip_rocq_comments, tokenize,
+        upstream_declared_names,
     };
     use crate::rocq_test_support::{ExternalBytes, LinkedExternal, generate_linked_v, generate_v};
     use crate::utils::get_test_data_path;
     use inference::{ExternalSpecPolicy, LinkOptions};
     use inference_wasm_codegen::CompilationMode;
+    use inference_wasm_to_v_translator::rocq_names::ROCQ_CONTRACT_NAMES;
     use rustc_hash::{FxHashMap, FxHashSet};
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -117,6 +120,18 @@ pub(crate) mod gate {
     /// the width of one underscore run. No other entry names two specs that way,
     /// so this is the only place the gate can observe the two list families
     /// staying apart.
+    ///
+    /// A different class, not a duplicate at all: the same fixture names
+    /// functions after names the proof contract declares (`BI_call`,
+    /// `module_func`, `module`, `hassert`, `reachability_spec`, `host`,
+    /// `ValidModule`). Each is defined once, which Rocq accepts, but a
+    /// verbatim definition would shadow the imported name for the rest of the
+    /// file, and each one sits before something later in the file that spells
+    /// its name: a caller's body, the next function's type, the module record's
+    /// type, the obligations, the host section or the validity theorem. No
+    /// other entry names a function that way, so this is the only entry where
+    /// `coqc` checks that a contract-named function leaves those later mentions
+    /// resolving to the contract.
     pub(crate) const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
         ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
@@ -726,9 +741,10 @@ pub(crate) mod gate {
     /// (`WasmVerifier.*`, the assertion language and the proof obligations),
     /// and the second imports the first.
     ///
-    /// [`compile_stub`] compiles exactly these files and
-    /// [`stub_declarations`] parses exactly these files, so the coverage audit
-    /// can never measure itself against a contract the gate does not compile.
+    /// [`compile_stub`] compiles exactly these files, and
+    /// [`stub_declarations`] and [`stub_vocabulary`] parse exactly these files,
+    /// so the coverage audit can never measure itself against a contract the
+    /// gate does not compile.
     const STUB_MODULES: &[(&str, &str)] = &[
         ("wasm", "bytes"),
         ("wasm", "numerics"),
@@ -2972,18 +2988,28 @@ pub(crate) mod gate {
     /// under its spelling — the constructor-shape drift this audit exists to
     /// catch, wearing a producer's badge. [`emitted_bindings`] therefore
     /// collects what each module binds, and the audit asserts that none of it
-    /// is a stub declaration; that assertion is what makes the tokenised set
+    /// is a name the stub binds; that assertion is what makes the tokenised set
     /// mean what it claims. It asserts rather than subtracts because
     /// subtracting is unsound in the other direction: a name that is both bound
     /// and genuinely referenced would come back unproduced and fail a producer
     /// that is really there. A collision is worth failing on for its own sake
     /// anyway, because the binding shadows the stub's declaration for the rest
     /// of the file: a module that also *references* that name gets the local
-    /// definition instead, and `coqc` rejects the `.v` (#405). The two halves
-    /// are complementary rather than redundant — a module carrying no such
-    /// reference compiles clean, and is exactly the module whose collision
-    /// coverage cannot see — so the audit fails on the binding itself and says
-    /// which fixture to rename.
+    /// definition instead, and `coqc` rejects a `.v` the translator reported as
+    /// written. The two halves are complementary rather than redundant — a
+    /// module carrying no such reference compiles clean, and is exactly the
+    /// module whose collision coverage cannot see — so the audit fails on the
+    /// binding itself and names the module that binds it.
+    ///
+    /// The collision check looks bindings up in the whole [`stub_vocabulary`],
+    /// type names included, not only in the declarations the coverage half
+    /// counts. A type name needs no producer of its own, but a binding spelled
+    /// like one shadows it all the same, and the emitter spells several after
+    /// the functions are defined: `module_func` on every function, `module` on
+    /// the record, `hassert` and `reachability_spec` on the obligations, `host`
+    /// on the section binder. `rocq_name_collisions.inf` names a function after
+    /// each of those, and where `coqc` is absent this check is what sees one of
+    /// them reach that fixture's `.v` verbatim.
     ///
     /// The audit then compiles that same set itself. Measuring coverage against
     /// generated *text* while leaving the elaboration to other tests would make
@@ -3012,11 +3038,13 @@ pub(crate) mod gate {
     /// uncovered names. What this audit adds is the floor underneath them —
     /// coverage of everything nobody thought to write a needle for.
     ///
-    /// Two deliberate limits. Inductive and record *type* names (`hassert`,
-    /// `module_func`, `sx`, …) are left out of the declared set: the emitter
-    /// spells almost none of them, while `coqc` elaborates a type whenever it
-    /// elaborates one of its constructors, so demanding a producer for the type
-    /// would only grow the exemption list without covering anything new. And
+    /// Two deliberate limits, both on the coverage half. Inductive and record
+    /// *type* names (`hassert`, `module_func`, `sx`, …) are left out of the set
+    /// that must have a producer: the emitter spells few of them, while `coqc`
+    /// elaborates a type whenever it elaborates one of its constructors, so
+    /// demanding a producer for the type would only grow the exemption list
+    /// without covering anything new. The collision check is not limited this
+    /// way; it reads the type names too, for the reason given above. And
     /// coverage here is name-level — it proves each constructor is elaborated
     /// somewhere, not that every *argument shape* of it is, nor that any
     /// particular module is what elaborates it. `BI_select` is the standing
@@ -3036,6 +3064,7 @@ pub(crate) mod gate {
         // `(*narrow*)` is neither a producer nor a binding.
         let stripped: Vec<String> = modules.iter().map(|m| strip_rocq_comments(&m.v)).collect();
         let declared = stub_declarations();
+        let vocabulary = stub_vocabulary();
 
         // First, because every assertion below reads a producer set that means
         // "references a stub declaration" only while this holds.
@@ -3048,7 +3077,7 @@ pub(crate) mod gate {
                     .map(move |name| (m, name))
             })
             .filter_map(|(m, name)| {
-                let (_, file) = declared.iter().find(|(declared, _)| declared == name)?;
+                let (_, file) = vocabulary.iter().find(|(bound, _)| bound == name)?;
                 Some(format!(
                     "  {name}  bound by `{}`, declared in {file}",
                     m.source
@@ -3062,9 +3091,15 @@ pub(crate) mod gate {
              leaves the coverage measurement below meaningless — the \
              declaration counts as produced because something unrelated was \
              defined under its spelling, not because anything referenced it — \
-             and turns any reference to it from the same module into a `coqc` \
-             type error (#405):\n{}\n\
-             Rename the offending fixture function, module or spec; the stub's \
+             and turns any later mention of it in the same module, a \
+             constructor applied or a type annotated, into a `coqc` type \
+             error:\n{}\n\
+             A function name is escaped off every such name by \
+             `sanitize_rocq_identifier`, through `ROCQ_CONTRACT_NAMES`, so a \
+             function here means the escape in `sanitize_rocq_identifier` has \
+             regressed, or `ROCQ_CONTRACT_NAMES` has drifted from the stub. \
+             Rename the offending module instead (its `CORPUS` entry's module \
+             name, by convention the source file's stem); the stub's \
              names are the contract's and cannot move.",
             collisions.join("\n")
         );
@@ -3161,22 +3196,356 @@ pub(crate) mod gate {
         let _ = std::fs::remove_dir_all(&work);
     }
 
-    /// Every name the vendored stub declares, paired with the stub file that
-    /// declares it. Parses exactly the files [`compile_stub`] compiles.
+    /// Every name the vendored stub declares except its type names, paired
+    /// with the stub file that declares it. Parses exactly the files
+    /// [`compile_stub`] compiles.
     fn stub_declarations() -> Vec<(String, String)> {
-        let stub = stub_dir();
         STUB_MODULES
             .iter()
             .flat_map(|&(dir, module)| {
                 let file = format!("{dir}/{module}.v");
-                let path = stub.join(dir).join(format!("{module}.v"));
-                let source = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("read stub {}: {e}", path.display()));
-                declared_names(&source)
+                declared_names(&read_stub(dir, module))
                     .into_iter()
                     .map(move |name| (name, file.clone()))
             })
             .collect()
+    }
+
+    /// Every name the vendored stub binds, paired with the stub file that
+    /// binds it: the [`stub_declarations`], plus the inductive, record and
+    /// class *type* names they leave out. This is the vocabulary a generated
+    /// `.v` imports from the contract, so a binding spelled like any of it
+    /// shadows an import. It is read by `upstream_declared_names`, the reader
+    /// [`the_contract_deny_list_is_the_stub_vocabulary`] holds the translator's
+    /// own copy of it to.
+    fn stub_vocabulary() -> Vec<(String, String)> {
+        STUB_MODULES
+            .iter()
+            .flat_map(|&(dir, module)| {
+                let file = format!("{dir}/{module}.v");
+                upstream_declared_names(&read_stub(dir, module))
+                    .into_iter()
+                    .map(move |name| (name, file.clone()))
+            })
+            .collect()
+    }
+
+    /// The text of one vendored stub file, named as in [`STUB_MODULES`].
+    fn read_stub(dir: &str, module: &str) -> String {
+        let path = stub_dir().join(dir).join(format!("{module}.v"));
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read stub {}: {e}", path.display()))
+    }
+
+    /// The logical library a generated `.v` imports a stub file by: the
+    /// logical root the stub's `_CoqProject` maps the file's directory to,
+    /// then the file stem, so `wasm/host.v` is `Wasm.host`. Read from
+    /// `_CoqProject` rather than restated, so the library a name is reported
+    /// under is the one `coqc` resolves it from.
+    fn stub_library(dir: &str, module: &str) -> String {
+        let project = std::fs::read_to_string(stub_dir().join("_CoqProject"))
+            .unwrap_or_else(|e| panic!("read the stub's _CoqProject: {e}"));
+        let root = project
+            .lines()
+            .find_map(|line| match line.split_whitespace().collect::<Vec<_>>()[..] {
+                ["-Q", physical, logical] if physical == dir => Some(logical.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the stub's _CoqProject maps no logical root to `{dir}`"));
+        format!("{root}.{module}")
+    }
+
+    /// `ROCQ_CONTRACT_NAMES` is the translator's own copy of the stub's
+    /// vocabulary: every function name is escaped off it. A name missing from
+    /// the copy is a name a function can still shadow, and a stale entry
+    /// renames functions for nothing. This holds the copy to the stub as set
+    /// equality, library by library, reading each stub file with the same
+    /// `upstream_declared_names` [`stub_vocabulary`] reads it with.
+    ///
+    /// Libraries are compared by the logical path a generated `.v` imports
+    /// them by, in [`STUB_MODULES`] order, so the library a name is filed
+    /// under is the library that declares it. On a mismatch the message lists, per
+    /// library, the names to add, sorted and quoted ready to paste into the
+    /// group, and the names to delete.
+    ///
+    /// It compares text, so it needs no `coqc` and runs everywhere. On its own
+    /// it is exactly as strong as `upstream_declared_names`: a declaration
+    /// form that reader misses is missing from both sides alike. Two guards
+    /// cover that: the reader's shape test,
+    /// `upstream_declared_names_reads_every_binding_shape`, and, wherever
+    /// `coqc` runs, [`the_contract_deny_list_matches_what_coqc_records`],
+    /// which reads the declarations from `coqc` instead.
+    #[test]
+    fn the_contract_deny_list_is_the_stub_vocabulary() {
+        let stub: Vec<(String, BTreeSet<String>)> = STUB_MODULES
+            .iter()
+            .map(|&(dir, module)| {
+                let names = upstream_declared_names(&read_stub(dir, module));
+                (stub_library(dir, module), names.into_iter().collect())
+            })
+            .collect();
+
+        let mut report = Vec::new();
+        for (library, declared) in &stub {
+            let listed: BTreeSet<&str> = ROCQ_CONTRACT_NAMES
+                .iter()
+                .filter(|(listed_library, _)| listed_library == library)
+                .flat_map(|(_, names)| names.iter().copied())
+                .collect();
+            let missing: Vec<String> = declared
+                .iter()
+                .filter(|name| !listed.contains(name.as_str()))
+                .map(|name| format!("            \"{name}\","))
+                .collect();
+            if !missing.is_empty() {
+                report.push(format!(
+                    "{library} declares {} name(s) its group lacks; add them:\n{}",
+                    missing.len(),
+                    missing.join("\n")
+                ));
+            }
+            let stale: Vec<&str> = listed
+                .iter()
+                .filter(|name| !declared.contains(**name))
+                .copied()
+                .collect();
+            if !stale.is_empty() {
+                report.push(format!(
+                    "{library} no longer declares these; delete them from its group: {}",
+                    stale.join(", ")
+                ));
+            }
+        }
+        for (library, _) in ROCQ_CONTRACT_NAMES {
+            if !stub.iter().any(|(stub_library, _)| stub_library == library) {
+                report.push(format!(
+                    "{library} is not a stub library; delete its group"
+                ));
+            }
+        }
+        assert!(
+            report.is_empty(),
+            "ROCQ_CONTRACT_NAMES in core/wasm-to-v/src/rocq_names.rs has drifted from \
+             the vendored stub in core/wasm-to-v/rocq-stub/:\n\n{}",
+            report.join("\n\n")
+        );
+
+        let listed_order: Vec<&str> = ROCQ_CONTRACT_NAMES
+            .iter()
+            .map(|&(library, _)| library)
+            .collect();
+        let stub_order: Vec<&str> = stub.iter().map(|(library, _)| library.as_str()).collect();
+        assert_eq!(
+            listed_order, stub_order,
+            "ROCQ_CONTRACT_NAMES must hold one group per stub file, in STUB_MODULES order",
+        );
+    }
+
+    /// The `.glob` kinds `coqc` tags a declaration with that a generated `.v`
+    /// imports: axioms and parameters, constructors, definitions, inductive
+    /// types, record projections, and records (a `Class` is recorded as one).
+    const GLOB_DECLARATION_KINDS: &[&str] = &["ax", "constr", "def", "ind", "proj", "rec"];
+
+    /// The `.glob` kinds that record no name a generated `.v` can capture: a
+    /// local binder; an eliminator Rocq derives (`_rect`, `_ind`, …), which the
+    /// emitter never spells; and a module name, which lives in the module
+    /// namespace, so a `Definition` spelled like it leaves the qualified paths
+    /// through the module resolving.
+    const GLOB_NON_DECLARATION_KINDS: &[&str] = &["binder", "scheme", "mod"];
+
+    /// The names `ROCQ_CONTRACT_NAMES` carries although `coqc` records them
+    /// only inside a module, as (library, module, name): the declaration
+    /// reader's one documented over-collection. A `.v` reaches such a name only
+    /// qualified, so escaping it is unnecessary. These are the only names
+    /// [`the_contract_deny_list_matches_what_coqc_records`] allows the list to
+    /// carry beyond what `coqc` records at top level.
+    const QUALIFIED_ONLY_CONTRACT_NAMES: &[(&str, &str, &str)] =
+        &[("Wasm.numerics", "Wasm_int", "int_of_Z")];
+
+    /// The declarations `coqc` recorded in one stub file's `.glob`.
+    struct GlobDeclarations {
+        /// The logical library `coqc` compiled the file as, from its `F` line.
+        library: String,
+        /// The declarations outside any module (a section does not change the
+        /// recorded path).
+        top_level: BTreeSet<String>,
+        /// The declarations inside a module, as (module path, name).
+        qualified: BTreeSet<(String, String)>,
+    }
+
+    /// Reads the declarations a `.glob` file records. A declaration line is
+    /// `<kind> <start>:<end> <module path> <name>`, with `<>` as the path of a
+    /// top-level one; a reference line starts with `R` and its position, and
+    /// names a declaration made elsewhere. A kind in neither
+    /// [`GLOB_DECLARATION_KINDS`] nor [`GLOB_NON_DECLARATION_KINDS`] fails the
+    /// read, so a declaration form the stub grows is classified by a person
+    /// rather than silently dropped.
+    fn glob_declarations(text: &str, file: &str) -> GlobDeclarations {
+        let mut lines = text.lines();
+        let library = lines
+            .find_map(|line| line.strip_prefix('F'))
+            .unwrap_or_else(|| panic!("{file} names no library: it has no `F` line"))
+            .to_string();
+        let mut declarations = GlobDeclarations {
+            library,
+            top_level: BTreeSet::new(),
+            qualified: BTreeSet::new(),
+        };
+        for line in lines {
+            let is_reference = line
+                .strip_prefix('R')
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+            if line.trim().is_empty() || is_reference {
+                continue;
+            }
+            let [kind, _span, path, name, ..] = line.split_whitespace().collect::<Vec<_>>()[..]
+            else {
+                panic!("{file}: unreadable glob line `{line}`");
+            };
+            if GLOB_NON_DECLARATION_KINDS.contains(&kind) {
+                continue;
+            }
+            assert!(
+                GLOB_DECLARATION_KINDS.contains(&kind),
+                "{file}: coqc recorded `{name}` with the unclassified kind `{kind}`. Decide \
+                 whether it declares a name a generated .v imports, and add the kind to \
+                 GLOB_DECLARATION_KINDS or GLOB_NON_DECLARATION_KINDS",
+            );
+            if path == "<>" {
+                declarations.top_level.insert(name.to_string());
+            } else {
+                declarations
+                    .qualified
+                    .insert((path.to_string(), name.to_string()));
+            }
+        }
+        declarations
+    }
+
+    /// `ROCQ_CONTRACT_NAMES` against an oracle that shares nothing with how
+    /// the list was made. The list was generated by `upstream_declared_names`,
+    /// and [`the_contract_deny_list_is_the_stub_vocabulary`] checks it against
+    /// that same reader, so a declaration form the reader misses (a mutual
+    /// `Inductive a … with b …`, whose `with` it does not treat as binding) is
+    /// missing from both sides and passes. This reads the declarations from
+    /// `coqc` instead: compiling the stub writes a `.glob` file per library,
+    /// recording the declarations Rocq elaborated (though not a record's
+    /// constructor, which the emitter never spells), and each library's
+    /// top-level declarations must equal its group as a set.
+    ///
+    /// Two differences are allowed, both documented on the translator's list.
+    /// Module names (`Wasm_int`) and derived eliminators are excluded by kind,
+    /// see [`GLOB_NON_DECLARATION_KINDS`]. And `int_of_Z`, which `coqc`
+    /// records inside `Module Wasm_int`, is carried by the list as the
+    /// reader's over-collection; [`QUALIFIED_ONLY_CONTRACT_NAMES`] allows it,
+    /// and fails if the allowance goes stale. The library names are `coqc`'s
+    /// own too, read from each file's `F` line.
+    ///
+    /// Elaboration needs `coqc`, so this skips, saying so, where it is absent.
+    #[test]
+    fn the_contract_deny_list_matches_what_coqc_records() {
+        let Some(coqc) = find_coqc() else {
+            eprintln!(
+                "skipped: coqc not found (set COQC or put coqc on PATH). \
+                 ROCQ_CONTRACT_NAMES was held to the stub by the text reader only; \
+                 the declarations coqc records were not read, so a declaration \
+                 form that reader misses is unchecked on this run."
+            );
+            return;
+        };
+        let work = compile_stub(&coqc, "glob");
+        let recorded: Vec<GlobDeclarations> = STUB_MODULES
+            .iter()
+            .map(|&(dir, module)| {
+                let path = work.join(dir).join(format!("{module}.glob"));
+                let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                    panic!("coqc wrote no glob file {}: {e}", path.display())
+                });
+                glob_declarations(&text, &format!("{dir}/{module}.glob"))
+            })
+            .collect();
+
+        let mut report = Vec::new();
+        for declarations in &recorded {
+            let library = declarations.library.as_str();
+            let listed: BTreeSet<&str> = ROCQ_CONTRACT_NAMES
+                .iter()
+                .filter(|&&(listed_library, _)| listed_library == library)
+                .flat_map(|&(_, names)| names.iter().copied())
+                .collect();
+            let missing: Vec<&str> = declarations
+                .top_level
+                .iter()
+                .map(String::as_str)
+                .filter(|name| !listed.contains(name))
+                .collect();
+            if !missing.is_empty() {
+                report.push(format!(
+                    "{library}: coqc records these declarations, which its group lacks: {}",
+                    missing.join(", ")
+                ));
+            }
+            let extra: Vec<&str> = listed
+                .iter()
+                .copied()
+                .filter(|name| !declarations.top_level.contains(*name))
+                .filter(|name| {
+                    !QUALIFIED_ONLY_CONTRACT_NAMES
+                        .iter()
+                        .any(|&(allowed_library, _, allowed)| {
+                            allowed_library == library && allowed == *name
+                        })
+                })
+                .collect();
+            if !extra.is_empty() {
+                report.push(format!(
+                    "{library}: its group lists these, which coqc records no top-level \
+                     declaration of: {}",
+                    extra.join(", ")
+                ));
+            }
+        }
+        for &(library, module, name) in QUALIFIED_ONLY_CONTRACT_NAMES {
+            let recorded_inside = recorded.iter().any(|declarations| {
+                declarations.library == library
+                    && declarations
+                        .qualified
+                        .contains(&(module.to_string(), name.to_string()))
+            });
+            let listed = ROCQ_CONTRACT_NAMES
+                .iter()
+                .any(|&(listed_library, names)| listed_library == library && names.contains(&name));
+            if !(recorded_inside && listed) {
+                report.push(format!(
+                    "the allowance for `{name}` inside {library}'s `{module}` is stale \
+                     (recorded inside the module: {recorded_inside}; listed: {listed}); \
+                     update QUALIFIED_ONLY_CONTRACT_NAMES"
+                ));
+            }
+        }
+        let recorded_libraries: BTreeSet<&str> = recorded
+            .iter()
+            .map(|declarations| declarations.library.as_str())
+            .collect();
+        let listed_libraries: BTreeSet<&str> = ROCQ_CONTRACT_NAMES
+            .iter()
+            .map(|&(library, _)| library)
+            .collect();
+        if recorded_libraries != listed_libraries {
+            report.push(format!(
+                "coqc compiled the libraries {recorded_libraries:?}, but the list groups \
+                 {listed_libraries:?}"
+            ));
+        }
+        assert!(
+            report.is_empty(),
+            "ROCQ_CONTRACT_NAMES in core/wasm-to-v/src/rocq_names.rs disagrees with the \
+             declarations coqc records for the vendored stub:\n{}\n\
+             work dir kept for inspection: {}",
+            report.join("\n"),
+            work.display()
+        );
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     /// The Rocq vernacular an emitted module binds a name with, and all of it.

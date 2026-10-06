@@ -193,6 +193,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::errors::WasmToVError;
 use crate::gallina::{escape_string_literal, z_literal};
 use crate::hassert_print;
+use crate::rocq_names::HOST_INSTANCE_BINDER;
 
 const LCB: &str = "{|\n";
 const RCB_DOT: &str = "|}.\n";
@@ -1415,7 +1416,7 @@ impl WasmParseData<'_> {
         let module_name = &self.mod_name;
         out.push('\n');
         out.push_str("Section Host.\n");
-        out.push_str("Context `{ho: host}.\n");
+        out.push_str(format!("Context `{{{HOST_INSTANCE_BINDER}: host}}.\n").as_str());
         out.push('\n');
         out.push_str(
             format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str(),
