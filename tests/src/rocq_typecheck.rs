@@ -129,9 +129,12 @@ pub(crate) mod gate {
     /// file, and each one sits before something later in the file that spells
     /// its name: a caller's body, the next function's type, the module record's
     /// type, the obligations, the host section or the validity theorem. No
-    /// other entry names a function that way, so this is the only entry where
-    /// `coqc` checks that a contract-named function leaves those later mentions
-    /// resolving to the contract.
+    /// other entry names a function that way. The hand-assembled
+    /// [`HandbuiltModule::ContractNamedFunctions`] names one after every
+    /// contract name, but its one obligation is assembled by hand too. So this
+    /// entry is the only place where `coqc` checks, through codegen, that
+    /// obligations later in the file still reach a contract name a function
+    /// was named for.
     pub(crate) const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
         ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
@@ -577,7 +580,11 @@ pub(crate) mod gate {
 
     /// The hand-assembled gated modules. Each is a WASM module written directly
     /// rather than compiled from `.inf`, reaching contract shapes Inference
-    /// codegen cannot produce.
+    /// codegen cannot produce. [`Self::ContractNamedFunctions`] is the
+    /// exception: Inference could name a function after each of its names but
+    /// `i32` and `i64`, its type keywords, but it names one after every name
+    /// the stub declares, a set read from the stub at test time that no
+    /// fixture could keep in step with.
     ///
     /// A closed enum rather than a list of names: the match in
     /// [`HandbuiltModule::build`] is exhaustive, so a member cannot be added
@@ -589,8 +596,9 @@ pub(crate) mod gate {
     /// from [`every_stub_declaration_has_a_producer`].
     ///
     /// That net only catches a member that is the sole producer of some
-    /// declaration. [`Self::HostileNames`] exists for the names it carries, not
-    /// the constructors it uses, so its gate checks its membership directly.
+    /// declaration. [`Self::HostileNames`] and [`Self::ContractNamedFunctions`]
+    /// exist for the names they carry, not the constructors they use, so their
+    /// gates check their membership directly.
     #[derive(Clone, Copy)]
     enum HandbuiltModule {
         ForeignSegments,
@@ -599,6 +607,7 @@ pub(crate) mod gate {
         Obligations,
         Reachability,
         HostileNames,
+        ContractNamedFunctions,
     }
 
     impl HandbuiltModule {
@@ -610,6 +619,7 @@ pub(crate) mod gate {
             Self::Obligations,
             Self::Reachability,
             Self::HostileNames,
+            Self::ContractNamedFunctions,
         ];
 
         /// The name the translator is given; also the `.v` basename and the
@@ -622,6 +632,7 @@ pub(crate) mod gate {
                 Self::Obligations => "handbuilt_obligations",
                 Self::Reachability => "handbuilt_reachability",
                 Self::HostileNames => "hostile_names",
+                Self::ContractNamedFunctions => "contract_named_functions",
             }
         }
 
@@ -637,6 +648,7 @@ pub(crate) mod gate {
                 Self::Obligations => handbuilt_obligations_v(module),
                 Self::Reachability => handbuilt_reachability_v(module),
                 Self::HostileNames => translate_wat(module, &HostileNames::FULL.wat()),
+                Self::ContractNamedFunctions => contract_named_functions_v(module),
             };
             GatedModule {
                 source: module,
@@ -2925,6 +2937,245 @@ pub(crate) mod gate {
         );
     }
 
+    /// The `.v` for [`HandbuiltModule::ContractNamedFunctions`].
+    ///
+    /// The module has one `i32 -> i32` function per name in
+    /// [`stub_vocabulary`], in stub order, then one per name in
+    /// [`READER_OVER_COLLECTION`]. Each is named by a quoted identifier and
+    /// returns its argument. No function calls another: the translator emits
+    /// a call by function index, so a call would spell no name. The one export
+    /// is the last function, so the module record spells `Me` and `MED_func`.
+    ///
+    /// The first function carries the module's one obligation, an `exists`
+    /// obligation, for the import it causes: the translator imports
+    /// `WasmVerifier.Exists` only into a `.v` with a reachability obligation,
+    /// and the oracle can check that library's names only where it is in
+    /// scope. The obligation and the export sit on different functions because
+    /// the translator refuses an exported spec function.
+    fn contract_named_functions_v(module_name: &str) -> String {
+        use inference_hassert::{HAssert, HFnRef, HSpecEntry, HTerm, ReachMeta, SpecKind};
+
+        let vocabulary = stub_vocabulary();
+        assert!(
+            !vocabulary.is_empty(),
+            "the vendored stub parsed to no names, so `{module_name}` would check nothing"
+        );
+        let names: Vec<&str> = vocabulary
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(READER_OVER_COLLECTION.iter().map(|&(_, name)| name))
+            .collect();
+        let functions: String = names
+            .iter()
+            .map(|name| {
+                let name = wat_escaped(name);
+                format!("(func $\"{name}\" (param i32) (result i32) local.get 0)\n")
+            })
+            .collect();
+        let exported = names.len() - 1;
+        let wat = format!("(module\n{functions}(export \"main\" (func {exported})))");
+        let bytes = wat::parse_str(&wat)
+            .unwrap_or_else(|e| panic!("`{module_name}` fixture assembles: {e}"));
+
+        let spec = "Reachable";
+        let (target, _) = &vocabulary[0];
+        let mut spec_funcs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        spec_funcs.insert(spec.to_string(), vec![0]);
+        let mut hspecs = inference::HSpecMap::default();
+        hspecs.insert(
+            spec.to_string(),
+            vec![HSpecEntry::new(
+                HFnRef(format!("{spec}.{target}")),
+                HAssert::Defined(HTerm::Local(0)),
+                SpecKind::Exists(ReachMeta {
+                    entry_arity: 1,
+                    visible_locs: vec![0],
+                }),
+            )],
+        );
+
+        inference::wasm_to_v(module_name, &bytes, &spec_funcs, &hspecs)
+            .unwrap_or_else(|e| panic!("wasm_to_v failed for `{module_name}`: {e}"))
+    }
+
+    /// The logical libraries `v` imports through its `From <root> Require
+    /// Import …` lines, each as `<root>.<file>`.
+    fn imported_libraries(v: &str) -> BTreeSet<String> {
+        v.lines()
+            .filter_map(|line| line.strip_prefix("From ")?.strip_suffix('.'))
+            .filter_map(|line| line.split_once(" Require Import "))
+            .flat_map(|(root, files)| {
+                files
+                    .split_whitespace()
+                    .map(move |file| format!("{root}.{file}"))
+            })
+            .collect()
+    }
+
+    /// `Example`s, appended after every definition in `v`, that each contract
+    /// name still denotes the contract's declaration.
+    ///
+    /// Each one states that the name spelled bare, as a later line of the file
+    /// or a proof importing it would spell it, is the declaration reached
+    /// through its library's full path, which no definition in `v` can
+    /// capture, and `eq_refl` closes it. A function left spelled like the name
+    /// turns the bare side into that function, a `module_func`, and the
+    /// statement no longer type-checks.
+    ///
+    /// The bare side names the contract's declaration only where `v` imports
+    /// its library, so every library of the vocabulary must be among the
+    /// imports read from `v`. Under `coqc` a dropped import would fail anyway,
+    /// since its bare names would not resolve; the assertion makes it fail
+    /// without `coqc` too, and names the library.
+    ///
+    /// A name of [`READER_OVER_COLLECTION`] is declared inside a module, and
+    /// stays unescaped because the translator spells it only qualified. The
+    /// preamble, everything before the first function, is where it spells it,
+    /// so every spelling there must be qualified, and there must be at least
+    /// one, or the oracle would check nothing for the name. Each qualified
+    /// spelling gets its own `Example`: those are the spellings a top-level
+    /// definition of the bare name must leave alone.
+    fn contract_names_oracle(v: &str) -> String {
+        let imported = imported_libraries(v);
+        let vocabulary = stub_vocabulary();
+        let unimported: BTreeSet<&str> = vocabulary
+            .iter()
+            .map(|(_, library)| library.as_str())
+            .filter(|library| !imported.contains(*library))
+            .collect();
+        assert!(
+            unimported.is_empty(),
+            "no `From … Require Import` line of this `.v` was read as importing \
+             {unimported:?} (read: {imported:?}), so the oracle could not check \
+             their names"
+        );
+        let mut out = String::from(ORACLE_MARKER);
+        for (name, library) in &vocabulary {
+            out.push_str(&format!(
+                "Example contract_name_{name} : @{name} = @{library}.{name} := eq_refl.\n"
+            ));
+        }
+
+        let preamble = v
+            .split_once(" : module_func :=")
+            .map_or(v, |(preamble, _)| preamble);
+        let stripped = strip_rocq_comments(preamble);
+        let tokens = tokenize(&stripped);
+        for &(library, name) in READER_OVER_COLLECTION {
+            let spellings: Vec<Option<&str>> = (0..tokens.len())
+                .filter(|&at| ident_at(&tokens, at) == Some(name))
+                .map(|at| match at.checked_sub(2) {
+                    Some(qualifier) if is_punct(&tokens, at - 1, '.') => {
+                        ident_at(&tokens, qualifier)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                !spellings.is_empty(),
+                "the preamble no longer spells `{name}`, so the oracle would check \
+                 nothing for it; re-examine its READER_OVER_COLLECTION allowance:\n\
+                 {preamble}"
+            );
+            assert!(
+                spellings.iter().all(Option::is_some),
+                "the preamble spells `{name}` bare, which a function named after it \
+                 would capture, so READER_OVER_COLLECTION may no longer leave it \
+                 unescaped:\n{preamble}"
+            );
+            let qualifiers: BTreeSet<&str> = spellings.into_iter().flatten().collect();
+            for qualifier in qualifiers {
+                out.push_str(&format!(
+                    "Example contract_name_{qualifier}_{name} : @{qualifier}.{name} = \
+                     @{library}.{qualifier}.{name} := eq_refl.\n"
+                ));
+            }
+        }
+        out
+    }
+
+    /// A function named after any name the proof contract declares is escaped
+    /// off it, and the `.v` elaborates with each of those names still
+    /// denoting the contract's declaration.
+    ///
+    /// [`HandbuiltModule::ContractNamedFunctions`] names one function after
+    /// each name [`stub_vocabulary`] parses out of the vendored stub, not after
+    /// each entry of `ROCQ_CONTRACT_NAMES`, the translator's copy: the module
+    /// grows with the stub, so a name the stub gains is a function here before
+    /// anybody lists it. The gate checks:
+    /// - membership in [`HandbuiltModule::ALL`], which the audit's net cannot
+    ///   check for a member like this one;
+    /// - without `coqc`, that each name `X` is bound exactly once, as
+    ///   `Definition X_ : module_func`. The audit's collision check already
+    ///   fails on a bare `X`, so this is the positive half: the escape is the
+    ///   trailing `_`, not a disambiguating index or a dropped function. A
+    ///   name of [`READER_OVER_COLLECTION`] is the exception and must stay
+    ///   bare, because the stub declares it inside a module and the
+    ///   translator leaves it out of its list;
+    /// - with `coqc`, that the module elaborates against the stub with
+    ///   [`contract_names_oracle`] appended.
+    ///
+    /// The oracle is what gives `coqc` teeth across the vocabulary. A
+    /// definition that shadows a contract name fails `coqc` only where the
+    /// file spells that name again later, and the module on its own spells
+    /// few of them: what follows a definition spells only the function record,
+    /// the module record with its fields and types, `MED_func`, the
+    /// obligation's definitions and theorems, `host` and `ValidModule`. The
+    /// oracle spells every name of the vocabulary after the last definition,
+    /// and the module's reachability obligation is what puts the
+    /// `WasmVerifier.Exists` names in scope for it. The real-library lane
+    /// compiles this module without the oracle, so there it shows only that
+    /// the escaped module and its obligation elaborate.
+    #[test]
+    fn contract_named_functions_elaborate_under_coqc() {
+        // The audit's safety net cannot notice this member missing from
+        // `ALL` (see `HandbuiltModule`), so the gate checks membership itself.
+        assert!(
+            HandbuiltModule::ALL
+                .iter()
+                .any(|member| matches!(member, HandbuiltModule::ContractNamedFunctions)),
+            "`ContractNamedFunctions` must be in `HandbuiltModule::ALL`, or neither \
+             the audit nor the real-library lane compiles it"
+        );
+        let module = HandbuiltModule::ContractNamedFunctions.build();
+        let v = &module.v;
+
+        // Teeth without `coqc`: every name is bound under its escaped
+        // spelling, exactly once.
+        let misbound: Vec<String> = stub_vocabulary()
+            .into_iter()
+            .filter(|(name, _)| {
+                let binding = format!("\nDefinition {name}_ : module_func := ");
+                v.matches(&binding).count() != 1
+            })
+            .map(|(name, library)| format!("  {name}  (declared in {library})"))
+            .collect();
+        assert!(
+            misbound.is_empty(),
+            "each function named after a contract name must be bound once, as \
+             `Definition <name>_ : module_func`; these are not:\n{}\n\
+             `sanitize_rocq_identifier` escapes a name through \
+             `ROCQ_CONTRACT_NAMES`, so its escape has regressed or the list has \
+             drifted from the stub. The emitted module:\n{v}",
+            misbound.join("\n")
+        );
+        for &(library, name) in READER_OVER_COLLECTION {
+            assert!(
+                v.contains(&format!("\nDefinition {name} : module_func := ")),
+                "`{name}` is declared inside a module of {library}, so the \
+                 translator must leave a function named after it unescaped, as \
+                 `Definition {name} : module_func`; got:\n{v}"
+            );
+        }
+
+        type_check_with_coqc_suffix(
+            &module,
+            &contract_names_oracle(v),
+            "Contract-named module generated, every contract name verified bound \
+             under its escaped name and `int_of_Z` bare",
+        );
+    }
+
     /// A stub declaration that no gated module can name, with the reason why.
     ///
     /// Each entry claims a producer is *impossible*, never merely absent: "no
@@ -3077,9 +3328,9 @@ pub(crate) mod gate {
                     .map(move |name| (m, name))
             })
             .filter_map(|(m, name)| {
-                let (_, file) = vocabulary.iter().find(|(bound, _)| bound == name)?;
+                let (_, library) = vocabulary.iter().find(|(bound, _)| bound == name)?;
                 Some(format!(
-                    "  {name}  bound by `{}`, declared in {file}",
+                    "  {name}  bound by `{}`, declared in {library}",
                     m.source
                 ))
             })
@@ -3148,7 +3399,7 @@ pub(crate) mod gate {
                     .iter()
                     .any(|&(exempt, _)| exempt == name)
             })
-            .map(|(name, file)| format!("  {name}  (declared in {file})"))
+            .map(|(name, library)| format!("  {name}  (declared in {library})"))
             .collect();
         assert!(
             missing.is_empty(),
@@ -3197,41 +3448,45 @@ pub(crate) mod gate {
     }
 
     /// Every name the vendored stub declares except its type names, paired
-    /// with the stub file that declares it. Parses exactly the files
-    /// [`compile_stub`] compiles.
+    /// with the logical library that declares it (`Wasm.datatypes`). Parses
+    /// exactly the files [`compile_stub`] compiles.
     fn stub_declarations() -> Vec<(String, String)> {
         STUB_MODULES
             .iter()
             .flat_map(|&(dir, module)| {
-                let file = format!("{dir}/{module}.v");
+                let library = stub_library(dir, module);
                 declared_names(&read_stub(dir, module))
                     .into_iter()
-                    .map(move |name| (name, file.clone()))
+                    .map(move |name| (name, library.clone()))
             })
             .collect()
     }
 
-    /// Every name the vendored stub binds, paired with the stub file that
-    /// binds it: the [`stub_declarations`], plus the inductive, record and
-    /// class *type* names they leave out. This is the vocabulary a generated
-    /// `.v` imports from the contract, so a binding spelled like any of it
-    /// shadows an import. It is read by `upstream_declared_names`, the reader
+    /// Every name the vendored stub binds, paired with the logical library
+    /// that binds it (`Wasm.datatypes`): the [`stub_declarations`], plus the
+    /// inductive, record and class *type* names they leave out. This is the
+    /// vocabulary a generated `.v` imports from the contract, so a binding
+    /// spelled like any of it shadows an import. It is read by
+    /// `upstream_declared_names`, the reader
     /// [`the_contract_deny_list_is_the_stub_vocabulary`] holds the translator's
     /// own copy of it to, less that reader's known over-collection,
     /// [`READER_OVER_COLLECTION`], which no binding can shadow; so it is the
-    /// same vocabulary the translator escapes.
+    /// same vocabulary the translator escapes, grouped the same way.
     fn stub_vocabulary() -> Vec<(String, String)> {
         STUB_MODULES
             .iter()
             .flat_map(|&(dir, module)| {
-                let file = format!("{dir}/{module}.v");
                 let library = stub_library(dir, module);
                 upstream_declared_names(&read_stub(dir, module))
                     .into_iter()
-                    .filter(move |name| {
-                        !READER_OVER_COLLECTION.contains(&(library.as_str(), name.as_str()))
+                    .filter_map(move |name| {
+                        let key = (library.as_str(), name.as_str());
+                        if READER_OVER_COLLECTION.contains(&key) {
+                            None
+                        } else {
+                            Some((name, library.clone()))
+                        }
                     })
-                    .map(move |name| (name, file.clone()))
             })
             .collect()
     }

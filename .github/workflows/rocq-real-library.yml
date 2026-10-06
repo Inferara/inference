@@ -427,7 +427,7 @@ jobs:
           INFERENCE_WASM_VERIFIER_COQC: ${{ vars.WASM_VERIFIER_COQC }}
           WASM_VERIFIER_THEORIES: ${{ vars.WASM_VERIFIER_THEORIES }}
           WASM_VERIFIER_CONTAINER: ${{ vars.WASM_VERIFIER_CONTAINER }}
-          REAL_LIBRARY_MODULE_FLOOR: '33'
+          REAL_LIBRARY_MODULE_FLOOR: '34'
         run: |
           set -euo pipefail
           cargo test -p inference-tests --verbose \
