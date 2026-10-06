@@ -3419,6 +3419,378 @@ fn module_named_as_a_rocq_preamble_helper_compiles_in_default_mode() {
     );
 }
 
+/// Seeds the artifacts an earlier build of `<stem>.inf` would have left in
+/// `out/`, so asserting that a rejected run leaves none behind asserts
+/// something.
+fn seed_stale_artifacts(root: &std::path::Path, stem: &str) {
+    write_source(root, &format!("out/{stem}.wasm"), "stale");
+    write_source(root, &format!("out/{stem}.v"), "(* stale *)");
+}
+
+/// The whole diagnostic for `host.inf`, which `Wasm.host` declares and every
+/// generated `.v` imports.
+const HOST_MODULE_DIAGNOSTIC: &str = "error: the output module name 'host' is already declared \
+     by 'Wasm.host', a proof library every generated .v imports.\n\n  \
+     The module name comes from the source filename, and the .v gives it to the module record: \
+     'Definition host : module'. Rocq lets that definition shadow the library's 'host': in any \
+     proof that imports this .v after the library, and in this .v wherever it spells 'host' \
+     again, 'host' names your module record, so code written for the library's 'host' breaks \
+     there. Rename the source file: 'host.inf' -> 'host_module.inf'.\n\n  \
+     Why not auto-rename: the module name is the .v's identity — its file name, the subject of \
+     'Theorem valid_host', and the prefix of every spec proof name — so renaming it silently \
+     would rename the artifact your proofs import.\n";
+
+/// An entry file whose stem is a name the proof contract declares is rejected
+/// whenever a `.v` is written, naming the declaring library and the rename.
+/// `Definition host : module` would shadow the contract's `host` class, which
+/// the `.v` spells again in ``Context `{ho: host}.``, so `coqc` used to reject
+/// the file after `infc` had exited 0. Any artifact an earlier build left is
+/// cleared, so nothing runnable survives the rejection.
+#[test]
+fn module_named_after_a_contract_name_rejected_no_stale_artifact() {
+    for flags in [&["-v"][..], &["--mode", "proof"], &["--mode", "compile", "-v"]] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let entry = write_source(temp.path(), "host.inf", "pub fn main() -> i32 { return 0; }");
+        seed_stale_artifacts(temp.path(), "host");
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path()).arg(&entry).args(flags);
+
+        cmd.assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains(HOST_MODULE_DIAGNOSTIC))
+            .stdout(predicate::str::contains("generated").not());
+
+        assert_no_artifacts(temp.path(), "host");
+    }
+}
+
+/// One stem from every always-imported contract library, each rejected under
+/// the library that declares it: the host class (`host`), a type the record
+/// itself is annotated with (`module`), a constructor a body applies
+/// (`BI_call`), the validity predicate the `.v` states its theorem with
+/// (`ValidModule`), and one name from each remaining library.
+#[test]
+fn module_named_after_a_contract_name_names_the_declaring_library() {
+    for (stem, library) in [
+        ("encode", "Wasm.bytes"),
+        ("i32", "Wasm.numerics"),
+        ("module", "Wasm.datatypes"),
+        ("BI_call", "Wasm.datatypes"),
+        ("host", "Wasm.host"),
+        ("hassert", "WasmVerifier.Assertions"),
+        ("ValidModule", "WasmVerifier.Verifier"),
+    ] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let entry = write_source(
+            temp.path(),
+            &format!("{stem}.inf"),
+            "pub fn main() -> i32 { return 0; }",
+        );
+        seed_stale_artifacts(temp.path(), stem);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+        cmd.assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains(format!(
+                "error: the output module name '{stem}' is already declared by '{library}', a \
+                 proof library every generated .v imports.\n"
+            )))
+            .stderr(predicate::str::contains(format!(
+                "Rename the source file: '{stem}.inf' -> '{stem}_module.inf'."
+            )));
+
+        assert_no_artifacts(temp.path(), stem);
+    }
+}
+
+/// `WasmVerifier.Exists` is imported only by a `.v` whose program has a
+/// reachability obligation, and this one has none, so the diagnostic says when
+/// the import happens instead of claiming it, and why the name is refused
+/// anyway.
+#[test]
+fn module_named_after_a_conditionally_imported_contract_name_says_when_it_is_imported() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "reach_func.inf", "pub fn main() -> i32 { return 0; }");
+    seed_stale_artifacts(temp.path(), "reach_func");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "error: the output module name 'reach_func' is already declared by \
+             'WasmVerifier.Exists', a proof library the generated .v imports whenever the \
+             program has a reachability ('exists' or 'unique') obligation.\n\n  \
+             The module name comes from the source filename, and the .v gives it to the module \
+             record: 'Definition reach_func : module'. Rocq lets that definition shadow the \
+             library's 'reach_func': in any proof that imports this .v after the library, and in \
+             this .v wherever it spells 'reach_func' again, 'reach_func' names your module \
+             record, so code written for the library's 'reach_func' breaks there. Rename the \
+             source file: 'reach_func.inf' -> 'reach_func_module.inf'.\n\n  \
+             Why refuse it in a program without one: the name is reserved in every .v, so \
+             adding an 'exists' or 'unique' obligation later never makes the file name \
+             invalid.\n\n  \
+             Why not auto-rename: the module name is the .v's identity — its file name, the \
+             subject of 'Theorem valid_reach_func', and the prefix of every spec proof name — so \
+             renaming it silently would rename the artifact your proofs import.\n",
+        ));
+
+    assert_no_artifacts(temp.path(), "reach_func");
+}
+
+/// The rejection is scoped to runs that write a `.v`: without one, no Rocq
+/// name is emitted, so the same stems compile cleanly to `.wasm`.
+#[test]
+fn module_named_after_a_contract_name_compiles_in_default_mode() {
+    for stem in ["host", "module", "ValidModule", "reach_func"] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let entry = write_source(
+            temp.path(),
+            &format!("{stem}.inf"),
+            "pub fn main() -> i32 { return 0; }",
+        );
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path()).arg(&entry);
+
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("WASM generated"));
+
+        assert!(
+            temp.child("out").child(format!("{stem}.wasm")).path().exists(),
+            "{stem}.inf must still build its .wasm"
+        );
+        assert!(
+            !temp.child("out").child(format!("{stem}.v")).path().exists(),
+            "default mode must not emit a .v"
+        );
+    }
+}
+
+/// `int_of_Z` is declared by the contract, but inside `Module Wasm_int`, and
+/// the `.v` only ever spells it `Wasm_int.int_of_Z`, which a top-level
+/// `Definition int_of_Z` cannot capture. So a module named after it is not
+/// reserved, and its `.v` is written.
+#[test]
+fn module_named_after_a_name_reached_only_qualified_builds_a_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "int_of_Z.inf", "pub fn main() -> i32 { return 0; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("V generated"));
+
+    let v = std::fs::read_to_string(temp.child("out").child("int_of_Z.v").path()).unwrap();
+    assert!(
+        v.contains("Definition int_of_Z : module :="),
+        "the record keeps the name `int_of_Z`:\n{v}"
+    );
+}
+
+/// An entry file named after the binder every generated `.v` gives its host
+/// instance is rejected in proof mode. Inside `Section Host` the theorems
+/// would read `ho` as the host instance rather than the module record, so
+/// `Theorem valid_ho : ValidModule ho` failed under `coqc` after `infc`
+/// exited 0.
+#[test]
+fn module_named_after_the_host_binder_rejected_no_stale_artifact() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "ho.inf", "pub fn main() -> i32 { return 0; }");
+    seed_stale_artifacts(temp.path(), "ho");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "error: the output module name 'ho' is the name every generated .v gives its host \
+             instance ('Section Host. Context `{ho: host}.'), so inside that section 'ho' would \
+             mean the host instance, not your module record.\n\n  \
+             The theorems name the module record inside that section — 'Theorem valid_ho : \
+             ValidModule ho' — where 'ho' is the host instance, which is not a module, so the \
+             file fails to compile. Rename the source file: 'ho.inf' -> 'ho_module.inf'.\n\n  \
+             Why not auto-rename: the module name is the .v's identity — its file name, the \
+             subject of 'Theorem valid_ho', and the prefix of every spec proof name — so \
+             renaming it silently would rename the artifact your proofs import. Nor is the \
+             binder renamed: it is the proof library's own name for the host instance, and the \
+             spec theorems take the instance as an implicit argument named 'ho', which proofs \
+             may pass as '(ho := h)'.\n",
+        ))
+        .stdout(predicate::str::contains("generated").not());
+
+    assert_no_artifacts(temp.path(), "ho");
+}
+
+/// And in default mode the same `ho.inf` compiles to `.wasm` with no `.v`.
+#[test]
+fn module_named_after_the_host_binder_compiles_in_default_mode() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "ho.inf", "pub fn main() -> i32 { return 0; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(temp.child("out").child("ho.wasm").path().exists());
+    assert!(
+        !temp.child("out").child("ho.v").path().exists(),
+        "default mode must not emit a .v"
+    );
+}
+
+/// The rename every reserved-name diagnostic offers keeps the source file's
+/// own extension, or its lack of one, for each owner: a preamble helper, a
+/// contract name and the host binder.
+#[test]
+fn reserved_module_name_rename_keeps_the_file_extension() {
+    for (file, rename) in [
+        ("Me.txt", "'Me.txt' -> 'Me_module.txt'"),
+        ("host.src", "'host.src' -> 'host_module.src'"),
+        ("ho.txt", "'ho.txt' -> 'ho_module.txt'"),
+        ("host", "'host' -> 'host_module'"),
+    ] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let entry = write_source(temp.path(), file, "pub fn main() -> i32 { return 0; }");
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+        cmd.assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains(format!(
+                "Rename the source file: {rename}."
+            )));
+    }
+}
+
+/// The dedicated refusal for a source file name that is not UTF-8, for the
+/// name `caf\xE9.inf`.
+#[cfg(target_os = "linux")]
+const NON_UTF8_STEM_REFUSAL: &str = "error: the source file name \"caf\\xE9.inf\" is not valid \
+     UTF-8, so the .v has no name to give its Rocq module.\n\n  \
+     The .v names its Rocq module after the source file: the module record, its validity \
+     theorem and every spec proof name are spelled from the file's stem. Rename the source file \
+     to an ASCII name of letters, digits and underscores, such as 'program.inf'.\n";
+
+/// Writes a trivial program under the file name `caf\xE9.inf`, whose stem is
+/// not UTF-8. A Linux file system takes any byte but `/` and NUL. macOS's APFS
+/// refuses such a name, and NTFS admits ill-formed UTF-16 instead, so the
+/// refusal is reachable on Windows too, but these raw bytes are a Unix
+/// spelling: the tests that need one are Linux-only.
+#[cfg(target_os = "linux")]
+fn write_non_utf8_source(root: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let entry = root.join(std::ffi::OsStr::from_bytes(b"caf\xe9.inf"));
+    std::fs::write(&entry, "pub fn main() -> i32 { return 0; }").unwrap();
+    entry
+}
+
+/// A `.v` names its Rocq module after the source file, so a file name that is
+/// not UTF-8 is refused before any phase runs, by every spelling that writes a
+/// `.v`. Without the refusal it would fall back to the module name `module`, a
+/// name this compiler chose and the contract declares, and the user would be
+/// refused under a name they never wrote. Like the translation's module-name
+/// rejections, it leaves no artifact an earlier build wrote under that
+/// fallback.
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_stem_is_rejected_in_proof_mode() {
+    for flags in [
+        &["-v"][..],
+        &["--mode", "proof"],
+        &["--codegen", "-v"],
+        &["--mode", "compile", "-v"],
+    ] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let entry = write_non_utf8_source(temp.path());
+        seed_stale_artifacts(temp.path(), "module");
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path()).arg(&entry).args(flags);
+
+        cmd.assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains(NON_UTF8_STEM_REFUSAL))
+            .stderr(predicate::str::contains("Wasm.datatypes").not())
+            .stdout(predicate::str::contains("Parsed:").not());
+
+        assert_no_artifacts(temp.path(), "module");
+    }
+}
+
+/// The refusal is keyed on a `.v` actually being written. A default build
+/// still names its `.wasm` after the `module` fallback, which `infs run`
+/// looks the artifact up by, and neither `--parse --mode proof` nor
+/// `--analyze -v` writes a `.v`, so both still succeed.
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_stem_keeps_the_module_fallback_without_a_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_non_utf8_source(temp.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+    assert!(temp.child("out").child("module.wasm").path().exists());
+    assert!(
+        !temp.child("out").child("module.v").path().exists(),
+        "default mode must not emit a .v"
+    );
+
+    for flags in [&["--parse", "--mode", "proof"][..], &["--analyze", "-v"]] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let entry = write_non_utf8_source(temp.path());
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path()).arg(&entry).args(flags);
+        cmd.assert()
+            .success()
+            .stderr(predicate::str::contains("is not valid UTF-8").not());
+        assert!(
+            !temp.child("out").path().exists(),
+            "{flags:?} writes no artifact"
+        );
+    }
+}
+
+/// A path with no file stem names no file at all, so a run that would write a
+/// `.v` is not refused for the name: reading the path reports what is wrong.
+#[test]
+fn a_path_with_no_stem_reports_the_read_error_under_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let below = temp.child("below");
+    below.create_dir_all().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(below.path()).arg("..").arg("-v");
+
+    cmd.assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("failed to read `..`"))
+        .stderr(predicate::str::contains("is not valid UTF-8").not());
+}
+
 /// Asserts that the emitted Rocq file gives no top-level name to two
 /// constructs. That is exactly what `coqc` refuses — `<name> already exists`,
 /// reported for the whole file, so nothing in it elaborates, including the

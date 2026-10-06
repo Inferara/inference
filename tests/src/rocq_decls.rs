@@ -22,12 +22,14 @@
 //! the stub, it would leave a contract name off the deny-list, free for a
 //! function to shadow.
 //!
-//! Reading broadly has a cost, though. A name it collects that a `.v` cannot
-//! actually shadow still renames every function spelled like it. The one such
-//! name is `int_of_Z`, collected from inside `Module Wasm_int` although nothing
-//! outside that module reaches it unqualified. A rename of a function nobody
-//! could shadow costs a trailing `_`; a missed contract name costs a `.v` that
-//! `coqc` rejects, so the reader keeps erring towards collecting.
+//! Reading broadly has a cost, though: it collects names a `.v` cannot actually
+//! shadow. The one such name in the stub is `int_of_Z`, collected from inside
+//! `Module Wasm_int` although nothing outside that module reaches it
+//! unqualified. The contract deny-list leaves it out, and the drift test that
+//! holds the list to this reader allows it by name, failing if the reader
+//! stops collecting it. A name collected in excess costs one named allowance;
+//! a missed contract name costs a `.v` that `coqc` rejects, so the reader keeps
+//! erring towards collecting.
 
 /// A Rocq token, at the resolution the declaration parser needs.
 ///
@@ -328,8 +330,9 @@ const BINDING_KEYWORDS: &[&str] = &[
 /// collected bare, like a top-level one, although outside the module it is
 /// reachable only qualified; the wrapper's own name is not collected at all,
 /// since `Module` is not a binding keyword here. That is how the stub's
-/// `int_of_Z`, declared inside `Module Wasm_int`, reaches the contract
-/// deny-list while `Wasm_int` does not.
+/// `int_of_Z`, declared inside `Module Wasm_int`, is collected while
+/// `Wasm_int` is not; the contract deny-list leaves `int_of_Z` out, and its
+/// drift test allows the excess by name.
 ///
 /// It is a reader, not a Rocq parser, and it has blind spots: the second type
 /// of a mutual `Inductive a … with b …` is missed, because `with` is not a

@@ -2058,10 +2058,11 @@ mod unsupported_surface {
 /// against the vendored stub's `Exists.v`.
 #[cfg(test)]
 mod reachability_emission {
-    use super::errors::WasmToVError;
+    use super::errors::{ReservedNameOwner, WasmToVError};
+    use super::rocq_names::ROCQ_CONTRACT_NAMES;
     use super::wasm_parser::translate_bytes;
     use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm, ReachMeta, SpecKind};
-    use rustc_hash::FxHashMap;
+    use rustc_hash::{FxHashMap, FxHashSet};
 
     fn exists_entry(symbol: &str, entry_arity: u32, visible_locs: Vec<u32>) -> HSpecEntry {
         HSpecEntry::new(
@@ -2219,6 +2220,81 @@ mod reachability_emission {
             !output.lines().any(|line| line.trim() == "Qed."),
             "generated unfinished proofs must use `Admitted.`, never `Qed.`:\n{output}",
         );
+    }
+
+    /// The logical paths a `.v`'s `From <root> Require Import …` lines import,
+    /// such as `Wasm.host`.
+    fn imported_libraries(v: &str) -> FxHashSet<String> {
+        v.lines()
+            .filter_map(|line| {
+                let (root, names) = line.strip_prefix("From ")?.split_once(" Require Import ")?;
+                Some(
+                    names
+                        .trim_end_matches('.')
+                        .split(' ')
+                        .map(move |name| format!("{root}.{name}")),
+                )
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Every library the contract list is grouped by is imported under that
+    /// logical path, and exactly the libraries
+    /// `ReservedNameOwner::is_imported_conditionally` names wait for a
+    /// reachability obligation, of either kind. The reserved-module-name
+    /// diagnostics say the generated file imports a contract library on the
+    /// strength of this, and qualify the claim with that method's answer.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_contract_library_is_imported_and_only_exists_waits_for_an_obligation() {
+        let contract: FxHashSet<String> = ROCQ_CONTRACT_NAMES
+            .iter()
+            .map(|&(library, _)| library.to_string())
+            .collect();
+        let unconditional: FxHashSet<String> = ROCQ_CONTRACT_NAMES
+            .iter()
+            .map(|&(library, _)| library)
+            .filter(|&library| !ReservedNameOwner::Contract { library }.is_imported_conditionally())
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            contract.len() - unconditional.len(),
+            1,
+            "exactly one contract library is imported conditionally",
+        );
+
+        let plain = translate(
+            "(module (func $f))",
+            &FxHashMap::default(),
+            &HSpecMap::default(),
+        )
+        .expect("a module without obligations translates");
+        assert_eq!(
+            imported_libraries(&plain),
+            unconditional,
+            "a module without a reachability obligation imports every other library:\n{plain}",
+        );
+
+        for (kind, entry) in [
+            ("exists", exists_entry("probe", 0, vec![0])),
+            ("unique", unique_entry("probe", 0, vec![0])),
+        ] {
+            let (spec_funcs, hspecs) = spec_maps("Reach", vec![1], vec![entry]);
+            let reaching = translate(
+                "(module (func $exec) (func $probe (param i32)))",
+                &spec_funcs,
+                &hspecs,
+            )
+            .unwrap_or_else(|err| {
+                panic!("a module with a `{kind}` obligation translates: {err:?}")
+            });
+            assert_eq!(
+                imported_libraries(&reaching),
+                contract,
+                "a module with a `{kind}` obligation imports every library:\n{reaching}",
+            );
+        }
     }
 
     /// A forall-only module keeps its pre-reachability output: the preamble
@@ -3296,9 +3372,14 @@ mod reachability_emission {
 /// as `BI_call_`, a module named `BI_call_`, or a method `BI.call`, which also
 /// escapes onto `BI_call_`), in which case the disambiguator moves all but one
 /// off it as it would any duplicate.
+///
+/// A *module* named after a contract name, or after `ho`, the binder of the
+/// host instance the theorems are stated under, is rejected like one named
+/// after a preamble helper, under its own `ReservedNameOwner`: the module name
+/// cannot move, and these tests pin the owner and the offered rename.
 #[cfg(test)]
 mod emitted_name_collisions {
-    use super::errors::WasmToVError;
+    use super::errors::{ReservedNameOwner, WasmToVError};
     use super::wasm_parser::translate_bytes;
     use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -3380,13 +3461,43 @@ mod emitted_name_collisions {
         expected_hint: &str,
     ) {
         let err = translate(mod_name, bytes).expect_err("a shadowed module name must be rejected");
-        let Some(WasmToVError::ModuleNameShadowsPreambleHelper { name, fix_hint }) =
-            err.downcast_ref::<WasmToVError>()
+        let Some(WasmToVError::ModuleNameReserved {
+            name,
+            owner: ReservedNameOwner::PreambleHelper,
+            fix_hint,
+        }) = err.downcast_ref::<WasmToVError>()
         else {
-            panic!("expected ModuleNameShadowsPreambleHelper, got {err:?}");
+            panic!("expected ModuleNameReserved by a preamble helper, got {err:?}");
         };
         assert_eq!(name, expected_name, "the contested name");
         assert_eq!(fix_hint, expected_hint, "the offered rename");
+    }
+
+    /// Asserts that translating `bytes` under `mod_name` is rejected because
+    /// `expected_owner` reserves `expected_name`, and that the offered
+    /// rename is `<expected_name>_module`.
+    fn assert_module_reserved(
+        mod_name: &str,
+        bytes: &[u8],
+        expected_name: &str,
+        expected_owner: ReservedNameOwner,
+    ) {
+        let err = translate(mod_name, bytes).expect_err("a reserved module name must be rejected");
+        let Some(WasmToVError::ModuleNameReserved {
+            name,
+            owner,
+            fix_hint,
+        }) = err.downcast_ref::<WasmToVError>()
+        else {
+            panic!("expected ModuleNameReserved for `{expected_name}`, got {err:?}");
+        };
+        assert_eq!(name, expected_name, "the contested name");
+        assert_eq!(*owner, expected_owner, "what holds `{expected_name}`");
+        assert_eq!(
+            *fix_hint,
+            format!("{expected_name}_module"),
+            "the offered rename"
+        );
     }
 
     /// Translates a one-function module whose function is named `func_name`,
@@ -3651,6 +3762,133 @@ mod emitted_name_collisions {
         let mut bytes = skeleton(1);
         bytes.extend(name_section(&name_subsection(0x00, &wasm_name("Me"))));
         assert_module_shadow("Prog", &bytes, "Me", "Me_module");
+    }
+
+    /// A module named after a name the proof contract declares is rejected,
+    /// naming the library that declares it. One name from every library, and
+    /// from `Wasm.datatypes` both a type the record itself is annotated with
+    /// (`module`) and a constructor a body applies (`BI_call`). `reach_func`'s
+    /// library is imported only with a reachability obligation, which this
+    /// module does not carry, and the name is rejected all the same.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_named_after_a_contract_name_is_rejected() {
+        for (mod_name, library) in [
+            ("encode", "Wasm.bytes"),
+            ("i32", "Wasm.numerics"),
+            ("module", "Wasm.datatypes"),
+            ("BI_call", "Wasm.datatypes"),
+            ("host", "Wasm.host"),
+            ("hassert", "WasmVerifier.Assertions"),
+            ("ValidModule", "WasmVerifier.Verifier"),
+            ("reach_func", "WasmVerifier.Exists"),
+        ] {
+            assert_module_reserved(
+                mod_name,
+                &module_with_function_named("f"),
+                mod_name,
+                ReservedNameOwner::Contract { library },
+            );
+        }
+    }
+
+    /// A module named after the host binder is rejected: every theorem names
+    /// the module record inside `Section Host`, where `ho` is the host
+    /// instance, so `Theorem valid_ho : ValidModule ho` would not type-check.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_named_after_the_host_binder_is_rejected() {
+        assert_module_reserved(
+            "ho",
+            &module_with_function_named("f"),
+            "ho",
+            ReservedNameOwner::HostSectionBinder,
+        );
+    }
+
+    /// The decode boundary re-checks the module name the `name` section
+    /// supplies against the contract too, not only against the preamble.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_renamed_by_the_name_section_to_a_contract_name_is_rejected() {
+        for (embedded, library) in [
+            ("host", "Wasm.host"),
+            ("ValidModule", "WasmVerifier.Verifier"),
+            ("reach_func", "WasmVerifier.Exists"),
+        ] {
+            let mut bytes = skeleton(1);
+            bytes.extend(name_section(&name_subsection(0x00, &wasm_name(embedded))));
+            assert_module_reserved(
+                "Prog",
+                &bytes,
+                embedded,
+                ReservedNameOwner::Contract { library },
+            );
+        }
+    }
+
+    /// And against the host binder.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_renamed_by_the_name_section_to_the_host_binder_is_rejected() {
+        let mut bytes = skeleton(1);
+        bytes.extend(name_section(&name_subsection(0x00, &wasm_name("ho"))));
+        assert_module_reserved("Prog", &bytes, "ho", ReservedNameOwner::HostSectionBinder);
+    }
+
+    /// The binder the module-name check reserves is the one the file spells.
+    /// Both read one constant, and this pins the line it produces byte for
+    /// byte, so changing that constant moves this test, not only the check.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_host_binder_line_is_unchanged() {
+        let out = translate("Prog", &module_with_function_named("f"))
+            .expect("a clean module translates");
+        assert!(
+            out.contains(
+                "\nSection Host.\nContext `{ho: host}.\n\nTheorem valid_Prog : ValidModule Prog.\n"
+            ),
+            "the host section must open with the `ho` binder:\n{out}",
+        );
+        assert_eq!(
+            out.matches("Context ").count(),
+            1,
+            "the file binds exactly one section variable:\n{out}",
+        );
+    }
+
+    /// Controls: a module name near a reserved one is a different identifier
+    /// and translates under its own name. Among them are the renames the
+    /// rejections offer, and three names the contract brings into scope that no
+    /// emitted term can be captured through: `Build_module`, the record
+    /// constructor Rocq derives and the emitter never spells; `Wasm_int`, a
+    /// module, which lives in a namespace a `Definition` cannot capture; and
+    /// `int_of_Z`, declared inside that module and only ever spelled qualified.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_named_near_a_reserved_name_translates() {
+        for mod_name in [
+            "Host",
+            "hosts",
+            "Ho",
+            "hos",
+            "host_module",
+            "ho_module",
+            "reach_func_module",
+            "Me_module",
+            "modules",
+            "Build_module",
+            "Wasm_int",
+            "int_of_Z",
+        ] {
+            let out = translate(mod_name, &module_with_function_named("f"))
+                .unwrap_or_else(|err| panic!("`{mod_name}` must translate: {err:?}"));
+            assert_no_duplicate_top_level_names(&out);
+            assert!(
+                out.contains(&format!("Definition {mod_name} : module :=")),
+                "the record keeps the name `{mod_name}`:\n{out}",
+            );
+        }
     }
 
     /// Control: a module contesting nothing keeps every name unchanged. This is

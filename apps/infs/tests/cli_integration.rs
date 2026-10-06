@@ -973,6 +973,97 @@ fn single_file_build_still_works() {
     assert!(wasm.path().exists());
 }
 
+/// Single-file `infs build -v` forwards `-v` to `infc` and inherits its stderr,
+/// so a module name the `.v` cannot use reaches the user in `infc`'s own words,
+/// with `infc`'s exit code and no artifact. Project mode always compiles
+/// `src/main.inf`, and `main` is not a reserved name, so this is the `infs` path
+/// that can meet the rejection.
+#[test]
+fn build_v_flag_surfaces_a_reserved_module_name() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("host.inf");
+    dest.write_str("pub fn main() -> i32 { return 0; }").unwrap();
+    for artifact in ["host.wasm", "host.v"] {
+        temp.child("out").child(artifact).write_str("stale").unwrap();
+    }
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path())
+        .arg("-v");
+
+    cmd.assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "error: the output module name 'host' is already declared by 'Wasm.host'",
+        ))
+        .stderr(predicate::str::contains("'host.inf' -> 'host_module.inf'"));
+
+    for artifact in ["host.wasm", "host.v"] {
+        assert!(
+            !temp.child("out").child(artifact).path().exists(),
+            "a rejected build must not leave the stale out/{artifact} behind"
+        );
+    }
+}
+
+/// A source file whose stem is not UTF-8 reaches `infc` unchanged: with `-v`
+/// it is refused in `infc`'s words, clearing what an earlier build left at the
+/// `module` fallback, and without it the `.wasm` still lands at
+/// `out/module.wasm`. Linux-only: the raw bytes below are a Unix spelling.
+/// macOS's APFS refuses such a name; NTFS admits ill-formed UTF-16, so the
+/// refusal is reachable on Windows too, but `OsStrExt::from_bytes` is
+/// Unix-only.
+#[cfg(target_os = "linux")]
+#[test]
+fn build_forwards_a_non_utf8_stem_to_infc() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.inf"));
+    std::fs::write(&dest, "pub fn main() -> i32 { return 0; }").unwrap();
+    for artifact in ["module.wasm", "module.v"] {
+        temp.child("out").child(artifact).write_str("stale").unwrap();
+    }
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(&dest)
+        .arg("-v");
+    cmd.assert().failure().code(1).stderr(predicate::str::contains(
+        "error: the source file name \"caf\\xE9.inf\" is not valid UTF-8",
+    ));
+    for artifact in ["module.wasm", "module.v"] {
+        assert!(
+            !temp.child("out").child(artifact).path().exists(),
+            "a refused build must not leave the stale out/{artifact} behind"
+        );
+    }
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(&dest);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+    assert!(temp.child("out").child("module.wasm").path().exists());
+}
+
 /// Four-tier byte comparison: project-mode WASM must be byte-identical to what
 /// single-file `infc` produces for the same source. The control is critical —
 /// `infc src/main.inf` is run with CWD = project root so the `main` stem (and

@@ -77,30 +77,31 @@ pub enum WasmToVError {
         fix_hint: String,
     },
 
-    /// The output module name is one of the top-level `Definition` names the
-    /// emitted preamble always occupies. Every generated `.v` opens with those
-    /// helpers, then names the module record `Definition <module> : module` and
-    /// its judgement `Theorem valid_<module>`. Rocq definitions are not
-    /// overloadable, so the file would define one name twice and `coqc` rejects
-    /// it whole — nothing in it elaborates, including the definitions that were
-    /// fine. Emission never noticed, so the failure surfaced only when someone
-    /// tried to check the proof.
+    /// The output module name is reserved in the generated `.v`, so the module
+    /// record cannot take it. Every generated `.v` names the record
+    /// `Definition <module> : module` and judges it in `Theorem valid_<module>`,
+    /// so the record contests every other binding of that name in scope there,
+    /// or in a proof that imports the `.v`; [`ReservedNameOwner`] says which
+    /// binding, and how the clash breaks the file or such a proof.
     ///
-    /// The module name is the one name in the file with nowhere to move to: it
-    /// is the `.v`'s identity, the subject of the validity theorem, and the
-    /// prefix of every spec-derived proof name. Rejected with a rename hint
-    /// rather than auto-renamed, for the reason
-    /// [`Self::SpecNameReservesSeparator`] is: proof-mode names appear verbatim
-    /// in the `.v`, so quietly renaming the module would rename the artifact a
-    /// downstream proof imports.
-    #[error(
-        "the output module name `{name}` is one of the helper definitions the emitted Rocq \
-         preamble always occupies, so `{name}` would name two top-level definitions in one \
-         file; rename it to `{fix_hint}`"
-    )]
-    ModuleNameShadowsPreambleHelper {
+    /// The name is the caller's `mod_name`, unless the binary's `name` section
+    /// carries a module name, which takes precedence (`codegen` writes its own
+    /// `module_name` there) and is checked the same way. So the rejected name
+    /// may be one the binary brought rather than the one the caller passed.
+    ///
+    /// Every owner shares one fix, which is why they share one variant. The
+    /// module name is the one name in the file with nowhere to move to: it is
+    /// the `.v`'s identity, the subject of the validity theorem, and the prefix
+    /// of every spec-derived proof name. Rejected with a rename hint rather
+    /// than auto-renamed, for the reason [`Self::SpecNameReservesSeparator`]
+    /// is: proof-mode names appear verbatim in the `.v`, so quietly renaming
+    /// the module would rename the artifact a downstream proof imports.
+    #[error("{}", module_name_reserved_message(.name, .owner, .fix_hint))]
+    ModuleNameReserved {
         /// The contested name, exactly as it would have been emitted.
         name: String,
+        /// What the name is reserved for.
+        owner: ReservedNameOwner,
         /// A concrete free name, so the fix needs no guessing.
         fix_hint: String,
     },
@@ -157,4 +158,66 @@ pub enum WasmToVError {
     /// supported" guidance rather than "malformed binary".
     #[error("unsupported WASM feature: {description}")]
     UnsupportedFeature { description: String },
+}
+
+/// What a name the output module cannot take is reserved for, carried by
+/// [`WasmToVError::ModuleNameReserved`].
+///
+/// Each owner contests the module record in its own way, so each gets its own
+/// explanation, but the fix is the same for all of them: rename the source file
+/// the module name comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReservedNameOwner {
+    /// One of the helper `Definition`s every generated `.v` opens with. The
+    /// record would define the same name a second time, and Rocq definitions
+    /// are not overloadable, so `coqc` rejects the whole file.
+    PreambleHelper,
+    /// A name the proof contract declares, listed in
+    /// [`crate::rocq_names::ROCQ_CONTRACT_NAMES`]. Defining it is legal, but
+    /// wherever the declaring library is imported first, the record shadows
+    /// the library's name: in a proof that imports the `.v` after the library,
+    /// and in the `.v` itself wherever it spells the name again. Code written
+    /// for the library's name then gets the record instead. That is usually an
+    /// error, but not always: a shadowed nullary constructor in a pattern
+    /// silently becomes a pattern variable that matches anything.
+    Contract {
+        /// The logical path of the declaring library, such as `Wasm.host`.
+        library: &'static str,
+    },
+    /// The `ho` binder of the host instance, which every generated `.v` binds
+    /// in the `Section Host` its theorems are stated under. Inside that
+    /// section the name resolves to the host instance, which is not a module,
+    /// so every theorem naming the record there fails to type-check.
+    HostSectionBinder,
+}
+
+/// The one-line description of a [`WasmToVError::ModuleNameReserved`], for its
+/// owner.
+fn module_name_reserved_message(name: &str, owner: &ReservedNameOwner, fix_hint: &str) -> String {
+    match owner {
+        ReservedNameOwner::PreambleHelper => format!(
+            "the output module name `{name}` is one of the helper definitions the emitted Rocq \
+             preamble always occupies, so `{name}` would name two top-level definitions in one \
+             file; rename it to `{fix_hint}`"
+        ),
+        ReservedNameOwner::Contract { library } => {
+            let imported = if owner.is_imported_conditionally() {
+                "the generated Rocq file imports whenever the module carries a reachability \
+                 obligation (the name is reserved either way)"
+            } else {
+                "every generated Rocq file imports"
+            };
+            format!(
+                "the output module name `{name}` is declared by `{library}`, a proof-contract \
+                 library {imported}, so the module record would shadow the library's `{name}`; \
+                 rename the module to `{fix_hint}`"
+            )
+        }
+        ReservedNameOwner::HostSectionBinder => format!(
+            "the output module name `{name}` is the name the generated Rocq file gives its host \
+             instance, so the file's theorems would read it as the host instance instead of the \
+             module record; rename it to `{fix_hint}`"
+        ),
+    }
 }

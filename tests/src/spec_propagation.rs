@@ -793,7 +793,7 @@ mod scenario_5_empty_list {
 // Scenario 6: Invalid module name
 #[cfg(test)]
 mod scenario_6_invalid_module_name {
-    use super::helpers::compile;
+    use super::helpers::{compile, compile_with_module};
     use inference_wasm_codegen::CompilationMode;
     use rustc_hash::FxHashMap;
 
@@ -954,6 +954,67 @@ mod scenario_6_invalid_module_name {
                 }) if name.len() == 256
             ),
             "expected TooLong for 256-char module name; got: {err:?}"
+        );
+    }
+
+    /// Module name declared by the proof contract is rejected with
+    /// `ModuleNameReserved`, naming the declaring library through the
+    /// re-exported owner type a caller matches on.
+    #[test]
+    fn module_name_declared_by_the_contract_is_rejected() {
+        let wasm = valid_wasm();
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let result = inference::wasm_to_v("host", &wasm, &empty, &inference::HSpecMap::default());
+        let err = result.expect_err("expected error for `host`");
+        assert!(
+            matches!(
+                err.downcast_ref::<inference::WasmToVError>(),
+                Some(inference::WasmToVError::ModuleNameReserved {
+                    name,
+                    owner: inference::ReservedNameOwner::Contract { library: "Wasm.host" },
+                    fix_hint,
+                }) if name == "host" && fix_hint == "host_module"
+            ),
+            "expected ModuleNameReserved by Wasm.host for `host`; got: {err:?}"
+        );
+    }
+
+    /// The module name codegen writes into the binary's `name` section takes
+    /// precedence over the one the caller passes, and is checked the same way:
+    /// a binary compiled under `module`, a name the contract declares, is
+    /// rejected under whatever name it is translated. Compiled and translated
+    /// under one name, as the `wasm_to_v` examples do, it keeps that name.
+    #[test]
+    fn module_name_from_the_name_section_is_checked_too() {
+        let source = r#"pub fn main() -> i32 { return 0; }"#;
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let hspecs = inference::HSpecMap::default();
+
+        let wasm = compile_with_module(source, CompilationMode::Compile, "module")
+            .wasm()
+            .to_vec();
+        let err = inference::wasm_to_v("EvenChecker", &wasm, &empty, &hspecs)
+            .expect_err("the embedded module name `module` must be rejected");
+        assert!(
+            matches!(
+                err.downcast_ref::<inference::WasmToVError>(),
+                Some(inference::WasmToVError::ModuleNameReserved {
+                    name,
+                    owner: inference::ReservedNameOwner::Contract { library: "Wasm.datatypes" },
+                    ..
+                }) if name == "module"
+            ),
+            "expected ModuleNameReserved by Wasm.datatypes for `module`; got: {err:?}"
+        );
+
+        let wasm = compile_with_module(source, CompilationMode::Compile, "EvenChecker")
+            .wasm()
+            .to_vec();
+        let v = inference::wasm_to_v("EvenChecker", &wasm, &empty, &hspecs)
+            .expect("one name for codegen and translation must translate");
+        assert!(
+            v.contains("Definition EvenChecker : module :="),
+            "the record keeps the shared name:\n{v}"
         );
     }
 }

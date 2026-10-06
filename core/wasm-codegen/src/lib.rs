@@ -139,11 +139,13 @@ pub use crate::bounds_elided_section::SECTION_VERSION as BOUNDS_ELIDED_SECTION_V
 /// Generates WebAssembly binary from a typed AST for the specified target and compilation mode.
 ///
 /// `module_name` is written into the WASM module-name subsection and flows
-/// downstream to the Rocq translator, which uses it as the top-level module
-/// identifier. The CLI derives this from the input file stem; library
-/// callers can pass any [`validate_rocq_identifier`]-compatible name.
-///
-/// [`validate_rocq_identifier`]: inference_wasm_to_v_translator::validate_rocq_identifier
+/// downstream to the Rocq translator: if the binary is translated, it is the
+/// Rocq module name, which takes precedence over the name the translator's
+/// caller passes. The CLI derives it from the input file stem. Any name
+/// compiles, but the binary can be translated only under a name that passes
+/// the translator's `validate_rocq_identifier` and that the generated `.v` does
+/// not reserve (a name it does is refused with
+/// `WasmToVError::ModuleNameReserved`, such as `module`).
 ///
 /// `options` carries the full compilation configuration; see [`CodegenOptions`]
 /// for the field-by-field contract. Its `features` apply identically in both
