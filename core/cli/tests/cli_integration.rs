@@ -3520,6 +3520,51 @@ fn function_named_as_the_module_theorem_produces_a_duplicate_free_v() {
     assert_v_has_no_duplicate_top_level_names(v.path());
 }
 
+/// A function named after a name the proof contract declares is a different
+/// hazard from a duplicate: the `.v` defines it once, which Rocq accepts, but
+/// the definition shadows the imported `BI_call` constructor for the rest of
+/// the file. `main`'s body applies that constructor to call the function, so a
+/// verbatim `Definition BI_call` would make `coqc` report that
+/// `"BI_call" of type "module_func"` cannot be applied, after `infc` exited 0.
+/// The function is emitted as `BI_call_`, the spelling `fn nat` gets, and
+/// `main` still names the constructor.
+#[test]
+fn function_named_after_a_contract_name_is_escaped_in_the_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "prog.inf",
+        "fn BI_call(x: i32) -> i32 { return x; }\npub fn main() -> i32 { return BI_call(1); }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("V generated"));
+
+    let v_path = temp.child("out").child("prog.v");
+    assert!(v_path.path().exists(), "expected out/prog.v");
+    assert_v_has_no_duplicate_top_level_names(v_path.path());
+    let v = std::fs::read_to_string(v_path.path()).unwrap();
+    assert!(
+        v.contains("Definition BI_call_ : module_func := {|"),
+        "the function must be emitted as `BI_call_`:\n{v}"
+    );
+    assert!(
+        !v.contains("Definition BI_call "),
+        "the contract's `BI_call` must not be redefined:\n{v}"
+    );
+    let (_, main_body) = v
+        .split_once("Definition main : module_func := {|")
+        .unwrap_or_else(|| panic!("`main` must be defined after `BI_call_`:\n{v}"));
+    assert!(
+        main_body.contains("BI_call 0%N"),
+        "`main` must still apply the contract's `BI_call` constructor:\n{v}"
+    );
+}
+
 // Stale-artifact safety: a rejected compile must never leave a runnable
 // `out/<name>.wasm` (or `.v`) on disk for `wasmtime` to execute. After a good
 // build, a later edit that fails any rejection channel (type check, analysis,

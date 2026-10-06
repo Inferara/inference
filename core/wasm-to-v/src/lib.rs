@@ -1037,19 +1037,20 @@ mod link_robustness {
     /// imported functions first. `translate_functions` offsets the body
     /// position by the function-import count to recover the absolute index.
     ///
-    /// This module imports `host` (absolute index 0) and defines `local`
+    /// This module imports `ext` (absolute index 0) and defines `local`
     /// (absolute index 1). The single code-section body is `local`; its
     /// name-section entry lives under absolute index 1. Without the offset the
     /// translator would look up index 0 and emit the body under the *import's*
-    /// name (`host`) — a silently mis-named proof obligation. The offset must
-    /// give it the correct name `local`.
+    /// name (`ext`) — a silently mis-named proof obligation. The offset must
+    /// give it the correct name `local`. The import's name is deliberately one
+    /// the translator emits verbatim, so the negative check below can see it.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn function_import_offsets_the_name_lookup() {
         let bytes = wat::parse_str(
             r#"
             (module
-              (import "env" "host" (func $host (param i32) (result i32)))
+              (import "env" "ext" (func $ext (param i32) (result i32)))
               (func $local (param i32) (result i32) local.get 0 i32.const 1 i32.add))
             "#,
         )
@@ -1066,10 +1067,10 @@ mod link_robustness {
         assert!(
             output.contains("Definition local :"),
             "the sole defined function must be named from its absolute index (1 -> `local`), \
-             not the import's index (0 -> `host`):\n{output}",
+             not the import's index (0 -> `ext`):\n{output}",
         );
         assert!(
-            !output.contains("Definition host :"),
+            !output.contains("Definition ext :"),
             "the import's name must never be emitted as a defined `module_func`:\n{output}",
         );
     }
@@ -3283,6 +3284,18 @@ mod reachability_emission {
 /// They assert the property that matters — no top-level name appears twice, and
 /// `mod_funcs` names the same definition the file defines — so a future change
 /// to the suffix scheme stays free.
+///
+/// A different class is not a duplicate at all. A function named after a name
+/// the proof contract declares (`BI_call`, `module_func`, `host`) defines that
+/// name once, which Rocq accepts, but the definition shadows the import for the
+/// rest of the file: a later body applying the `BI_call` constructor, or a
+/// later `: module_func` annotation, then names the user's function, and `coqc`
+/// rejects the file. Such a function is escaped with a trailing `_`, as `nat`
+/// is, and that spelling *is* pinned: it depends only on the name, unless
+/// another name in the module ends up spelled the same way (a function written
+/// as `BI_call_`, a module named `BI_call_`, or a method `BI.call`, which also
+/// escapes onto `BI_call_`), in which case the disambiguator moves all but one
+/// off it as it would any duplicate.
 #[cfg(test)]
 mod emitted_name_collisions {
     use super::errors::WasmToVError;
@@ -3293,6 +3306,27 @@ mod emitted_name_collisions {
     /// rather than read from the translator's own list so a name silently
     /// dropped from that list fails this suite instead of hiding in it.
     const PREAMBLE_HELPERS: &[&str] = &["Vi32", "Vi64", "Mt", "Mm", "Mg", "Mi", "Me", "Ma"];
+
+    /// Contract names of every kind a later line of a `.v` spells: a
+    /// constructor a body applies (`BI_call`), the types every function and
+    /// the record are annotated with, the types the obligations and the host
+    /// section spell, a record field every function's record sets, the
+    /// validity predicate, a function-type constructor, and the byte-literal
+    /// function.
+    /// Spelled out rather than read from the translator's list, for the same
+    /// reason [`PREAMBLE_HELPERS`] is.
+    const CONTRACT_NAME_SAMPLE: &[&str] = &[
+        "BI_call",
+        "module_func",
+        "module",
+        "host",
+        "hassert",
+        "reachability_spec",
+        "modfunc_body",
+        "ValidModule",
+        "Tf",
+        "encode",
+    ];
 
     fn translate(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
         translate_bytes(
@@ -3479,6 +3513,101 @@ mod emitted_name_collisions {
         assert_ne!(
             emitted, "valid_prog",
             "the function must not keep the theorem's name",
+        );
+    }
+
+    /// A function named after a contract name gains exactly one `_`, and
+    /// `mod_funcs` lists the escaped name.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_function_named_after_a_contract_name_is_escaped() {
+        for name in CONTRACT_NAME_SAMPLE {
+            assert_eq!(
+                emitted_name_of_the_only_function("Prog", name),
+                format!("{name}_"),
+                "a function named `{name}` must be emitted as `{name}_`",
+            );
+        }
+    }
+
+    /// The shadowing itself, at the text level: a function named `BI_call`
+    /// defined before a function that calls it. The caller's body applies the
+    /// contract's `BI_call` constructor, and a verbatim `Definition BI_call`
+    /// earlier in the file would capture that application, so `coqc` would
+    /// report that `"BI_call" of type "module_func"` cannot be applied. The
+    /// definition moves to `BI_call_`, and the caller's body still names the
+    /// constructor.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_contract_named_function_before_a_caller_is_escaped() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (func $BI_call (param i32) (result i32) local.get 0)
+              (func $caller (result i32) i32.const 1 call $BI_call))
+            "#,
+        )
+        .expect("fixture WAT assembles");
+        let out = translate("Prog", &bytes).expect("a contract-named function is escaped");
+        assert_no_duplicate_top_level_names(&out);
+        assert_eq!(
+            module_func_names(&out),
+            vec!["BI_call_", "caller"],
+            "the callee is escaped and the caller keeps its name:\n{out}",
+        );
+        assert!(
+            !out.contains("Definition BI_call "),
+            "the contract's `BI_call` must not be redefined:\n{out}",
+        );
+        let (_, caller) = out
+            .split_once("Definition caller : module_func := {|")
+            .expect("the caller is defined after the callee");
+        assert!(
+            caller.contains("BI_call 0%N"),
+            "the caller's body must still apply the contract's constructor:\n{out}",
+        );
+    }
+
+    /// The escape composes with the disambiguator. Whichever of `BI_call_` and
+    /// `BI_call` comes first takes the spelling `BI_call_`, and the other,
+    /// escaped onto it or written that way, is disambiguated off it like any
+    /// duplicate. Neither function is ever emitted as `BI_call`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_contract_name_escaped_onto_a_taken_name_is_disambiguated() {
+        for names in [["BI_call_", "BI_call"], ["BI_call", "BI_call_"]] {
+            let out = translate("Prog", &module_with_functions_named(&names))
+                .expect("an escaped name colliding with a written one is renamed");
+            assert_no_duplicate_top_level_names(&out);
+            let funcs = module_func_names(&out);
+            assert_eq!(funcs.len(), 2, "both functions were emitted:\n{out}");
+            assert_eq!(funcs[0], "BI_call_", "the first keeps the spelling:\n{out}");
+            assert!(
+                funcs[1].starts_with("BI_call_"),
+                "the second is disambiguated from the same base:\n{out}",
+            );
+            assert!(
+                !funcs.contains(&"BI_call"),
+                "neither may bind the contract's `BI_call`:\n{out}",
+            );
+        }
+    }
+
+    /// The module record can hold the escaped spelling too: in a module named
+    /// `BI_call_`, the record keeps that name, and a function `BI_call`,
+    /// escaped onto it, is disambiguated off the record instead.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_contract_name_escaped_onto_the_module_name_is_disambiguated() {
+        let out = translate("BI_call_", &module_with_function_named("BI_call"))
+            .expect("an escaped name colliding with the module name is renamed");
+        assert_no_duplicate_top_level_names(&out);
+        assert!(out.contains("Definition BI_call_ : module :="), "{out}");
+        let funcs = module_func_names(&out);
+        assert_eq!(funcs.len(), 1, "one function was emitted:\n{out}");
+        assert!(
+            funcs[0].starts_with("BI_call_") && funcs[0] != "BI_call_",
+            "the function is disambiguated off the record's name:\n{out}",
         );
     }
 
