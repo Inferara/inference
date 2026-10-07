@@ -74,9 +74,13 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
         return this.loading ?? this.track(this.load(false));
     }
 
-    /** Append the next older page. */
+    /** Append the next older page (dropped if the server or account changes meanwhile). */
     async loadMore(): Promise<void> {
+        const generation = this.generation;
         await this.loading;
+        if (generation !== this.generation || this.jobs.length === 0) {
+            return;
+        }
         return this.track(this.load(true));
     }
 
