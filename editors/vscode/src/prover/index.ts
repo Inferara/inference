@@ -121,7 +121,11 @@ export function registerProver(
         }
     });
 
+    // A different server or key means different jobs: drop what is loaded
+    // and every open panel before loading again.
     const changed = () => {
+        jobs.reset();
+        panels.closeAll();
         void jobs.refresh();
         onStatusChanged();
     };

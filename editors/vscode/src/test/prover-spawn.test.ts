@@ -38,6 +38,30 @@ describe('run', () => {
         assert.ok(aborted.aborted);
     });
 
+    it('stops the whole process tree, so a grandchild holding the pipes cannot hang it', { skip: process.platform === 'win32' }, async () => {
+        // The child starts a grandchild that inherits stdout, as infs starts infc.
+        const script = [
+            "const cp = require('child_process');",
+            "const g = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'inherit' });",
+            'console.log(g.pid);',
+            'setTimeout(() => {}, 60000);',
+        ].join(' ');
+        let grandchild = 0;
+        const controller = new AbortController();
+        const started = Date.now();
+        const result = await run(node, ['-e', script], {
+            signal: controller.signal,
+            onLine: (line) => {
+                grandchild = Number(line);
+                controller.abort();
+            },
+        });
+        assert.ok(result.aborted);
+        assert.ok(Date.now() - started < 10_000, 'run returned promptly');
+        assert.ok(grandchild > 0);
+        assert.throws(() => process.kill(grandchild, 0), 'the grandchild was stopped too');
+    });
+
     it('rejects when the command cannot be spawned', async () => {
         await assert.rejects(run('/nonexistent/infs', []));
     });

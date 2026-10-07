@@ -38,11 +38,13 @@ function fakeDeps(options: {
     infc?: string | null;
     confirm?: boolean;
     vText?: string;
+    cancelAfterBuild?: boolean;
 }) {
     const calls: Call[] = [];
     const submits: Array<{ filename: string; options: SubmitJobOptions; key?: string }> = [];
     const identity = options.identity ?? { commit: 'd71a9c3e', version: 'infc 0.0.1', abi: '1.3' };
     let confirmations = 0;
+    let built = false;
     const deps: ProveDeps = {
         locateInfs: () => (options.infs === undefined ? '/t/infs' : options.infs),
         resolveInfc: async () => (options.infc === undefined ? '/t/infc' : options.infc),
@@ -52,6 +54,7 @@ function fakeDeps(options: {
                 const out = { '--commit-hash': identity.commit, '--version': identity.version, '--abi-version': identity.abi }[args[0]];
                 return { exitCode: 0, stdout: `${out}\n`, stderr: '' };
             }
+            built = true;
             return options.build ?? { exitCode: 0, stdout: 'WASM generated at: out/m.wasm\nV generated at: out/m.v\n', stderr: '' };
         },
         readFile: async () => new TextEncoder().encode(options.vText ?? V),
@@ -67,6 +70,7 @@ function fakeDeps(options: {
             return options.confirm ?? false;
         },
         progress: () => undefined,
+        cancelled: () => Boolean(options.cancelAfterBuild) && built,
     };
     return { deps, calls, submits, confirmations: () => confirmations };
 }
@@ -114,6 +118,13 @@ describe('proveInfFile', () => {
             command === '/t/infc' ? { exitCode: 1, stdout: '', stderr: '', aborted: true } : run(command, args, options);
         assert.deepStrictEqual(await proveInfFile('/w/m.inf', fake.deps), { kind: 'cancelled' });
         assert.ok(!fake.calls.some((c) => c.command === '/t/infs'));
+    });
+
+    it('does not upload when the user cancels after the build', async () => {
+        const fake = fakeDeps({ cancelAfterBuild: true });
+        assert.deepStrictEqual(await proveInfFile('/w/m.inf', fake.deps), { kind: 'cancelled' });
+        assert.ok(fake.calls.some((c) => c.command === '/t/infs'));
+        assert.strictEqual(fake.submits.length, 0);
     });
 
     it('reports a missing toolchain or compiler', async () => {
@@ -216,6 +227,7 @@ describe('proveInfFile with real processes and HTTP', { skip: process.platform =
             api: new ProverApi(baseUrl, 'infp_key_test'),
             confirmUnchecked: async () => false,
             progress: () => undefined,
+            cancelled: () => false,
         });
         assert.strictEqual(outcome.kind, 'submitted', JSON.stringify(outcome));
         assert.ok(outcome.kind === 'submitted' && outcome.vPath === path.join(dir, 'src', 'out', 'controller.v'));

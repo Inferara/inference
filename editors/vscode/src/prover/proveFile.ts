@@ -86,6 +86,7 @@ export function registerProveFileCommand(
                             progress.report({ message });
                             log.info(`Prover: ${message}`);
                         },
+                        cancelled: () => token.isCancellationRequested,
                     });
                 },
             );

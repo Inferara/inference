@@ -156,6 +156,16 @@ function request(opts: RequestOptions, remaining: number): Promise<RawResponse> 
                         return;
                     }
                     res.resume();
+                    // An upload carries the user's program and specifications;
+                    // it goes only to the origin they configured.
+                    if (targetUrl.origin !== parsed.origin && payload !== undefined) {
+                        reject(
+                            new Error(
+                                `Refusing to send the request body to another origin: ${opts.url} -> ${targetUrl.origin}`,
+                            ),
+                        );
+                        return;
+                    }
                     // Never replay credentials (Authorization, Idempotency-Key)
                     // to a different origin — a misdirected redirect must not
                     // leak the bearer token.
