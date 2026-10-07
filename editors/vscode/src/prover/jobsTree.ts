@@ -49,6 +49,8 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
     private timer: ReturnType<typeof setInterval> | undefined;
     private loading: Promise<void> | null = null;
     private filter: JobStatus | undefined;
+    /** Bumped on a server or account change; replies from older generations are dropped. */
+    private generation = 0;
 
     constructor(
         private readonly secrets: vscode.SecretStorage,
@@ -69,21 +71,33 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
 
     /** Reload the first page; concurrent calls share one load. */
     refresh(): Promise<void> {
-        if (!this.loading) {
-            this.loading = this.load(false).finally(() => {
-                this.loading = null;
-            });
-        }
-        return this.loading;
+        return this.loading ?? this.track(this.load(false));
     }
 
     /** Append the next older page. */
     async loadMore(): Promise<void> {
         await this.loading;
-        this.loading = this.load(true).finally(() => {
-            this.loading = null;
+        return this.track(this.load(true));
+    }
+
+    /** Forget everything loaded: the server or the account changed. */
+    reset(): void {
+        this.generation++;
+        this.jobs = [];
+        this.hasMore = false;
+        this.errorMessage = null;
+        this.loading = null;
+        this.changed.fire(undefined);
+    }
+
+    private track(load: Promise<void>): Promise<void> {
+        const tracked: Promise<void> = load.finally(() => {
+            if (this.loading === tracked) {
+                this.loading = null;
+            }
         });
-        return this.loading;
+        this.loading = tracked;
+        return tracked;
     }
 
     setVisible(visible: boolean): void {
@@ -114,6 +128,7 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
     }
 
     private async load(more: boolean): Promise<void> {
+        const generation = this.generation;
         let config;
         try {
             config = await resolveConfig(this.secrets);
@@ -136,6 +151,9 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
             const api = new ProverApi(config.serverUrl, config.apiKey);
             const before = more ? this.jobs[this.jobs.length - 1]?.createdAt ?? undefined : undefined;
             const page = await api.listJobs({ status: this.filter, limit: PAGE_SIZE, before });
+            if (generation !== this.generation) {
+                return; // a reply from the previous server or account
+            }
             this.jobs = more ? [...this.jobs, ...page] : mergeFirstPage(page, this.jobs, PAGE_SIZE);
             if (more || page.length < PAGE_SIZE || this.jobs.length === page.length) {
                 // A full page may have older jobs behind it. A refresh that kept
@@ -144,6 +162,9 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
             }
             this.errorMessage = null;
         } catch (err) {
+            if (generation !== this.generation) {
+                return;
+            }
             this.jobs = [];
             this.hasMore = false;
             this.errorMessage =

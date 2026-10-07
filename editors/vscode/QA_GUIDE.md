@@ -53,7 +53,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 0.1 | `npm install` in `editors/vscode/` | Installs without errors |
 | 0.2 | `npm run build` | Builds `dist/extension.js` without errors |
 | 0.3 | `npm run build:prod` | Production build succeeds |
-| 0.4 | `npm test` | All 433 tests pass, 0 failures |
+| 0.4 | `npm test` | All 436 tests pass, 0 failures |
 | 0.5 | `npm run package` | Runs `build:prod` first (the `vscode:prepublish` script), then produces `inference-0.0.6.vsix` without errors. `npx vsce ls --no-dependencies` lists only `package.json`, `README.md`, `LICENSE`, `dist/extension.js`, `icons/`, `language-configuration.json` and `syntaxes/`: no `node_modules`, sources, tests or source map |
 
 ---
@@ -416,4 +416,7 @@ accepts (`GET /api/v1/meta` → `acceptedToolchain`).
 | 14.14 | Delete a finished job | Confirmation mentions purge within 7 days; the job leaves the list | |
 | 14.15 | Filter by status, then "Load more…" past 50 jobs | Only that status is listed (view description shows it); older jobs append | |
 | 14.16 | Set `inference.prover.serverUrl` to `http://localhost:8088` against a local deployment | Jobs list, submit and live updates work over plain HTTP on loopback | |
+| 14.17 | With jobs listed and a job panel open, change `inference.prover.serverUrl` (or clear the key) | Open job panels close and the list shows only the new server's jobs; nothing from the previous server reappears | |
+| 14.18 | With a running job's panel in polling mode (block the stream, e.g. a proxy that drops SSE), let the job finish | The final events (`job.verifying`, `job.completed`) appear in the log without a manual refresh | |
+| 14.19 | Cancel "Prove This File" while a slow compile runs | The progress ends promptly and no `infs`/`infc` process remains (`ps`) | |
 

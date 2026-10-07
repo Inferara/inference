@@ -38,10 +38,14 @@ export function run(command: string, args: string[], options: RunOptions = {}): 
             resolve({ exitCode: 1, stdout: '', stderr: '', timedOut: false, aborted: true });
             return;
         }
+        const windows = process.platform === 'win32';
         const child = cp.spawn(command, args, {
             cwd: options.cwd,
             env: options.env ? { ...process.env, ...options.env } : undefined,
             stdio: ['ignore', 'pipe', 'pipe'],
+            // Own process group on POSIX, so stopping reaches the compiler
+            // `infs` spawns, which would otherwise hold the pipes open.
+            detached: !windows,
         });
 
         const out = { stdout: '', stderr: '' };
@@ -63,9 +67,23 @@ export function run(command: string, args: string[], options: RunOptions = {}): 
         child.stdout.on('data', (chunk: Buffer) => consume('stdout', decoders.stdout.write(chunk)));
         child.stderr.on('data', (chunk: Buffer) => consume('stderr', decoders.stderr.write(chunk)));
 
+        const signalTree = (signal: NodeJS.Signals) => {
+            if (child.pid === undefined) {
+                return;
+            }
+            if (windows) {
+                cp.spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+                return;
+            }
+            try {
+                process.kill(-child.pid, signal);
+            } catch {
+                child.kill(signal);
+            }
+        };
         const stop = () => {
-            child.kill('SIGTERM');
-            killTimer = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS);
+            signalTree('SIGTERM');
+            killTimer = setTimeout(() => signalTree('SIGKILL'), KILL_GRACE_MS);
         };
         const timer = setTimeout(() => {
             timedOut = true;

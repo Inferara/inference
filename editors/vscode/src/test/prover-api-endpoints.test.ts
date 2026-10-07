@@ -70,6 +70,33 @@ describe('ProverApi endpoints', () => {
             err instanceof ApiError && err.status === 409 && err.code === 'NOT_TERMINAL');
     });
 
+    it('never carries an upload to another origin on a redirect', async () => {
+        let foreignRequests = 0;
+        const foreign = http.createServer((_req, res) => {
+            foreignRequests++;
+            res.end('{}');
+        });
+        await new Promise<void>((resolve) => foreign.listen(0, '127.0.0.1', resolve));
+        const foreignUrl = `http://localhost:${(foreign.address() as { port: number }).port}`;
+        const redirecting = http.createServer((_req, res) => {
+            res.statusCode = 307;
+            res.setHeader('Location', `${foreignUrl}/api/v1/jobs`);
+            res.end();
+        });
+        await new Promise<void>((resolve) => redirecting.listen(0, '127.0.0.1', resolve));
+        try {
+            const client = new ProverApi(`http://127.0.0.1:${(redirecting.address() as { port: number }).port}`, 'k');
+            await assert.rejects(
+                client.submitJob('m.v', Buffer.from('secret program'), {}, 'key'),
+                /Refusing to send the request body to another origin/,
+            );
+            assert.strictEqual(foreignRequests, 0);
+        } finally {
+            redirecting.close();
+            foreign.close();
+        }
+    });
+
     it('lists artifacts and downloads beyond the JSON cap', async () => {
         assert.strictEqual((await api.listArtifacts('j1'))[0].kind, 'CompletedV');
         artifactBytes = Buffer.alloc(11 * 1024 * 1024, 0x61); // > 10 MiB JSON cap

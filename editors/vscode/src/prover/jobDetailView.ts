@@ -66,7 +66,7 @@ interface PanelState {
     /** Result metadata + artifacts, fetched once the job is terminal. */
     result: JobResultResponse | null;
     resultFetched: boolean;
-    /** One-time event-history backfill for jobs opened already-terminal. */
+    /** The finished job's remaining event history has been read. */
     historyFetched: boolean;
 }
 
@@ -92,6 +92,13 @@ export class JobDetailViewManager implements vscode.Disposable {
         /** Called after an action here changed a job (the tree refreshes). */
         private readonly onJobChanged: () => void,
     ) {}
+
+    /** Close every panel: the server or the account changed. */
+    closeAll(): void {
+        for (const state of [...this.states.values()]) {
+            state.panel.dispose(); // onDidDispose suspends and forgets it
+        }
+    }
 
     /** Open (or reveal) the detail panel for `job`, then fetch fresh data. */
     async open(job: JobResponse, source?: string): Promise<void> {
@@ -354,7 +361,7 @@ export class JobDetailViewManager implements vscode.Disposable {
                 state.stream = undefined;
                 auxChanged = await this.fetchResultOnce(id, api);
                 auxChanged =
-                    (await this.backfillHistoryOnce(id, api)) || auxChanged;
+                    (await this.catchUpHistoryOnce(id, api)) || auxChanged;
             } else if (state.liveMode !== 'sse') {
                 await this.pollEvents(id, api);
             }
@@ -421,26 +428,30 @@ export class JobDetailViewManager implements vscode.Disposable {
     }
 
     /**
-     * Backfill the event log once for jobs opened after they finished. The
-     * events endpoint pages forward from a cursor, so read until a short page
-     * (bounded) and keep the newest {@link EVENT_LOG_CAP} lines — the tail
+     * Once a job has finished, read every event past the panel's cursor: the
+     * whole history for a panel opened afterwards, or the tail a polling
+     * panel had not fetched yet when the job ended. Reads until a short page
+     * (bounded) and keeps the newest {@link EVENT_LOG_CAP} lines — the tail
      * holds the verdict. Returns true when lines were added.
      */
-    private async backfillHistoryOnce(
+    private async catchUpHistoryOnce(
         id: string,
         api: ProverApi,
     ): Promise<boolean> {
         const state = this.states.get(id);
-        if (!state || state.historyFetched || state.log.length > 0) {
+        if (!state || state.historyFetched) {
             return false;
         }
         try {
             const lines: string[] = [];
-            let cursor = 0;
+            let cursor = state.lastSeq;
             for (let page = 0; page < MAX_HISTORY_PAGES; page++) {
                 const res = await api.getEvents(id, cursor);
                 for (const env of res.events) {
-                    if (typeof env.seq === 'number' && env.seq > cursor) {
+                    if (typeof env.seq === 'number') {
+                        if (env.seq <= cursor) {
+                            continue;
+                        }
                         cursor = env.seq;
                     }
                     lines.push(formatEventLine(env));
@@ -457,6 +468,9 @@ export class JobDetailViewManager implements vscode.Disposable {
                 return false;
             }
             fresh.log.push(...lines);
+            if (fresh.log.length > EVENT_LOG_CAP) {
+                fresh.log.splice(0, fresh.log.length - EVENT_LOG_CAP);
+            }
             fresh.lastSeq = Math.max(fresh.lastSeq, cursor);
             fresh.historyFetched = true;
             return lines.length > 0;

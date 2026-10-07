@@ -48,6 +48,8 @@ export interface ProveDeps {
     confirmUnchecked(): Promise<boolean>;
     /** Progress for the notification and the output channel. */
     progress(message: string): void;
+    /** True once the user cancelled; checked again right before the upload. */
+    cancelled(): boolean;
 }
 
 export type ProveOutcome =
@@ -141,8 +143,11 @@ export async function proveInfFile(infPath: string, deps: ProveDeps): Promise<Pr
         return { kind: 'no-output', output };
     }
 
-    deps.progress(`Submitting ${path.basename(vPath)}…`);
     const bytes = await deps.readFile(vPath);
+    if (deps.cancelled()) {
+        return { kind: 'cancelled' };
+    }
+    deps.progress(`Submitting ${path.basename(vPath)}…`);
     const submitted = await submitVFile(deps.api, path.basename(vPath), bytes, meta.maxUploadBytes);
     if (submitted.kind === 'preflight-failed') {
         return { kind: 'preflight-failed', vPath, problem: submitted.problem };
