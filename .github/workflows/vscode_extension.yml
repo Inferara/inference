@@ -13,6 +13,9 @@ on:
     paths:
       - 'editors/vscode/**'
       - '.github/workflows/vscode_extension.yml'
+  # The publish workflow builds through this job so the bytes it publishes
+  # are the bytes these checks passed.
+  workflow_call:
 
 permissions:
   contents: read
@@ -95,3 +98,11 @@ jobs:
             exit 1
           fi
           echo "${vsix[0]} carries the expected $(printf '%s\n' "$actual" | wc -l) files and a production bundle."
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-vsix
+          path: editors/vscode/inference-*.vsix
+          if-no-files-found: error
+          retention-days: 14

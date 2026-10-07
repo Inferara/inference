@@ -16,8 +16,8 @@ describe('settings schema (QA Section 8)', () => {
     const properties = contributes.configuration.properties;
     const settingKeys = Object.keys(properties);
 
-    it('has exactly 6 settings', () => {
-        assert.strictEqual(settingKeys.length, 6);
+    it('has exactly 7 settings', () => {
+        assert.strictEqual(settingKeys.length, 7);
     });
 
     it('contains inference.path, inference.autoInstall, inference.checkForUpdates, inference.lsp.enabled, inference.lsp.path, inference-lsp.trace.server', () => {
@@ -60,6 +60,13 @@ describe('settings schema (QA Section 8)', () => {
         assert.strictEqual(setting.scope, 'machine');
     });
 
+    it('inference.prover.serverUrl has type=string, default="" (hosted service), and machine scope', () => {
+        const setting = properties['inference.prover.serverUrl'];
+        assert.strictEqual(setting.type, 'string');
+        assert.strictEqual(setting.default, '');
+        assert.strictEqual(setting.scope, 'machine');
+    });
+
     it('inference-lsp.trace.server is the standard protocol-trace knob: string enum off/messages/verbose, default off, window scope', () => {
         const setting = properties['inference-lsp.trace.server'];
         assert.strictEqual(setting.type, 'string');
@@ -79,8 +86,8 @@ describe('settings schema (QA Section 8)', () => {
 describe('commands schema (QA Section 8)', () => {
     const commands: Array<{ command: string; title: string }> = contributes.commands;
 
-    it('has exactly 11 commands registered', () => {
-        assert.strictEqual(commands.length, 11);
+    it('has exactly 24 commands registered', () => {
+        assert.strictEqual(commands.length, 24);
     });
 
     it('contains expected command IDs', () => {
@@ -96,6 +103,23 @@ describe('commands schema (QA Section 8)', () => {
         assert.ok(ids.includes('inference.refreshConfigView'));
         assert.ok(ids.includes('inference.copyConfigValue'));
         assert.ok(ids.includes('inference.revealConfigPath'));
+        for (const id of [
+            'inference.proveFile',
+            'inference.submitProof',
+            'inference.setProverApiKey',
+            'inference.clearProverApiKey',
+            'inference.refreshProofJobs',
+            'inference.filterProofJobs',
+            'inference.openProofJob',
+            'inference.cancelProofJob',
+            'inference.deleteProofJob',
+            'inference.resubmitProofJob',
+            'inference.copyProofJobId',
+            'inference.compareProof',
+            'inference.openProofJobInPortal',
+        ]) {
+            assert.ok(ids.includes(id), id);
+        }
     });
 });
 
@@ -106,6 +130,7 @@ describe('activation events (QA Section 1)', () => {
         assert.ok(activationEvents.includes('onLanguage:inference'));
         assert.ok(activationEvents.includes('workspaceContains:**/*.inf'));
         assert.ok(activationEvents.includes('onView:inference.configView'));
+        assert.ok(activationEvents.includes('onView:inference.proofJobsView'));
     });
 });
 
@@ -131,8 +156,8 @@ describe('walkthrough schema (QA Section 7)', () => {
         assert.strictEqual(walkthroughs[0].id, 'inference.gettingStarted');
     });
 
-    it('walkthrough has exactly 4 steps', () => {
-        assert.strictEqual(walkthroughs[0].steps.length, 4);
+    it('walkthrough has exactly 5 steps', () => {
+        assert.strictEqual(walkthroughs[0].steps.length, 5);
     });
 
     it('walkthrough steps have correct IDs', () => {
@@ -142,6 +167,7 @@ describe('walkthrough schema (QA Section 7)', () => {
             'inference.walkthrough.verify',
             'inference.walkthrough.createProject',
             'inference.walkthrough.build',
+            'inference.walkthrough.prove',
         ]);
     });
 

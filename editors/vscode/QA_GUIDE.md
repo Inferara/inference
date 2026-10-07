@@ -36,12 +36,13 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 5. Syntax Highlighting | Manual (requires VS Code host) |
 | 6. Language Configuration | Manual (requires VS Code host) |
 | 7. Walkthrough | **[A]** Schema validated (`settings-schema.test.ts`); interactive steps manual |
-| 8. Settings | **[A]** Schema validated (6 settings, 11 commands in `settings-schema.test.ts`) |
+| 8. Settings | **[A]** Schema validated (7 settings, 24 commands in `settings-schema.test.ts`) |
 | 9. Error Handling | **[A]** Most paths automated (`install-failures.test.ts`, `version-parsing.test.ts`, `e2e-installation.test.ts`) |
 | 10. Cross-Platform | Manual (requires physical platforms); detection and extraction logic tested |
 | 11. Privacy & Security | **[A]** HTTPS redirect + SHA-256 automated (`https-redirect.test.ts`, `download.test.ts`) |
 | 12. Component Management | Partial -- component args + doctor-attention logic automated (`components.test.ts`, `doctor.test.ts`); UI flows manual |
 | 13. Language Server | Partial -- binary resolution + config-change logic automated (`lsp-resolve.test.ts`), start-timeout helper automated (`timeout.test.ts`); client lifecycle and editor features manual |
+| 14. Proving & Proof Jobs | Partial -- compiler check, build/submit flow (fake `infs`/`infc` + HTTP stub), preflight, API client, SSE, event formatting, detail rendering and menu wiring automated (`prover-*.test.ts`); panels, tree and notifications manual |
 
 ---
 
@@ -52,7 +53,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 0.1 | `npm install` in `editors/vscode/` | Installs without errors |
 | 0.2 | `npm run build` | Builds `dist/extension.js` without errors |
 | 0.3 | `npm run build:prod` | Production build succeeds |
-| 0.4 | `npm test` | All 291 tests pass, 0 failures |
+| 0.4 | `npm test` | All 433 tests pass, 0 failures |
 | 0.5 | `npm run package` | Runs `build:prod` first (the `vscode:prepublish` script), then produces `inference-0.0.6.vsix` without errors. `npx vsce ls --no-dependencies` lists only `package.json`, `README.md`, `LICENSE`, `dist/extension.js`, `icons/`, `language-configuration.json` and `syntaxes/`: no `node_modules`, sources, tests or source map |
 
 ---
@@ -256,13 +257,14 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
-| 7.1 | Ctrl+Shift+P > "Get Started: Open Walkthrough..." > "Get Started with Inference" | Walkthrough opens with 4 steps **[A]** schema validated | |
+| 7.1 | Ctrl+Shift+P > "Get Started: Open Walkthrough..." > "Get Started with Inference" | Walkthrough opens with 5 steps **[A]** schema validated | |
 | 7.2 | Step 1: "Install the Toolchain" | Shows install button, manual download link, configure path link. Completion event: `onCommand:inference.installToolchain` **[A]** step IDs validated | |
 | 7.3 | Click "Install Toolchain" in walkthrough | Triggers install command, step completes | |
 | 7.4 | Step 2: "Verify Your Installation" | Shows "Run Doctor" button. Completion event: `onCommand:inference.runDoctor` | |
 | 7.5 | Click "Run Doctor" in walkthrough | Triggers doctor command, step completes | |
 | 7.6 | Step 3: "Create a Project" | Shows "Create New File" link and instructs saving the file with the `.inf` extension (language-server features are file-scheme only; untitled buffers get grammar-level highlighting but no diagnostics/hover/goto). Completion event: `onLanguage:inference` **[A]** description validated | |
 | 7.7 | Step 4: "Build Your Program" | Shows terminal command example: `infs build main.inf`. Completion event: `stepSelected` | |
+| 7.8 | Step 5: "Prove Your Specifications" | Shows "Set API Key" and "Prove This File" links. Completion event: `onCommand:inference.proveFile` | |
 
 ---
 
@@ -270,13 +272,14 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
-| 8.1 | Open Settings, search "inference" | Shows exactly 6 settings: path, autoInstall, checkForUpdates, lsp.enabled, lsp.path, and the `inference-lsp.trace.server` protocol-trace knob **[A]** | |
+| 8.1 | Open Settings, search "inference" | Shows exactly 7 settings: path, autoInstall, checkForUpdates, lsp.enabled, lsp.path, prover.serverUrl, and the `inference-lsp.trace.server` protocol-trace knob **[A]** | |
 | 8.2 | `inference.path` | Type: string, default: empty, scope: machine. Accepts file path to infs binary. **[A]** | |
 | 8.3 | `inference.autoInstall` | Type: boolean, default: true. Toggleable. **[A]** | |
 | 8.4 | `inference.checkForUpdates` | Type: boolean, default: true. Toggleable. **[A]** | |
 | 8.5 | `inference.lsp.enabled` | Type: boolean, default: true. Toggleable. **[A]** | |
 | 8.6 | `inference.lsp.path` | Type: string, default: empty, scope: machine. Accepts file path to inference-lsp binary. **[A]** | |
 | 8.7 | `inference-lsp.trace.server` | Type: string enum `off`/`messages`/`verbose`, default: `off`, scope: window. Recognized by settings.json IntelliSense (no "unknown configuration setting" marker). **[A]** | |
+| 8.8 | `inference.prover.serverUrl` | Type: string, default: empty (hosted proof service), scope: machine. **[A]** | |
 
 ---
 
@@ -314,12 +317,16 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
-| 11.1 | Monitor network during activation (e.g., with DevTools or proxy) | Only contacts `inference-lang.org` (manifest) and `github.com/Inferara/inference` (releases). Configurable via `INFS_DIST_SERVER` env var. | |
+| 11.1 | Monitor network during activation (e.g., with DevTools or proxy) | Only contacts `inference-lang.org` (manifest) and `github.com/Inferara/inference` (releases). Configurable via `INFS_DIST_SERVER` env var. The proof server is contacted only after an API key is stored. | |
 | 11.2 | Verify no telemetry endpoints are contacted | No analytics or tracking requests | |
 | 11.3 | Downloaded archive SHA-256 is verified before extraction | If hash tampered, install fails: "SHA-256 verification failed for infs vX.Y.Z" **[A]** | |
 | 11.4 | HTTPS-to-HTTP redirect is blocked | If manifest/download redirects to HTTP, fails with "Refusing HTTPS-to-HTTP redirect: {url} -> {target}" **[A]** | |
 | 11.5 | JSON response size limit | Responses larger than 10 MB are rejected | |
 | 11.6 | Redirect chain limit | More than 5 redirects are rejected: "Too many redirects fetching {url}" | |
+| 11.7 | Set a proof-server API key, then search settings.json and the workspace | The key is not in any settings file; it lives in VS Code secret storage | |
+| 11.8 | Set `inference.prover.serverUrl` to `http://example.com` | Rejected: "must use https; plain http is allowed only for localhost" **[A]** | |
+| 11.9 | First Prove/Submit against a server | A modal upload notice appears once per server; declining uploads nothing | |
+| 11.10 | Proof-server redirect to another origin | The API key is not sent to the other origin **[A]** | |
 
 ---
 
@@ -381,3 +388,32 @@ a built `inference-lsp` binary.
 | 13.19 | **Hung start:** point `inference.lsp.path` at a script that spawns but never answers initialize (e.g. `#!/bin/sh` + `sleep 1000`), restart the server | After 30s the attempt is abandoned: Output logs `Language server failed to start ... no response to the initialize request within 30s`, a warning notification with a "Show Output" button appears, the process is shut down, and later lifecycle commands (restart, disable) still work — the queue is not wedged | |
 | 13.20 | **Disable during slow start:** with a slow-to-initialize server, set `inference.lsp.enabled: false` while the start is still in flight | The server ends up STOPPED once the in-flight start completes — the last setting wins regardless of interleaving | |
 | 13.21 | **Protocol trace:** set `inference-lsp.trace.server` to `verbose` | "Inference Language Server" output channel logs LSP protocol traffic; setting back to `off` silences it | |
+
+---
+
+## 14. Proving & Proof Jobs
+
+These cases need the extension host (F5), a proof server (hosted, or a local
+deployment on `http://localhost`), and a service API key issued by its operator.
+For "Prove This File", the installed `infc` must be the compiler the server
+accepts (`GET /api/v1/meta` → `acceptedToolchain`).
+
+| # | Step | Expected | Pass? |
+|---|------|----------|-------|
+| 14.1 | Without a key, open the Inference sidebar | Proof Jobs shows the welcome with "Set API Key"; Configuration > Proof Server shows "API key: not set" | |
+| 14.2 | Run "Inference: Set Proof Server API Key" with a wrong key | "The proof server rejected this API key; nothing was stored." | |
+| 14.3 | Same, with a valid key | "Connected to {server} as a {role} account"; the jobs list loads | |
+| 14.4 | Open an `.inf`, click "Prove This File" in the editor title | Progress shows compiler check → compile → submit; `out/<file>.v` appears beside the source; the job panel opens and the job is selected in Proof Jobs | |
+| 14.5 | Same, with a compiler the server does not accept | Modal names commit/ABI differences and yours vs accepted; nothing is compiled or uploaded. When the accepted compiler is a release, "Install infc X" switches the toolchain | |
+| 14.6 | Cancel the progress notification during compilation | The build process stops; nothing is uploaded | |
+| 14.7 | Prove an `.inf` with a compile error | "Compiling {file} failed (exit N)" with "Show Output"; the output channel has the compiler's lines | |
+| 14.8 | Submit the same `.v` twice ("Submit Rocq File for Proof") | The second submit opens the existing job | |
+| 14.9 | Watch a running job | Phase ribbon advances; obligations update; agent activity reads as lines scoped to theorem and attempt; the log keeps up to 2000 lines | |
+| 14.10 | Cancel a running job (tree inline button or panel) | Confirmation, then the job moves to Canceling/Canceled | |
+| 14.11 | Open a finished Verified job | Green claim badge only with the verifier's full acceptance; "Open completed proof", "Compare with input" and "Open certificate in portal" work; the compare is a read-only diff | |
+| 14.12 | Open a StructuralOnly job | Warning banner: structural validity only, not a functional-correctness claim | |
+| 14.13 | Run a finished job again from its menu | A new job starts from the stored input and opens | |
+| 14.14 | Delete a finished job | Confirmation mentions purge within 7 days; the job leaves the list | |
+| 14.15 | Filter by status, then "Load more…" past 50 jobs | Only that status is listed (view description shows it); older jobs append | |
+| 14.16 | Set `inference.prover.serverUrl` to `http://localhost:8088` against a local deployment | Jobs list, submit and live updates work over plain HTTP on loopback | |
+

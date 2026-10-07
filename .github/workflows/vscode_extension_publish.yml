@@ -1,0 +1,96 @@
+name: VS Code Extension Publish
+
+# Publishes the extension to the VS Code Marketplace and Open VSX.
+#
+# Release: bump `version` in editors/vscode/package.json, merge, then push a
+# tag `vscode-v<version>` (for example `vscode-v0.0.7`). A manual run packages
+# and checks without publishing unless `publish` is ticked.
+#
+# One-time setup (repository settings):
+# - environment `marketplace`, with required reviewers;
+# - its secret `VSCE_PAT`: an Azure DevOps token with Marketplace > Manage
+#   scope for the `inference-lang` publisher;
+# - its secret `OVSX_PAT`: an Open VSX access token whose account owns the
+#   `inference-lang` namespace (`npx ovsx create-namespace inference-lang`).
+
+on:
+  push:
+    tags:
+      - 'vscode-v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to the Marketplace and Open VSX (otherwise package and check only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vscode-extension-publish
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Test and package
+    uses: ./.github/workflows/vscode_extension.yml
+
+  publish:
+    name: Publish
+    needs: package
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: marketplace
+    permissions:
+      contents: write # attach the package to the GitHub release
+    steps:
+      - name: Download the checked package
+        uses: actions/download-artifact@v4
+        with:
+          name: inference-vsix
+
+      - name: Check the version
+        id: version
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          vsix=(inference-*.vsix)
+          [ "${#vsix[@]}" -eq 1 ] || { echo "::error::Expected one package, found ${#vsix[@]}"; exit 1; }
+          version=$(unzip -p "${vsix[0]}" extension/package.json | jq -r .version)
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "vscode-v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package version ${version}"
+            exit 1
+          fi
+          echo "vsix=${vsix[0]}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Publish to the VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          VSIX: ${{ steps.version.outputs.vsix }}
+        run: npx --yes @vscode/vsce@3 publish --packagePath "$VSIX"
+
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+          VSIX: ${{ steps.version.outputs.vsix }}
+        run: npx --yes ovsx@0 publish "$VSIX" --pat "$OVSX_PAT"
+
+      - name: Attach the package to the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VSIX: ${{ steps.version.outputs.vsix }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" "$VSIX"
+          --repo "$GITHUB_REPOSITORY" --verify-tag
+          --title "VS Code extension $VERSION"
+          --notes "Inference VS Code extension $VERSION, as published to the VS Code Marketplace and Open VSX."

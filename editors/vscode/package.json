@@ -1,7 +1,7 @@
 {
   "name": "inference",
   "displayName": "Inference",
-  "description": "Language support for Inference - a programming language for verified WebAssembly",
+  "description": "Language support for Inference - a programming language for verified WebAssembly - and proof jobs on the Inference proof server",
   "version": "0.0.6",
   "publisher": "inference-lang",
   "license": "GPL-3.0",
@@ -28,7 +28,8 @@
   "activationEvents": [
     "workspaceContains:**/*.inf",
     "onLanguage:inference",
-    "onView:inference.configView"
+    "onView:inference.configView",
+    "onView:inference.proofJobsView"
   ],
   "contributes": {
     "viewsContainers": {
@@ -46,6 +47,11 @@
           "id": "inference.configView",
           "name": "Configuration",
           "icon": "icons/file_icon.svg"
+        },
+        {
+          "id": "inference.proofJobsView",
+          "name": "Proof Jobs",
+          "icon": "icons/file_icon.svg"
         }
       ]
     },
@@ -54,6 +60,11 @@
         "view": "inference.configView",
         "contents": "Inference toolchain is not installed.\n[Install Toolchain](command:inference.installToolchain)\n[Configure Path](command:workbench.action.openSettings?%5B%22inference.path%22%5D)",
         "when": "!inference.toolchainInstalled"
+      },
+      {
+        "view": "inference.proofJobsView",
+        "contents": "Prove the specifications in your Inference code with the Inference proof server.\n[Set API Key](command:inference.setProverApiKey)\nYour proof-server operator issues the key. [Proof server settings](command:workbench.action.openSettings?%5B%22inference.prover.serverUrl%22%5D)",
+        "when": "!inference.prover.configured"
       }
     ],
     "languages": [
@@ -126,6 +137,67 @@
       {
         "command": "inference.revealConfigPath",
         "title": "Reveal in File Explorer"
+      },
+      {
+        "command": "inference.proveFile",
+        "title": "Inference: Prove This File",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "inference.submitProof",
+        "title": "Inference: Submit Rocq File for Proof",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "inference.setProverApiKey",
+        "title": "Inference: Set Proof Server API Key"
+      },
+      {
+        "command": "inference.clearProverApiKey",
+        "title": "Inference: Clear Proof Server API Key"
+      },
+      {
+        "command": "inference.refreshProofJobs",
+        "title": "Inference: Refresh Proof Jobs",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "inference.filterProofJobs",
+        "title": "Inference: Filter Proof Jobs by Status",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "inference.openProofJob",
+        "title": "Open Proof Job"
+      },
+      {
+        "command": "inference.cancelProofJob",
+        "title": "Cancel Proof Job",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "inference.deleteProofJob",
+        "title": "Delete Proof Job",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "inference.resubmitProofJob",
+        "title": "Run Proof Job Again",
+        "icon": "$(debug-rerun)"
+      },
+      {
+        "command": "inference.copyProofJobId",
+        "title": "Copy Job ID"
+      },
+      {
+        "command": "inference.compareProof",
+        "title": "Compare Completed Proof with Input",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "inference.openProofJobInPortal",
+        "title": "Open Certificate in Portal",
+        "icon": "$(link-external)"
       }
     ],
     "menus": {
@@ -134,6 +206,21 @@
           "command": "inference.refreshConfigView",
           "when": "view == inference.configView",
           "group": "navigation"
+        },
+        {
+          "command": "inference.filterProofJobs",
+          "when": "view == inference.proofJobsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "inference.refreshProofJobs",
+          "when": "view == inference.proofJobsView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "inference.submitProof",
+          "when": "view == inference.proofJobsView",
+          "group": "1_submit"
         }
       ],
       "view/item/context": [
@@ -145,6 +232,107 @@
         {
           "command": "inference.revealConfigPath",
           "when": "view == inference.configView && viewItem == inference.configPath"
+        },
+        {
+          "command": "inference.cancelProofJob",
+          "when": "view == inference.proofJobsView && viewItem =~ /\\.cancelable/",
+          "group": "inline"
+        },
+        {
+          "command": "inference.compareProof",
+          "when": "view == inference.proofJobsView && viewItem =~ /\\.proof$/",
+          "group": "1_review@1"
+        },
+        {
+          "command": "inference.openProofJobInPortal",
+          "when": "view == inference.proofJobsView && viewItem =~ /\\.terminal/",
+          "group": "1_review@2"
+        },
+        {
+          "command": "inference.copyProofJobId",
+          "when": "view == inference.proofJobsView && viewItem =~ /^inference\\.proofJob/",
+          "group": "1_review@3"
+        },
+        {
+          "command": "inference.resubmitProofJob",
+          "when": "view == inference.proofJobsView && viewItem =~ /\\.terminal/",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "inference.cancelProofJob",
+          "when": "view == inference.proofJobsView && viewItem =~ /\\.cancelable/",
+          "group": "2_manage@2"
+        },
+        {
+          "command": "inference.deleteProofJob",
+          "when": "view == inference.proofJobsView && viewItem =~ /\\.terminal/",
+          "group": "2_manage@3"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "inference.proveFile",
+          "when": "resourceExtname == .inf",
+          "group": "navigation"
+        },
+        {
+          "command": "inference.submitProof",
+          "when": "resourceExtname == .v",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "inference.proveFile",
+          "when": "resourceExtname == .inf",
+          "group": "z_commands"
+        },
+        {
+          "command": "inference.submitProof",
+          "when": "resourceExtname == .v",
+          "group": "z_commands"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "inference.proveFile",
+          "when": "resourceExtname == .inf",
+          "group": "z_commands"
+        },
+        {
+          "command": "inference.submitProof",
+          "when": "resourceExtname == .v",
+          "group": "z_commands"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "inference.openProofJob",
+          "when": "false"
+        },
+        {
+          "command": "inference.cancelProofJob",
+          "when": "false"
+        },
+        {
+          "command": "inference.deleteProofJob",
+          "when": "false"
+        },
+        {
+          "command": "inference.resubmitProofJob",
+          "when": "false"
+        },
+        {
+          "command": "inference.copyProofJobId",
+          "when": "false"
+        },
+        {
+          "command": "inference.compareProof",
+          "when": "false"
+        },
+        {
+          "command": "inference.openProofJobInPortal",
+          "when": "false"
         }
       ]
     },
@@ -188,6 +376,12 @@
           "default": "off",
           "scope": "window",
           "description": "Trace the communication between VS Code and the Inference language server in the 'Inference Language Server' output channel."
+        },
+        "inference.prover.serverUrl": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Proof server for **Prove This File** and the Proof Jobs view. Leave empty for the hosted Inference proof service. Must use `https`; plain `http` is accepted only for `localhost` (for example an offline local deployment)."
         }
       }
     },
@@ -246,6 +440,18 @@
             },
             "completionEvents": [
               "stepSelected"
+            ]
+          },
+          {
+            "id": "inference.walkthrough.prove",
+            "title": "Prove Your Specifications",
+            "description": "Prove the `spec` properties of your program on the Inference proof server.\n\n[Set API Key](command:inference.setProverApiKey) with the key your proof-server operator issued, then open your `.inf` file and run:\n\n[Prove This File](command:inference.proveFile)\n\nThe extension checks your compiler against the one the server accepts, compiles the file in proof mode (`infs build <file>.inf -v`), uploads the generated Rocq file and follows the job in the **Proof Jobs** view.",
+            "media": {
+              "image": "icons/inference.png",
+              "altText": "Inference logo"
+            },
+            "completionEvents": [
+              "onCommand:inference.proveFile"
             ]
           }
         ]
