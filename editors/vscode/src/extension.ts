@@ -12,6 +12,7 @@ import { registerUpdateCommand, checkForUpdates } from './commands/update';
 import { createStatusBar, updateStatusBar } from './ui/statusBar';
 import { InferenceConfigProvider, ConfigItem } from './ui/configTree';
 import { runDoctor } from './toolchain/doctor';
+import { registerProver } from './prover';
 import {
     handleLspConfigChange,
     initializeLspClient,
@@ -52,6 +53,10 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(configView);
     context.subscriptions.push(configProvider);
+
+    const prover = registerProver(context, outputChannel, () => configProvider.refresh());
+    context.subscriptions.push(prover.disposable);
+    configProvider.setProverStatus(prover.status);
 
     context.subscriptions.push(
         vscode.commands.registerCommand('inference.refreshConfigView', () => {

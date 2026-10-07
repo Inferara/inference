@@ -5,8 +5,16 @@ import { detectPlatform } from '../toolchain/platform';
 import { getSettings } from '../config/settings';
 import { exec } from '../utils/exec';
 import { DoctorResult } from '../toolchain/doctor';
+import { describeError, getServerUrl, SERVER_URL_SETTING } from '../prover/config';
+import type { ProverStatusSource } from '../prover';
 
-type GroupId = 'toolchain' | 'settings';
+type GroupId = 'toolchain' | 'prover' | 'settings';
+
+const GROUP_ICONS: Record<GroupId, string> = {
+    toolchain: 'tools',
+    prover: 'cloud',
+    settings: 'gear',
+};
 
 export class ConfigItem extends vscode.TreeItem {
     constructor(
@@ -20,9 +28,7 @@ export class ConfigItem extends vscode.TreeItem {
         super(label, collapsible);
 
         if (kind === 'group') {
-            this.iconPath = new vscode.ThemeIcon(
-                groupId === 'toolchain' ? 'tools' : 'gear',
-            );
+            this.iconPath = new vscode.ThemeIcon(GROUP_ICONS[groupId ?? 'settings']);
         }
 
         if (settingKey) {
@@ -50,6 +56,12 @@ export class InferenceConfigProvider
     private detection: InfsDetection | null = null;
     private version: string | null = null;
     private doctorResult: DoctorResult | null = null;
+    private prover: ProverStatusSource | null = null;
+
+    setProverStatus(status: ProverStatusSource): void {
+        this.prover = status;
+        this._onDidChangeTreeData.fire(undefined);
+    }
 
     refresh(detection?: InfsDetection | null, doctorResult?: DoctorResult | null): void {
         if (detection !== undefined) {
@@ -75,6 +87,12 @@ export class InferenceConfigProvider
                     'toolchain',
                 ),
                 new ConfigItem(
+                    'Proof Server',
+                    'group',
+                    vscode.TreeItemCollapsibleState.Expanded,
+                    'prover',
+                ),
+                new ConfigItem(
                     'Settings',
                     'group',
                     vscode.TreeItemCollapsibleState.Expanded,
@@ -85,6 +103,10 @@ export class InferenceConfigProvider
 
         if (element.groupId === 'toolchain') {
             return this.getToolchainChildren();
+        }
+
+        if (element.groupId === 'prover') {
+            return this.getProverChildren();
         }
 
         if (element.groupId === 'settings') {
@@ -182,6 +204,58 @@ export class InferenceConfigProvider
             arguments: [],
         };
         items.push(statusItem);
+
+        return items;
+    }
+
+    private async getProverChildren(): Promise<ConfigItem[]> {
+        const items: ConfigItem[] = [];
+
+        let serverLabel: string;
+        let serverIcon = 'globe';
+        try {
+            serverLabel = `Server: ${getServerUrl()}`;
+        } catch (err) {
+            serverLabel = `Server: ${describeError(err)}`;
+            serverIcon = 'error';
+        }
+        const serverItem = new ConfigItem(
+            serverLabel,
+            'property',
+            vscode.TreeItemCollapsibleState.None,
+            undefined,
+            SERVER_URL_SETTING,
+        );
+        serverItem.iconPath = new vscode.ThemeIcon(serverIcon);
+        items.push(serverItem);
+
+        const hasKey = (await this.prover?.hasApiKey()) ?? false;
+        const keyItem = new ConfigItem(
+            `API key: ${hasKey ? 'set' : 'not set'}`,
+            'property',
+            vscode.TreeItemCollapsibleState.None,
+        );
+        keyItem.iconPath = new vscode.ThemeIcon(hasKey ? 'key' : 'warning');
+        keyItem.command = {
+            title: 'Set API Key',
+            command: 'inference.setProverApiKey',
+            arguments: [],
+        };
+        items.push(keyItem);
+
+        const check = this.prover?.lastCompilerCheck();
+        const checkItem = new ConfigItem(
+            check
+                ? `Compiler: ${check.state === 'match' ? 'accepted' : check.state === 'mismatch' ? 'not accepted' : 'not checked'}`
+                : 'Compiler: checked when you prove a file',
+            'property',
+            vscode.TreeItemCollapsibleState.None,
+        );
+        checkItem.iconPath = new vscode.ThemeIcon(
+            check?.state === 'match' ? 'pass' : check?.state === 'mismatch' ? 'error' : 'question',
+        );
+        checkItem.tooltip = check?.detail;
+        items.push(checkItem);
 
         return items;
     }

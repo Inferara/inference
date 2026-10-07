@@ -114,6 +114,24 @@ Open Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 
 A guided setup walkthrough is available via **Get Started: Open Walkthrough...** > **Get Started with Inference**.
 
+### Proving
+
+Prove the `spec` properties of an Inference program on the Inference proof server, then review and manage the runs without leaving the editor.
+
+1. Get a service API key from your proof-server operator and run **Inference: Set Proof Server API Key**. The key is checked against the server and stored in VS Code's secret storage.
+2. Open an `.inf` file and click **Prove This File** in the editor title (or right-click it in the Explorer). The extension:
+   - finds the `infc` that `infs build` will use and compares its `--commit-hash` and `--abi-version` with the compiler the proof server accepts. A different compiler is refused before anything is uploaded, with an offer to install the accepted release when there is one;
+   - runs `infs build <file>.inf -v` in the file's folder, which writes `out/<file>.v`;
+   - checks that the file has proof holes and fits the server's upload limit, then submits it.
+3. The job opens in a panel that follows it live: phases, per-obligation status, and the prover's activity. Positive results are independently re-verified on the server before they count; the panel shows the verifier's verdict and kernel-reported assumptions.
+4. When the job finishes, open the completed proof, compare it with what you submitted, or open the exportable certificate in the portal.
+
+An existing Rocq `.v` file can be submitted directly with **Inference: Submit Rocq File for Proof**. Submitting the same content twice returns the existing job.
+
+The **Proof Jobs** view in the Inference sidebar lists your jobs, newest first. Filter by status, load older jobs, and use each job's menu to cancel a running job, run a finished one again, copy its ID, or delete it. Deleted jobs disappear immediately and are purged within 7 days; finished jobs are kept for 30 days.
+
+A structural result (`ValidModule` only) is labelled as such: it is not a functional-correctness claim.
+
 ## Installation
 
 ### From VS Code Marketplace
@@ -139,6 +157,7 @@ A guided setup walkthrough is available via **Get Started: Open Walkthrough...**
 - **`inference.checkForUpdates`** (boolean, default: `true`) - Automatically check for toolchain updates on activation.
 - **`inference.lsp.enabled`** (boolean, default: `true`) - Start the Inference language server automatically. Disable to turn off all language intelligence features.
 - **`inference.lsp.path`** (string, default: `""`) - Custom path to the `inference-lsp` binary. Leave empty for automatic detection. Scope: machine (not synced across devices).
+- **`inference.prover.serverUrl`** (string, default: `""`) - Proof server for proving and the Proof Jobs view. Leave empty for the hosted Inference proof service. Must use `https`; plain `http` is accepted only for `localhost`. Scope: machine.
 
 ### Environment Variables
 
@@ -223,7 +242,9 @@ Learn more:
 
 ## Privacy
 
-This extension does not collect telemetry, usage data, or any personal information. All toolchain operations communicate only with `github.com/Inferara/inference/releases` and `inference-lang.org/releases.json`.
+This extension does not collect telemetry, usage data, or any personal information. Toolchain operations communicate only with `github.com/Inferara/inference/releases` and `inference-lang.org/releases.json`.
+
+The proving features contact only the configured proof server (`inference.prover.serverUrl`), and only after you store an API key. **Prove This File** and **Submit Rocq File for Proof** upload the generated Rocq file, which contains your program logic and specifications. Submitted files and results are visible to your account and the proof-server operator, and an AI prover may send file content to its model provider. The extension asks once per server before the first upload. Your `.inf` source is compiled locally and is not uploaded.
 
 ## Contributing
 
