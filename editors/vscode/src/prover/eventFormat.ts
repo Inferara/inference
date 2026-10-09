@@ -17,7 +17,7 @@ const MAX_PAYLOAD_CHARS = 160;
 const MAX_ACTIVITY_CHARS = 240;
 
 /** Server-originated agent limits (`agent.limited.code`), as the portal words them. */
-const AGENT_LIMIT_MESSAGES: Readonly<Record<string, string>> = {
+export const AGENT_LIMIT_MESSAGES: Readonly<Record<string, string>> = {
     AGENT_REQUEST_LIMIT:
         'Agent request limit reached. No further model requests are allowed for this job.',
     AGENT_PROVIDER_RATE_LIMITED:
@@ -69,7 +69,7 @@ function clip(text: string, max: number): string {
  * One `agent.activity` payload as a readable line. The kinds mirror the
  * portal's transcript (`portal/src/lib/store.ts::applyActivity`).
  */
-function summarizeActivity(p: Record<string, unknown>): string {
+export function summarizeActivity(p: Record<string, unknown>): string {
     const kind = str(p.kind) ?? '';
     const detail = str(p.detail) ?? '';
     if (kind === 'truncated') {
@@ -110,7 +110,7 @@ function activityScope(p: Record<string, unknown>): string {
 }
 
 /** Per-type human summary of an event payload ('' = type alone suffices). */
-function summarize(env: EventEnvelope): string {
+export function summarize(env: EventEnvelope): string {
     const p = asRecord(env.payload);
     const name = str(p.name);
     const attempt = num(p.attempt);

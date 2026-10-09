@@ -3,13 +3,14 @@ import * as vscode from 'vscode';
 
 import { ApiError, AuthError, ProverApi } from './api';
 import { describeError, requireConfig, type ProverConfig } from './config';
+import type { JobOrigin } from './jobOrigins';
 import { DEFAULT_MAX_UPLOAD_BYTES, submitVFile } from './submission';
 import type { JobResponse } from './types';
 
 /** What a finished submission hands to the views. */
 export interface SubmitHooks {
     /** Refresh the jobs view, reveal the job and open its panel. */
-    showJob(job: JobResponse, source?: string): Promise<void>;
+    showJob(job: JobResponse, origin?: JobOrigin): Promise<void>;
 }
 
 const UPLOAD_NOTICE_KEY = 'inference.prover.uploadNotice';
@@ -139,7 +140,7 @@ export function registerSubmitProofCommand(
                 return;
             }
             log.info(`Prover: submitted ${filename} (${outcome.holes} holes) → job ${outcome.job.id}`);
-            await hooks.showJob(outcome.job);
+            await hooks.showJob(outcome.job, { vPath: uri.fsPath, vSha256: outcome.sha256 });
         } catch (err) {
             log.error(`Prover: submit ${filename}: ${err instanceof Error ? err.message : err}`);
             vscode.window.showErrorMessage(`Inference: ${submitErrorMessage(err)}`);

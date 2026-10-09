@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-import { hasApiKey, SERVER_URL_SETTING, updateConfiguredContext } from './config';
+import { hasApiKey, resolveConfig, SERVER_URL_SETTING, updateConfiguredContext } from './config';
 import {
     cancelJobInteractive,
     compareProof,
@@ -8,7 +8,8 @@ import {
     openInPortal,
     resubmitJob,
 } from './jobActions';
-import { JobDetailViewManager } from './jobDetailView';
+import { JOB_PANEL_VIEW_TYPE, JobDetailViewManager } from './jobDetailView';
+import { JobOrigins, type JobOrigin } from './jobOrigins';
 import { FILTER_STATUSES } from './jobList';
 import { JobTreeItem, ProofJobsProvider } from './jobsTree';
 import { ProofDocuments } from './proofDocuments';
@@ -40,21 +41,53 @@ export function registerProver(
     const jobs = new ProofJobsProvider(secrets, log);
     const view = vscode.window.createTreeView('inference.proofJobsView', { treeDataProvider: jobs });
     const documents = new ProofDocuments(secrets);
-    const panels = new JobDetailViewManager(secrets, log, documents, () => void jobs.refresh());
-    disposables.push(jobs, view, documents, panels);
+    const origins = new JobOrigins(context.workspaceState);
+    /** The local files a job was uploaded from, when this workspace knows them. */
+    const originOf = async (jobId: string): Promise<JobOrigin | undefined> => {
+        const config = await resolveConfig(secrets).catch(() => null);
+        return config ? origins.get(config.serverUrl, jobId) : undefined;
+    };
+    const runAgain = async (job: JobResponse) => {
+        const fresh = await resubmitJob(secrets, log, job);
+        if (fresh) {
+            await showJob(fresh, await originOf(job.id));
+        }
+    };
+    const panels = new JobDetailViewManager(
+        context.extensionUri,
+        secrets,
+        log,
+        documents,
+        origins,
+        () => void jobs.refresh(),
+        runAgain,
+    );
+    disposables.push(
+        jobs,
+        view,
+        documents,
+        panels,
+        vscode.window.registerWebviewPanelSerializer(JOB_PANEL_VIEW_TYPE, panels),
+    );
 
     disposables.push(view.onDidChangeVisibility((e) => jobs.setVisible(e.visible)));
     if (view.visible) {
         jobs.setVisible(true);
     }
 
-    const showJob: SubmitHooks['showJob'] = async (job, source) => {
+    const showJob: SubmitHooks['showJob'] = async (job, origin) => {
+        if (origin) {
+            const config = await resolveConfig(secrets).catch(() => null);
+            if (config) {
+                await origins.set(config.serverUrl, job.id, origin);
+            }
+        }
         await jobs.refresh();
         const node = jobs.findNode(job.id);
         if (node && view.visible) {
             await view.reveal(node, { select: true, focus: false });
         }
-        await panels.open(job, source);
+        await panels.open(job, origin);
     };
     const jobOf = (arg: unknown): JobResponse | undefined =>
         arg instanceof JobTreeItem ? arg.job : undefined;
@@ -96,9 +129,8 @@ export function registerProver(
     });
     command('inference.resubmitProofJob', async (arg) => {
         const job = jobOf(arg);
-        const fresh = job && (await resubmitJob(secrets, log, job));
-        if (fresh) {
-            await showJob(fresh);
+        if (job) {
+            await runAgain(job);
         }
     });
     command('inference.copyProofJobId', async (arg) => {

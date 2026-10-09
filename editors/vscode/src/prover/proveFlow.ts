@@ -53,7 +53,7 @@ export interface ProveDeps {
 }
 
 export type ProveOutcome =
-    | { kind: 'submitted'; job: JobResponse; vPath: string; holes: number; checked: boolean }
+    | { kind: 'submitted'; job: JobResponse; vPath: string; vSha256: string; holes: number; checked: boolean }
     | { kind: 'no-infs' }
     | { kind: 'no-infc' }
     | {
@@ -156,6 +156,7 @@ export async function proveInfFile(infPath: string, deps: ProveDeps): Promise<Pr
         kind: 'submitted',
         job: submitted.job,
         vPath,
+        vSha256: submitted.sha256,
         holes: submitted.holes,
         checked: verdict.kind === 'match',
     };

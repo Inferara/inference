@@ -9,6 +9,8 @@ import {
     renderJobDetailHtml,
     type RenderOptions,
 } from '../prover/jobDetailHtml';
+import { JOB_DETAIL_STYLES } from '../prover/jobDetailStyles';
+import { applyEvent, newRunModel } from '../prover/runModel';
 import type {
     JobResponse,
     JobResultResponse,
@@ -20,8 +22,6 @@ const BASE_OPTS: RenderOptions = {
     cspSource: 'vscode-webview://test-source',
     error: null,
     live: 'terminal',
-    eventLog: [],
-    canCancel: false,
 };
 
 const JOB: JobResponse = {
@@ -117,6 +117,21 @@ const RESULT: JobResultResponse = {
     ],
 };
 
+/** The verdict the panel shows (`#verdict` data attributes). */
+function verdictOf(html: string): { kind: string; tone: string; claim: string } {
+    const m = /id="verdict" data-verdict="([^"]+)" data-tone="([^"]+)" data-claim="([^"]+)"/.exec(html);
+    assert.ok(m, 'the panel renders a verdict');
+    return { kind: m[1], tone: m[2], claim: m[3] };
+}
+
+/** No positive claim and no success tone. */
+function assertNoProofClaim(html: string, message?: string): void {
+    const v = verdictOf(html);
+    assert.notStrictEqual(v.tone, 'ok', message);
+    assert.strictEqual(v.claim, 'none', message);
+    assert.ok(!html.includes('data-verdict="verified"'), message);
+}
+
 describe('escapeHtml', () => {
     it('escapes all five HTML metacharacters', () => {
         assert.strictEqual(
@@ -204,26 +219,32 @@ describe('isCancelableStatus', () => {
 });
 
 describe('renderJobDetailHtml', () => {
-    it('renders the core job facts', () => {
+    it('renders the core job facts in plain words, raw values only under Technical details', () => {
         const html = renderJobDetailHtml(JOB, BASE_OPTS);
         assert.ok(html.includes('fixture-stdlib.v'));
-        assert.ok(html.includes('Succeeded'));
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('Certificate evidence unavailable'));
-        assert.ok(
-            html.includes(
-                '<div class="meta-label">Mode</div><div class="meta-value">prove</div>',
-            ),
-        );
-        assert.ok(html.includes('2/2 closed'));
-        assert.ok(html.includes('valid_fixture__Add'));
-        assert.ok(html.includes('valid_fixture__Comm'));
-        assert.ok(html.includes('<th>Content</th>'));
-        assert.ok(html.includes('grounded'));
-        assert.ok(html.includes('Claim class'));
-        assert.ok(html.includes('Verified'));
-        assert.ok(html.includes('4200 ms') || html.includes('4.2 s'));
+        assert.ok(html.includes('data-field="mode"><code>prove</code>'));
+        assert.ok(html.includes('data-field="claimClass"><code>Verified</code>'));
+        assert.ok(html.includes('data-field="status"><code>Succeeded</code>'));
+        assert.ok(html.includes('aria-valuenow="2"'));
+        assert.ok(html.includes('aria-valuemax="2"'));
+        assert.ok(html.includes('2 of 2 obligations closed'));
+        // Short names in the list, full theorem names in the details.
+        assert.ok(html.includes('>Add</span>'));
+        assert.ok(html.includes('<code>valid_fixture__Comm</code>'));
+        assert.ok(html.includes('>behavior</span>'));
+        assert.ok(html.includes('States a behavioral property of the compiled module'));
+        assert.ok(html.includes('4.2 s'));
         assert.ok(html.includes('1m 1s'));
+    });
+
+    it('makes no claim while the verifier verdict is loading, and says so when it failed', () => {
+        const loading = renderJobDetailHtml(JOB, BASE_OPTS);
+        assertNoProofClaim(loading);
+        assert.strictEqual(verdictOf(loading).kind, 'loading');
+
+        const failed = renderJobDetailHtml(JOB, { ...BASE_OPTS, resultState: 'failed' });
+        assertNoProofClaim(failed);
+        assert.ok(failed.includes('Verifier evidence unavailable'));
     });
 
     it('fails closed for Succeeded records without durable prove mode', () => {
@@ -231,19 +252,15 @@ describe('renderJobDetailHtml', () => {
             undefined,
             null,
             'unknown',
-            'compile-goals',
         ] satisfies Array<RunMode | null | undefined>) {
-            const html = renderJobDetailHtml({ ...JOB, mode }, BASE_OPTS);
-            assert.ok(
-                html.includes('<span class="badge warn">Succeeded</span>'),
-                `mode ${String(mode)} should be warning`,
-            );
-            assert.ok(
-                !html.includes('<span class="badge ok">Succeeded</span>'),
-                `mode ${String(mode)} must not be green`,
-            );
-            assert.ok(html.includes('<strong>Not proven.</strong>'));
+            const html = renderJobDetailHtml({ ...JOB, mode }, { ...BASE_OPTS, result: { ...RESULT, mode } });
+            assertNoProofClaim(html, `mode ${String(mode)} must not be a proof`);
+            assert.strictEqual(verdictOf(html).tone, 'warn');
+            assert.ok(html.includes('was not recorded as a proof run'));
         }
+        const compileGoals = renderJobDetailHtml({ ...JOB, mode: 'compile-goals' }, BASE_OPTS);
+        assertNoProofClaim(compileGoals);
+        assert.strictEqual(verdictOf(compileGoals).kind, 'compile-only');
     });
 
     it('fails closed when job and result proof modes disagree', () => {
@@ -251,10 +268,9 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             result: { ...RESULT, mode: 'compile-goals' },
         });
-        assert.ok(html.includes('<span class="badge warn">Succeeded</span>'));
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('<strong>Not proven.</strong>'));
-        assert.ok(html.includes('Job detail and result DTOs do not agree'));
+        assertNoProofClaim(html);
+        assert.strictEqual(verdictOf(html).kind, 'conflict');
+        assert.ok(html.includes('The job record and its result disagree'));
     });
 
     it('fails closed when Succeeded proof counts are incomplete', () => {
@@ -262,9 +278,8 @@ describe('renderJobDetailHtml', () => {
             { ...JOB, holesTotal: 2, holesClosed: 1 },
             BASE_OPTS,
         );
-        assert.ok(html.includes('<span class="badge warn">Succeeded</span>'));
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('every hole closed'));
+        assertNoProofClaim(html);
+        assert.ok(html.includes('does not show every proof hole closed'));
     });
 
     it('fails closed when job and result proof counts disagree', () => {
@@ -272,9 +287,8 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             result: { ...RESULT, holesClosed: 1 },
         });
-        assert.ok(html.includes('<span class="badge warn">Succeeded</span>'));
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('Job detail and result DTOs do not agree'));
+        assertNoProofClaim(html);
+        assert.strictEqual(verdictOf(html).kind, 'conflict');
     });
 
     it('fails closed when independent verifier flags reject Succeeded', () => {
@@ -282,9 +296,10 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             result: { ...RESULT, verifiedClean: false, admitsDetected: true },
         });
-        assert.ok(html.includes('<span class="badge warn">Succeeded</span>'));
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('independent verifier evidence rejects'));
+        assertNoProofClaim(html);
+        assert.deepStrictEqual(verdictOf(html), { kind: 'rejected', tone: 'err', claim: 'none' });
+        assert.ok(html.includes('Independent verification failed'));
+        assert.ok(html.includes('Some proofs are incomplete (still admitted).'));
     });
 
     it('fails closed when a target fails the assumption policy', () => {
@@ -298,10 +313,11 @@ describe('renderJobDetailHtml', () => {
                     index === 0 ? { ...report, policyPassed: false } : report),
             },
         });
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('independent verifier evidence rejects'));
-        assert.ok(html.includes('Assumption policy passed'));
+        assertNoProofClaim(html);
+        assert.strictEqual(verdictOf(html).kind, 'rejected');
+        assert.ok(html.includes('Only approved assumptions are used'));
         assert.ok(html.includes('policy rejected'));
+        assert.ok(html.includes('relies on assumptions the policy does not allow'));
     });
 
     it('fails closed when verifier outcome disagrees with Succeeded', () => {
@@ -314,12 +330,12 @@ describe('renderJobDetailHtml', () => {
                 admitsDetected: true,
             },
         });
-        assert.ok(html.includes('<span class="badge warn">Succeeded</span>'));
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('independent verifier evidence rejects'));
+        assertNoProofClaim(html);
+        assert.strictEqual(verdictOf(html).kind, 'rejected');
+        assert.ok(html.includes('outcome is “partial”, not “succeeded”'));
     });
 
-    it('renders CompileGoals as a terminal warning, never a green success', () => {
+    it('renders CompileGoals as compiled-only, never a success', () => {
         const mode: RunMode = 'compile-goals';
         const compileGoals: JobResponse = {
             ...JOB,
@@ -332,15 +348,11 @@ describe('renderJobDetailHtml', () => {
         const html = renderJobDetailHtml(compileGoals, BASE_OPTS);
         assert.ok(isTerminalStatus(compileGoals.status));
         assert.ok(isStreamTerminalStatus(compileGoals.status));
-        assert.ok(html.includes('<span class="badge warn">CompileGoals</span>'));
-        assert.ok(!html.includes('<span class="badge ok">CompileGoals</span>'));
-        assert.ok(
-            html.includes(
-                '<div class="meta-label">Mode</div><div class="meta-value">compile-goals</div>',
-            ),
-        );
-        assert.ok(html.includes('<strong>Compile-only result.</strong>'));
-        assert.ok(html.includes('no proof was accepted or returned'));
+        assertNoProofClaim(html);
+        assert.deepStrictEqual(verdictOf(html), { kind: 'compile-only', tone: 'warn', claim: 'none' });
+        assert.ok(html.includes('data-field="mode"><code>compile-goals</code>'));
+        assert.ok(html.includes('Compiled — nothing was proved'));
+        assert.ok(html.includes('No proof was accepted or returned.'));
 
         const failedCompile = renderJobDetailHtml(
             {
@@ -351,7 +363,8 @@ describe('renderJobDetailHtml', () => {
             },
             BASE_OPTS,
         );
-        assert.ok(failedCompile.includes('<strong>Compile-only run.</strong>'));
+        assertNoProofClaim(failedCompile);
+        assert.ok(failedCompile.includes('This was a compile-only run'));
         assert.ok(!failedCompile.includes('The file compiled'));
     });
 
@@ -383,14 +396,9 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             result: compileResult,
         });
-        assert.ok(html.includes('<h2>Verification</h2>'));
-        assert.ok(
-            html.includes(
-                'No independent verifier provenance is available; this is a worker-reported legacy result.',
-            ),
-        );
-        assert.ok(!html.includes('Independent verifier verdict'));
-        assert.ok(!html.includes('Verified clean (compiles, no admits)'));
+        assert.ok(html.includes('How this was verified'));
+        assert.ok(html.includes('Not applicable — this run only compiled the file.'));
+        assert.ok(!html.includes('class="checks"'));
     });
 
     it('renders the per-obligation goal state', () => {
@@ -400,7 +408,7 @@ describe('renderJobDetailHtml', () => {
         assert.ok(html.includes('pre class="goal"'));
     });
 
-    it('fails closed to unknown when legacy obligation content is missing', () => {
+    it('fails closed to "not classified" when legacy obligation content is missing', () => {
         const html = renderJobDetailHtml(
             {
                 ...JOB,
@@ -409,7 +417,7 @@ describe('renderJobDetailHtml', () => {
             BASE_OPTS,
         );
         assert.ok(html.includes('legacy_obligation'));
-        assert.ok(html.includes('<td>unknown</td>'));
+        assert.ok(html.includes('Not classified'));
     });
 
     it('escapes goal text (server-originated)', () => {
@@ -437,15 +445,15 @@ describe('renderJobDetailHtml', () => {
         assert.ok(!html.includes('claude-code'));
         assert.ok(!html.includes('kubernetes'));
         assert.ok(!/>\s*Provider\s*</.test(html));
-        assert.ok(!/>\s*Agent\s*</.test(html));
-        // And no raw-JSON dump (it would leak both, and is the dirty-JSON view
-        // this webview replaced).
+        assert.ok(!html.includes('data-field="provider"'));
+        assert.ok(!html.includes('data-field="agent'));
         assert.ok(!html.includes('Raw response'));
     });
 
     it('escapes server-originated strings everywhere', () => {
         const hostile: JobResponse = {
             ...JOB,
+            status: 'Failed',
             filename: '<img src=x onerror=alert(1)>.v',
             errorCode: 'X<Y',
             errorReason: '<script>steal()</script>',
@@ -463,15 +471,19 @@ describe('renderJobDetailHtml', () => {
         assert.ok(!html.includes('<img src=x'));
         assert.ok(!html.includes('<script>steal'));
         assert.ok(!html.includes('valid_<b>'));
+        assert.ok(!html.includes('X<Y'));
         assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;.v'));
         assert.ok(html.includes('&lt;script&gt;steal()&lt;/script&gt;'));
+        assert.ok(html.includes('&quot;; window.close(); //'));
     });
 
-    it('escapes event-log lines', () => {
-        const html = renderJobDetailHtml(JOB, {
-            ...BASE_OPTS,
-            eventLog: ['12:00:00  log — <script>document.title="pwn"</script>'],
+    it('escapes activity rows', () => {
+        const run = newRunModel();
+        applyEvent(run, {
+            schemaVersion: 1, jobId: JOB.id, seq: 1, type: 'log', ts: '2026-06-05T10:00:01Z',
+            payload: { message: '<script>document.title="pwn"</script>' },
         });
+        const html = renderJobDetailHtml(JOB, { ...BASE_OPTS, run });
         assert.ok(!html.includes('<script>document.title'));
         assert.ok(html.includes('&lt;script&gt;document.title'));
     });
@@ -482,6 +494,7 @@ describe('renderJobDetailHtml', () => {
         assert.ok(html.includes('<script nonce="test-nonce-123">'));
         // Exactly one <script ...> opening tag in the document.
         assert.strictEqual(html.match(/<script[\s>]/g)?.length, 1);
+        assert.ok(html.includes("default-src 'none'"));
     });
 
     it('shows the fetch-error banner while keeping stale data', () => {
@@ -489,11 +502,12 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             error: 'Could not reach the proof server.',
         });
+        assert.ok(html.includes('role="alert"'));
         assert.ok(html.includes('Could not reach the proof server.'));
         assert.ok(html.includes('fixture-stdlib.v'));
     });
 
-    it('shows the error block for failed jobs', () => {
+    it('explains a failed job in words and keeps the raw code under Technical details', () => {
         const failed: JobResponse = {
             ...JOB,
             status: 'Failed',
@@ -501,12 +515,24 @@ describe('renderJobDetailHtml', () => {
             errorReason: 'admits detected',
         };
         const html = renderJobDetailHtml(failed, BASE_OPTS);
-        assert.ok(html.includes('VERIFICATION_FAILED'));
-        assert.ok(html.includes('admits detected'));
+        assertNoProofClaim(html);
+        assert.strictEqual(verdictOf(html).kind, 'failed');
+        assert.ok(html.includes('<p>admits detected</p>'));
+        assert.ok(html.includes('data-field="errorCode"><code>VERIFICATION_FAILED</code>'));
         assert.ok(html.includes('auto-refresh stopped'));
+        assert.ok(html.includes('data-action="resubmit"'));
     });
 
-    it('reflects the live-update mode in the toolbar note', () => {
+    it('explains known error codes instead of showing them', () => {
+        const html = renderJobDetailHtml(
+            { ...JOB, status: 'TimedOut', errorCode: 'QUEUE_TIMEOUT', errorReason: 'queue' },
+            BASE_OPTS,
+        );
+        assert.strictEqual(verdictOf(html).kind, 'timed-out');
+        assert.ok(html.includes('No worker became free before the time budget ran out.'));
+    });
+
+    it('reflects the live-update mode in the header', () => {
         const running: JobResponse = { ...JOB, status: 'Running' };
         const sse = renderJobDetailHtml(running, { ...BASE_OPTS, live: 'sse' });
         assert.ok(sse.includes('Live — streaming events'));
@@ -514,48 +540,45 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             live: 'poll',
         });
-        assert.ok(poll.includes('Polling every 5 s'));
+        assert.ok(poll.includes('checking every 5 seconds'));
     });
 
-    it('shows the Cancel button only when the status is cancelable', () => {
+    it('offers Cancel Job only when the status is cancelable', () => {
         const running: JobResponse = { ...JOB, status: 'Running' };
-        const withCancel = renderJobDetailHtml(running, {
-            ...BASE_OPTS,
-            live: 'sse',
-            canCancel: true,
-        });
-        assert.ok(withCancel.includes('id="cancel"'));
-        const without = renderJobDetailHtml(JOB, BASE_OPTS);
-        assert.ok(!without.includes('id="cancel"'));
+        const withCancel = renderJobDetailHtml(running, { ...BASE_OPTS, live: 'sse' });
+        assert.ok(withCancel.includes('data-action="cancel"'));
+        assert.ok(withCancel.includes('Cancel Job'));
+        for (const status of ['Verifying', 'Canceling', 'Succeeded'] as const) {
+            const without = renderJobDetailHtml({ ...JOB, status }, BASE_OPTS);
+            assert.ok(!without.includes('data-action="cancel"'), status);
+        }
     });
 
-    it('renders an independent verifier verdict only with explicit provenance', () => {
+    it('claims a verified proof only with full independent verifier evidence', () => {
         const html = renderJobDetailHtml(JOB, {
             ...BASE_OPTS,
             result: RESULT,
         });
-        assert.ok(html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('Independent verifier verdict'));
-        assert.ok(html.includes('Compilation passed'));
-        assert.ok(html.includes('Verified clean (all holes closed, no admits)'));
-        assert.ok(html.includes('Statements immutable'));
-        assert.ok(html.includes('Proof markers remaining'));
+        assert.deepStrictEqual(verdictOf(html), { kind: 'verified', tone: 'ok', claim: 'proved' });
+        assert.ok(html.includes('Proved and independently verified'));
+        assert.ok(html.includes('2 state behavioral properties of the compiled Wasm.'));
+        assert.ok(html.includes('How this was verified'));
+        assert.ok(html.includes('The returned file compiles'));
+        assert.ok(html.includes('Every proof is complete (no admits)'));
+        assert.ok(html.includes('Theorem statements are unchanged'));
+        assert.ok(html.includes('No proof markers left'));
         assert.ok(html.includes('Kernel-reported assumptions'));
         assert.ok(html.includes('Classical_Prop.classic'));
-        assert.ok(html.includes('sectionVariable'));
+        assert.ok(html.includes('section variable'));
         assert.ok(html.includes('Normalized Print Assumptions output'));
-        assert.ok(html.includes('6/5/2026') || html.includes('2026'));
         assert.ok(html.includes('completed.v'));
         assert.ok(html.includes('report.json'));
         assert.ok(html.includes('20.0 KiB'));
-        assert.ok(
-            html.includes(
-                'data-artifact="a1a1a1a1-0000-7000-8000-000000000001"',
-            ),
-        );
-        // No result → no verdict section.
+        assert.ok(html.includes('data-artifact="a1a1a1a1-0000-7000-8000-000000000001"'));
+        assert.ok(html.includes('aria-label="Download completed.v"'));
+        // No result → no verifier section.
         const bare = renderJobDetailHtml(JOB, BASE_OPTS);
-        assert.ok(!bare.includes('Independent verifier verdict'));
+        assert.ok(!bare.includes('How this was verified'));
     });
 
     it('fails closed and escapes malformed-looking assumption evidence', () => {
@@ -563,7 +586,7 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             result: { ...RESULT, assumptionReports: null },
         });
-        assert.ok(!missing.includes('<span class="badge ok">Succeeded</span>'));
+        assertNoProofClaim(missing);
         assert.ok(missing.includes('Print Assumptions evidence is unavailable'));
 
         const malformed = renderJobDetailHtml(JOB, {
@@ -578,7 +601,7 @@ describe('renderJobDetailHtml', () => {
                 } as any],
             },
         });
-        assert.ok(!malformed.includes('<span class="badge ok">Succeeded</span>'));
+        assertNoProofClaim(malformed);
         assert.ok(malformed.includes('Print Assumptions evidence is unavailable'));
 
         const hostile = renderJobDetailHtml(JOB, {
@@ -613,11 +636,12 @@ describe('renderJobDetailHtml', () => {
                 ],
             },
         });
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('independent verifier evidence rejects'));
+        assertNoProofClaim(html);
+        assert.strictEqual(verdictOf(html).kind, 'rejected');
+        assert.ok(html.includes('assumption evidence is incomplete or rejected'));
     });
 
-    it('shows null-provenance Verified success as worker-reported', () => {
+    it('shows a result without verifier provenance as not independently verified', () => {
         const html = renderJobDetailHtml(JOB, {
             ...BASE_OPTS,
             result: {
@@ -626,10 +650,10 @@ describe('renderJobDetailHtml', () => {
                 verifiedAt: null,
             },
         });
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('<strong>Worker-reported result.</strong>'));
-        assert.ok(html.includes('worker-reported legacy result'));
-        assert.ok(!html.includes('Independent verifier verdict'));
+        assertNoProofClaim(html);
+        assert.ok(html.includes('Not independently verified'));
+        assert.ok(html.includes('checked only inside the worker'));
+        assert.ok(!html.includes('class="checks"'));
     });
 
     it('fails closed when a Succeeded record has no claim class', () => {
@@ -643,13 +667,12 @@ describe('renderJobDetailHtml', () => {
                 verifiedAt: null,
             },
         });
-        assert.ok(html.includes('<span class="badge warn">Succeeded</span>'));
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('<strong>Behavioral claim unverified.</strong>'));
+        assertNoProofClaim(html);
+        assert.ok(html.includes('Behavior not verified'));
         assert.ok(html.includes('did not provide a claim class'));
     });
 
-    it('warning-labels StructuralOnly without claiming behavioral proof', () => {
+    it('labels StructuralOnly as structural validity only, never a behavioral proof', () => {
         const job: JobResponse = {
             ...JOB,
             claimClass: 'StructuralOnly',
@@ -662,12 +685,12 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             result: { ...RESULT, claimClass: 'StructuralOnly' },
         });
-        assert.ok(html.includes('<span class="badge warn">Succeeded</span>'));
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('<strong>Structural validity only.</strong>'));
-        assert.ok(html.includes('not a functional-correctness claim'));
-        assert.ok(html.includes('StructuralOnly'));
-        assert.ok(html.includes('structural'));
+        assert.deepStrictEqual(verdictOf(html), { kind: 'structural', tone: 'warn', claim: 'structural' });
+        assert.ok(!html.includes('data-claim="proved"'));
+        assert.ok(html.includes('Structural validity only'));
+        assert.ok(html.includes('this is not a functional-correctness result'));
+        assert.ok(html.includes('data-field="claimClass"><code>StructuralOnly</code>'));
+        assert.ok(html.includes('Structural (module typing)'));
     });
 
     it('fails closed when job and result claim classes disagree', () => {
@@ -675,12 +698,11 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             result: { ...RESULT, claimClass: 'StructuralOnly' },
         });
-        assert.ok(html.includes('<span class="badge warn">Succeeded</span>'));
-        assert.ok(!html.includes('<span class="badge ok">Succeeded</span>'));
-        assert.ok(html.includes('Job detail and result DTOs do not agree'));
+        assertNoProofClaim(html);
+        assert.strictEqual(verdictOf(html).kind, 'conflict');
     });
 
-    it('renders verifier-backed PartialSuccess as an accepted warning', () => {
+    it('renders verifier-backed PartialSuccess as partially proved', () => {
         const partialJob: JobResponse = {
             ...JOB,
             status: 'PartialSuccess',
@@ -710,33 +732,109 @@ describe('renderJobDetailHtml', () => {
             ...BASE_OPTS,
             result: partialResult,
         });
-        assert.ok(html.includes('<span class="badge warn">PartialSuccess</span>'));
-        assert.ok(html.includes('<strong>Partial result accepted.</strong>'));
-        assert.ok(!html.includes('<strong>Independent verification failed.</strong>'));
-        assert.ok(!html.includes('<strong>Not proven.</strong>'));
-        assert.ok(html.includes('unfinished obligations remain admitted'));
-        assert.ok(html.includes('<span class="badge warn">partial</span>'));
+        assert.deepStrictEqual(verdictOf(html), { kind: 'partial', tone: 'warn', claim: 'partial' });
+        assert.ok(html.includes('1 of 2 obligations closed and independently re-verified; the other 1 remain admitted'));
+        assert.ok(html.includes('Every closed proof is complete'));
+        assert.ok(html.includes('as expected for a partial result'));
+        assert.ok(!html.includes('Independent verification failed'));
     });
 
-    it('renders the event log lines and the empty placeholder', () => {
-        const lines = ['10:00:01  job.accepted — main.v, 3 holes', '10:00:05  vm.online'];
-        const html = renderJobDetailHtml(JOB, {
-            ...BASE_OPTS,
-            eventLog: lines,
-        });
-        for (const line of lines) {
-            assert.ok(html.includes(line));
-        }
+    it('renders activity rows grouped by obligation, and the empty placeholder', () => {
+        const run = newRunModel();
+        applyEvent(run, { schemaVersion: 1, jobId: JOB.id, seq: 1, type: 'job.accepted', ts: '2026-06-05T10:00:01Z', payload: { holes: 3 } });
+        applyEvent(run, { schemaVersion: 1, jobId: JOB.id, seq: 2, type: 'obligation.started', ts: '2026-06-05T10:00:05Z', payload: { name: 'valid_fixture__Add' } });
+        const html = renderJobDetailHtml(JOB, { ...BASE_OPTS, run });
+        assert.ok(html.includes('Accepted — 3 proof holes'));
+        assert.ok(html.includes('<div class="grp" title="valid_fixture__Add">Add</div>'));
+        assert.ok(html.includes('data-obligation="valid_fixture__Add"'));
         const empty = renderJobDetailHtml(JOB, BASE_OPTS);
-        assert.ok(empty.includes('No events yet.'));
+        assert.ok(empty.includes('No activity yet.'));
     });
 
     it('tolerates a minimal list-shaped job (everything optional missing)', () => {
         const minimal: JobResponse = { id: 'abc', status: 'Queued' };
         const html = renderJobDetailHtml(minimal, BASE_OPTS);
         assert.ok(html.includes('abc'));
-        assert.ok(html.includes('Queued'));
-        assert.ok(html.includes('0/0 closed'));
-        assert.ok(html.includes('No obligations reported yet.'));
+        assert.strictEqual(verdictOf(html).kind, 'queued');
+        assert.ok(html.includes('Waiting for a worker'));
+        assert.ok(!html.includes('role="progressbar"'));
+        assert.ok(html.includes('Obligations appear once the worker has compiled the file.'));
+    });
+
+    it('shows neutral loading placeholders before the detail arrives', () => {
+        const html = renderJobDetailHtml(JOB, { ...BASE_OPTS, detailLoaded: false });
+        assert.ok(html.includes('Loading obligations…'));
+        assert.ok(html.includes('aria-busy="true"'));
+        assert.ok(!html.includes('No obligations'));
+        assertNoProofClaim(html);
+
+        const restored = renderJobDetailHtml({ id: 'abc', status: 'Accepted' }, {
+            ...BASE_OPTS, detailLoaded: false, statusKnown: false,
+        });
+        assert.strictEqual(verdictOf(restored).kind, 'loading');
+        assert.ok(restored.includes('Loading this proof job…'));
+        assert.ok(!restored.includes('data-action="cancel"'));
+    });
+
+    it('shows the first compiler error inline with a fix hint and a link to the line', () => {
+        const failed: JobResponse = {
+            ...JOB,
+            status: 'Failed',
+            mode: 'compile-goals',
+            filename: 'clamp.v',
+            claimClass: 'Unverified',
+            holesClosed: 0,
+            errorCode: 'compile_failed',
+            errorReason: 'file did not compile (see build.log)',
+        };
+        const result: JobResultResponse = {
+            id: failed.id, status: 'Failed', holesTotal: 2, holesClosed: 0,
+            artifacts: [
+                { id: 'in', kind: 'InputV', filename: 'input.v', sizeBytes: 10, sha256: 'aa' },
+                { id: 'log', kind: 'BuildLog', filename: 'build.log', sizeBytes: 10, sha256: 'bb' },
+            ],
+        };
+        const html = renderJobDetailHtml(failed, {
+            ...BASE_OPTS,
+            result,
+            source: 'clamp.inf',
+            buildError: { line: 53, startChar: 11, endChar: 16, message: 'clamp already exists.' },
+        });
+        assert.deepStrictEqual(verdictOf(html), { kind: 'compile-error', tone: 'err', claim: 'none' });
+        assert.ok(html.includes('The prover could not compile your file'));
+        assert.ok(html.includes('<pre class="excerpt">Line 53: clamp already exists.</pre>'));
+        assert.ok(html.includes('names the module after the file'));
+        assert.ok(html.includes('data-action="gotoLine" data-artifact="in" data-line="53"'));
+        assert.ok(html.includes('Open build log'));
+        assert.ok(!html.includes('data-action="resubmit"'), 'running it again would fail the same way');
+    });
+
+    it('uses theme colours only, with focus, high-contrast and reduced-motion rules', () => {
+        assert.ok(!/#fff\b|#1e1e1e/i.test(JOB_DETAIL_STYLES));
+        assert.ok(JOB_DETAIL_STYLES.includes(':focus-visible'));
+        assert.ok(JOB_DETAIL_STYLES.includes('body.vscode-high-contrast'));
+        assert.ok(JOB_DETAIL_STYLES.includes('prefers-reduced-motion'));
+        assert.ok(JOB_DETAIL_STYLES.includes('--vscode-testing-iconPassed'));
+    });
+
+    it('calls obligations proved only when the run claims a proof', () => {
+        const verified = renderJobDetailHtml(JOB, { ...BASE_OPTS, result: RESULT });
+        assert.ok(verified.includes('<span class="obl-status">Proved</span>'));
+        const rejected = renderJobDetailHtml(JOB, {
+            ...BASE_OPTS,
+            result: { ...RESULT, verifiedClean: false, admitsDetected: true },
+        });
+        assert.ok(!rejected.includes('<span class="obl-status">Proved</span>'));
+        assert.ok(rejected.includes('<span class="obl-status">Closed — not verified</span>'));
+        const running = renderJobDetailHtml({ ...JOB, status: 'Running' }, { ...BASE_OPTS, live: 'sse' });
+        assert.ok(running.includes('<span class="obl-status">Closed</span>'));
+    });
+
+    it('labels the verdict for assistive technology', () => {
+        const html = renderJobDetailHtml(JOB, { ...BASE_OPTS, result: RESULT });
+        assert.ok(/id="verdict"[^>]*role="status" aria-live="polite"/.test(html));
+        assert.ok(html.includes('role="radiogroup" aria-label="Show activity"'));
+        assert.ok(html.includes('aria-label="Filter activity"'));
+        assert.ok(html.includes('<span class="sr-only">, done</span>'));
     });
 });

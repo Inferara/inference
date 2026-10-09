@@ -91,7 +91,7 @@ export function generatedVPath(stdout: string, cwd: string): string | null {
 }
 
 export type SubmitOutcome =
-    | { kind: 'submitted'; job: JobResponse; holes: number }
+    | { kind: 'submitted'; job: JobResponse; holes: number; sha256: string }
     | { kind: 'preflight-failed'; problem: string };
 
 /** Preflight, then submit with the content-derived key. API errors propagate. */
@@ -107,5 +107,6 @@ export async function submitVFile(
     }
     // No options: the server picks provider, agent and budget.
     const job = await api.submitJob(filename, bytes, {}, idempotencyKey(checked.text));
-    return { kind: 'submitted', job, holes: checked.holes };
+    const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+    return { kind: 'submitted', job, holes: checked.holes, sha256 };
 }

@@ -90,7 +90,7 @@ export function registerProveFileCommand(
                     });
                 },
             );
-            await report(outcome, source, log, hooks, onCompilerCheck);
+            await report(outcome, uri.fsPath, log, hooks, onCompilerCheck);
         } catch (err) {
             log.error(`Prover: prove ${source}: ${err instanceof Error ? err.message : err}`);
             vscode.window.showErrorMessage(`Inference: ${submitErrorMessage(err)}`);
@@ -102,11 +102,12 @@ export function registerProveFileCommand(
 
 async function report(
     outcome: ProveOutcome,
-    source: string,
+    infPath: string,
     log: vscode.LogOutputChannel,
     hooks: SubmitHooks,
     onCompilerCheck: (check: CompilerCheck) => void,
 ): Promise<void> {
+    const source = path.basename(infPath);
     const showOutput = async (message: string, error = true) => {
         const show = error
             ? vscode.window.showErrorMessage(message, 'Show Output')
@@ -123,7 +124,7 @@ async function report(
                     : { state: 'unchecked', detail: 'server does not publish an accepted compiler' },
             );
             log.info(`Prover: ${source} → ${outcome.vPath} (${outcome.holes} holes) → job ${outcome.job.id}`);
-            await hooks.showJob(outcome.job, source);
+            await hooks.showJob(outcome.job, { infPath, vPath: outcome.vPath, vSha256: outcome.vSha256 });
             return;
         }
         case 'no-infs': {
