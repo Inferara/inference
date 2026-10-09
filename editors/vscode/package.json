@@ -29,7 +29,8 @@
     "workspaceContains:**/*.inf",
     "onLanguage:inference",
     "onView:inference.configView",
-    "onView:inference.proofJobsView"
+    "onView:inference.proofJobsView",
+    "onWebviewPanel:inference.proofJob"
   ],
   "contributes": {
     "viewsContainers": {

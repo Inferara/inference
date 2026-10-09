@@ -47,6 +47,20 @@ function artifactUri(jobId: string, info: ArtifactInfo): vscode.Uri {
     });
 }
 
+/** Show a document with the cursor on a 1-based line (clamped), revealed in the centre. */
+export async function showAtLine(doc: vscode.TextDocument, line?: number): Promise<void> {
+    const options: vscode.TextDocumentShowOptions = { preview: false };
+    if (line !== undefined && Number.isInteger(line) && line > 0) {
+        const target = Math.min(line, doc.lineCount) - 1;
+        const range = doc.lineAt(target).range;
+        options.selection = new vscode.Range(range.start, range.start);
+    }
+    const editor = await vscode.window.showTextDocument(doc, options);
+    if (options.selection) {
+        editor.revealRange(options.selection, vscode.TextEditorRevealType.InCenter);
+    }
+}
+
 /**
  * Read-only documents for job artifacts (`inference-proof:/<job>/<artifact>/<name>`).
  *
@@ -90,12 +104,17 @@ export class ProofDocuments implements vscode.TextDocumentContentProvider, vscod
         return text;
     }
 
-    /** Download (verified) and show one artifact read-only. */
-    async open(api: ProverApi, jobId: string, info: ArtifactInfo): Promise<void> {
+    /** Download (verified) and show one artifact read-only, optionally at a 1-based line. */
+    async open(api: ProverApi, jobId: string, info: ArtifactInfo, line?: number): Promise<void> {
         const uri = artifactUri(jobId, info);
         await this.load(api, jobId, info, uri);
         const doc = await vscode.workspace.openTextDocument(uri);
-        await vscode.window.showTextDocument(doc, { preview: false });
+        await showAtLine(doc, line);
+    }
+
+    /** The text of an artifact (verified), for parsing in the host. */
+    async text(api: ProverApi, jobId: string, info: ArtifactInfo): Promise<string> {
+        return this.load(api, jobId, info);
     }
 
     /** Diff the submitted input against the completed proof. */

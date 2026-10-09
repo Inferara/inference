@@ -102,6 +102,8 @@ export interface ObligationDto {
     lastError?: string | null;
     /** Goal state Rocq shows at this theorem's `Proof.` (compile-goals flow). */
     goal?: string | null;
+    /** 1-based line of the theorem in the submitted `.v`; absent on older servers. */
+    sourceLine?: number | null;
 }
 
 /**
@@ -139,6 +141,11 @@ export interface JobResponse {
     claimClass?: ClaimClass | null;
     errorCode?: string | null;
     errorReason?: string | null;
+    /**
+     * When the time budget ends (submission + budget; queue time counts).
+     * Absent on older servers: `job.queued` carries it, or derive it.
+     */
+    deadlineUtc?: string | null;
 }
 
 /** Paged list response for `GET /api/v1/jobs`. */
