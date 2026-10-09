@@ -107,7 +107,9 @@ export async function resubmitJob(
                     throw new Error('The job has no stored input to resubmit.');
                 }
                 const bytes = await fetchVerified(api, job.id, input);
-                const fresh = await api.submitJob(input.filename, bytes, {}, crypto.randomUUID());
+                // The server stores every input as `input.v`; keep the name the job was submitted under.
+                const filename = job.filename || input.filename;
+                const fresh = await api.submitJob(filename, bytes, {}, crypto.randomUUID());
                 log.info(`Prover: resubmitted job ${job.id} → ${fresh.id}`);
                 return fresh;
             },
