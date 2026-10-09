@@ -28,7 +28,34 @@ export function countHoles(text: string): number {
 
 export type Preflight =
     | { ok: true; text: string; holes: number }
-    | { ok: false; problem: string };
+    | { ok: false; problem: string; duplicate?: DuplicateDefinition };
+
+/** A top-level name the file defines more than once (it cannot compile). */
+export interface DuplicateDefinition {
+    name: string;
+    /** 1-based lines of every definition of `name`. */
+    lines: number[];
+}
+
+const VERNACULAR = /^(?:Definition|Fixpoint|CoFixpoint|Inductive|CoInductive|Record|Structure|Class|Theorem|Lemma|Corollary|Proposition|Example|Fact|Remark|Axiom|Parameter)\s+([A-Za-z_][\w']*)/;
+
+/**
+ * Top-level (column 0) names defined more than once. The accepted compiler
+ * names the module after the file, so `clamp.inf` with `fn clamp` defines
+ * `clamp` twice and the server's Rocq rejects it ("clamp already exists").
+ */
+export function duplicateDefinitions(text: string): DuplicateDefinition[] {
+    const seen = new Map<string, number[]>();
+    text.split(/\r?\n/).forEach((line, index) => {
+        const m = VERNACULAR.exec(line);
+        if (m) {
+            seen.set(m[1], [...(seen.get(m[1]) ?? []), index + 1]);
+        }
+    });
+    return [...seen.entries()]
+        .filter(([, lines]) => lines.length > 1)
+        .map(([name, lines]) => ({ name, lines }));
+}
 
 /** Check a `.v` upload the way the server will (size, UTF-8, NUL, holes). */
 export function preflight(
@@ -61,6 +88,17 @@ export function preflight(
             problem: `${filename} has no proof holes, so there is nothing to prove. A hole is the marker "${HOLE_MARKER}".`,
         };
     }
+    const duplicate = duplicateDefinitions(text)[0];
+    if (duplicate) {
+        const stem = path.basename(filename, '.v');
+        return {
+            ok: false,
+            duplicate,
+            problem: duplicate.name === stem
+                ? `${filename} defines “${duplicate.name}” twice, so it cannot compile: the compiler names the module after the file, and a function is also called “${duplicate.name}”. Rename the file or the function.`
+                : `${filename} defines “${duplicate.name}” twice (lines ${duplicate.lines.join(', ')}), so it cannot compile.`,
+        };
+    }
     return { ok: true, text, holes };
 }
 
@@ -91,22 +129,54 @@ export function generatedVPath(stdout: string, cwd: string): string | null {
 }
 
 export type SubmitOutcome =
-    | { kind: 'submitted'; job: JobResponse; holes: number; sha256: string }
-    | { kind: 'preflight-failed'; problem: string };
+    | { kind: 'submitted'; job: JobResponse; holes: number; sha256: string; replayed: boolean }
+    | { kind: 'preflight-failed'; problem: string; duplicate?: DuplicateDefinition };
+
+/** Replays this old are certainly not this submission (clocks may drift). */
+const REPLAY_SLACK_MS = 120_000;
+
+/**
+ * Whether a submit answer is an existing job (same file, same account) rather
+ * than a new one. The server's `Idempotent-Replayed` header decides when
+ * present; older servers omit it, and then a job that already moved past
+ * Queued, or was created well before this submit, is a replay.
+ */
+export function classifyReplay(
+    job: Pick<JobResponse, 'status' | 'createdAt'>,
+    replayHeader: boolean | null,
+    submittedAt: number,
+): boolean {
+    if (replayHeader !== null) {
+        return replayHeader;
+    }
+    if (job.status !== 'Accepted' && job.status !== 'Queued') {
+        return true;
+    }
+    const created = Date.parse(job.createdAt ?? '');
+    return !Number.isNaN(created) && created < submittedAt - REPLAY_SLACK_MS;
+}
 
 /** Preflight, then submit with the content-derived key. API errors propagate. */
 export async function submitVFile(
-    api: Pick<ProverApi, 'submitJob'>,
+    api: Pick<ProverApi, 'submitJobWithMeta'>,
     filename: string,
     bytes: Uint8Array,
     maxUploadBytes?: number,
+    now: () => number = Date.now,
 ): Promise<SubmitOutcome> {
     const checked = preflight(filename, bytes, maxUploadBytes);
     if (!checked.ok) {
-        return { kind: 'preflight-failed', problem: checked.problem };
+        return { kind: 'preflight-failed', problem: checked.problem, ...(checked.duplicate ? { duplicate: checked.duplicate } : {}) };
     }
     // No options: the server picks provider, agent and budget.
-    const job = await api.submitJob(filename, bytes, {}, idempotencyKey(checked.text));
+    const submittedAt = now();
+    const { job, replayHeader } = await api.submitJobWithMeta(filename, bytes, {}, idempotencyKey(checked.text));
     const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
-    return { kind: 'submitted', job, holes: checked.holes, sha256 };
+    return {
+        kind: 'submitted',
+        job,
+        holes: checked.holes,
+        sha256,
+        replayed: classifyReplay(job, replayHeader, submittedAt),
+    };
 }

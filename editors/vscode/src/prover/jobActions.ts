@@ -24,7 +24,10 @@ export async function cancelJobInteractive(
 ): Promise<boolean> {
     const confirmed = await vscode.window.showWarningMessage(
         `Cancel proof job "${label(job)}"?`,
-        { modal: true, detail: 'A running worker stops at its next heartbeat; partial results are kept.' },
+        {
+            modal: true,
+            detail: 'A running worker stops at its next heartbeat; partial results are kept. While a worker is still starting, canceling can take up to about 90 seconds.',
+        },
         'Cancel Job',
     );
     if (confirmed !== 'Cancel Job') {
@@ -37,7 +40,7 @@ export async function cancelJobInteractive(
     try {
         const res = await new ProverApi(config.serverUrl, config.apiKey).cancelJob(job.id);
         log.info(`Prover: cancel requested for job ${job.id} → ${res.status}`);
-        vscode.window.showInformationMessage(`Inference: cancel requested; the job is now ${res.status}.`);
+        vscode.window.setStatusBarMessage(`$(circle-slash) Canceling ${label(job)}…`, 5000);
         return true;
     } catch (err) {
         if (err instanceof ApiError && err.code === 'NOT_CANCELABLE') {
@@ -100,7 +103,7 @@ export async function resubmitJob(
     const api = new ProverApi(config.serverUrl, config.apiKey);
     try {
         return await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: `Resubmitting ${label(job)}…` },
+            { location: vscode.ProgressLocation.Notification, title: `Running ${label(job)} again…` },
             async () => {
                 const input = (await api.listArtifacts(job.id)).find((a) => a.kind === 'InputV');
                 if (!input) {

@@ -192,8 +192,8 @@ export function registerProver(
         onStatusChanged();
     };
     disposables.push(
-        registerSubmitProofCommand(context, log, { showJob }),
-        registerProveFileCommand(context, log, { showJob }, (check) => {
+        registerSubmitProofCommand(context, log, { showJob, runAgain }),
+        registerProveFileCommand(context, log, { showJob, runAgain }, (check) => {
             compilerCheck = check;
             onStatusChanged();
         }),

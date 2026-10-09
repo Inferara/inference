@@ -27,7 +27,7 @@ export function registerProverAuthCommands(
         }
         const key = await vscode.window.showInputBox({
             title: 'Inference Proof Server API Key',
-            prompt: `Service key for ${serverUrl}, issued by your proof-server operator.`,
+            prompt: `API key for ${serverUrl}, issued by your proof server operator.`,
             password: true,
             ignoreFocusOut: true,
             placeHolder: 'infp_key…',
@@ -55,7 +55,8 @@ export function registerProverAuthCommands(
             }
             log.warn(`Prover: key check failed: ${err instanceof Error ? err.message : err}`);
             const choice = await vscode.window.showWarningMessage(
-                `Inference: could not check the key (${describeError(err)}).`,
+                `Couldn't check the API key with ${serverUrl}.`,
+                { modal: true, detail: `${describeError(err)}\n\nSave it anyway and check it later?` },
                 'Save Anyway',
             );
             if (choice !== 'Save Anyway') {
@@ -76,9 +77,17 @@ export function registerProverAuthCommands(
             vscode.window.showErrorMessage(`Inference: ${describeError(err)}`);
             return;
         }
+        const confirmed = await vscode.window.showWarningMessage(
+            `Remove the API key for ${serverUrl}?`,
+            { modal: true, detail: 'Open proof job panels close. Your jobs stay on the proof server.' },
+            'Remove Key',
+        );
+        if (confirmed !== 'Remove Key') {
+            return;
+        }
         await secrets.delete(apiKeySecret(serverUrl));
         log.info(`Prover: API key for ${serverUrl} cleared.`);
-        vscode.window.showInformationMessage(`Inference: API key for ${serverUrl} cleared.`);
+        vscode.window.showInformationMessage(`Inference: removed the API key for ${serverUrl}.`);
         await updateConfiguredContext(secrets);
         onChanged();
     });

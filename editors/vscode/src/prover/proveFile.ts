@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
@@ -7,14 +8,78 @@ import { runDoctor } from '../toolchain/doctor';
 import { run } from '../utils/spawn';
 import { ProverApi } from './api';
 import { requireConfig } from './config';
+import { parseInfcDiagnostics, summarizeDiagnostics, type ParsedDiagnostics } from './infcDiagnostics';
 import { proveInfFile, type ProveOutcome } from './proveFlow';
-import { confirmUpload, pickFile, saveIfDirty, submitErrorMessage, type SubmitHooks } from './submitProof';
+import type { DuplicateDefinition } from './submission';
+import { confirmUpload, notifyReplay, pickFile, saveBeforeRun, submitErrorMessage, type SubmitHooks } from './submitProof';
 import { installableVersion, resolvedInfcPath } from './toolchainIdentity';
 
 /** Last compiler check, shown in the Configuration view. */
 export interface CompilerCheck {
     state: 'match' | 'mismatch' | 'unchecked';
     detail: string;
+}
+
+const UNCHECKED_OK_KEY = 'inference.prover.uncheckedCompilerOk';
+
+/**
+ * A progress notification that steps aside for questions: `pause()` closes it
+ * before a dialog, and the next `report()` opens a new one, so a modal never
+ * sits on top of a progress toast.
+ */
+class StepProgress {
+    private report?: (message: string) => void;
+    private finish?: () => void;
+    private latest = '';
+    private readonly abort = new AbortController();
+
+    constructor(private readonly title: string) {}
+
+    get signal(): AbortSignal {
+        return this.abort.signal;
+    }
+
+    get cancelled(): boolean {
+        return this.abort.signal.aborted;
+    }
+
+    step(message: string): void {
+        this.latest = message;
+        if (this.report) {
+            this.report(message);
+            return;
+        }
+        if (this.finish) {
+            return; // opening; the task reports `latest` when it starts
+        }
+        let open = true;
+        this.finish = () => {
+            open = false;
+        };
+        void vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: this.title, cancellable: true },
+            (progress, token) => {
+                token.onCancellationRequested(() => this.abort.abort());
+                return new Promise<void>((resolve) => {
+                    if (!open) {
+                        resolve(); // paused before the notification appeared
+                        return;
+                    }
+                    this.report = (m) => progress.report({ message: m });
+                    this.finish = resolve;
+                    progress.report({ message: this.latest });
+                });
+            },
+        );
+    }
+
+    /** Close the notification (before a dialog, or when done). */
+    pause(): void {
+        const finish = this.finish;
+        this.finish = undefined;
+        this.report = undefined;
+        finish?.();
+    }
 }
 
 /**
@@ -29,7 +94,15 @@ export function registerProveFileCommand(
     onCompilerCheck: (check: CompilerCheck) => void,
 ): vscode.Disposable {
     let running = false;
-    return vscode.commands.registerCommand('inference.proveFile', async (arg?: unknown) => {
+    const diagnostics = vscode.languages.createDiagnosticCollection('inference-prove');
+    // Problems from the last proof build go stale as soon as the file changes.
+    const onEdit = vscode.workspace.onDidChangeTextDocument((e) => {
+        if (diagnostics.has(e.document.uri)) {
+            diagnostics.delete(e.document.uri);
+        }
+    });
+
+    const command = vscode.commands.registerCommand('inference.proveFile', async (arg?: unknown) => {
         if (running) {
             vscode.window.showInformationMessage('Inference: a proof build is already running.');
             return;
@@ -42,80 +115,155 @@ export function registerProveFileCommand(
             title: 'Select the Inference source to prove',
             filters: { 'Inference source': ['inf'] },
         });
-        if (!uri || uri.scheme !== 'file' || !(await saveIfDirty(uri, 'Prove'))) {
-            return;
-        }
-        if (!(await confirmUpload(context, config.serverUrl))) {
+        if (!uri || uri.scheme !== 'file' || !(await saveBeforeRun(uri))) {
             return;
         }
         running = true;
         const source = path.basename(uri.fsPath);
         const api = new ProverApi(config.serverUrl, config.apiKey);
+        const progress = new StepProgress(`Proving ${source}`);
+        diagnostics.delete(uri);
         try {
-            const outcome = await vscode.window.withProgress(
-                {
-                    location: vscode.ProgressLocation.Notification,
-                    title: `Proving ${source}`,
-                    cancellable: true,
-                },
-                (progress, token) => {
-                    const abort = new AbortController();
-                    token.onCancellationRequested(() => abort.abort());
-                    log.info(`Prover: proving ${uri.fsPath}`);
-                    return proveInfFile(uri.fsPath, {
-                        locateInfs: () => detectInfs()?.path ?? null,
-                        resolveInfc: async (infsPath) => resolvedInfcPath(await runDoctor(infsPath)),
-                        run: (command, args, options) =>
-                            run(command, args, {
-                                ...options,
-                                signal: abort.signal,
-                                onLine: (line) => log.info(`  ${line}`),
-                            }),
-                        readFile: (file) => Promise.resolve(vscode.workspace.fs.readFile(vscode.Uri.file(file))),
-                        api,
-                        confirmUnchecked: async () =>
-                            (await vscode.window.showWarningMessage(
-                                'This proof server does not say which compiler it accepts.',
-                                {
-                                    modal: true,
-                                    detail: 'Your infc cannot be checked against it. A mismatched compiler produces a file the prover cannot compile.',
-                                },
-                                'Compile and Submit',
-                            )) === 'Compile and Submit',
-                        progress: (message) => {
-                            progress.report({ message });
-                            log.info(`Prover: ${message}`);
+            log.info(`Prover: proving ${uri.fsPath}`);
+            const outcome = await proveInfFile(uri.fsPath, {
+                locateInfs: () => detectInfs()?.path ?? null,
+                resolveInfc: async (infsPath) => resolvedInfcPath(await runDoctor(infsPath)),
+                run: (cmd, args, options) =>
+                    run(cmd, args, {
+                        ...options,
+                        signal: progress.signal,
+                        onLine: (line) => log.info(`  ${line}`),
+                    }),
+                readFile: (file) => Promise.resolve(vscode.workspace.fs.readFile(vscode.Uri.file(file))),
+                api,
+                confirmUnchecked: async () => {
+                    const key = `${UNCHECKED_OK_KEY}:${config.serverUrl}`;
+                    if (context.globalState.get<boolean>(key)) {
+                        return true;
+                    }
+                    progress.pause();
+                    const choice = await vscode.window.showWarningMessage(
+                        "This proof server doesn't say which compiler it accepts.",
+                        {
+                            modal: true,
+                            detail: "Your compiler can't be checked against it. If the server uses a different one, the uploaded file won't compile there.\n\nYou won't be asked again for this server.",
                         },
-                        cancelled: () => token.isCancellationRequested,
-                    });
+                        'Continue for This Server',
+                    );
+                    if (choice !== 'Continue for This Server') {
+                        return false;
+                    }
+                    await context.globalState.update(key, true);
+                    return true;
                 },
-            );
-            await report(outcome, uri.fsPath, log, hooks, onCompilerCheck);
+                confirmUpload: async () => {
+                    progress.pause();
+                    return confirmUpload(context, config.serverUrl, `${path.basename(source, '.inf')}.v`);
+                },
+                progress: (message) => {
+                    progress.step(message);
+                    log.info(`Prover: ${message}`);
+                },
+                cancelled: () => progress.cancelled,
+            });
+            progress.pause();
+            await report(outcome, uri, log, hooks, onCompilerCheck, diagnostics);
         } catch (err) {
+            progress.pause();
             log.error(`Prover: prove ${source}: ${err instanceof Error ? err.message : err}`);
             vscode.window.showErrorMessage(`Inference: ${submitErrorMessage(err)}`);
         } finally {
             running = false;
         }
     });
+    return vscode.Disposable.from(command, diagnostics, onEdit);
+}
+
+/** The file a diagnostic belongs to: the source, or a submodule `a::b` → `<dir>/a/b.inf`. */
+function diagnosticFile(source: vscode.Uri, module: string | undefined): vscode.Uri {
+    if (!module) {
+        return source;
+    }
+    const candidate = path.join(path.dirname(source.fsPath), ...module.split('::')) + '.inf';
+    return fs.existsSync(candidate) ? vscode.Uri.file(candidate) : source;
+}
+
+/** Publish compiler errors to the Problems panel; returns how many. */
+function publish(
+    collection: vscode.DiagnosticCollection,
+    source: vscode.Uri,
+    parsed: ParsedDiagnostics,
+): number {
+    const byFile = new Map<string, { uri: vscode.Uri; items: vscode.Diagnostic[] }>();
+    const add = (uri: vscode.Uri, d: vscode.Diagnostic) => {
+        const entry = byFile.get(uri.toString()) ?? { uri, items: [] };
+        entry.items.push(d);
+        byFile.set(uri.toString(), entry);
+    };
+    for (const d of parsed.located) {
+        const line = Math.max(0, d.line - 1);
+        const column = Math.max(0, d.column - 1);
+        const diagnostic = new vscode.Diagnostic(
+            new vscode.Range(line, column, line, column + 1),
+            d.message,
+            vscode.DiagnosticSeverity.Error,
+        );
+        diagnostic.source = 'infc (proof build)';
+        if (d.code) {
+            diagnostic.code = d.code;
+        }
+        add(diagnosticFile(source, d.module), diagnostic);
+    }
+    for (const message of parsed.unlocated) {
+        const diagnostic = new vscode.Diagnostic(new vscode.Range(0, 0, 0, 0), message, vscode.DiagnosticSeverity.Error);
+        diagnostic.source = 'infc (proof build)';
+        add(source, diagnostic);
+    }
+    for (const { uri, items } of byFile.values()) {
+        collection.set(uri, items);
+    }
+    return parsed.located.length + parsed.unlocated.length;
+}
+
+/** Point at `fn <name>` in the source, for the module-named-after-the-file clash. */
+async function duplicateInSource(
+    collection: vscode.DiagnosticCollection,
+    source: vscode.Uri,
+    duplicate: DuplicateDefinition,
+): Promise<vscode.Range | undefined> {
+    try {
+        const doc = await vscode.workspace.openTextDocument(source);
+        const pattern = new RegExp(`\\bfn\\s+${duplicate.name.replace(/[^\w]/g, '')}\\b`);
+        for (let i = 0; i < doc.lineCount; i++) {
+            const m = pattern.exec(doc.lineAt(i).text);
+            if (m) {
+                const range = new vscode.Range(i, m.index, i, m.index + m[0].length);
+                const diagnostic = new vscode.Diagnostic(
+                    range,
+                    `“${duplicate.name}” is also the module name (the file is named ${path.basename(source.fsPath)}). Rename the file or this function.`,
+                    vscode.DiagnosticSeverity.Error,
+                );
+                diagnostic.source = 'infc (proof build)';
+                collection.set(source, [diagnostic]);
+                return range;
+            }
+        }
+    } catch {
+        // The source cannot be read; the notification still explains.
+    }
+    return undefined;
 }
 
 async function report(
     outcome: ProveOutcome,
-    infPath: string,
+    sourceUri: vscode.Uri,
     log: vscode.LogOutputChannel,
     hooks: SubmitHooks,
     onCompilerCheck: (check: CompilerCheck) => void,
+    diagnostics: vscode.DiagnosticCollection,
 ): Promise<void> {
+    const infPath = sourceUri.fsPath;
     const source = path.basename(infPath);
-    const showOutput = async (message: string, error = true) => {
-        const show = error
-            ? vscode.window.showErrorMessage(message, 'Show Output')
-            : vscode.window.showWarningMessage(message, 'Show Output');
-        if ((await show) === 'Show Output') {
-            log.show();
-        }
-    };
     switch (outcome.kind) {
         case 'submitted': {
             onCompilerCheck(
@@ -123,7 +271,10 @@ async function report(
                     ? { state: 'match', detail: 'matches the accepted compiler' }
                     : { state: 'unchecked', detail: 'server does not publish an accepted compiler' },
             );
-            log.info(`Prover: ${source} → ${outcome.vPath} (${outcome.holes} holes) → job ${outcome.job.id}`);
+            log.info(`Prover: ${source} → ${outcome.vPath} (${outcome.holes} holes) → job ${outcome.job.id}${outcome.replayed ? ' (existing job)' : ''}`);
+            if (outcome.replayed) {
+                notifyReplay(outcome.job, source, hooks);
+            }
             await hooks.showJob(outcome.job, { infPath, vPath: outcome.vPath, vSha256: outcome.vSha256 });
             return;
         }
@@ -158,35 +309,83 @@ async function report(
                 `Accepted: ${accepted.version}, commit ${accepted.commit.slice(0, 12)}, ABI ${accepted.abiVersion}.`,
                 '',
                 version
-                    ? `Install ${version} and run Prove again.`
-                    : 'The accepted compiler is not a published release. Ask the proof-server operator for that build.',
+                    ? `Installing ${version} makes it your default toolchain and restarts the language server; Prove then runs again.`
+                    : 'The accepted compiler is not a published release. Ask the proof server operator for that build.',
             ].join('\n');
             log.warn(`Prover: compiler mismatch for ${source}: ${reasons.join('; ')}`);
-            const install = version ? `Install infc ${version}` : undefined;
+            const install = version ? `Install ${version} and Prove` : undefined;
+            const copy = 'Copy Commit';
             const choice = await vscode.window.showErrorMessage(
-                'Your compiler is not the one this proof server accepts.',
+                "Your compiler isn't the one this proof server accepts.",
                 { modal: true, detail },
-                ...(install ? [install] : []),
+                ...(install ? [install] : [copy]),
             );
             const infs = detectInfs();
             if (install && choice === install && version && infs) {
-                await performVersionChange(infs.path, version, log, 'Switching to');
+                if (await performVersionChange(infs.path, version, log, 'Switching to')) {
+                    await vscode.commands.executeCommand('inference.proveFile', sourceUri);
+                }
+            } else if (choice === copy) {
+                await vscode.env.clipboard.writeText(accepted.commit);
+                vscode.window.setStatusBarMessage('Copied the accepted compiler commit', 3000);
             }
             return;
         }
-        case 'build-failed':
-            await showOutput(
-                outcome.timedOut
-                    ? `Inference: compiling ${source} timed out.`
+        case 'build-failed': {
+            if (outcome.timedOut) {
+                const action = await vscode.window.showErrorMessage(
+                    `Inference: compiling ${source} took longer than 5 minutes and was stopped.`,
+                    'Show Output',
+                );
+                if (action === 'Show Output') {
+                    log.show();
+                }
+                return;
+            }
+            const parsed = parseInfcDiagnostics(outcome.output);
+            const count = publish(diagnostics, sourceUri, parsed);
+            const summary = summarizeDiagnostics(parsed);
+            const action = await vscode.window.showErrorMessage(
+                summary
+                    ? `Inference: ${source} has ${summary}`
                     : `Inference: compiling ${source} failed (exit ${outcome.exitCode}).`,
+                ...(count > 0 ? ['Show Problems'] : []),
+                'Show Output',
             );
+            if (action === 'Show Problems') {
+                await vscode.commands.executeCommand('workbench.actions.view.problems');
+            } else if (action === 'Show Output') {
+                log.show();
+            }
             return;
-        case 'no-output':
-            await showOutput(`Inference: infs build finished but reported no .v file for ${source}.`);
+        }
+        case 'no-output': {
+            const action = await vscode.window.showErrorMessage(
+                `Inference: the build finished but reported no Rocq file for ${source}.`,
+                'Show Output',
+            );
+            if (action === 'Show Output') {
+                log.show();
+            }
             return;
+        }
         case 'preflight-failed': {
-            const action = await vscode.window.showErrorMessage(`Inference: ${outcome.problem}`, 'Open File');
-            if (action === 'Open File') {
+            if (outcome.duplicate) {
+                const range = await duplicateInSource(diagnostics, sourceUri, outcome.duplicate);
+                const goTo = `Go to fn ${outcome.duplicate.name}`;
+                const action = await vscode.window.showErrorMessage(
+                    `Inference: the generated Rocq file defines “${outcome.duplicate.name}” twice, so the proof server cannot compile it. The compiler names the module after the file; rename ${source} or the function “${outcome.duplicate.name}”.`,
+                    ...(range ? [goTo] : ['Open Generated File']),
+                );
+                if (action === goTo && range) {
+                    await vscode.window.showTextDocument(sourceUri, { selection: range });
+                } else if (action === 'Open Generated File') {
+                    await vscode.window.showTextDocument(vscode.Uri.file(outcome.vPath));
+                }
+                return;
+            }
+            const action = await vscode.window.showErrorMessage(`Inference: ${outcome.problem}`, 'Open Generated File');
+            if (action === 'Open Generated File') {
                 await vscode.window.showTextDocument(vscode.Uri.file(outcome.vPath));
             }
             return;
