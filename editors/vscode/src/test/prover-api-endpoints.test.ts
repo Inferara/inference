@@ -27,6 +27,13 @@ describe('ProverApi endpoints', () => {
                         releaseTag: null } });
             } else if (url === '/api/v1/me') {
                 json(200, { schemaVersion: 1, userId: 'u1', role: 'User', keyId: 'k1' });
+            } else if (req.method === 'POST' && url === '/api/v1/jobs') {
+                const key = String(req.headers['idempotency-key'] ?? '');
+                if (key !== 'none') {
+                    res.setHeader('Idempotent-Replayed', key === 'old' ? 'true' : 'false');
+                }
+                req.resume();
+                req.on('end', () => json(202, { id: `job-${key}`, status: 'Queued' }));
             } else if (url.startsWith('/api/v1/jobs?') || url === '/api/v1/jobs') {
                 json(200, { jobs: [{ id: 'j1', status: 'Running' }] });
             } else if (req.method === 'DELETE' && url === '/api/v1/jobs/done') {
@@ -48,6 +55,16 @@ describe('ProverApi endpoints', () => {
     });
 
     after(() => server.close());
+
+    it('reports whether a submit replayed an existing job', async () => {
+        const body = new TextEncoder().encode('x');
+        assert.deepStrictEqual(await api.submitJobWithMeta('m.v', body, {}, 'old'), {
+            job: { id: 'job-old', status: 'Queued' }, replayHeader: true,
+        });
+        assert.strictEqual((await api.submitJobWithMeta('m.v', body, {}, 'new')).replayHeader, false);
+        assert.strictEqual((await api.submitJobWithMeta('m.v', body, {}, 'none')).replayHeader, null);
+        assert.strictEqual((await api.submitJob('m.v', body, {}, 'new')).id, 'job-new');
+    });
 
     it('reads meta with the accepted toolchain, and the key owner', async () => {
         assert.strictEqual((await api.getMeta()).acceptedToolchain?.abiVersion, '1.3');

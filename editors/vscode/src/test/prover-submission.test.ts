@@ -61,13 +61,14 @@ describe('submitVFile', () => {
     it('submits with the content key and no options; never submits a doomed file', async () => {
         const calls: Array<{ filename: string; options: SubmitJobOptions; key?: string }> = [];
         const api = {
-            submitJob: async (filename: string, _c: Uint8Array, options: SubmitJobOptions = {}, key?: string) => {
+            submitJobWithMeta: async (filename: string, _c: Uint8Array, options: SubmitJobOptions = {}, key?: string) => {
                 calls.push({ filename, options, key });
-                return { id: 'job-1', status: 'Accepted' } as JobResponse;
+                return { job: { id: 'job-1', status: 'Accepted' } as JobResponse, replayHeader: null };
             },
         };
         const ok = await submitVFile(api, 'm.v', bytes(V));
         assert.strictEqual(ok.kind, 'submitted');
+        assert.ok(ok.kind === 'submitted' && !ok.replayed);
         assert.deepStrictEqual(calls, [{ filename: 'm.v', options: {}, key: idempotencyKey(V) }]);
 
         const bad = await submitVFile(api, 'm.v', bytes('no holes'));

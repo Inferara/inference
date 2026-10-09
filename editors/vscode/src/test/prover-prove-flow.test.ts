@@ -39,11 +39,15 @@ function fakeDeps(options: {
     confirm?: boolean;
     vText?: string;
     cancelAfterBuild?: boolean;
+    upload?: boolean;
+    replay?: boolean;
+    replayHeader?: boolean | null;
 }) {
     const calls: Call[] = [];
     const submits: Array<{ filename: string; options: SubmitJobOptions; key?: string }> = [];
     const identity = options.identity ?? { commit: 'd71a9c3e', version: 'infc 0.0.1', abi: '1.3' };
     let confirmations = 0;
+    let uploadAsks = 0;
     let built = false;
     const deps: ProveDeps = {
         locateInfs: () => (options.infs === undefined ? '/t/infs' : options.infs),
@@ -60,19 +64,26 @@ function fakeDeps(options: {
         readFile: async () => new TextEncoder().encode(options.vText ?? V),
         api: {
             getMeta: async () => options.meta ?? META,
-            submitJob: async (filename: string, _content: Uint8Array, opts: SubmitJobOptions = {}, key?: string) => {
+            submitJobWithMeta: async (filename: string, _content: Uint8Array, opts: SubmitJobOptions = {}, key?: string) => {
                 submits.push({ filename, options: opts, key });
-                return { id: 'job-1', status: 'Accepted', filename } as JobResponse;
+                return {
+                    job: { id: 'job-1', status: options.replay ? 'Succeeded' : 'Accepted', filename } as JobResponse,
+                    replayHeader: options.replayHeader ?? null,
+                };
             },
         },
         confirmUnchecked: async () => {
             confirmations++;
             return options.confirm ?? false;
         },
+        confirmUpload: async () => {
+            uploadAsks++;
+            return options.upload ?? true;
+        },
         progress: () => undefined,
         cancelled: () => Boolean(options.cancelAfterBuild) && built,
     };
-    return { deps, calls, submits, confirmations: () => confirmations };
+    return { deps, calls, submits, confirmations: () => confirmations, uploadAsks: () => uploadAsks };
 }
 
 describe('proveInfFile', () => {
@@ -226,6 +237,7 @@ describe('proveInfFile with real processes and HTTP', { skip: process.platform =
             readFile: async (file) => fs.readFileSync(file),
             api: new ProverApi(baseUrl, 'infp_key_test'),
             confirmUnchecked: async () => false,
+            confirmUpload: async () => true,
             progress: () => undefined,
             cancelled: () => false,
         });
@@ -236,5 +248,30 @@ describe('proveInfFile with real processes and HTTP', { skip: process.platform =
         assert.strictEqual(received[0].auth, 'Bearer infp_key_test');
         assert.strictEqual(received[0].key, idempotencyKey(received[0].content!));
         assert.ok(received[0].content!.includes(HOLE_MARKER));
+    });
+});
+
+describe('proveInfFile asks and reports in the right order', () => {
+    it('asks for the upload only after a successful build and check, and stops when declined', async () => {
+        const declined = fakeDeps({ upload: false });
+        assert.deepStrictEqual(await proveInfFile('/w/m.inf', declined.deps), { kind: 'cancelled' });
+        assert.strictEqual(declined.uploadAsks(), 1);
+        assert.strictEqual(declined.submits.length, 0);
+        assert.ok(declined.calls.some((c) => c.command === '/t/infs'), 'built before asking');
+
+        const doomed = fakeDeps({ vText: 'Definition m : module := x.\nDefinition m : module_func := y.\n(* TODO: fill the proof *)\n' });
+        const outcome = await proveInfFile('/w/m.inf', doomed.deps);
+        assert.strictEqual(outcome.kind, 'preflight-failed');
+        assert.deepStrictEqual(outcome.kind === 'preflight-failed' && outcome.duplicate, { name: 'm', lines: [1, 2] });
+        assert.strictEqual(doomed.uploadAsks(), 0, 'a doomed upload never asks');
+    });
+
+    it('reports when the server returned an existing job', async () => {
+        const replay = await proveInfFile('/w/m.inf', fakeDeps({ replay: true }).deps);
+        assert.ok(replay.kind === 'submitted' && replay.replayed);
+        const fresh = await proveInfFile('/w/m.inf', fakeDeps({}).deps);
+        assert.ok(fresh.kind === 'submitted' && !fresh.replayed);
+        const header = await proveInfFile('/w/m.inf', fakeDeps({ replayHeader: true }).deps);
+        assert.ok(header.kind === 'submitted' && header.replayed);
     });
 });

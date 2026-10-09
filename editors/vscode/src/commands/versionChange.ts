@@ -4,16 +4,18 @@ import { restartLspClient } from '../lsp/client';
 
 /**
  * Perform a version change (install + set default) with progress UI.
+ * `actionVerb` words the progress (e.g. "Switching to"). Resolves true when
+ * the version is installed and is the default.
  *
- * Shared by both the "Select Version" and "Update Toolchain" commands.
+ * Shared by "Select Version", "Update Toolchain" and "Prove This File".
  */
 export async function performVersionChange(
     infsPath: string,
     version: string,
     outputChannel: vscode.OutputChannel,
     actionVerb: string,
-): Promise<void> {
-    await vscode.window.withProgress(
+): Promise<boolean> {
+    return vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
             title: 'Inference Toolchain',
@@ -44,7 +46,7 @@ export async function performVersionChange(
                 );
                 vscode.window
                     .showInformationMessage(
-                        `Inference toolchain ${actionVerb.toLowerCase()} to v${version}.`,
+                        `Inference toolchain v${version} is now the default.`,
                         'Show Output',
                     )
                     .then((action) => {
@@ -52,7 +54,7 @@ export async function performVersionChange(
                             outputChannel.show();
                         }
                     });
-                return;
+                return true;
             }
 
             outputChannel.appendLine(
@@ -75,6 +77,7 @@ export async function performVersionChange(
                     `Inference: Failed to install v${version}: ${result.error}`,
                 );
             }
+            return false;
         },
     );
 }
