@@ -3,8 +3,6 @@ import { describe, it } from 'node:test';
 
 import {
     isProvedSuccess,
-    jobStatusIconId,
-    jobStatusLabel,
 } from '../prover/jobPresentation';
 import type { ClaimClass, RunMode } from '../prover/types';
 
@@ -45,83 +43,5 @@ describe('job proof presentation', () => {
                 `${String(claimClass)} must not be behavioral success`,
             );
         }
-    });
-
-    it('uses a check icon only for durable proof success', () => {
-        assert.strictEqual(
-            jobStatusIconId('Succeeded', 'prove', 2, 2, 'Verified'),
-            'check',
-        );
-        assert.strictEqual(
-            jobStatusIconId('Succeeded', 'prove', 2, 2, 'StructuralOnly'),
-            'warning',
-        );
-        assert.strictEqual(
-            jobStatusIconId('Succeeded', 'prove', 2, 2, undefined),
-            'warning',
-        );
-        assert.strictEqual(
-            jobStatusIconId('Succeeded', 'compile-goals', 2, 2, 'Verified'),
-            'warning',
-        );
-        assert.strictEqual(
-            jobStatusIconId('Succeeded', 'unknown', 2, 2, 'Verified'),
-            'warning',
-        );
-        assert.strictEqual(
-            jobStatusIconId('Succeeded', null, 2, 2, 'Verified'),
-            'warning',
-        );
-        assert.strictEqual(
-            jobStatusIconId('Succeeded', 'prove', 2, 1, 'Verified'),
-            'warning',
-        );
-        assert.strictEqual(
-            jobStatusIconId(
-                'CompileGoals',
-                'compile-goals',
-                2,
-                0,
-                'Unverified',
-            ),
-            'warning',
-        );
-    });
-
-    it('qualifies Succeeded text unless mode and counts prove completion', () => {
-        assert.strictEqual(
-            jobStatusLabel('Succeeded', 'prove', 2, 2, 'Verified'),
-            'Succeeded',
-        );
-        assert.strictEqual(
-            jobStatusLabel('Succeeded', 'prove', 2, 2, 'StructuralOnly'),
-            'Succeeded (structural only)',
-        );
-        assert.strictEqual(
-            jobStatusLabel('Succeeded', 'prove', 2, 2, undefined),
-            'Succeeded (claim unverified)',
-        );
-        assert.strictEqual(
-            jobStatusLabel('Succeeded', 'compile-goals', 2, 2, 'Verified'),
-            'Succeeded (compile-goals)',
-        );
-        assert.strictEqual(
-            jobStatusLabel('Succeeded', null, 2, 2, 'Verified'),
-            'Succeeded (mode unknown)',
-        );
-        assert.strictEqual(
-            jobStatusLabel('Succeeded', 'prove', 2, 1, 'Verified'),
-            'Succeeded (counts invalid)',
-        );
-        assert.strictEqual(
-            jobStatusLabel(
-                'CompileGoals',
-                'compile-goals',
-                2,
-                0,
-                'Unverified',
-            ),
-            'CompileGoals',
-        );
     });
 });

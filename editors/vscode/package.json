@@ -180,6 +180,11 @@
         "icon": "$(filter)"
       },
       {
+        "command": "inference.clearProofJobsFilter",
+        "title": "Inference: Show All Proof Jobs",
+        "icon": "$(clear-filter)"
+      },
+      {
         "command": "inference.openProofJob",
         "title": "Open Proof Job"
       },
@@ -209,7 +214,7 @@
       },
       {
         "command": "inference.openProofJobInPortal",
-        "title": "Open Certificate in Portal",
+        "title": "Open in Portal",
         "icon": "$(link-external)"
       }
     ],
@@ -221,8 +226,18 @@
           "group": "navigation"
         },
         {
-          "command": "inference.filterProofJobs",
+          "command": "inference.proveFile",
           "when": "view == inference.proofJobsView",
+          "group": "navigation@0"
+        },
+        {
+          "command": "inference.filterProofJobs",
+          "when": "view == inference.proofJobsView && !inference.prover.filtered",
+          "group": "navigation@1"
+        },
+        {
+          "command": "inference.clearProofJobsFilter",
+          "when": "view == inference.proofJobsView && inference.prover.filtered",
           "group": "navigation@1"
         },
         {
@@ -233,7 +248,22 @@
         {
           "command": "inference.submitProof",
           "when": "view == inference.proofJobsView",
-          "group": "1_submit"
+          "group": "1_submit@1"
+        },
+        {
+          "command": "inference.filterProofJobs",
+          "when": "view == inference.proofJobsView && inference.prover.filtered",
+          "group": "1_submit@2"
+        },
+        {
+          "command": "inference.setProverApiKey",
+          "when": "view == inference.proofJobsView",
+          "group": "2_key@1"
+        },
+        {
+          "command": "inference.clearProverApiKey",
+          "when": "view == inference.proofJobsView && inference.prover.configured",
+          "group": "2_key@2"
         }
       ],
       "view/item/context": [
@@ -258,7 +288,7 @@
         },
         {
           "command": "inference.openProofJobInPortal",
-          "when": "view == inference.proofJobsView && viewItem =~ /\\.terminal/",
+          "when": "view == inference.proofJobsView && viewItem =~ /^inference\\.proofJob\\./",
           "group": "1_review@2"
         },
         {
@@ -278,7 +308,7 @@
         },
         {
           "command": "inference.deleteProofJob",
-          "when": "view == inference.proofJobsView && viewItem =~ /\\.terminal/",
+          "when": "view == inference.proofJobsView && viewItem =~ /\\.(terminal|lost)/",
           "group": "2_manage@3"
         }
       ],
@@ -346,6 +376,10 @@
         {
           "command": "inference.openProofJobInPortal",
           "when": "false"
+        },
+        {
+          "command": "inference.clearProofJobsFilter",
+          "when": "inference.prover.filtered"
         }
       ]
     },

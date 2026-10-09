@@ -7,6 +7,7 @@ import { exec } from '../utils/exec';
 import { DoctorResult } from '../toolchain/doctor';
 import { describeError, getServerUrl, SERVER_URL_SETTING } from '../prover/config';
 import type { ProverStatusSource } from '../prover';
+import { toolchainHealth, toolchainHealthLabel } from './statusBarState';
 
 type GroupId = 'toolchain' | 'prover' | 'settings';
 
@@ -178,20 +179,15 @@ export class InferenceConfigProvider
         platformItem.iconPath = new vscode.ThemeIcon('device-desktop');
         items.push(platformItem);
 
-        const status = this.doctorResult
-            ? this.doctorResult.hasErrors
-                ? 'errors'
-                : this.doctorResult.hasWarnings
-                    ? 'warnings'
-                    : 'healthy'
-            : 'unknown';
-        const statusIcon = this.doctorResult
-            ? this.doctorResult.hasErrors
-                ? 'error'
-                : this.doctorResult.hasWarnings
-                    ? 'warning'
-                    : 'pass'
-            : 'question';
+        const health = toolchainHealth(this.doctorResult ?? null);
+        const status = toolchainHealthLabel(health);
+        const statusIcon = {
+            missing: 'question',
+            healthy: 'pass',
+            warnings: 'warning',
+            degraded: 'warning',
+            errors: 'error',
+        }[health];
         const statusItem = new ConfigItem(
             `Status: ${status}`,
             'property',

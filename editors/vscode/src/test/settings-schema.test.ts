@@ -86,8 +86,8 @@ describe('settings schema (QA Section 8)', () => {
 describe('commands schema (QA Section 8)', () => {
     const commands: Array<{ command: string; title: string }> = contributes.commands;
 
-    it('has exactly 24 commands registered', () => {
-        assert.strictEqual(commands.length, 24);
+    it('has exactly 25 commands registered', () => {
+        assert.strictEqual(commands.length, 25);
     });
 
     it('contains expected command IDs', () => {
@@ -110,6 +110,7 @@ describe('commands schema (QA Section 8)', () => {
             'inference.clearProverApiKey',
             'inference.refreshProofJobs',
             'inference.filterProofJobs',
+            'inference.clearProofJobsFilter',
             'inference.openProofJob',
             'inference.cancelProofJob',
             'inference.deleteProofJob',

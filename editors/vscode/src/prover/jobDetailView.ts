@@ -107,6 +107,11 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
         private readonly onRunAgain: (job: JobResponse) => Promise<void>,
     ) {}
 
+    /** The job's panel is the active editor tab. */
+    isActive(jobId: string): boolean {
+        return this.states.get(jobId)?.panel.active === true;
+    }
+
     /** Close every panel: the server or the account changed. */
     closeAll(): void {
         for (const state of [...this.states.values()]) {

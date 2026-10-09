@@ -10,8 +10,9 @@ import {
 } from './jobActions';
 import { JOB_PANEL_VIEW_TYPE, JobDetailViewManager } from './jobDetailView';
 import { JobOrigins, type JobOrigin } from './jobOrigins';
-import { FILTER_STATUSES } from './jobList';
+import { FILTER_LABELS, FILTER_STATUSES, hasCertificate, isActiveJob } from './jobList';
 import { JobTreeItem, ProofJobsProvider } from './jobsTree';
+import { ProverStatus } from './proverStatusBar';
 import { ProofDocuments } from './proofDocuments';
 import { registerProverAuthCommands } from './proofAuth';
 import { registerProveFileCommand, type CompilerCheck } from './proveFile';
@@ -38,10 +39,10 @@ export function registerProver(
     const disposables: vscode.Disposable[] = [];
     let compilerCheck: CompilerCheck | undefined;
 
-    const jobs = new ProofJobsProvider(secrets, log);
-    const view = vscode.window.createTreeView('inference.proofJobsView', { treeDataProvider: jobs });
-    const documents = new ProofDocuments(secrets);
     const origins = new JobOrigins(context.workspaceState);
+    const jobs = new ProofJobsProvider(secrets, log, origins);
+    const view = vscode.window.createTreeView('inference.proofJobsView', { treeDataProvider: jobs, showCollapseAll: false });
+    const documents = new ProofDocuments(secrets);
     /** The local files a job was uploaded from, when this workspace knows them. */
     const originOf = async (jobId: string): Promise<JobOrigin | undefined> => {
         const config = await resolveConfig(secrets).catch(() => null);
@@ -62,11 +63,19 @@ export function registerProver(
         () => void jobs.refresh(),
         runAgain,
     );
+    const status = new ProverStatus({
+        nameOf: (job) => jobs.displayName(job),
+        openJob: async (job) => panels.open(job, await originOf(job.id)),
+        runAgain,
+        isPanelActive: (jobId) => panels.isActive(jobId),
+    });
     disposables.push(
         jobs,
         view,
         documents,
         panels,
+        status,
+        jobs.onDidLoad((snapshot) => status.update(snapshot)),
         vscode.window.registerWebviewPanelSerializer(JOB_PANEL_VIEW_TYPE, panels),
     );
 
@@ -82,6 +91,10 @@ export function registerProver(
                 await origins.set(config.serverUrl, job.id, origin);
             }
         }
+        if (isActiveJob(job)) {
+            jobs.noteSubmitted();
+            status.watch(job);
+        }
         await jobs.refresh();
         const node = jobs.findNode(job.id);
         if (node && view.visible) {
@@ -96,19 +109,35 @@ export function registerProver(
 
     command('inference.refreshProofJobs', () => jobs.refresh());
     command('inference.loadMoreProofJobs', () => jobs.loadMore());
+    const setFilter = async (filter: JobStatus | undefined) => {
+        view.description = filter ? `Showing: ${FILTER_LABELS[filter]}` : undefined;
+        await jobs.setFilter(filter);
+    };
     command('inference.filterProofJobs', async () => {
-        const all = 'All statuses';
-        const picked = await vscode.window.showQuickPick([all, ...FILTER_STATUSES], {
-            title: 'Show proof jobs with status',
-            placeHolder: jobs.statusFilter ?? all,
+        type Item = vscode.QuickPickItem & { status?: JobStatus };
+        const option = (s: JobStatus): Item => ({
+            label: FILTER_LABELS[s],
+            description: s,
+            status: s,
+            picked: jobs.statusFilter === s,
         });
-        if (picked === undefined) {
-            return;
+        const items: Item[] = [
+            { label: 'All jobs', description: jobs.statusFilter ? undefined : 'current' },
+            { label: 'In progress', kind: vscode.QuickPickItemKind.Separator },
+            ...FILTER_STATUSES.filter((s) => isActiveJob({ status: s }) && s !== 'Lost').map(option),
+            { label: 'Finished', kind: vscode.QuickPickItemKind.Separator },
+            ...FILTER_STATUSES.filter((s) => !isActiveJob({ status: s }) || s === 'Lost').map(option),
+        ];
+        const picked = await vscode.window.showQuickPick(items, {
+            title: 'Show proof jobs',
+            placeHolder: jobs.statusFilter ? `Showing: ${FILTER_LABELS[jobs.statusFilter]}` : 'Showing all jobs',
+            matchOnDescription: true,
+        });
+        if (picked) {
+            await setFilter(picked.status);
         }
-        const status = picked === all ? undefined : (picked as JobStatus);
-        view.description = status ? `Status: ${status}` : undefined;
-        await jobs.setFilter(status);
     });
+    command('inference.clearProofJobsFilter', () => setFilter(undefined));
     command('inference.openProofJob', async (arg) => {
         const job = jobOf(arg);
         if (job) {
@@ -149,7 +178,7 @@ export function registerProver(
     command('inference.openProofJobInPortal', async (arg) => {
         const job = jobOf(arg);
         if (job) {
-            await openInPortal(secrets, job);
+            await openInPortal(secrets, job, hasCertificate(job) ? 'certificate' : undefined);
         }
     });
 
