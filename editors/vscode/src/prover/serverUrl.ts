@@ -43,9 +43,13 @@ export function checkServerUrl(raw: string | undefined): ServerUrlCheck {
     return { ok: true, url: `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}` };
 }
 
-/** The portal page for a job (the portal serves the same origin as the API). */
+/**
+ * The portal page for a job (the portal serves the same origin as the API).
+ * The portal routes by hash, so the route goes after `#/`; a plain path gets
+ * the portal's fallback route (the jobs list).
+ */
 export function portalJobUrl(serverUrl: string, jobId: string, tab?: 'certificate'): string {
     const base = serverUrl.replace(/\/+$/, '');
-    const page = `${base}/job/${encodeURIComponent(jobId)}`;
+    const page = `${base}/#/job/${encodeURIComponent(jobId)}`;
     return tab ? `${page}/${tab}` : page;
 }

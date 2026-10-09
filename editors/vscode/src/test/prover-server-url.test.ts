@@ -37,11 +37,11 @@ describe('portalJobUrl', () => {
     it('links the job page and its certificate tab', () => {
         assert.strictEqual(
             portalJobUrl('https://p.example.com/', 'abc'),
-            'https://p.example.com/job/abc',
+            'https://p.example.com/#/job/abc',
         );
         assert.strictEqual(
             portalJobUrl('http://localhost:8088', 'abc', 'certificate'),
-            'http://localhost:8088/job/abc/certificate',
+            'http://localhost:8088/#/job/abc/certificate',
         );
     });
 });
