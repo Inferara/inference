@@ -40,8 +40,11 @@ describe('proof jobs manifest wiring', () => {
         const allowed: Record<string, (s: string) => boolean> = {
             'inference.cancelProofJob': (s) => ['Accepted', 'Queued', 'Provisioning', 'Booting', 'Running'].includes(s),
             'inference.deleteProofJob': (s) => !['Accepted', 'Queued', 'Provisioning', 'Booting', 'Running', 'Verifying', 'Canceling'].includes(s),
-            'inference.resubmitProofJob': (s) => !['Accepted', 'Queued', 'Provisioning', 'Booting', 'Running', 'Verifying', 'Canceling'].includes(s),
+            // Lost is re-queued by the server: deletable, but not run again.
+            'inference.resubmitProofJob': (s) => !['Accepted', 'Queued', 'Provisioning', 'Booting', 'Running', 'Verifying', 'Canceling', 'Lost'].includes(s),
             'inference.compareProof': (s) => s === 'Succeeded' || s === 'PartialSuccess',
+            'inference.openProofJobInPortal': () => true,
+            'inference.copyProofJobId': () => true,
         };
         for (const [command, expected] of Object.entries(allowed)) {
             const entries = itemMenu(command);
@@ -72,7 +75,7 @@ describe('proof jobs manifest wiring', () => {
         const ids = pkg.contributes.commands
             .map((c: { command: string }) => c.command)
             .filter((id: string) => /Proof|Prover|proveFile|submitProof|compareProof/.test(id));
-        assert.strictEqual(ids.length, 13);
+        assert.strictEqual(ids.length, 14);
         for (const id of ids) {
             assert.ok(source.includes(`'${id}'`), id);
         }

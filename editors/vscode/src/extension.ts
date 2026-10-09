@@ -10,6 +10,7 @@ import { registerDoctorCommand } from './commands/doctor';
 import { registerSelectVersionCommand } from './commands/selectVersion';
 import { registerUpdateCommand, checkForUpdates } from './commands/update';
 import { createStatusBar, updateStatusBar } from './ui/statusBar';
+import { failingChecks, toolchainHealth, toolchainHealthLabel } from './ui/statusBarState';
 import { InferenceConfigProvider, ConfigItem } from './ui/configTree';
 import { runDoctor } from './toolchain/doctor';
 import { registerProver } from './prover';
@@ -271,14 +272,13 @@ async function checkToolchain(
     updateStatusBar(statusBarItem, doctorResult);
     configProvider.refresh(detection, doctorResult);
 
-    const status = doctorResult?.hasErrors
-        ? 'errors'
-        : doctorResult?.hasWarnings
-            ? 'warnings'
-            : 'healthy';
-    if (doctorResult?.hasErrors) {
+    const health = toolchainHealth(doctorResult);
+    const status = toolchainHealthLabel(health);
+    if (health === 'errors') {
         outputChannel.error(`Toolchain status: ${status}`);
-    } else if (doctorResult?.hasWarnings) {
+    } else if (health === 'degraded') {
+        outputChannel.warn(`Toolchain status: ${status} (${failingChecks(doctorResult).join('; ')})`);
+    } else if (health === 'warnings') {
         outputChannel.warn(`Toolchain status: ${status}`);
     } else {
         outputChannel.info(`Toolchain status: ${status}`);
