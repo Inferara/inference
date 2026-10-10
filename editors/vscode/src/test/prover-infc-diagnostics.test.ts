@@ -76,6 +76,24 @@ describe('parseInfcDiagnostics (output of the accepted infc, d71a9c3e)', () => {
         ]);
     });
 
+    it('keeps analysis warnings as warnings, out of the error count', () => {
+        const parsed = parseInfcDiagnostics([
+            '3:5: warning[A041]: unused variable `t`',
+            'lib::io:8:1: error[A036]: frame too large',
+            '9:2: info[A050]: loop bound inferred',
+        ].join('\n'));
+        assert.deepStrictEqual(parsed.located, [
+            { line: 3, column: 5, message: 'unused variable `t`', code: 'A041', severity: 'warning' },
+            { line: 8, column: 1, message: 'frame too large', module: 'lib::io', code: 'A036' },
+        ]);
+        assert.strictEqual(summarizeDiagnostics(parsed), '1 compile error and 1 warning. 8:1 frame too large');
+        assert.strictEqual(
+            summarizeDiagnostics({ located: [], unlocated: ['cannot read file', 'no main'] }),
+            '2 compile errors. cannot read file',
+        );
+        assert.strictEqual(summarizeDiagnostics({ located: parsed.located.slice(0, 1), unlocated: [] }), null, 'warnings alone are not errors');
+    });
+
     it('reads analysis findings with codes and unlocated errors', () => {
         const parsed = parseInfcDiagnostics('4:1: error[A036]: something is wrong\nerror: cannot read file\n');
         assert.deepStrictEqual(parsed.located, [{ line: 4, column: 1, message: 'something is wrong', code: 'A036' }]);

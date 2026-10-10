@@ -9,7 +9,7 @@
  *     Parse error: failed to parse imported file `a::b`:
  *       3:1: expected an item
  *     Type checking failed: 2:5: type mismatch …; 3:12: use of undeclared variable `z`
- *     [module::path:]4:1: error[A036]: …
+ *     [module::path:]4:1: error[A036]: …     (or warning[…], kept as a warning)
  *     error: <message without a position>
  *
  * Messages in a `Type checking failed:` line are joined by `; `; an optional
@@ -30,6 +30,8 @@ export interface InfcDiagnostic {
     module?: string;
     /** Analysis code, e.g. `A036`. */
     code?: string;
+    /** Set for an analysis warning; everything else is an error. */
+    severity?: 'warning';
 }
 
 export interface ParsedDiagnostics {
@@ -41,20 +43,21 @@ export interface ParsedDiagnostics {
 const MODULE = '[A-Za-z_]\\w*(?:::[A-Za-z_]\\w*)*';
 // `s`: a message keeps its note lines.
 const LOCATED = new RegExp(`^(?:(${MODULE}):)?(\\d+):(\\d+):\\s+(.+)$`, 's');
-const ANALYSIS = new RegExp(`^(?:(${MODULE}):)?(\\d+):(\\d+):\\s+(?:error|warning)(?:\\[(\\w+)\\])?:\\s+(.+)$`, 's');
+const ANALYSIS = new RegExp(`^(?:(${MODULE}):)?(\\d+):(\\d+):\\s+(error|warning)(?:\\[(\\w+)\\])?:\\s+(.+)$`, 's');
 const NOTE = /^\s*(?:note|help):\s/;
 const SPLIT = new RegExp(`;\\s+(?=(?:${MODULE}:)?\\d+:\\d+:\\s)`);
 
 function located(text: string): InfcDiagnostic | null {
     const analysis = ANALYSIS.exec(text);
     if (analysis) {
-        const [, module, line, column, code, message] = analysis;
+        const [, module, line, column, severity, code, message] = analysis;
         return {
             line: Number(line),
             column: Number(column),
             message: message.trim(),
             ...(module ? { module } : {}),
             ...(code ? { code } : {}),
+            ...(severity === 'warning' ? { severity } : {}),
         };
     }
     const m = LOCATED.exec(text);
@@ -133,13 +136,17 @@ export function parseInfcDiagnostics(output: string): ParsedDiagnostics {
     return { located: unique, unlocated };
 }
 
-/** Short summary for a notification: count and the first message. */
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** Short summary for a notification: the counts and the first error. */
 export function summarizeDiagnostics(parsed: ParsedDiagnostics): string | null {
-    const total = parsed.located.length + parsed.unlocated.length;
+    const errors = parsed.located.filter((d) => d.severity !== 'warning');
+    const warnings = parsed.located.length - errors.length;
+    const total = errors.length + parsed.unlocated.length;
     if (total === 0) {
         return null;
     }
-    const first = parsed.located[0];
+    const first = errors[0];
     const head = first ? `${first.line}:${first.column} ${first.message.split('\n')[0]}` : parsed.unlocated[0];
-    return `${total === 1 ? '1 compile error' : `${total} compile errors`}. ${head}`;
+    return `${plural(total, 'compile error')}${warnings ? ` and ${plural(warnings, 'warning')}` : ''}. ${head}`;
 }

@@ -287,7 +287,7 @@ function publish(
         const diagnostic = new vscode.Diagnostic(
             new vscode.Range(line, column, line, column + 1),
             d.message,
-            vscode.DiagnosticSeverity.Error,
+            d.severity === 'warning' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error,
         );
         diagnostic.source = 'infc (proof build)';
         if (d.code) {
