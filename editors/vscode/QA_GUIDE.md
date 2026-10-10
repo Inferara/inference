@@ -433,6 +433,7 @@ accepts (`GET /api/v1/meta` → `acceptedToolchain`).
 | 14.11 | Open a finished Verified job | "Proved and independently verified" (green) only with the verifier's full acceptance; "Open proof", "Compare with input" and "Certificate" work; the compare is a read-only diff; "How this was verified" lists five passing checks and the assumptions | |
 | 14.12 | Open a StructuralOnly job | "Structural validity only" (amber): not a functional-correctness result | |
 | 14.12a | Open a job that failed to compile on the server | "The prover could not compile your file" with the first Rocq error and "Go to line N"; the line opens in the local `.v` when unchanged, else in the uploaded copy | |
+| 14.12a2 | In a finished Verified job, expand a proved obligation → "Go to proof"; in a running or failed job, expand an obligation → "Go to theorem" | "Go to proof" opens the returned proof (read-only) at that theorem, not at a `TODO` marker; "Go to theorem" opens the submitted `.v` at the `Theorem` line (the local file when unchanged) | |
 | 14.12b | Reload the window with a job panel open | The panel comes back and loads the job | |
 | 14.12c | Switch to a light, dark and high-contrast theme with a panel open | Every state stays readable; focus outlines are visible when tabbing | |
 | 14.12d | Start a proof, hide the Proof Jobs view and wait for it to finish | The status bar item shows the job and its progress; a notification reports the result with "Open" | |

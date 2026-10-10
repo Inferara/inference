@@ -153,7 +153,7 @@ Prove the `spec` properties of an Inference program on the Inference proof serve
    - asks once per server before the first upload, then submits.
 3. The job opens in a panel that follows it live:
    - a verdict in plain words at the top, with the actions that fit it (open the proof, compare it with what you submitted, open the certificate in the portal, go to a failing line, run it again);
-   - the run's steps, obligations with their goals, how each was closed (template or agent), and source lines;
+   - the run's steps, obligations with their goals, how each was closed (template or agent), and a link to each theorem (its proof once proved);
    - elapsed and remaining time against the job's budget;
    - an Activity list grouped by obligation, filterable to steps, the agent transcript, or everything.
 
