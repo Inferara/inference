@@ -84,6 +84,13 @@
           "light": "./icons/file_icon.svg",
           "dark": "./icons/file_icon.svg"
         }
+      },
+      {
+        "id": "inference-rocq",
+        "aliases": [
+          "Rocq (Inference)"
+        ],
+        "configuration": "./rocq-language-configuration.json"
       }
     ],
     "grammars": [
@@ -91,6 +98,11 @@
         "language": "inference",
         "scopeName": "source.inference",
         "path": "./syntaxes/inference.tmLanguage.json"
+      },
+      {
+        "language": "inference-rocq",
+        "scopeName": "source.inference-rocq",
+        "path": "./syntaxes/rocq.tmLanguage.json"
       }
     ],
     "commands": [
@@ -467,7 +479,7 @@
     "test": "node --import tsx --test src/test/**/*.test.ts",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish",
-    "test syntax": "tsx --test test/grammar.test.ts test/language-config.test.ts"
+    "test syntax": "tsx --test test/grammar.test.ts test/language-config.test.ts test/rocq-grammar.test.ts"
   },
   "devDependencies": {
     "@types/node": "^25.2.0",

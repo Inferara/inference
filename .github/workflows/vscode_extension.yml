@@ -81,7 +81,9 @@ jobs:
           extension/language-configuration.json
           extension/package.json
           extension/readme.md
+          extension/rocq-language-configuration.json
           extension/syntaxes/inference.tmLanguage.json
+          extension/syntaxes/rocq.tmLanguage.json
           EOF
           )
           actual=$(unzip -Z1 "${vsix[0]}" | LC_ALL=C sort)
