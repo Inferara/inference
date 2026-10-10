@@ -81,8 +81,13 @@ export interface ObligationView {
     goal?: string;
     lastError?: string;
     specList?: string;
-    /** 1-based line in the submitted `.v`, when known. */
-    line?: number;
+    /**
+     * Where "Go to" leads: the theorem's proof in the returned file once the
+     * obligation is proved, else its statement in the submitted file. The host
+     * finds the theorem by name; `line` (the proof hole the server reported)
+     * is the fallback for the submitted file.
+     */
+    goto: { target: 'proof'; artifact: string } | { target: 'source'; line?: number };
     group: 'active' | 'problem' | 'waiting' | 'done';
 }
 
@@ -236,7 +241,13 @@ const GROUP_ORDER: Record<ObligationView['group'], number> = { active: 0, proble
  * claims a proof; while running it is "Closed", and in a finished run without
  * a claim it is "Closed — not verified".
  */
-function obligationView(o: ObligationDto, run: RunModel, finished: boolean, claimed: boolean): ObligationView {
+function obligationView(
+    o: ObligationDto,
+    run: RunModel,
+    finished: boolean,
+    claimed: boolean,
+    completedId: string | undefined,
+): ObligationView {
     const status = o.status ?? 'pending';
     const [statusLabel, tone]: [string, Tone] =
         finished && (status === 'pending' || status === 'running')
@@ -256,6 +267,7 @@ function obligationView(o: ObligationDto, run: RunModel, finished: boolean, clai
         tone,
         kindLabel: KIND_LABELS[o.kind] ?? 'other',
         contentLabel: CONTENT_LABELS[o.content ?? 'unknown'] ?? 'Not classified',
+        goto: { target: 'source' },
         group,
     };
     const by = status === 'proved' ? run.provedBy[o.name] : undefined;
@@ -268,7 +280,11 @@ function obligationView(o: ObligationDto, run: RunModel, finished: boolean, clai
     if (o.lastError) view.lastError = o.lastError;
     if (o.specList) view.specList = o.specList;
     const line = o.sourceLine ?? run.sourceLines[o.name];
-    if (typeof line === 'number' && line > 0) view.line = line;
+    if (status === 'proved' && completedId) {
+        view.goto = { target: 'proof', artifact: completedId };
+    } else if (typeof line === 'number' && line > 0) {
+        view.goto = { target: 'source', line };
+    }
     return view;
 }
 
@@ -478,9 +494,10 @@ export function buildJobView(input: JobViewInput): JobView {
         running: !terminal,
     };
 
+    const completedId = result?.artifacts.find((a) => a.kind === 'CompletedV')?.id;
     const obligations = detailLoaded && statusKnown
         ? (job.obligations ?? [])
-              .map((o) => obligationView(o, run, terminal, verdict.claim !== 'none'))
+              .map((o) => obligationView(o, run, terminal, verdict.claim !== 'none', completedId))
               .map((view, index) => ({ view, index }))
               .sort((a, b) => GROUP_ORDER[a.view.group] - GROUP_ORDER[b.view.group] || a.index - b.index)
               .map(({ view }) => view)

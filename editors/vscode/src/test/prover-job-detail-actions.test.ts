@@ -92,13 +92,30 @@ describe('job panel actions', () => {
         assert.strictEqual(buildJobView({ job: JOB, live: 'terminal' }).clock.deadline, '2026-10-07T00:15:00.000Z');
     });
 
-    it('links obligations to their source line when known', () => {
+    it('links an open obligation to its theorem in the submitted file, with the reported line as fallback', () => {
         const run = newRunModel();
         applyEvent(run, event(1, 'obligations.discovered', { obligations: [{ name: 't', sourceLine: 98 }] }));
+        const [fromEvents] = buildJobView({ job: JOB, run, live: 'terminal' }).obligations ?? [];
+        assert.deepStrictEqual(fromEvents.goto, { target: 'source', line: 98 });
         const html = renderJobDetailHtml(JOB, { ...OPTS, run });
-        assert.ok(html.includes('Go to line 98'));
-        const own = renderJobDetailHtml({ ...JOB, obligations: [{ name: 't', kind: 'spec', status: 'proved', sourceLine: 7 }] }, OPTS);
-        assert.ok(own.includes('Go to line 7'));
+        assert.ok(html.includes('data-action="gotoTheorem" data-obligation="t" data-line="98"'));
+        assert.ok(html.includes('Go to theorem'));
+        assert.ok(!html.includes('Go to line'));
+        const [unknown] = buildJobView({ job: JOB, live: 'terminal' }).obligations ?? [];
+        assert.deepStrictEqual(unknown.goto, { target: 'source' });
+    });
+
+    it('links a proved obligation to its proof in the returned file', () => {
+        const job: JobResponse = { ...JOB, obligations: [{ name: 't', kind: 'spec', status: 'proved', sourceLine: 7 }] };
+        const result = RESULT(['InputV', 'CompletedV']);
+        const [proved] = buildJobView({ job, result, live: 'terminal' }).obligations ?? [];
+        assert.deepStrictEqual(proved.goto, { target: 'proof', artifact: 'a1' });
+        const html = renderJobDetailHtml(job, { ...OPTS, result });
+        assert.ok(html.includes('data-action="gotoTheorem" data-obligation="t" data-artifact="a1"'));
+        assert.ok(html.includes('Go to proof'));
+        // Without a returned file it points at the submitted one.
+        const [noProof] = buildJobView({ job, result: RESULT(['InputV']), live: 'terminal' }).obligations ?? [];
+        assert.deepStrictEqual(noProof.goto, { target: 'source', line: 7 });
     });
 
     it('keeps one nonce-bound script and the activity cap', () => {

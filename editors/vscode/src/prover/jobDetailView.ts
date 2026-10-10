@@ -13,6 +13,7 @@ import { JobOrigins, type JobOrigin } from './jobOrigins';
 import { isStreamTerminalStatus, isTextArtifactKind } from './jobStatus';
 import type { ResultState } from './jobVerdict';
 import { fetchVerified, safeArtifactName, showAtLine, type ProofDocuments } from './proofDocuments';
+import { declarationLine } from './rocqSource';
 import { applyEvent, changesSummary, EVENT_LOG_CAP, newRunModel, type ActivityRow, type RunModel } from './runModel';
 import { openEventStream, type SseMessage } from './sse';
 import type { ArtifactInfo, EventEnvelope, JobResponse, JobResultResponse } from './types';
@@ -228,12 +229,13 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
 
     private onMessage(id: string, raw: unknown): void {
         const state = this.states.get(id);
-        const message = (raw ?? {}) as { command?: unknown; artifactId?: unknown; line?: unknown };
+        const message = (raw ?? {}) as { command?: unknown; artifactId?: unknown; line?: unknown; obligation?: unknown };
         if (!state || typeof message.command !== 'string') {
             return;
         }
         const artifactId = typeof message.artifactId === 'string' ? message.artifactId : undefined;
         const line = typeof message.line === 'number' && Number.isInteger(message.line) ? message.line : undefined;
+        const obligation = typeof message.obligation === 'string' && message.obligation ? message.obligation : undefined;
         switch (message.command) {
             case 'ready':
                 state.ready = true;
@@ -253,6 +255,9 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
                 break;
             case 'gotoLine':
                 if (line !== undefined) void this.gotoLine(id, line, artifactId);
+                break;
+            case 'gotoTheorem':
+                if (obligation) void this.gotoTheorem(id, obligation, artifactId, line);
                 break;
             case 'compare':
                 void compareProof(this.secrets, this.log, this.documents, state.job);
@@ -752,6 +757,42 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
             }
         } catch (err) {
             this.log.error(`Job ${id} go to line ${line}: ${err instanceof Error ? err.message : err}`);
+            vscode.window.showErrorMessage(`Inference: ${describeError(err)}`);
+        }
+    }
+
+    /**
+     * Jump to an obligation's theorem: its proof in the returned file when
+     * `artifactId` names it, else its statement in the submitted file. The
+     * theorem is found by name; `fallbackLine` (the proof hole the server
+     * reported) is used when the submitted file does not declare it.
+     */
+    private async gotoTheorem(id: string, name: string, artifactId?: string, fallbackLine?: number): Promise<void> {
+        const config = await this.config();
+        if (!this.states.has(id) || !config) {
+            return;
+        }
+        const api = new ProverApi(config.serverUrl, config.apiKey);
+        try {
+            const artifacts = await this.artifacts(id, api);
+            const target = artifactId
+                ? artifacts.find((a) => a.id === artifactId)
+                : artifacts.find((a) => a.kind === 'InputV');
+            if (!target || !isTextArtifactKind(target.kind)) {
+                return;
+            }
+            const found = declarationLine(await this.documents.text(api, id, target), name);
+            const line = found ?? (target.kind === 'InputV' ? fallbackLine : undefined);
+            if (line === undefined) {
+                void vscode.window.showInformationMessage(`Inference: ${name} was not found in ${target.filename}.`);
+            }
+            if (target.kind === 'InputV') {
+                await this.gotoLine(id, line ?? 1);
+            } else {
+                await this.openArtifact(id, target.id, line);
+            }
+        } catch (err) {
+            this.log.error(`Job ${id} go to ${name}: ${err instanceof Error ? err.message : err}`);
             vscode.window.showErrorMessage(`Inference: ${describeError(err)}`);
         }
     }
