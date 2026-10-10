@@ -13,7 +13,11 @@
  *     error: <message without a position>
  *
  * Messages in a `Type checking failed:` line are joined by `; `; an optional
- * `module::path:` prefix names the file of a submodule.
+ * `module::path:` prefix names the file of a submodule. A message can go on
+ * over `note:` lines, and the next message then follows the last of them:
+ *
+ *     Type checking failed: 3:13: cannot apply operator `Add` …
+ *     note: Inference has no implicit widening …; 5:5: use of undeclared variable `z`
  */
 
 export interface InfcDiagnostic {
@@ -35,8 +39,10 @@ export interface ParsedDiagnostics {
 }
 
 const MODULE = '[A-Za-z_]\\w*(?:::[A-Za-z_]\\w*)*';
-const LOCATED = new RegExp(`^(?:(${MODULE}):)?(\\d+):(\\d+):\\s+(.+)$`);
-const ANALYSIS = new RegExp(`^(?:(${MODULE}):)?(\\d+):(\\d+):\\s+(?:error|warning)(?:\\[(\\w+)\\])?:\\s+(.+)$`);
+// `s`: a message keeps its note lines.
+const LOCATED = new RegExp(`^(?:(${MODULE}):)?(\\d+):(\\d+):\\s+(.+)$`, 's');
+const ANALYSIS = new RegExp(`^(?:(${MODULE}):)?(\\d+):(\\d+):\\s+(?:error|warning)(?:\\[(\\w+)\\])?:\\s+(.+)$`, 's');
+const NOTE = /^\s*(?:note|help):\s/;
 const SPLIT = new RegExp(`;\\s+(?=(?:${MODULE}:)?\\d+:\\d+:\\s)`);
 
 function located(text: string): InfcDiagnostic | null {
@@ -59,6 +65,17 @@ function located(text: string): InfcDiagnostic | null {
     return { line: Number(line), column: Number(column), message: message.trim(), ...(module ? { module } : {}) };
 }
 
+/** Line `i` (trimmed) with the note lines that continue it; `end` is the last line read. */
+function withNotes(lines: readonly string[], i: number): { text: string; end: number } {
+    let text = lines[i].trim();
+    let end = i;
+    while (end + 1 < lines.length && NOTE.test(lines[end + 1])) {
+        end++;
+        text += `\n${lines[end].trim()}`;
+    }
+    return { text, end };
+}
+
 export function parseInfcDiagnostics(output: string): ParsedDiagnostics {
     const lines = output.replace(/\r\n?/g, '\n').split('\n');
     const found: InfcDiagnostic[] = [];
@@ -77,9 +94,10 @@ export function parseInfcDiagnostics(output: string): ParsedDiagnostics {
             }
             continue;
         }
-        const typeCheck = /^Type checking failed:\s*(.*)$/.exec(line);
-        if (typeCheck) {
-            for (const part of typeCheck[1].split(SPLIT)) {
+        if (/^Type checking failed:/.test(line)) {
+            const { text, end } = withNotes(lines, i);
+            i = end;
+            for (const part of text.replace(/^Type checking failed:\s*/, '').split(SPLIT)) {
                 const d = located(part.trim());
                 if (d) {
                     found.push(d);
@@ -89,9 +107,13 @@ export function parseInfcDiagnostics(output: string): ParsedDiagnostics {
             }
             continue;
         }
-        const d = ANALYSIS.test(line.trim()) ? located(line.trim()) : null;
-        if (d) {
-            found.push(d);
+        if (ANALYSIS.test(line.trim())) {
+            const { text, end } = withNotes(lines, i);
+            i = end;
+            const d = located(text);
+            if (d) {
+                found.push(d);
+            }
             continue;
         }
         const error = /^error:\s*(.+)$/.exec(line.trim());
@@ -118,6 +140,6 @@ export function summarizeDiagnostics(parsed: ParsedDiagnostics): string | null {
         return null;
     }
     const first = parsed.located[0];
-    const head = first ? `${first.line}:${first.column} ${first.message}` : parsed.unlocated[0];
+    const head = first ? `${first.line}:${first.column} ${first.message.split('\n')[0]}` : parsed.unlocated[0];
     return `${total === 1 ? '1 compile error' : `${total} compile errors`}. ${head}`;
 }

@@ -42,6 +42,40 @@ describe('parseInfcDiagnostics (output of the accepted infc, d71a9c3e)', () => {
         assert.strictEqual(summarizeDiagnostics(parsed), '3 compile errors. 2:5 type mismatch in variable definition: expected `Bool`, found `i32`');
     });
 
+    it('keeps the errors that follow a message with a note line', () => {
+        // BinaryOperandTypeMismatch prints a note line; the next error is joined onto it.
+        const note = 'note: Inference has no implicit widening and no cast operator, so `i32` and `i64` never combine; change one of the two declarations so both operands have the same type';
+        const parsed = parseInfcDiagnostics([
+            'Type checking failed: 3:13: cannot apply operator `Add` to operands of different types: `i32` and `i64`',
+            `${note}; 5:5: use of undeclared variable \`z\`; lib::arith:2:1: cannot access private function \`helper\``,
+            'note: function `helper` is defined at 1:5 in file `lib::arith`; add `pub` to export it',
+            'Error: build failed',
+        ].join('\n'));
+        assert.deepStrictEqual(parsed.located, [
+            { line: 3, column: 13, message: `cannot apply operator \`Add\` to operands of different types: \`i32\` and \`i64\`\n${note}` },
+            { line: 5, column: 5, message: 'use of undeclared variable `z`' },
+            {
+                line: 2,
+                column: 1,
+                message: 'cannot access private function `helper`\nnote: function `helper` is defined at 1:5 in file `lib::arith`; add `pub` to export it',
+                module: 'lib::arith',
+            },
+        ]);
+        assert.deepStrictEqual(parsed.unlocated, []);
+        assert.strictEqual(
+            summarizeDiagnostics(parsed),
+            '3 compile errors. 3:13 cannot apply operator `Add` to operands of different types: `i32` and `i64`',
+        );
+    });
+
+    it('keeps the note line of an analysis finding', () => {
+        const parsed = parseInfcDiagnostics('4:9: error[A022]: literal `300` does not fit `u8`\nnote: the literal is typed `u8` by the annotation\n6:1: error[A036]: frame too large\n');
+        assert.deepStrictEqual(parsed.located, [
+            { line: 4, column: 9, message: 'literal `300` does not fit `u8`\nnote: the literal is typed `u8` by the annotation', code: 'A022' },
+            { line: 6, column: 1, message: 'frame too large', code: 'A036' },
+        ]);
+    });
+
     it('reads analysis findings with codes and unlocated errors', () => {
         const parsed = parseInfcDiagnostics('4:1: error[A036]: something is wrong\nerror: cannot read file\n');
         assert.deepStrictEqual(parsed.located, [{ line: 4, column: 1, message: 'something is wrong', code: 'A036' }]);
