@@ -24,7 +24,7 @@
 export interface InfcDiagnostic {
     /** 1-based. */
     line: number;
-    /** 1-based. */
+    /** 1-based, counted in UTF-8 bytes (see {@link characterAt}). */
     column: number;
     message: string;
     /** `a::b` when the error is in a submodule file. */
@@ -67,6 +67,31 @@ function located(text: string): InfcDiagnostic | null {
     }
     const [, module, line, column, message] = m;
     return { line: Number(line), column: Number(column), message: message.trim(), ...(module ? { module } : {}) };
+}
+
+function utf8Size(codePoint: number): number {
+    return codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
+}
+
+/**
+ * The 0-based UTF-16 position (what VS Code uses) of infc's 1-based column on
+ * `lineText`. infc counts the column in UTF-8 bytes, so after non-ASCII text
+ * the two differ. A column inside a character gives that character; one past
+ * the end of the line stays past it.
+ */
+export function characterAt(lineText: string, byteColumn: number): number {
+    const target = Math.max(0, byteColumn - 1);
+    let bytes = 0;
+    let index = 0;
+    for (const ch of lineText) {
+        const size = utf8Size(ch.codePointAt(0) ?? 0);
+        if (bytes + size > target) {
+            return index;
+        }
+        bytes += size;
+        index += ch.length;
+    }
+    return index + (target - bytes);
 }
 
 /** Line `i` (trimmed) with the note lines that continue it; `end` is the last line read. */

@@ -9,7 +9,7 @@ import { run } from '../utils/spawn';
 import { ProverApi } from './api';
 import { BuildProblems } from './buildProblems';
 import { requireConfig } from './config';
-import { parseInfcDiagnostics, summarizeDiagnostics, type ParsedDiagnostics } from './infcDiagnostics';
+import { characterAt, parseInfcDiagnostics, summarizeDiagnostics, type ParsedDiagnostics } from './infcDiagnostics';
 import { functionDeclaration } from './infSource';
 import { proveInfFile, type ProveOutcome } from './proveFlow';
 import type { DuplicateDefinition } from './submission';
@@ -270,21 +270,37 @@ function diagnosticFile(source: vscode.Uri, module: string | undefined): vscode.
     return fs.existsSync(candidate) ? vscode.Uri.file(candidate) : source;
 }
 
+/** The lines of a file as the build read it (from disk), or null. */
+async function fileLines(uri: vscode.Uri): Promise<string[] | null> {
+    try {
+        return new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)).split('\n');
+    } catch {
+        return null;
+    }
+}
+
 /** Publish compiler errors to the Problems panel; returns how many. */
-function publish(
+async function publish(
     problems: ProveProblems,
     source: vscode.Uri,
     parsed: ParsedDiagnostics,
-): number {
+): Promise<number> {
     const byFile = new Map<string, { uri: vscode.Uri; items: vscode.Diagnostic[] }>();
     const add = (uri: vscode.Uri, d: vscode.Diagnostic) => {
         const entry = byFile.get(uri.toString()) ?? { uri, items: [] };
         entry.items.push(d);
         byFile.set(uri.toString(), entry);
     };
+    const texts = new Map<string, Promise<string[] | null>>();
     for (const d of parsed.located) {
+        const uri = diagnosticFile(source, d.module);
+        if (!texts.has(uri.toString())) {
+            texts.set(uri.toString(), fileLines(uri));
+        }
         const line = Math.max(0, d.line - 1);
-        const column = Math.max(0, d.column - 1);
+        const lineText = (await texts.get(uri.toString()))?.[line];
+        // infc counts columns in bytes; VS Code in UTF-16 characters.
+        const column = lineText === undefined ? Math.max(0, d.column - 1) : characterAt(lineText, d.column);
         const diagnostic = new vscode.Diagnostic(
             new vscode.Range(line, column, line, column + 1),
             d.message,
@@ -294,7 +310,7 @@ function publish(
         if (d.code) {
             diagnostic.code = d.code;
         }
-        add(diagnosticFile(source, d.module), diagnostic);
+        add(uri, diagnostic);
     }
     for (const message of parsed.unlocated) {
         const diagnostic = new vscode.Diagnostic(new vscode.Range(0, 0, 0, 0), message, vscode.DiagnosticSeverity.Error);
@@ -433,7 +449,7 @@ async function report(
                 return;
             }
             const parsed = parseInfcDiagnostics(outcome.output);
-            const count = publish(problems, sourceUri, parsed);
+            const count = await publish(problems, sourceUri, parsed);
             const summary = summarizeDiagnostics(parsed);
             const action = await vscode.window.showErrorMessage(
                 summary

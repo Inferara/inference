@@ -1,7 +1,7 @@
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { parseInfcDiagnostics, summarizeDiagnostics } from '../prover/infcDiagnostics';
+import { characterAt, parseInfcDiagnostics, summarizeDiagnostics } from '../prover/infcDiagnostics';
 import { classifyReplay, duplicateDefinitions, preflight } from '../prover/submission';
 
 describe('parseInfcDiagnostics (output of the accepted infc, d71a9c3e)', () => {
@@ -114,6 +114,27 @@ describe('parseInfcDiagnostics (output of the accepted infc, d71a9c3e)', () => {
         assert.deepStrictEqual(parsed.located, [{ line: 4, column: 1, message: 'something is wrong', code: 'A036' }]);
         assert.deepStrictEqual(parsed.unlocated, ['cannot read file']);
         assert.strictEqual(summarizeDiagnostics({ located: [], unlocated: [] }), null);
+    });
+});
+
+describe('characterAt (infc byte columns to VS Code positions)', () => {
+    it('is the column minus one on ASCII lines', () => {
+        assert.strictEqual(characterAt('let x: i32 = y;', 1), 0);
+        assert.strictEqual(characterAt('let x: i32 = y;', 14), 13);
+    });
+
+    it('counts multi-byte characters once', () => {
+        // `é` is 2 bytes, `界` 3, `😀` 4 bytes and 2 UTF-16 units.
+        const line = 'let s = "é界😀"; z';
+        const byteColumn = Buffer.byteLength(line.slice(0, line.indexOf('z'))) + 1;
+        assert.strictEqual(characterAt(line, byteColumn), line.indexOf('z'));
+        assert.strictEqual(characterAt('é', 2), 0, 'inside a character: that character');
+    });
+
+    it('stays past the end of the line', () => {
+        assert.strictEqual(characterAt('aé', 4), 2);
+        assert.strictEqual(characterAt('aé', 6), 4);
+        assert.strictEqual(characterAt('', 0), 0);
     });
 });
 
