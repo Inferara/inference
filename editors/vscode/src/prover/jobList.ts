@@ -133,21 +133,75 @@ export interface PollState {
 
 /**
  * When to load the job list next (ms), or null to stop: fast right after a
- * submit, steady while jobs move (also hidden, for the status bar and finish
- * notices), slow when idle and visible, off when idle and hidden, and backing
- * off on errors.
+ * submit (even before the list shows the new job), steady while jobs move
+ * (also hidden, for the status bar and finish notices), slow when idle and
+ * visible, off when idle and hidden, and backing off on errors.
  */
 export function pollDelay(state: PollState): number | null {
-    if (!state.active && !state.visible) {
+    const recentSubmit = state.msSinceSubmit !== null && state.msSinceSubmit < 120_000;
+    if (!state.active && !state.visible && !recentSubmit) {
         return null;
     }
     if (state.errors > 0) {
         return Math.min(300_000, 10_000 * 2 ** Math.min(state.errors - 1, 5));
     }
-    if (state.msSinceSubmit !== null && state.msSinceSubmit < 120_000) {
+    if (recentSubmit) {
         return 5_000;
     }
     return state.active ? 10_000 : 60_000;
+}
+
+/** At most this many moving jobs outside the first page are re-read per load. */
+export const MAX_STALE_REFRESH = 10;
+
+/**
+ * Moving jobs known from earlier loads that a fresh first page no longer
+ * covers (newer jobs pushed them out): re-read them one by one, or they would
+ * look moving forever. Newest first, at most {@link MAX_STALE_REFRESH}.
+ */
+export function staleActiveJobs(known: readonly JobResponse[], firstPage: readonly JobResponse[]): JobResponse[] {
+    const fresh = new Set(firstPage.map((j) => j.id));
+    const seen = new Set<string>();
+    return known
+        .filter((j) => {
+            if (fresh.has(j.id) || seen.has(j.id) || !isActiveJob(j)) {
+                return false;
+            }
+            seen.add(j.id);
+            return true;
+        })
+        .slice(0, MAX_STALE_REFRESH);
+}
+
+/**
+ * The statuses to compare the next load against: the loaded ones, plus the
+ * last known status of watched jobs the load did not include (a list request
+ * that started before the submit, or a filtered page).
+ */
+export function nextStatuses(
+    previous: ReadonlyMap<string, JobStatus>,
+    jobs: readonly JobResponse[],
+    watched: ReadonlySet<string>,
+): Map<string, JobStatus> {
+    const next = new Map(jobs.map((j) => [j.id, j.status] as [string, JobStatus]));
+    for (const id of watched) {
+        const before = previous.get(id);
+        if (!next.has(id) && before !== undefined) {
+            next.set(id, before);
+        }
+    }
+    return next;
+}
+
+/** The most recently submitted job (by `createdAt`), or null. */
+export function newestJob(jobs: readonly JobResponse[]): JobResponse | null {
+    let newest: JobResponse | null = null;
+    for (const job of jobs) {
+        if (!newest || Date.parse(job.createdAt ?? '') > Date.parse(newest.createdAt ?? '')) {
+            newest = job;
+        }
+    }
+    return newest;
 }
 
 /**

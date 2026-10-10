@@ -178,13 +178,14 @@ export function registerProver(
     command('inference.openProofJobInPortal', async (arg) => {
         const job = jobOf(arg);
         if (job) {
-            await openInPortal(secrets, job, hasCertificate(job) ? 'certificate' : undefined);
+            await openInPortal(secrets, job, hasCertificate(job) ? 'certificate' : 'job');
         }
     });
 
     // A different server or key means different jobs: drop what is loaded
     // and every open panel before loading again.
     const changed = () => {
+        status.reset();
         jobs.reset();
         panels.closeAll();
         void jobs.refresh();

@@ -11,6 +11,7 @@ import {
     mergeFirstPage,
     PAGE_SIZE,
     pollDelay,
+    staleActiveJobs,
 } from './jobList';
 import { listVerdict, type Verdict, type VerdictIcon } from './jobVerdict';
 import type { JobResponse, JobStatus } from './types';
@@ -37,7 +38,14 @@ export function verdictThemeIcon(verdict: Verdict): vscode.ThemeIcon {
 
 /** What the last load ended with, for the status bar and notifications. */
 export interface JobsSnapshot {
+    /** The jobs the view shows (filtered, with older pages). */
     jobs: readonly JobResponse[];
+    /**
+     * The jobs the status bar, finish notices and polling follow, whatever
+     * the filter: the newest page of all jobs plus moving jobs re-read
+     * because newer ones pushed them off that page.
+     */
+    tracking: readonly JobResponse[];
     /** A problem to show instead of jobs, or null. */
     problem: { kind: 'auth' | 'config' | 'network'; message: string } | null;
     configured: boolean;
@@ -74,6 +82,7 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
     readonly onDidLoad = this.loaded.event;
 
     private jobs: JobResponse[] = [];
+    private tracked: JobResponse[] = [];
     private hasMore = false;
     private problem: JobsSnapshot['problem'] = null;
     private configured = false;
@@ -87,6 +96,7 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
     /** Bumped on a server or account change; replies from older generations are dropped. */
     private generation = 0;
     private groups = new Map<string, JobTreeItem>();
+    private disposed = false;
 
     constructor(
         private readonly secrets: vscode.SecretStorage,
@@ -99,7 +109,7 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
     }
 
     get snapshot(): JobsSnapshot {
-        return { jobs: this.jobs, problem: this.problem, configured: this.configured, serverUrl: this.serverUrl };
+        return { jobs: this.jobs, tracking: this.tracked, problem: this.problem, configured: this.configured, serverUrl: this.serverUrl };
     }
 
     /** Show only `status` (undefined = all); a load in flight finishes first. */
@@ -118,6 +128,9 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
 
     /** Reload the first page; concurrent calls share one load. */
     refresh(): Promise<void> {
+        if (this.disposed) {
+            return Promise.resolve();
+        }
         return this.loading ?? this.track(this.load(false));
     }
 
@@ -135,6 +148,7 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
     reset(): void {
         this.generation++;
         this.jobs = [];
+        this.tracked = [];
         this.hasMore = false;
         this.problem = null;
         this.loading = null;
@@ -168,8 +182,11 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
             clearTimeout(this.timer);
             this.timer = undefined;
         }
+        if (this.disposed) {
+            return;
+        }
         const delay = pollDelay({
-            active: this.jobs.some(isActiveJob),
+            active: this.tracked.some(isActiveJob),
             visible: this.visible,
             msSinceSubmit: this.lastSubmit === null ? null : Date.now() - this.lastSubmit,
             errors: this.errors,
@@ -245,10 +262,21 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
             const api = new ProverApi(config.serverUrl, config.apiKey);
             const before = more ? this.jobs[this.jobs.length - 1]?.createdAt ?? undefined : undefined;
             const page = await api.listJobs({ status: this.filter, limit: PAGE_SIZE, before });
+            let tracked = this.tracked;
+            if (!more) {
+                const newest = this.filter ? await api.listJobs({ limit: PAGE_SIZE }) : page;
+                const stale = staleActiveJobs([...this.tracked, ...this.jobs], newest);
+                const reread = await Promise.all(stale.map((j) => api.getJob(j.id).catch(() => null)));
+                tracked = [...newest, ...reread.filter((j): j is JobResponse => j !== null)];
+            }
             if (generation !== this.generation) {
                 return; // a reply from the previous server or account
             }
-            this.jobs = more ? [...this.jobs, ...page] : mergeFirstPage(page, this.jobs, PAGE_SIZE);
+            this.tracked = tracked;
+            const latest = new Map(tracked.map((j) => [j.id, j]));
+            this.jobs = (more ? [...this.jobs, ...page] : mergeFirstPage(page, this.jobs, PAGE_SIZE))
+                .map((j) => latest.get(j.id) ?? j)
+                .filter((j) => !this.filter || j.status === this.filter);
             if (more || page.length < PAGE_SIZE || this.jobs.length === page.length) {
                 // A full page may have older jobs behind it. A refresh that kept
                 // older loaded pages keeps the answer from the last "Load more".
@@ -375,8 +403,10 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
     }
 
     dispose(): void {
+        this.disposed = true;
         if (this.timer) {
             clearTimeout(this.timer);
+            this.timer = undefined;
         }
         this.changed.dispose();
         this.loaded.dispose();
