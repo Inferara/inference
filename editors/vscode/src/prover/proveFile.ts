@@ -94,13 +94,7 @@ export function registerProveFileCommand(
     onCompilerCheck: (check: CompilerCheck) => void,
 ): vscode.Disposable {
     let running = false;
-    const diagnostics = vscode.languages.createDiagnosticCollection('inference-prove');
-    // Problems from the last proof build go stale as soon as the file changes.
-    const onEdit = vscode.workspace.onDidChangeTextDocument((e) => {
-        if (diagnostics.has(e.document.uri)) {
-            diagnostics.delete(e.document.uri);
-        }
-    });
+    const problems = new ProveProblems();
 
     const command = vscode.commands.registerCommand('inference.proveFile', async (arg?: unknown) => {
         if (running) {
@@ -122,7 +116,8 @@ export function registerProveFileCommand(
         const source = path.basename(uri.fsPath);
         const api = new ProverApi(config.serverUrl, config.apiKey);
         const progress = new StepProgress(`Proving ${source}`);
-        diagnostics.delete(uri);
+        problems.start(uri);
+        let again = false;
         try {
             log.info(`Prover: proving ${uri.fsPath}`);
             const outcome = await proveInfFile(uri.fsPath, {
@@ -167,16 +162,77 @@ export function registerProveFileCommand(
                 cancelled: () => progress.cancelled,
             });
             progress.pause();
-            await report(outcome, uri, log, hooks, onCompilerCheck, diagnostics);
+            again = (await report(outcome, uri, log, hooks, onCompilerCheck, problems)) === 'again';
         } catch (err) {
             progress.pause();
             log.error(`Prover: prove ${source}: ${err instanceof Error ? err.message : err}`);
             vscode.window.showErrorMessage(`Inference: ${submitErrorMessage(err)}`);
         } finally {
+            problems.finish();
             running = false;
         }
+        // After the guard is released, or the command would refuse to run.
+        if (again) {
+            await vscode.commands.executeCommand('inference.proveFile', uri);
+        }
     });
-    return vscode.Disposable.from(command, diagnostics, onEdit);
+    return vscode.Disposable.from(command, problems);
+}
+
+/**
+ * The Problems entries from proof builds. Each build owns what it published
+ * (the entry file and any imported files) and replaces it on the next build
+ * of the same entry; an edit clears a file's entries, and errors for a file
+ * edited while its build ran are not published (they describe old text).
+ */
+class ProveProblems implements vscode.Disposable {
+    private readonly collection = vscode.languages.createDiagnosticCollection('inference-prove');
+    private readonly owned = new Map<string, vscode.Uri[]>();
+    private edited: Set<string> | null = null;
+    private readonly onEdit = vscode.workspace.onDidChangeTextDocument((e) => {
+        if (e.contentChanges.length === 0) {
+            return;
+        }
+        this.edited?.add(e.document.uri.toString());
+        if (this.collection.has(e.document.uri)) {
+            this.collection.delete(e.document.uri);
+        }
+    });
+
+    /** A build of `source` starts: drop what its previous build published. */
+    start(source: vscode.Uri): void {
+        for (const uri of this.owned.get(source.toString()) ?? []) {
+            this.collection.delete(uri);
+        }
+        this.collection.delete(source);
+        this.owned.delete(source.toString());
+        this.edited = new Set();
+    }
+
+    finish(): void {
+        this.edited = null;
+    }
+
+    /** Publish `source`'s build errors per file; returns how many were published. */
+    publish(source: vscode.Uri, byFile: ReadonlyMap<string, { uri: vscode.Uri; items: vscode.Diagnostic[] }>): number {
+        const owned = this.owned.get(source.toString()) ?? [];
+        let count = 0;
+        for (const [key, { uri, items }] of byFile) {
+            if (this.edited?.has(key)) {
+                continue;
+            }
+            this.collection.set(uri, items);
+            owned.push(uri);
+            count += items.length;
+        }
+        this.owned.set(source.toString(), owned);
+        return count;
+    }
+
+    dispose(): void {
+        this.onEdit.dispose();
+        this.collection.dispose();
+    }
 }
 
 /** The file a diagnostic belongs to: the source, or a submodule `a::b` → `<dir>/a/b.inf`. */
@@ -190,7 +246,7 @@ function diagnosticFile(source: vscode.Uri, module: string | undefined): vscode.
 
 /** Publish compiler errors to the Problems panel; returns how many. */
 function publish(
-    collection: vscode.DiagnosticCollection,
+    problems: ProveProblems,
     source: vscode.Uri,
     parsed: ParsedDiagnostics,
 ): number {
@@ -219,15 +275,12 @@ function publish(
         diagnostic.source = 'infc (proof build)';
         add(source, diagnostic);
     }
-    for (const { uri, items } of byFile.values()) {
-        collection.set(uri, items);
-    }
-    return parsed.located.length + parsed.unlocated.length;
+    return problems.publish(source, byFile);
 }
 
 /** Point at `fn <name>` in the source, for the module-named-after-the-file clash. */
 async function duplicateInSource(
-    collection: vscode.DiagnosticCollection,
+    problems: ProveProblems,
     source: vscode.Uri,
     duplicate: DuplicateDefinition,
 ): Promise<vscode.Range | undefined> {
@@ -244,7 +297,7 @@ async function duplicateInSource(
                     vscode.DiagnosticSeverity.Error,
                 );
                 diagnostic.source = 'infc (proof build)';
-                collection.set(source, [diagnostic]);
+                problems.publish(source, new Map([[source.toString(), { uri: source, items: [diagnostic] }]]));
                 return range;
             }
         }
@@ -260,8 +313,8 @@ async function report(
     log: vscode.LogOutputChannel,
     hooks: SubmitHooks,
     onCompilerCheck: (check: CompilerCheck) => void,
-    diagnostics: vscode.DiagnosticCollection,
-): Promise<void> {
+    problems: ProveProblems,
+): Promise<'again' | void> {
     const infPath = sourceUri.fsPath;
     const source = path.basename(infPath);
     switch (outcome.kind) {
@@ -323,7 +376,7 @@ async function report(
             const infs = detectInfs();
             if (install && choice === install && version && infs) {
                 if (await performVersionChange(infs.path, version, log, 'Switching to')) {
-                    await vscode.commands.executeCommand('inference.proveFile', sourceUri);
+                    return 'again';
                 }
             } else if (choice === copy) {
                 await vscode.env.clipboard.writeText(accepted.commit);
@@ -343,7 +396,7 @@ async function report(
                 return;
             }
             const parsed = parseInfcDiagnostics(outcome.output);
-            const count = publish(diagnostics, sourceUri, parsed);
+            const count = publish(problems, sourceUri, parsed);
             const summary = summarizeDiagnostics(parsed);
             const action = await vscode.window.showErrorMessage(
                 summary
@@ -371,7 +424,7 @@ async function report(
         }
         case 'preflight-failed': {
             if (outcome.duplicate) {
-                const range = await duplicateInSource(diagnostics, sourceUri, outcome.duplicate);
+                const range = await duplicateInSource(problems, sourceUri, outcome.duplicate);
                 const goTo = `Go to fn ${outcome.duplicate.name}`;
                 const action = await vscode.window.showErrorMessage(
                     `Inference: the generated Rocq file defines “${outcome.duplicate.name}” twice, so the proof server cannot compile it. The compiler names the module after the file; rename ${source} or the function “${outcome.duplicate.name}”.`,
