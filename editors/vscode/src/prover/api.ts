@@ -341,8 +341,8 @@ export class ProverApi {
      * `POST /api/v1/jobs` — submit a `.v` file (JSON + base64) → 202.
      *
      * `idempotencyKey` must be a UUID (the server parses the header as a
-     * Guid); resubmitting with the same key replays the original 202 instead
-     * of creating a second job.
+     * Guid); resubmitting with the same key answers 202 with the existing job,
+     * as it is now (its current status), instead of creating a second job.
      *
      * `options` is empty for normal use. The server always picks provider and
      * agent from deployment config; callers may set only the optional
