@@ -29,6 +29,22 @@ Full syntax highlighting support for Inference language constructs:
 - Automatically activates for `.inf` files
 - Custom file icon for Inference source files
 
+### Rocq (`.v`) Highlighting
+
+The Rocq files you work with while proving — the generated `out/*.v`, uploaded
+files and returned proofs — are highlighted even without a Rocq extension:
+commands, declarations, tactics, `Proof`/`Qed`/`Admitted`, comments, strings
+and numbers. The language mode shows **Rocq (Inference)**; `(* *)` toggles
+comments.
+
+This applies only to `.v` files that would otherwise open as plain text. When
+a Rocq extension (VsCoq, coq-lsp) or a Verilog extension handles `.v`, it keeps
+doing so. To keep `.v` files as plain text, add
+`"files.associations": { "*.v": "plaintext" }`; choosing another language for a
+file in the status bar keeps that choice until the file is reopened. The
+highlighting is available while the Inference extension is active, for example
+in a workspace with `.inf` files.
+
 ### Language Server
 
 The extension automatically starts the Inference language server (`inference-lsp`) for `.inf` files, providing rich language intelligence:
