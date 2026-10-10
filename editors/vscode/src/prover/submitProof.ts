@@ -167,13 +167,7 @@ export function registerSubmitProofCommand(
             // Check the file before asking to upload it: a doomed upload never asks.
             const checked = preflight(filename, bytes, cap);
             if (!checked.ok) {
-                const action = checked.duplicate
-                    ? await vscode.window.showErrorMessage(`Inference: ${checked.problem}`, `Go to Line ${checked.duplicate.lines[1]}`)
-                    : await vscode.window.showErrorMessage(`Inference: ${checked.problem}`);
-                if (action && checked.duplicate) {
-                    const line = checked.duplicate.lines[1] - 1;
-                    await vscode.window.showTextDocument(uri, { selection: new vscode.Range(line, 0, line, 0) });
-                }
+                vscode.window.showErrorMessage(`Inference: ${checked.problem}`);
                 return;
             }
             if (!(await confirmUpload(context, config.serverUrl, filename))) {

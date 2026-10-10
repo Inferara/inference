@@ -6,6 +6,8 @@
  *
  *     Parse error: failed to parse `x.inf`:
  *       2:15: expected an expression
+ *     Parse error: failed to parse imported file `a::b`:
+ *       3:1: expected an item
  *     Type checking failed: 2:5: type mismatch …; 3:12: use of undeclared variable `z`
  *     [module::path:]4:1: error[A036]: …
  *     error: <message without a position>
@@ -64,10 +66,12 @@ export function parseInfcDiagnostics(output: string): ParsedDiagnostics {
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         if (/^Parse error:/.test(line)) {
+            // An imported file is named by its module path in the header only.
+            const imported = new RegExp(`failed to parse imported file \`(${MODULE})\``).exec(line);
             for (let j = i + 1; j < lines.length && /^\s+\S/.test(lines[j]); j++) {
                 const d = located(lines[j].trim());
                 if (d) {
-                    found.push(d);
+                    found.push(imported && !d.module ? { ...d, module: imported[1] } : d);
                 }
                 i = j;
             }

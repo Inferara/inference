@@ -10,6 +10,7 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 
 import type { ProverApi } from './api';
+import { maskCommentsAndStrings } from './rocqSource';
 import type { JobResponse, SubmitJobOptions } from './types';
 
 /** The literal hole marker the compiler emits; an unfilled hole does not compile. */
@@ -30,38 +31,72 @@ export type Preflight =
     | { ok: true; text: string; holes: number }
     | { ok: false; problem: string; duplicate?: DuplicateDefinition };
 
-/** A top-level name the file defines more than once (it cannot compile). */
+/** A name the file defines more than once in one module (it cannot compile). */
 export interface DuplicateDefinition {
+    /** Qualified by its enclosing modules (`M.x`); bare at the top level. */
     name: string;
     /** 1-based lines of every definition of `name`. */
     lines: number[];
 }
 
 const VERNACULAR = /^(?:Definition|Fixpoint|CoFixpoint|Inductive|CoInductive|Record|Structure|Class|Theorem|Lemma|Corollary|Proposition|Example|Fact|Remark|Axiom|Parameter)\s+([A-Za-z_][\w']*)/;
+const MODULE_START = /^\s*Module\s+(?:(?:Import|Export)\s+)?(?:Type\s+)?([A-Za-z_][\w']*)/;
+const SECTION_START = /^\s*Section\s+([A-Za-z_][\w']*)/;
+const SCOPE_END = /^\s*End\s+([A-Za-z_][\w']*)/;
 
 /**
- * Top-level (column 0) names defined more than once. The accepted compiler
- * names the module after the file, so `clamp.inf` with `fn clamp` defines
- * `clamp` twice and the server's Rocq rejects it ("clamp already exists").
+ * Names defined more than once (at column 0) in the same module. The
+ * accepted compiler names the module after the file, so `clamp.inf` with
+ * `fn clamp` defines `clamp` twice and the server's Rocq rejects it ("clamp
+ * already exists"). Comments and strings are ignored; a `Module` has its own
+ * names (a `Module M := N.` alias opens none), a `Section` does not.
  */
 export function duplicateDefinitions(text: string): DuplicateDefinition[] {
-    const seen = new Map<string, number[]>();
-    text.split(/\r?\n/).forEach((line, index) => {
+    const seen = new Map<string, DuplicateDefinition>();
+    const scopes: Array<{ name: string; module: boolean }> = [];
+    maskCommentsAndStrings(text).split(/\r?\n/).forEach((line, index) => {
+        const moduleStart = MODULE_START.exec(line);
+        if (moduleStart) {
+            if (!line.includes(':=')) {
+                scopes.push({ name: moduleStart[1], module: true });
+            }
+            return;
+        }
+        const sectionStart = SECTION_START.exec(line);
+        if (sectionStart) {
+            scopes.push({ name: sectionStart[1], module: false });
+            return;
+        }
+        const end = SCOPE_END.exec(line);
+        if (end) {
+            const at = scopes.map((s) => s.name).lastIndexOf(end[1]);
+            if (at >= 0) {
+                scopes.length = at;
+            }
+            return;
+        }
         const m = VERNACULAR.exec(line);
         if (m) {
-            seen.set(m[1], [...(seen.get(m[1]) ?? []), index + 1]);
+            const name = [...scopes.filter((s) => s.module).map((s) => s.name), m[1]].join('.');
+            const entry = seen.get(name) ?? { name, lines: [] };
+            entry.lines.push(index + 1);
+            seen.set(name, entry);
         }
     });
-    return [...seen.entries()]
-        .filter(([, lines]) => lines.length > 1)
-        .map(([name, lines]) => ({ name, lines }));
+    return [...seen.values()].filter((d) => d.lines.length > 1);
 }
 
-/** Check a `.v` upload the way the server will (size, UTF-8, NUL, holes). */
+/**
+ * Check a `.v` upload the way the server will (size, UTF-8, NUL, holes).
+ * `generated` also blocks duplicate definitions: in a file the compiler just
+ * generated they mean the module-named-after-the-file clash. A hand-written
+ * file is left to the server, whose error the job panel shows.
+ */
 export function preflight(
     filename: string,
     bytes: Uint8Array,
     maxUploadBytes: number = DEFAULT_MAX_UPLOAD_BYTES,
+    generated = false,
 ): Preflight {
     if (!filename.endsWith('.v')) {
         return { ok: false, problem: `${filename} is not a Rocq .v file.` };
@@ -88,7 +123,7 @@ export function preflight(
             problem: `${filename} has no proof holes, so there is nothing to prove. A hole is the marker "${HOLE_MARKER}".`,
         };
     }
-    const duplicate = duplicateDefinitions(text)[0];
+    const duplicate = generated ? duplicateDefinitions(text)[0] : undefined;
     if (duplicate) {
         const stem = path.basename(filename, '.v');
         return {

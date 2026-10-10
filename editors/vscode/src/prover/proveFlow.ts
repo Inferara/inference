@@ -159,7 +159,7 @@ export async function proveInfFile(infPath: string, deps: ProveDeps): Promise<Pr
 
     const bytes = await deps.readFile(vPath);
     // Check the file before asking to upload it: a doomed upload never asks.
-    const checked = preflight(path.basename(vPath), bytes, meta.maxUploadBytes);
+    const checked = preflight(path.basename(vPath), bytes, meta.maxUploadBytes, true);
     if (!checked.ok) {
         return {
             kind: 'preflight-failed',

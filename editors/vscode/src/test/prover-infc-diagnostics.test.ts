@@ -18,6 +18,18 @@ describe('parseInfcDiagnostics (output of the accepted infc, d71a9c3e)', () => {
         ]);
     });
 
+    it('attributes parse errors in an imported file to its module (real infc output)', () => {
+        const parsed = parseInfcDiagnostics([
+            'Parse error: failed to parse imported file `lib::broken`:',
+            '  1:14: expected an argument',
+            '  1:14: expected RParen',
+        ].join('\n'));
+        assert.deepStrictEqual(parsed.located, [
+            { line: 1, column: 14, message: 'expected an argument', module: 'lib::broken' },
+            { line: 1, column: 14, message: 'expected RParen', module: 'lib::broken' },
+        ]);
+    });
+
     it('splits type errors joined on one line, keeping colons and backticks in messages', () => {
         const parsed = parseInfcDiagnostics(
             'Parsed: types.inf\nType checking failed: 2:5: type mismatch in variable definition: expected `Bool`, found `i32`; 3:12: use of undeclared variable `z`; math::ops:3:5: type mismatch in return statement: expected `i32`, found `Unit`',
@@ -46,10 +58,27 @@ describe('duplicate definitions', () => {
         assert.deepStrictEqual(duplicateDefinitions('Definition a := 1.\n  Definition a := 2.\n'), [], 'column 0 only');
     });
 
-    it('blocks the upload with a fix', () => {
-        const checked = preflight('clamp.v', new TextEncoder().encode(generated));
+    it('ignores comments and strings, and keeps module namespaces apart', () => {
+        assert.deepStrictEqual(duplicateDefinitions('(*\nDefinition helper := 0.\n*)\nDefinition helper := 1.\n'), []);
+        assert.deepStrictEqual(duplicateDefinitions('Definition s := "\nDefinition s := 2.".\n'), []);
+        const modules = 'Module A.\nDefinition x := 1.\nEnd A.\nModule B.\nDefinition x := 2.\nEnd B.\nDefinition x := 3.\n';
+        assert.deepStrictEqual(duplicateDefinitions(modules), []);
+        assert.deepStrictEqual(
+            duplicateDefinitions('Module A.\nDefinition x := 1.\nDefinition x := 2.\nEnd A.\n'),
+            [{ name: 'A.x', lines: [2, 3] }],
+        );
+        // An alias opens no namespace; a section shares the enclosing one.
+        assert.deepStrictEqual(
+            duplicateDefinitions('Module C := B.\nDefinition y := 1.\nSection S.\nDefinition y := 2.\nEnd S.\n'),
+            [{ name: 'y', lines: [2, 4] }],
+        );
+    });
+
+    it('blocks a generated upload with a fix, and leaves hand-written files to the server', () => {
+        const checked = preflight('clamp.v', new TextEncoder().encode(generated), undefined, true);
         assert.ok(!checked.ok && checked.problem.includes('names the module after the file'));
         assert.ok(!checked.ok && checked.duplicate?.name === 'clamp');
+        assert.ok(preflight('clamp.v', new TextEncoder().encode(generated)).ok);
     });
 });
 
