@@ -5,6 +5,10 @@ import {
     describeJob,
     FILTER_STATUSES,
     finishedJobs,
+    MAX_STALE_REFRESH,
+    newestJob,
+    nextStatuses,
+    staleActiveJobs,
     hasCertificate,
     isActiveJob,
     jobContextValue,
@@ -90,6 +94,12 @@ describe('pollDelay', () => {
         assert.strictEqual(pollDelay({ ...base, visible: false }), null);
     });
 
+    it('keeps polling right after a submit even before the list shows the job', () => {
+        assert.strictEqual(pollDelay({ ...base, visible: false, msSinceSubmit: 1_000 }), 5_000);
+        assert.strictEqual(pollDelay({ ...base, visible: false, msSinceSubmit: 1_000, errors: 1 }), 10_000);
+        assert.strictEqual(pollDelay({ ...base, visible: false, msSinceSubmit: 200_000 }), null);
+    });
+
     it('backs off on errors, capped at five minutes', () => {
         assert.strictEqual(pollDelay({ ...base, errors: 1 }), 10_000);
         assert.strictEqual(pollDelay({ ...base, errors: 3 }), 40_000);
@@ -116,5 +126,52 @@ describe('finishedJobs', () => {
         assert.ok(isActiveJob({ status: 'Lost' }));
         assert.ok(hasCertificate({ status: 'CompileGoals' }));
         assert.ok(!hasCertificate({ status: 'Failed' }));
+    });
+});
+
+describe('staleActiveJobs', () => {
+    it('re-reads moving jobs that fell off the first page, newest first, once each', () => {
+        const known: JobResponse[] = [
+            { id: 'a', status: 'Running' },
+            { id: 'b', status: 'Succeeded' },
+            { id: 'c', status: 'Lost' },
+            { id: 'a', status: 'Running' },
+            { id: 'd', status: 'Queued' },
+        ];
+        const firstPage: JobResponse[] = [{ id: 'd', status: 'Running' }];
+        assert.deepStrictEqual(staleActiveJobs(known, firstPage).map((j) => j.id), ['a', 'c']);
+    });
+
+    it('is bounded', () => {
+        const known = Array.from({ length: 30 }, (_, i): JobResponse => ({ id: `j${i}`, status: 'Running' }));
+        assert.strictEqual(staleActiveJobs(known, []).length, MAX_STALE_REFRESH);
+    });
+});
+
+describe('nextStatuses', () => {
+    it('keeps the last status of watched jobs a load did not include', () => {
+        const previous = new Map([['new', 'Accepted'], ['gone', 'Running']] as const);
+        const next = nextStatuses(previous, [{ id: 'x', status: 'Running' }], new Set(['new']));
+        assert.deepStrictEqual([...next.entries()], [['x', 'Running'], ['new', 'Accepted']]);
+    });
+
+    it('lets a quick job that finished before the first load be reported', () => {
+        const watched = new Set(['q']);
+        // Submitted as Accepted; the next load already shows it finished.
+        const previous = nextStatuses(new Map([['q', 'Accepted']] as const), [], watched);
+        const done: JobResponse[] = [{ id: 'q', status: 'Succeeded' }];
+        assert.deepStrictEqual(finishedJobs(previous, done, watched).map((j) => j.id), ['q']);
+    });
+});
+
+describe('newestJob', () => {
+    it('picks the latest submission', () => {
+        const jobs: JobResponse[] = [
+            { id: 'b', status: 'Failed', createdAt: '2026-10-10T02:00:00Z' },
+            { id: 'a', status: 'Failed', createdAt: '2026-10-10T01:00:00Z' },
+            { id: 'c', status: 'Failed', createdAt: '2026-10-10T03:00:00Z' },
+        ];
+        assert.strictEqual(newestJob(jobs)?.id, 'c');
+        assert.strictEqual(newestJob([]), null);
     });
 });

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-import { finishedJobs, isActiveJob } from './jobList';
+import { finishedJobs, isActiveJob, newestJob, nextStatuses } from './jobList';
 import { listVerdict } from './jobVerdict';
 import { VERDICT_CODICONS, type JobsSnapshot } from './jobsTree';
 import { proverStatusState } from './proverStatusBarState';
@@ -40,30 +40,45 @@ export class ProverStatus implements vscode.Disposable {
     /** A job was just submitted here: watch it and stop showing the last result. */
     watch(job: JobResponse): void {
         this.watched.add(job.id);
+        // Its submitted status, so a finish before the next load is noticed.
+        if (!this.previous.has(job.id)) {
+            this.previous.set(job.id, job.status);
+        }
         this.lastFinished = null;
         if (this.snapshot) {
             this.update(this.snapshot);
         }
     }
 
+    /** The server or account changed: forget its jobs and last result. */
+    reset(): void {
+        this.previous = new Map();
+        this.watched.clear();
+        this.lastFinished = null;
+        this.target = null;
+        this.snapshot = null;
+        this.item.hide();
+    }
+
     update(snapshot: JobsSnapshot): void {
         this.snapshot = snapshot;
-        for (const job of snapshot.jobs) {
+        const jobs = snapshot.tracking;
+        for (const job of jobs) {
             if (isActiveJob(job)) {
                 this.watched.add(job.id);
             }
         }
-        const finished = finishedJobs(this.previous, snapshot.jobs, this.watched);
-        this.previous = new Map(snapshot.jobs.map((j) => [j.id, j.status]));
+        const finished = finishedJobs(this.previous, jobs, this.watched);
+        this.previous = nextStatuses(this.previous, jobs, this.watched);
         for (const job of finished) {
             this.watched.delete(job.id);
-            this.lastFinished = job;
             if (!this.hooks.isPanelActive(job.id)) {
                 void this.notify(job);
             }
         }
+        this.lastFinished = newestJob(finished) ?? this.lastFinished;
         const state = proverStatusState({
-            jobs: snapshot.configured ? snapshot.jobs : [],
+            jobs: snapshot.configured ? jobs : [],
             problem: snapshot.problem,
             lastFinished: this.lastFinished,
             nameOf: (job) => this.hooks.nameOf(job),
@@ -90,7 +105,9 @@ export class ProverStatus implements vscode.Disposable {
             : '';
         const message = `Inference: ${name} — ${verdict.headline}${counts}.`;
         const good = verdict.claim !== 'none';
-        const retry = ['failed', 'timed-out', 'provision-failed', 'lost'].includes(verdict.kind);
+        // A returned proof that did not compile may succeed on another run; a
+        // submitted file that did not compile fails again until it is changed.
+        const retry = ['failed', 'timed-out', 'provision-failed', 'lost', 'completed-compile-error'].includes(verdict.kind);
         const actions = retry ? ['Open', 'Run Again'] : ['Open'];
         const choice = good && verdict.tone === 'ok'
             ? await vscode.window.showInformationMessage(message, ...actions)
@@ -103,7 +120,7 @@ export class ProverStatus implements vscode.Disposable {
     }
 
     private async onClick(): Promise<void> {
-        const job = this.target ? this.snapshot?.jobs.find((j) => j.id === this.target) : undefined;
+        const job = this.target ? this.snapshot?.tracking.find((j) => j.id === this.target) : undefined;
         if (job) {
             if (!isActiveJob(job)) {
                 this.lastFinished = null; // seen
