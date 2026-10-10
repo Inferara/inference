@@ -26,6 +26,19 @@ describe('firstBuildError', () => {
         assert.strictEqual(error?.message, 'In environment\nx : nat');
     });
 
+    it('skips located warnings before the error', () => {
+        const log = [
+            'File "/work/compiled.v", line 3, characters 0-20:',
+            'Warning: Notation "_ + _" was already used. [notation-overridden,parsing,default]',
+            '',
+            'File "/work/compiled.v", line 53, characters 11-16:',
+            'Error: clamp already exists.',
+            '',
+        ].join('\n');
+        assert.deepStrictEqual(firstBuildError(log), { line: 53, startChar: 11, endChar: 16, message: 'clamp already exists.' });
+        assert.strictEqual(firstBuildError(log.split('\n').slice(0, 3).join('\n')), null);
+    });
+
     it('falls back to an unlocated Error block, and to null', () => {
         assert.deepStrictEqual(firstBuildError('noise\nError: Cannot find library Foo.\n'), { message: 'Cannot find library Foo.' });
         assert.strictEqual(firstBuildError('all good\n'), null);

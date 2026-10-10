@@ -160,10 +160,11 @@ export async function compareProof(
 export async function openInPortal(
     secrets: vscode.SecretStorage,
     job: JobRef,
-    tab: 'certificate' | undefined = 'certificate',
+    page: 'certificate' | 'job' = 'certificate',
 ): Promise<void> {
     const config = await requireConfig(secrets);
     if (config) {
+        const tab = page === 'certificate' ? 'certificate' : undefined;
         await vscode.env.openExternal(vscode.Uri.parse(portalJobUrl(config.serverUrl, job.id, tab)));
     }
 }

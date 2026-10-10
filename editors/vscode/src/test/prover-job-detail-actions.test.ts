@@ -105,6 +105,15 @@ describe('job panel actions', () => {
         assert.deepStrictEqual(unknown.goto, { target: 'source' });
     });
 
+    it('titles the closed group like its rows, never "Proved" without a claim', () => {
+        const obligations = Array.from({ length: 11 }, (_, i) => ({ name: `t${i}`, kind: 'spec' as const, status: 'proved' as const }));
+        const unverified = renderJobDetailHtml({ ...JOB, holesTotal: 11, holesClosed: 11, obligations }, { ...OPTS, resultState: 'failed' });
+        assert.ok(unverified.includes('Closed — not verified (11)'));
+        assert.ok(!unverified.includes('Proved (11)'));
+        const running = renderJobDetailHtml({ ...JOB, status: 'Running', holesTotal: 12, holesClosed: 11, obligations }, { ...OPTS, live: 'sse' });
+        assert.ok(running.includes('Closed (11)'));
+    });
+
     it('links a proved obligation to its proof in the returned file', () => {
         const job: JobResponse = { ...JOB, obligations: [{ name: 't', kind: 'spec', status: 'proved', sourceLine: 7 }] };
         const result = RESULT(['InputV', 'CompletedV']);
