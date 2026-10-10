@@ -1,0 +1,292 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Rocq (Inference)",
+  "scopeName": "source.inference-rocq",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#vernacular"
+    },
+    {
+      "include": "#proof"
+    },
+    {
+      "include": "#ltac"
+    },
+    {
+      "include": "#terms"
+    },
+    {
+      "include": "#punctuation"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.rocq",
+          "begin": "\\(\\*",
+          "end": "\\*\\)",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.begin.rocq"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.end.rocq"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comments"
+            }
+          ]
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.rocq",
+          "begin": "\"",
+          "end": "\"(?!\")",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.rocq"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.rocq"
+            }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.rocq",
+              "match": "\"\""
+            }
+          ]
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.attribute.rocq",
+          "begin": "#\\[",
+          "end": "\\]",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.attribute.begin.rocq"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.attribute.end.rocq"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#strings"
+            },
+            {
+              "name": "entity.other.attribute-name.rocq",
+              "match": "[\\p{L}_][\\p{L}\\p{N}_']*"
+            }
+          ]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(Proposition|CoFixpoint|Conjecture|Definition|Corollary|Equations|Fixpoint|Function|Instance|Property|Example|Theorem|Remark|Lemma|Fact|Let)\\s+([\\p{L}_][\\p{L}\\p{N}_']*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.declaration.rocq"
+            },
+            "2": {
+              "name": "entity.name.function.rocq"
+            }
+          }
+        },
+        {
+          "match": "\\b(CoInductive|Inductive|Structure|Variant|Record|Class)\\s+([\\p{L}_][\\p{L}\\p{N}_']*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.rocq"
+            },
+            "2": {
+              "name": "entity.name.type.rocq"
+            }
+          }
+        },
+        {
+          "match": "\\b(Module(?:\\s+Type)?|Section|End)\\s+(?!(?:Import|Export)\\b)([\\p{L}_][\\p{L}\\p{N}_']*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.module.rocq"
+            },
+            "2": {
+              "name": "entity.name.namespace.rocq"
+            }
+          }
+        },
+        {
+          "match": "\\b(Proposition|CoFixpoint|Conjecture|Definition|Corollary|Equations|Fixpoint|Function|Instance|Property|Example|Theorem|Remark|Lemma|Fact|Let)\\b(?!')",
+          "name": "keyword.other.declaration.rocq"
+        },
+        {
+          "match": "\\b(CoInductive|Inductive|Structure|Variant|Record|Class)\\b(?!')",
+          "name": "storage.type.rocq"
+        },
+        {
+          "match": "\\b(Module|Section|End)\\b(?!')",
+          "name": "keyword.other.module.rocq"
+        },
+        {
+          "match": "\\b(Hypotheses|Hypothesis|Parameters|Parameter|Variables|Variable|Context|Axioms|Axiom)\\b(?!')",
+          "name": "keyword.other.assumption.rocq"
+        }
+      ]
+    },
+    "vernacular": {
+      "patterns": [
+        {
+          "match": "^\\s*(Primitive|Combined|Redirect|Register|Strategy|Restart|Succeed|Timeout|Unfocus|Derive|Global|Remove|Tactic|Debug|Focus|Local|Unset|Fail|Info|Load|Show|Test|Time|Undo|Add|Set)\\b(?!')",
+          "captures": {
+            "1": {
+              "name": "keyword.other.vernacular.rocq"
+            }
+          }
+        },
+        {
+          "match": "\\bHint\\s+(?:Resolve|Rewrite|Unfold|Constructors|Extern|Immediate|Mode|Cut|Variables)\\b(?!')",
+          "name": "keyword.other.vernacular.rocq"
+        },
+        {
+          "match": "\\b(?:Implicit\\s+(?:Types?|Arguments)|Next\\s+Obligation|Solve\\s+(?:All\\s+)?Obligations|Admit\\s+Obligations|Create\\s+HintDb)\\b(?!')",
+          "name": "keyword.other.vernacular.rocq"
+        },
+        {
+          "match": "\\b(Generalizable|SearchPattern|SearchRewrite|Monomorphic|Obligations|Polymorphic|Transparent|Typeclasses|Obligation|Arguments|Canonical|Universes|Coercion|Existing|Notation|Reserved|Universe|Unshelve|Compute|Declare|Delimit|Include|Program|Require|Export|HintDb|Import|Locate|Opaque|Scheme|Search|About|Check|Close|Hints|Infix|Print|Scope|Bind|Eval|From|Goal|Hint|Open)\\b(?!')",
+          "name": "keyword.other.vernacular.rocq"
+        }
+      ]
+    },
+    "proof": {
+      "patterns": [
+        {
+          "match": "\\b(Defined|Proof|Save|Qed)\\b(?!')",
+          "name": "keyword.control.proof.rocq"
+        },
+        {
+          "match": "\\b(?:Admitted|Abort|admit)\\b(?!')",
+          "name": "keyword.control.admit.rocq"
+        }
+      ]
+    },
+    "ltac": {
+      "patterns": [
+        {
+          "match": "\\b(Ltac2?)\\s+([\\p{L}_][\\p{L}\\p{N}_']*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.ltac.rocq"
+            },
+            "2": {
+              "name": "entity.name.function.tactic.rocq"
+            }
+          }
+        },
+        {
+          "match": "\\b(exactly_once|abstract|progress|timeout|repeat|first|solve|using|once|now|try|at|by|do)\\b(?!')",
+          "name": "keyword.control.tactical.rocq"
+        },
+        {
+          "match": "\\b(inversion_clear|exact_no_check|field_simplify|native_compute|setoid_rewrite|contradiction|ediscriminate|ring_simplify|discriminate|econstructor|transitivity|autorewrite|constructor|eassumption|instantiate|reflexivity|assumption|autounfold|congruence|contradict|cutrewrite|einduction|einjection|firstorder|functional|generalize|specialize|vm_compute|clearbody|decompose|dependent|edestruct|induction|injection|intuition|inversion|split_and|destruct|erewrite|remember|symmetry|unshelve|case_eq|compute|eexists|exfalso|f_equal|fourier|give_up|pattern|replace|rewrite|trivial|absurd|assert|change|decide|eapply|eexact|enough|eright|esimpl|esplit|intros|lapply|refine|rename|revert|shelve|simple|unfold|admit|apply|clear|eauto|eleft|exact|field|gfail|idtac|intro|omega|psatz|right|simpl|split|subst|tauto|auto|case|done|easy|elim|evar|fail|fold|lazy|left|move|pose|ring|zify|cbn|cbv|cut|hnf|lia|lra|nia|nra|red|set)\\b(?!')",
+          "name": "support.function.tactic.rocq"
+        },
+        {
+          "match": "\\b(match)\\s+(goal)\\b(?!')",
+          "captures": {
+            "1": {
+              "name": "keyword.control.rocq"
+            },
+            "2": {
+              "name": "keyword.other.ltac.rocq"
+            }
+          }
+        },
+        {
+          "match": "\\bcontext\\b(?!')(?=\\s*(?:[\\p{L}_][\\p{L}\\p{N}_']*\\s*)?\\[)",
+          "name": "keyword.other.ltac.rocq"
+        }
+      ]
+    },
+    "terms": {
+      "patterns": [
+        {
+          "match": "\\b(exists2|exists|forall|return|struct|cofix|match|where|else|then|with|end|fix|fun|let|as|if|in|is)\\b(?!')",
+          "name": "keyword.control.rocq"
+        },
+        {
+          "match": "\\b(SProp|Prop|Type|Set)\\b(?!')",
+          "name": "support.type.sort.rocq"
+        },
+        {
+          "match": "\\b(False|false|None|Some|True|true|nil|tt)\\b(?!')",
+          "name": "constant.language.rocq"
+        },
+        {
+          "match": "(?<![\\p{L}\\p{N}_'])\\d+(?:\\.\\d+)?(?![\\p{L}\\p{N}_'])",
+          "name": "constant.numeric.rocq"
+        },
+        {
+          "match": "%[\\p{L}_][\\p{L}\\p{N}_']*",
+          "name": "keyword.operator.scope.rocq"
+        },
+        {
+          "match": ":=|=>|<->|->|<-|/\\\\|\\\\/|<>|<=|>=|\\|-|::|\\+\\+|[~=<>]",
+          "name": "keyword.operator.rocq"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "match": "\\{\\||\\|\\}",
+          "name": "punctuation.definition.record.rocq"
+        },
+        {
+          "match": "\\.(?=\\s|$)",
+          "name": "punctuation.terminator.rocq"
+        },
+        {
+          "match": "^\\s*([-+*]+)(?=\\s)",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.bullet.rocq"
+            }
+          }
+        },
+        {
+          "match": "[|,;:]",
+          "name": "punctuation.separator.rocq"
+        }
+      ]
+    }
+  }
+}

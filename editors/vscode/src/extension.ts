@@ -14,6 +14,7 @@ import { failingChecks, toolchainHealth, toolchainHealthLabel } from './ui/statu
 import { InferenceConfigProvider, ConfigItem } from './ui/configTree';
 import { runDoctor } from './toolchain/doctor';
 import { registerProver } from './prover';
+import { registerRocqHighlighting } from './rocq/rocqLanguage';
 import {
     handleLspConfigChange,
     initializeLspClient,
@@ -29,6 +30,7 @@ const outputChannel = vscode.window.createOutputChannel('Inference', { log: true
 
 export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(outputChannel);
+    context.subscriptions.push(registerRocqHighlighting());
 
     const statusBarItem = createStatusBar();
     context.subscriptions.push(statusBarItem);

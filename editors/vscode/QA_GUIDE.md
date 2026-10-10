@@ -34,6 +34,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 3b. Terminal PATH Integration | Manual (requires VS Code integrated terminal) |
 | 4. Commands | Partial -- formatting, version picker, update check logic automated; UI interactions manual |
 | 5. Syntax Highlighting | Manual (requires VS Code host) |
+| 5a. Rocq Highlighting | Partial -- grammar, language configuration and file selection automated (`test/rocq-grammar.test.ts`, `rocq-language.test.ts`); switching open documents manual |
 | 6. Language Configuration | Manual (requires VS Code host) |
 | 7. Walkthrough | **[A]** Schema validated (`settings-schema.test.ts`); interactive steps manual |
 | 8. Settings | **[A]** Schema validated (7 settings, 24 commands in `settings-schema.test.ts`) |
@@ -231,6 +232,22 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 5.13 | `checked(a + b)` and `wrapping(a + b)` | `checked` and `wrapping` highlighted as keywords, not as function calls | |
 | 5.14 | `fn unit() {` and `-> unit` | `unit` highlighted as a reserved word, not as a function or type name; `unit_count` stays an ordinary name | |
 | 5.15 | `type A = i32;` | `type` is NOT highlighted as a keyword (type aliases were removed from the language) | |
+
+---
+
+## 5a. Rocq (`.v`) Highlighting
+
+Use a profile without a Rocq or Verilog extension unless the step says otherwise.
+
+| # | Step | Expected | Pass? |
+|---|------|----------|-------|
+| 5a.1 | Open a generated `out/*.v` in a workspace with `.inf` files | Language mode shows "Rocq (Inference)"; `Require`/`Definition`/`Theorem` and theorem names, `Proof`/`Qed`, comments, numbers and `0%N` are coloured | |
+| 5a.2 | Open a returned proof from a job panel ("Open proof", "Compare with input") | Both sides are highlighted as Rocq | |
+| 5a.3 | In a `.v` file, select lines and press Shift+Alt+A (or Ctrl+/) | Toggles `(* *)` | |
+| 5a.4 | Change the language mode of a highlighted `.v` file to Plain Text | It stays plain text; after closing and reopening the file it is Rocq again | |
+| 5a.5 | Add `"files.associations": { "*.v": "plaintext" }`, reopen a `.v` file | It stays plain text | |
+| 5a.6 | Install VsCoq (or coq-lsp), reload, open a `.v` file | Language mode is that extension's (e.g. "Coq"); its highlighting and checking work unchanged | |
+| 5a.7 | Open a `.txt` file and a `.v` file in a workspace without `.inf` files, with the Inference views closed | The extension does not activate for them | |
 
 ---
 
