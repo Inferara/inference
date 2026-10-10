@@ -1,13 +1,20 @@
 //! A036: Cumulative shadow-stack depth must not exceed the stack budget.
 //!
 //! Inference compiles to WebAssembly with a downward-growing shadow stack
-//! (`__stack_pointer`) whose size the build configures and
-//! [`AnalysisOptions::stack_budget_bytes`] carries here. Only functions that
-//! allocate array or struct frames consume it; scalar locals live in WASM locals
-//! and never touch linear memory. Codegen already bounds each *individual* frame,
-//! but the *cumulative* depth across a call chain is unchecked and only traps
-//! opaquely at runtime (an out-of-bounds store in the frame prologue's
-//! zero-fill).
+//! (`__stack_pointer`) whose size the build's [`AnalysisOptions::layout`]
+//! decides once the program's static data is placed above it: the size the
+//! build asks for, or the default 64 KiB less whatever the constant data needs
+//! when the memory has no other room (see `MemoryLayout::with_static_data`).
+//! Only functions that allocate array or struct frames consume it; scalar locals
+//! live in WASM locals and never touch linear memory. Code generation refuses a
+//! single frame larger than the whole stack, but the *cumulative* depth across a
+//! call chain is unchecked there and would only trap opaquely at runtime (an
+//! out-of-bounds store in the frame prologue's zero-fill).
+//!
+//! Together with A058, which judges the stack and the static data against the
+//! memory's pages, this proves the program's whole static footprint fits the
+//! memory it declares: the deepest chain fits the stack, and the stack and the
+//! data fit the pages. Nothing else in linear memory is ever allocated.
 //!
 //! Because A035 forbids recursion, the whole-program call graph is a DAG, so the
 //! worst-case shadow-stack usage is the **maximum-weight root-to-leaf path**,
@@ -61,7 +68,7 @@
 //! reach — and keeps the rule independent of entry-point discovery. A future
 //! refinement could restrict the roots to reachable entry points.
 //!
-//! [`AnalysisOptions::stack_budget_bytes`]: crate::AnalysisOptions::stack_budget_bytes
+//! [`AnalysisOptions::layout`]: crate::AnalysisOptions::layout
 
 use std::collections::HashSet;
 
@@ -74,8 +81,9 @@ use inference_type_checker::StructInfo;
 use rustc_hash::FxHashMap;
 
 use crate::call_graph::{build_call_graph, resolve_adjacency, FnNode, BLACK, GRAY, WHITE};
-use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic, StackChain, StackFrame};
 use crate::rule::TypedContext;
+use inference_compiler_interface::MemoryLayout;
 
 /// Stack frame alignment in bytes.
 ///
@@ -109,45 +117,72 @@ crate::rule! {
     #[severity = error]
     pub struct StackDepthExceeded;
     fn check(ctx: &TypedContext, options: AnalysisOptions) -> Vec<LabeledDiagnostic> {
+        // The stack the module declares is the one left once the static data
+        // is placed. When the data does not fit at all, A058 reports that, and
+        // the chain is measured against the stack as the build asked for it.
+        let layout = options
+            .layout
+            .with_static_data(ctx.static_data().size())
+            .unwrap_or(options.layout);
         let nodes = build_call_graph(ctx);
-        check_stack_depth(ctx, &nodes, options.stack_budget_bytes)
+        check_stack_depth(ctx, &nodes, layout)
     }
 }
 
-/// Computes each node's frame weight and reports the deepest weighted path when
-/// it exceeds `budget_bytes`.
+/// Reports the deepest weighted path when it exceeds the stack `layout` gives.
 ///
 /// The diagnostic is anchored at the chain's first function; that function's
 /// defining file names the finding.
 fn check_stack_depth(
     ctx: &TypedContext,
     nodes: &[FnNode],
-    budget_bytes: u32,
+    layout: MemoryLayout,
 ) -> Vec<LabeledDiagnostic> {
-    if nodes.is_empty() {
+    let Some((chain, first)) = deepest_chain_of(ctx, nodes) else {
         return Vec::new();
+    };
+    if chain.total() <= layout.stack_size() {
+        return Vec::new();
+    }
+    vec![LabeledDiagnostic::new(
+        nodes[first].module_path.clone(),
+        AnalysisDiagnostic::StackDepthExceeded {
+            chain,
+            layout,
+            location: nodes[first].location,
+        },
+    )]
+}
+
+/// The deepest call chain in the program, itemized by frame, or `None` for a
+/// program with no functions. A058 reads it to tell whether a smaller stack
+/// would still hold the program.
+pub(crate) fn deepest_chain(ctx: &TypedContext) -> Option<StackChain> {
+    deepest_chain_of(ctx, &build_call_graph(ctx)).map(|(chain, _)| chain)
+}
+
+/// The deepest weighted path through `nodes` as an itemized chain, with the
+/// index of its first node.
+fn deepest_chain_of(ctx: &TypedContext, nodes: &[FnNode]) -> Option<(StackChain, usize)> {
+    if nodes.is_empty() {
+        return None;
     }
     let weights: Vec<u32> = nodes
         .iter()
         .map(|n| estimate_frame_size(ctx, n))
         .collect();
     let adj = resolve_adjacency(nodes);
-
-    let Some((depth_bytes, path)) = deepest_path(&adj, &weights) else {
-        return Vec::new();
+    let (_, path) = deepest_path(&adj, &weights)?;
+    let chain = StackChain {
+        frames: path
+            .iter()
+            .map(|&i| StackFrame {
+                function: nodes[i].key.to_string(),
+                bytes: weights[i],
+            })
+            .collect(),
     };
-    if depth_bytes <= budget_bytes {
-        return Vec::new();
-    }
-    vec![LabeledDiagnostic::new(
-        nodes[path[0]].module_path.clone(),
-        AnalysisDiagnostic::StackDepthExceeded {
-            chain: render_chain(nodes, &path),
-            depth_bytes,
-            budget_bytes,
-            location: nodes[path[0]].location,
-        },
-    )]
+    Some((chain, path[0]))
 }
 
 /// Returns the maximum total weight over all root-to-leaf paths and the node
@@ -212,14 +247,6 @@ fn longest_from(
     full_path.append(&mut path);
     best[u] = Some((total, full_path));
     color[u] = BLACK;
-}
-
-/// Renders a path as `a -> b -> c` using each node's canonical key.
-fn render_chain(nodes: &[FnNode], path: &[usize]) -> String {
-    path.iter()
-        .map(|&i| nodes[i].key.to_string())
-        .collect::<Vec<_>>()
-        .join(" -> ")
 }
 
 /// Returns each function's estimated stack-frame size in bytes, keyed by the
@@ -705,7 +732,6 @@ fn align_to(value: u32, alignment: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_graph::test_node;
 
     /// The entry file's (empty) module path: every `register_test_struct` keys a
     /// struct by its bare name, which is its canonical key in a single file.
@@ -791,7 +817,7 @@ mod tests {
         let weights = vec![1000, 2000];
         let adj = adj(&[&[1], &[]]);
         let (bytes, _) = deepest_path(&adj, &weights).unwrap();
-        assert!(bytes <= crate::AnalysisOptions::default().stack_budget_bytes);
+        assert!(bytes <= crate::AnalysisOptions::default().layout.stack_size());
     }
 
     #[test]
@@ -799,16 +825,26 @@ mod tests {
         let weights = vec![40_000, 40_000];
         let adj = adj(&[&[1], &[]]);
         let (bytes, path) = deepest_path(&adj, &weights).unwrap();
-        assert!(bytes > crate::AnalysisOptions::default().stack_budget_bytes);
+        assert!(bytes > crate::AnalysisOptions::default().layout.stack_size());
         assert_eq!(bytes, 80_000);
         assert_eq!(path, vec![0, 1]);
     }
 
     #[test]
-    fn render_chain_joins_with_arrows() {
-        let nodes = vec![test_node("a", &[]), test_node("b", &[]), test_node("c", &[])];
-        assert_eq!(render_chain(&nodes, &[0, 1, 2]), "a -> b -> c");
-        assert_eq!(render_chain(&nodes, &[1]), "b");
+    fn a_chain_renders_with_arrows_and_totals_its_frames() {
+        let frame = |function: &str, bytes| StackFrame {
+            function: function.to_string(),
+            bytes,
+        };
+        let chain = StackChain {
+            frames: vec![frame("a", 16), frame("b", 0), frame("c", 32)],
+        };
+        assert_eq!(chain.to_string(), "a -> b -> c");
+        assert_eq!(chain.total(), 48);
+        let single = StackChain {
+            frames: vec![frame("b", u32::MAX), frame("c", 1)],
+        };
+        assert_eq!(single.total(), u32::MAX, "the total saturates rather than wrapping");
     }
 
     #[test]

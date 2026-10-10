@@ -160,6 +160,7 @@ mod spacewasm_conformance_tests {
     ("codegen/wasm/base/method_self_mutate/method_self_mutate.wasm", Maxima(2, 4, 4)),
     ("codegen/wasm/base/method_three_fields/method_three_fields.wasm", Maxima(2, 3, 3)),
     ("codegen/wasm/base/mixed_visibility/mixed_visibility.wasm", Maxima(1, 1, 1)),
+    ("codegen/wasm/base/module_consts/module_consts.wasm", Maxima(4, 5, 5)),
     ("codegen/wasm/base/multidim_array_literal/multidim_array_literal.wasm", Maxima(1, 3, 4)),
     ("codegen/wasm/base/multidim_array_uzumaki/multidim_array_uzumaki.wasm", Refused),
     ("codegen/wasm/base/narrow_uzumaki/narrow_uzumaki.wasm", Refused),

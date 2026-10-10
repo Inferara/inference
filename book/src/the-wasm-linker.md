@@ -135,6 +135,45 @@ each satisfied export. An `unused` function that the source module exports but
 that no satisfied import calls is never pulled into the closure, so it does not
 appear in the merged output.
 
+### The Main Module's Data Segments
+
+Module-scope compound constants (arrays and structs) live in linear memory above
+the shadow stack, at `[stack_size, stack_size + data_bytes)`, and the main module
+initializes that region with one active data segment at an `i32.const` offset.
+The merge carries the main module's segments into the output unchanged — same
+order, same offsets, same bytes — in a Data section written right after the Code
+section. A module with no segments gets no Data section, so a data-free program
+links to exactly the bytes it did before segments were carried.
+
+Three facts make "unchanged" correct rather than merely convenient. No data index
+moves: only `memory.init` and `data.drop` name a segment, Inference codegen emits
+neither, the linker refuses either in a main body, and an external closure using
+either is Tier C, so no external segment ever joins the index space. No offset
+moves: the main module's memory stays memory 0 of the output. And the segment
+still fits: memory reconciliation only widens the minimum from the main module's
+and keeps its maximum. The output never carries a `DataCount` section, which
+SpaceWasm cannot decode; the validator requires one only of code that names a
+segment, which the first fact rules out.
+
+Any other main-side segment is refused with `LinkError::UnsupportedConstruct`
+naming the segment and its problem: a passive segment, a segment over a memory
+other than 0, or an offset expression other than a lone `i32.const`. These are
+shapes Inference codegen does not emit; the refusals guard the public library
+API. An *external's* data segments are a different matter and stay Tier C (see
+[What Each Tier May Touch](#what-each-tier-may-touch)).
+
+Nothing in the program writes the constant region, and a linked external cannot
+be handed it to write through a declared path: analysis rule A047 refuses a
+compound argument at a `mut` `external fn` parameter unless it is rooted at a
+`mut` binding, which a `const` is not, and the repair it suggests copies the
+constant into a `mut` binding on the stack; a closure that stores through a
+parameter not declared `mut` fails the
+[declared write-set check](#the-declared-write-set-check). That covers the
+declared path and nothing more. Tier B proves derivation, not containment, so
+an address the program passes as a scalar `i32`, or a displacement past a
+granted buffer, can reach a constant exactly as it can reach a caller's frame —
+the gap issue #420 tracks.
+
 ### The Example from the Repository
 
 The `scratch/linker-e2e/` demo links three external modules simultaneously. The
@@ -547,9 +586,11 @@ failed: …`) ends by asking for a compiler-bug report.
 What is not checked is everything the merge's main-side gate exists for. That
 gate lets the merge assume a module it can rewrite — index spaces it can
 renumber, sections it can concatenate — and no rewrite happens here. So the
-pass-through accepts what the linker would refuse in a main module: a data or
-element segment, a start function, a table, a second memory, a float or `v128`
-in one of the module's own signatures, and a duplicated or malformed
+pass-through accepts what the linker would refuse in a main module: a data
+segment of a shape the merge does not carry (passive, over another memory, or
+at a computed offset), an element segment, a start function, a table, a second
+memory, a float or `v128` in one of the module's own signatures, and a
+duplicated or malformed
 `inference.spec_funcs` or `inference.hspecs` custom section. No body is
 re-encoded through the [operator allow-list](#floating-point-exclusion), no
 tier is classified, and no write set is derived, since there is no foreign body
@@ -574,7 +615,7 @@ in for it (see
 | `LinkError::UnsatisfiedImport { field }` | No external module tagged with the right logical module name exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists each signal (e.g. "defines or initializes its own static data segments") |
-| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (with the exact mnemonic), a proof-only non-det or uzumaki opcode in an external body, a tail call (`return_call` / `return_call_indirect`), a segment-indexed table op (`table.init` / `elem.drop` / `table.copy`), a float or `v128` value type in a merged signature or local, multi-memory access, or a main module section the merge cannot preserve (start function, table section, non-function imports, data/element segments) |
+| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (with the exact mnemonic), a proof-only non-det or uzumaki opcode in an external body, a tail call (`return_call` / `return_call_indirect`), a segment-indexed table op (`table.init` / `elem.drop` / `table.copy`), a float or `v128` value type in a merged signature or local, multi-memory access, or a main module section the merge cannot preserve (start function, table section, non-function imports, element segments, and data segments other than active ones over memory 0 at a lone `i32.const` offset — see [The Main Module's Data Segments](#the-main-modules-data-segments)), or a main body naming a data segment through `memory.init` / `data.drop` |
 | `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature beyond the supported subset (floats, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls); `details` carries the validator's feature-named diagnostic |
 | `LinkError::AmbiguousImport { module, field }` | More than one supplied external exports a function of the same field name the import requests under the same logical module; the body to merge is ambiguous |
 | `LinkError::IncompatibleMemory { field, reason }` | The linear memory requirements of the main module and the Tier-B external cannot be reconciled into one shared output memory |

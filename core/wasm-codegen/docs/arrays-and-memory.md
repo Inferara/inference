@@ -103,9 +103,13 @@ default is a single page that is entirely stack.
 ```
 +------ pages * 65536 bytes  (default: 0x10000, one page)
 |
-|  [ Data region: future data sections, heap — empty by default ]
+|  [ Unused: nothing the compiler emits reads or writes it ]
 |
-+-- stack size (default 65536) = __stack_pointer initial value
++-- stack size + static data size
+|
+|  [ Static data region: compound module constants, one active data segment ]
+|
++-- stack size (default 65536, less what the data needs) = __stack_pointer initial value
 |
 |  [ Stack grows downward ]
 |
@@ -113,7 +117,7 @@ default is a single page that is entirely stack.
   overflow below 0 = WASM OOB trap
 ```
 
-This is the stack-first layout used by Rust and Zig: the stack occupies the bottom of the address space so that any overflow that pushes `__stack_pointer` below address 0 triggers a WASM out-of-bounds memory trap automatically. Future data sections will be placed above the stack region, starting at the stack size.
+This is the stack-first layout used by Rust and Zig: the stack occupies the bottom of the address space so that any overflow that pushes `__stack_pointer` below address 0 triggers a WASM out-of-bounds memory trap automatically. The static data region — the bytes of every array and struct module constant a body reads — is placed directly above the stack, starting at the stack size, by one active data segment; a default stack gives up exactly the part of its 64 KiB the region needs when the memory has no other room (`MemoryLayout::with_static_data`).
 
 **Frame allocation**:
 

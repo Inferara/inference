@@ -14,8 +14,9 @@
 //!   through the fuzz target's exact wire-format `split` and module-name
 //!   rotation, asserting it neither panics nor produces a silently-invalid `Ok`
 //!   — the same invariant the fuzzer enforces. It also checks each round-2 seed
-//!   reaches its intended rejection (so a seed that silently stops exercising the
-//!   guard it was built for is caught).
+//!   reaches its intended outcome — the rejection it was built for, or, for a
+//!   positive control, a valid merge — so a seed that silently stops exercising
+//!   the path it was built for is caught.
 //! - [`regenerate_fuzz_seeds`] (`#[ignore]`d) rebuilds the corpus from source, so
 //!   the binary blobs are reproducible rather than opaque. Run it with:
 //!   `cargo test -p inference-wasm-linker --test fuzz_seeds regenerate -- --ignored`.
@@ -94,7 +95,7 @@ fn link_like_fuzzer(
 }
 
 /// A named seed: its file name, the bytes, and the substring its rejection must
-/// contain (or `None` for the positive control that must merge into a valid
+/// contain (or `None` for a positive control that must merge into a valid
 /// module). The substring pins each round-2 seed to the *specific* guard it was
 /// built to exercise, so a refactor that lets a laundering seed slip to a
 /// different (or absent) rejection is caught here, not only in the fuzzer.
@@ -154,6 +155,13 @@ fn seeds() -> Vec<Seed> {
         "(module (type (;0;) (func (param i32 i32) (result i32))) \
          (import \"\" \"sum\" (func (;0;) (type 0))) \
          (memory (;0;) 1 1) (data (;0;) (i32.const 0) \"\\2a\\00\\00\\00\") \
+         (func (;1;) (type 0) (param i32 i32) (result i32) local.get 0 local.get 1 call 0) \
+         (export \"compute\" (func 1)))",
+    );
+    let m2b_main = wasm(
+        "(module (type (;0;) (func (param i32 i32) (result i32))) \
+         (import \"\" \"sum\" (func (;0;) (type 0))) \
+         (memory (;0;) 1 1) (data (;0;) \"\\2a\\00\\00\\00\") \
          (func (;1;) (type 0) (param i32 i32) (result i32) local.get 0 local.get 1 call 0) \
          (export \"compute\" (func 1)))",
     );
@@ -272,12 +280,20 @@ fn seeds() -> Vec<Seed> {
             over_declared_locals_external(u32::MAX),
             Some("parse"),
         ),
-        // M-2: a main module carrying an active data segment.
+        // M-2: a main module carrying an active data segment — the shape
+        // Inference codegen emits for module-scope constants. The merge once
+        // dropped it and then refused it; it now carries it, so the seed is a
+        // positive control that must merge. The bytes are unchanged from when
+        // it was a rejection seed, which is what lets the fuzzer's existing
+        // corpus entry keep its name.
+        mk("m2_main_data_segment", &m2_main, pure_lib.clone(), None),
+        // M-2b: a main module carrying a passive data segment, the shape the
+        // merge still refuses rather than re-emits.
         mk(
-            "m2_main_data_segment",
-            &m2_main,
+            "m2b_main_passive_data_segment",
+            &m2b_main,
             pure_lib.clone(),
-            Some("data segment"),
+            Some("passive"),
         ),
         // Positive control: a genuinely-pure external that must merge into a
         // valid module, so the corpus is never vacuously all-rejection.
@@ -348,7 +364,7 @@ fn committed_fuzz_seeds_reach_link_cleanly() {
                 );
             }
             (Err(e), None) => panic!(
-                "seed `{}`: the positive control must merge, got a rejection: {e}",
+                "seed `{}`: a positive control must merge, got a rejection: {e}",
                 seed.name
             ),
         }

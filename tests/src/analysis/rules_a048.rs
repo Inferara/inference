@@ -279,12 +279,11 @@ mod analysis_rules_tests {
         );
     }
 
-    /// A module-scope `const` is checked in its own right. A032 rejects every
-    /// top-level `const` as an unimplemented feature, and both fire: resting
-    /// this closure on A032 would make it silently incomplete the day that
-    /// feature lands.
+    /// A module-scope `const` is checked in its own right. Now that module
+    /// constants are supported, this rule is the one that refuses a string
+    /// one — at both the annotation and the literal.
     #[test]
-    fn a048_module_scope_const_reports_beside_a032() {
+    fn a048_module_scope_const_is_refused_by_this_rule_alone() {
         let source = r#"
             const S: string = "x";
             pub fn main() -> i32 { return 0; }
@@ -294,8 +293,8 @@ mod analysis_rules_tests {
             vec!["the declared type of a variable", "the type of a string literal"]
         );
         assert!(
-            has_error(source, "A032"),
-            "A032 must still reject the top-level `const`; there is no cross-rule suppression"
+            !has_error(source, "A032"),
+            "a module-scope `const` is no longer A032's business"
         );
     }
 

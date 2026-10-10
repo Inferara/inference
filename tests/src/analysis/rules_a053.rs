@@ -225,17 +225,18 @@ mod analysis_rules_tests {
         assert_eq!(count_a053(call), 1);
     }
 
+    /// A module-scope `const` initializer is computed under the arithmetic a
+    /// body runs, so an annotation there is held to this rule exactly as one in
+    /// a body is — the day top-level `const` landed, its initializer joined the
+    /// walk the body-level form was already in.
     #[test]
-    fn a_top_level_const_is_this_rule_s_business_only_once_the_language_has_one() {
-        // The file-scope form never reaches this rule, and the reason is that
-        // the language has no such declaration yet: A032 rejects it outright,
-        // whatever its initializer says. Pinned so that implementing top-level
-        // `const` cannot quietly ship a place an annotation goes unexamined —
-        // the day this stops reading `A032` alone, the initializer has to join
-        // the walk the body-level form is already in.
+    fn a_top_level_const_initializer_is_this_rule_s_business() {
         let source = "const K: i32 = checked(1);
-             pub fn f(a: i32) -> i32 { return a; }";
-        assert_eq!(error_rule_ids(source), vec!["A032"]);
+             pub fn f(a: i32) -> i32 { return a + K; }";
+        assert_eq!(error_rule_ids(source), vec!["A053"]);
+        let governed = "const K: i32 = wrapping(2147483647 + 1);
+             pub fn f(a: i32) -> i32 { return a + K; }";
+        assert!(error_rule_ids(governed).is_empty());
     }
 
     /// A rejected program never reaches code generation, and the way to observe

@@ -256,8 +256,8 @@ fn manifest_target(name: Option<&str>) -> TargetName {
         .unwrap_or(TargetName::DEFAULT)
 }
 
-/// The shadow-stack size a build of a manifest's `[memory]` table emits, or the
-/// default layout's when the table cannot be read or describes no memory a build
+/// The memory layout a build of a manifest's `[memory]` table emits, or the
+/// default layout when the table cannot be read or describes no memory a build
 /// could emit.
 ///
 /// The keys are resolved exactly as `infs` and `infc` resolve them, filling an
@@ -269,7 +269,7 @@ fn manifest_target(name: Option<&str>) -> TargetName {
 /// refuses to build it, so there is no build for the editor to agree with, and
 /// the default layout is the one under which the rest of the file is still
 /// analyzed in full.
-fn manifest_stack_budget(memory: Option<MemoryKeys>) -> u32 {
+fn manifest_layout(memory: Option<MemoryKeys>) -> MemoryLayout {
     memory
         .and_then(|keys| {
             let request = MemoryRequest {
@@ -280,7 +280,6 @@ fn manifest_stack_budget(memory: Option<MemoryKeys>) -> u32 {
             MemoryLayout::resolve(request, MemoryLayoutSource::Manifest).ok()
         })
         .unwrap_or_default()
-        .stack_size()
 }
 
 /// Owns the editor's open-document overlay and the per-entry-file analyses
@@ -1393,7 +1392,7 @@ impl RootDatabase {
             let root = EntryRoot {
                 src_root: settings.src_root,
                 target: manifest_target(settings.build_target.as_deref()),
-                stack_budget_bytes: manifest_stack_budget(settings.memory),
+                layout: manifest_layout(settings.memory),
             };
             self.worker_mut()
                 .roots
@@ -1412,7 +1411,7 @@ impl RootDatabase {
                 .unwrap_or_else(|| Path::new(""))
                 .to_path_buf(),
             target: TargetName::DEFAULT,
-            stack_budget_bytes: MemoryLayout::default().stack_size(),
+            layout: MemoryLayout::default(),
         }
     }
 

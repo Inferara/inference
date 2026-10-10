@@ -109,6 +109,7 @@ use crate::{errors::TypeCheckError, type_checker::TypeChecker, typed_context::Ty
 mod definition_graph;
 pub mod errors;
 mod extern_index;
+pub mod module_consts;
 mod symbol_table;
 mod type_checker;
 pub mod type_info;
@@ -290,8 +291,17 @@ pub fn check_with_diagnostics(arena: AstArena) -> TypeCheckOutcome {
     // whole point of a lossless entry point for tooling.
     ctx.symbol_table = symbol_table;
     ctx.build_type_indexes();
+    // Module constants are computed once every initializer and body is typed
+    // and the type indexes answer struct and enum lookups, which a struct
+    // literal's field order and an enum variant's tag are read from. The static
+    // data region is laid out from those values, so it follows them.
+    let (const_values, const_errors) = module_consts::evaluate(&ctx);
+    ctx.set_module_const_values(const_values);
+    let static_data = module_consts::lay_out(&ctx);
+    ctx.set_static_data(static_data);
     let errors = errors
         .into_iter()
+        .chain(const_errors)
         .map(|(file_label, error)| TypeCheckDiagnostic { file_label, error })
         .collect();
     TypeCheckOutcome {

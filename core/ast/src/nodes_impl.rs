@@ -134,11 +134,15 @@ impl AstArena {
     /// is non-deterministic by construction and `compile` mode strips it before
     /// a byte is emitted, so descending would answer `Some` for every program
     /// that writes one. A module-scope [`Def::Constant`] contributes no
-    /// instruction either: code generation drops one rather than lowering it,
-    /// and a declaration that emits nothing cannot emit something forbidden. A
-    /// `const` written *inside* a body is a different node and is descended, by
-    /// the [`Stmt::ConstDef`] arm of the statement walk. If module-scope `const`
-    /// is ever lowered, a `Def::Constant` arm has to be added here.
+    /// instruction either: the type checker computes its value and code
+    /// generation emits that *value* — an immediate at each use, or bytes of
+    /// the static data region — never the initializer as code, and an
+    /// initializer holding `@` has no value and is refused before code
+    /// generation. A declaration that emits no code cannot emit something
+    /// forbidden. A `const` written *inside* a body is a different node and is
+    /// descended, by the [`Stmt::ConstDef`] arm of the statement walk. If a
+    /// module-scope initializer is ever lowered as code, a `Def::Constant` arm
+    /// has to be added here.
     ///
     /// A `false` from the walk under this — `def_contains_non_det_anywhere`
     /// — is a decision rather than an approximation: every block, every
@@ -187,8 +191,9 @@ impl AstArena {
     /// one arm answers about neither: a [`Def::Constant`] descends its
     /// initializer *expression*, which is what makes a `const` written inside a
     /// function body reachable through the [`Stmt::ConstDef`] arm below, while a
-    /// module-scope one ships no instruction at all — which is why the walk above
-    /// does not ask about one, and why the two disagree there deliberately.
+    /// module-scope one ships its computed value rather than any instruction —
+    /// which is why the walk above does not ask about one, and why the two
+    /// disagree there deliberately.
     ///
     /// A [`Def::Spec`] answers `false` however its body is written, because
     /// `compile` mode strips a specification before emission and a definition
@@ -1008,11 +1013,12 @@ mod tests {
     /// A third definition is passed over for a reason of its own, and the last
     /// row is the one place the two walks disagree deliberately: a module-scope
     /// `const` whose initializer holds an `@` is `None` from the walk the gate
-    /// calls and `true` from the walk under it. Code generation drops such a
-    /// declaration rather than lowering it, so it ships no instruction to be
+    /// calls and `true` from the walk under it. Such an initializer has no
+    /// value — the type checker refuses it — and a module constant that has one
+    /// is emitted as that value, never as code, so it ships no instruction to be
     /// wrong about; what would make the asymmetry wrong is emission learning to
-    /// lower one, and this row is where the decision is written down so a reader
-    /// unifying the two has to come past it.
+    /// lower an initializer as code, and this row is where the decision is
+    /// written down so a reader unifying the two has to come past it.
     ///
     /// Fails if the `Def::Struct` arm is dropped, if a `Def::Spec` arm is added,
     /// or if a `Def::Constant` arm is added to the walk the gate calls without

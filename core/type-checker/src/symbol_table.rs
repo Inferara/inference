@@ -520,6 +520,9 @@ pub(crate) struct ConstInfo {
     /// Source location of the declaration, for the definition note on a
     /// cross-file private-access / private-import diagnostic.
     pub(crate) definition_location: Location,
+    /// The declaration itself, so a use that reaches the constant through an
+    /// import or a qualified path can be tied back to the value it names.
+    pub(crate) def_id: DefId,
 }
 
 #[derive(Debug, Clone)]
@@ -623,6 +626,16 @@ impl Symbol {
     pub(crate) fn as_constant_type(&self) -> Option<TypeInfo> {
         if let Symbol::Constant(info) = self {
             Some(info.type_info.clone())
+        } else {
+            None
+        }
+    }
+
+    /// The declaration a `Constant` symbol stands for; `None` for every other
+    /// kind of symbol.
+    pub(crate) fn as_constant_def(&self) -> Option<DefId> {
+        if let Symbol::Constant(info) = self {
+            Some(info.def_id)
         } else {
             None
         }
@@ -1007,6 +1020,7 @@ impl SymbolTable {
         type_info: TypeInfo,
         visibility: Visibility,
         location: Location,
+        def_id: DefId,
     ) -> anyhow::Result<()> {
         if let Some(current) = self.current_scope {
             if self.scopes[current.index()]
@@ -1021,6 +1035,7 @@ impl SymbolTable {
                     type_info,
                     visibility,
                     definition_location: location,
+                    def_id,
                 }),
             )
         } else {
@@ -1439,6 +1454,32 @@ impl SymbolTable {
         None
     }
 
+    /// The scope [`Self::lookup_variable`] finds `name` in, by the same walk:
+    /// the innermost scope declaring it, never the entry file's root scope from
+    /// inside another file.
+    ///
+    /// A variable found in a *file* scope is a module-scope `const` — the only
+    /// variable a file scope holds — so this is how the identifier arm of
+    /// inference tells a constant from a local or parameter of the same name.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_variable_scope(&self, name: &str) -> Option<u32> {
+        let root_id = self.root_scope;
+        let mut cursor = self.current_scope;
+        let mut crossed_file_boundary = false;
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            let is_root = Some(id) == root_id;
+            if !(is_root && crossed_file_boundary) && s.lookup_variable_local_type(name).is_some() {
+                return Some(id.as_u32());
+            }
+            if self.is_non_entry_file_scope(id.as_u32()) {
+                crossed_file_boundary = true;
+            }
+            cursor = s.parent;
+        }
+        None
+    }
+
     /// Resolves the value type of a top-level `const` named `name`, including one
     /// brought in bare by `use a::b::{C};`.
     ///
@@ -1455,6 +1496,21 @@ impl SymbolTable {
         }
         self.lookup_imported_item_symbol(name)
             .and_then(|symbol| symbol.as_constant_type())
+    }
+
+    /// The declaration [`Self::lookup_constant`] resolves `name` to, by the same
+    /// two routes: a `Constant` symbol in scope, or one brought in bare by an
+    /// item import.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_constant_def(&self, name: &str) -> Option<DefId> {
+        let from_symbol = self
+            .lookup_symbol_file_scoped(name)
+            .and_then(|symbol| symbol.as_constant_def());
+        if from_symbol.is_some() {
+            return from_symbol;
+        }
+        self.lookup_imported_item_symbol(name)
+            .and_then(|symbol| symbol.as_constant_def())
     }
 
     #[must_use = "this is a pure lookup with no side effects"]

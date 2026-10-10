@@ -6,16 +6,16 @@
 //! structures so the borrow does not outlive a single parse pass.
 //!
 //! The main module is rebuilt section-by-section after merging, so its
-//! exports, memory, globals, and name/custom sections are all retained. An
-//! external module is only mined for the closure of a satisfied export, so for
-//! those only the type table, import/local function split, exports, and bodies
-//! matter — but the same structure is reused for both.
+//! exports, memory, globals, data segments, and name/custom sections are all
+//! retained. An external module is only mined for the closure of a satisfied
+//! export, so for those only the type table, import/local function split,
+//! exports, and bodies matter — but the same structure is reused for both.
 
 use std::collections::BTreeMap;
 
 use inf_wasmparser::{
-    CompositeInnerType, CustomSectionReader, Export, ExternalKind, FuncType, GlobalType, Import,
-    KnownCustom, MemoryType, Name, Operator, Parser, Payload, RecGroup, TableType, TypeRef,
+    CompositeInnerType, CustomSectionReader, DataKind, Export, ExternalKind, FuncType, GlobalType,
+    Import, KnownCustom, MemoryType, Name, Operator, Parser, Payload, RecGroup, TableType, TypeRef,
     ValType,
 };
 
@@ -94,6 +94,56 @@ pub(crate) enum GlobalInit {
     I64(i64),
 }
 
+/// One data segment, with its payload copied out so it survives the parse
+/// borrow.
+///
+/// Captured for every module, and read in two places for opposite purposes. The
+/// main module's segments are what the merge re-emits: Inference codegen places
+/// module-scope compound constants in one active segment above the shadow
+/// stack, and an output without it would read zeroes where the constants
+/// should be. An external's are never re-emitted — declaring any is Tier C,
+/// keyed on [`ParsedModule::data_count`] — so for an external this is a record
+/// nothing reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DataSegment {
+    pub kind: DataSegmentKind,
+    /// The segment's bytes, verbatim.
+    pub bytes: Vec<u8>,
+}
+
+/// How a data segment initializes memory: at instantiation (active) or only
+/// when a `memory.init` names it (passive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DataSegmentKind {
+    Passive,
+    Active {
+        /// The memory the segment writes. Recorded as written rather than
+        /// assumed 0, so the merge can refuse a segment over a memory the single
+        /// shared output memory is not.
+        memory_index: u32,
+        offset: DataOffset,
+    },
+}
+
+/// The offset expression of an active data segment, restricted to the one form
+/// the merge can carry without evaluating anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DataOffset {
+    /// A lone `i32.const N`: the only offset Inference codegen emits, and one
+    /// whose meaning does not depend on anything the merge renumbers.
+    I32Const(i32),
+    /// Any other constant expression: a `global.get`, an extended-constant
+    /// arithmetic form, or an `i64.const` over a 64-bit memory.
+    ///
+    /// Recorded rather than refused here because the parse is shared with
+    /// externals, whose segments are refused by the tier gate on declaration
+    /// whatever their offset. The merge refuses it for the main module:
+    /// Inference codegen never emits one, and carrying a general constant
+    /// expression would need its own argument that it still denotes the same
+    /// address after the merge, where a plain number needs none.
+    Unsupported,
+}
+
 /// Whether a parsed module is the main module being linked or an external
 /// dependency merged into it.
 ///
@@ -130,7 +180,18 @@ pub(crate) struct ParsedModule {
     pub globals: Vec<GlobalDef>,
     pub tables: Vec<TableType>,
     pub element_count: usize,
+    /// The number of data segments the module declares — always
+    /// `data_segments.len()`. Kept as its own field because it is the
+    /// declaration signal the tier gate keys an external's Tier-C verdict on,
+    /// which reads more plainly as a count than as a vector's length.
     pub data_count: usize,
+    /// Every data segment the module declares, in data-index order.
+    ///
+    /// The merge re-emits the main module's verbatim and refuses any it cannot
+    /// carry without renumbering or evaluating something (see
+    /// [`DataSegmentKind`] and [`DataOffset`]). An external's are captured too,
+    /// but nothing reads them: declaring any is Tier C.
+    pub data_segments: Vec<DataSegment>,
     pub memory: Option<MemoryType>,
     /// The number of memories the module declares. A module with more than one
     /// memory cannot be merged: the body's memargs would name memories the
@@ -368,6 +429,10 @@ impl ParsedModule {
                 }
                 Payload::DataSection(reader) => {
                     module.data_count += reader.count() as usize;
+                    for data in reader {
+                        let data = data.map_err(|e| LinkError::Parse(e.to_string()))?;
+                        module.data_segments.push(collect_data_segment(&data)?);
+                    }
                 }
                 Payload::MemorySection(reader) => {
                     for memory in reader {
@@ -720,6 +785,45 @@ fn collect_global(global: &inf_wasmparser::Global) -> Result<GlobalDef, LinkErro
     })
 }
 
+/// Copies one data segment out of the parse borrow, classifying its offset.
+///
+/// An offset that is not a lone `i32.const` is recorded as
+/// [`DataOffset::Unsupported`] rather than refused, unlike a global initializer
+/// in [`collect_global`]: the parse is shared with externals, and an external's
+/// segment is refused by the tier gate on declaration whatever its offset, with
+/// a reason that names the actual problem. Only the main module's offsets are
+/// ever read, and the merge refuses an unsupported one there.
+fn collect_data_segment(data: &inf_wasmparser::Data) -> Result<DataSegment, LinkError> {
+    let kind = match &data.kind {
+        DataKind::Passive => DataSegmentKind::Passive,
+        DataKind::Active {
+            memory_index,
+            offset_expr,
+        } => {
+            let mut ops = offset_expr.get_operators_reader();
+            let first = ops.read().map_err(|e| LinkError::Parse(e.to_string()))?;
+            // `is_end_then_eof` is what makes the constant *lone*: an
+            // extended-constant `i32.const 1 i32.const 2 i32.add` also opens on
+            // an `i32.const`, and taking its first operand as the offset would
+            // place the segment at the wrong address.
+            let offset = match first {
+                Operator::I32Const { value } if ops.is_end_then_eof() => {
+                    DataOffset::I32Const(value)
+                }
+                _ => DataOffset::Unsupported,
+            };
+            DataSegmentKind::Active {
+                memory_index: *memory_index,
+                offset,
+            }
+        }
+    };
+    Ok(DataSegment {
+        kind,
+        bytes: data.data.to_vec(),
+    })
+}
+
 /// Stores a code-section body against the local function at `next_body_idx`,
 /// then advances the cursor. Bodies arrive in function-declaration order, so
 /// this assigns body `i` to local function `i` in a single linear pass.
@@ -792,6 +896,57 @@ mod tests {
         assert_eq!(module.element_count, 1, "one element segment");
         assert_eq!(module.data_count, 1, "one data segment");
         assert!(module.memory.is_some(), "memory captured");
+    }
+
+    #[test]
+    fn captures_each_data_segment_with_its_kind_offset_and_bytes() {
+        // One segment of every shape the merge distinguishes. Multi-memory and
+        // extended constants are on under the parser's default features, so
+        // all four validate; the classification is what the merge refuses on.
+        let module = parse(
+            r#"
+            (module
+              (memory (;0;) 1)
+              (memory (;1;) 1)
+              (data (;0;) (i32.const 1024) "\01\02")
+              (data (;1;) "pass")
+              (data (;2;) (memory 1) (i32.const 0) "m1")
+              (data (;3;) (offset i32.const 8 i32.const 8 i32.add) "x"))
+            "#,
+        );
+        assert_eq!(module.data_count, module.data_segments.len());
+        assert_eq!(
+            module.data_segments,
+            vec![
+                DataSegment {
+                    kind: DataSegmentKind::Active {
+                        memory_index: 0,
+                        offset: DataOffset::I32Const(1024),
+                    },
+                    bytes: vec![1, 2],
+                },
+                DataSegment {
+                    kind: DataSegmentKind::Passive,
+                    bytes: b"pass".to_vec(),
+                },
+                DataSegment {
+                    kind: DataSegmentKind::Active {
+                        memory_index: 1,
+                        offset: DataOffset::I32Const(0),
+                    },
+                    bytes: b"m1".to_vec(),
+                },
+                // Opens on an `i32.const` and is still not a lone one: taking
+                // the first operand would place the segment at 8, not 16.
+                DataSegment {
+                    kind: DataSegmentKind::Active {
+                        memory_index: 0,
+                        offset: DataOffset::Unsupported,
+                    },
+                    bytes: b"x".to_vec(),
+                },
+            ]
+        );
     }
 
     #[test]
