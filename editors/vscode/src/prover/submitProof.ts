@@ -15,6 +15,11 @@ export interface SubmitHooks {
     showJob(job: JobResponse, origin?: JobOrigin): Promise<void>;
     /** Submit a finished job's input again as a new job and show it. */
     runAgain(job: JobResponse): Promise<void>;
+    /**
+     * Call when a notice about a job opens; the check it returns turns false
+     * once the server or account changes, as the job then belongs to neither.
+     */
+    sameAccount(): () => boolean;
 }
 
 /**
@@ -32,8 +37,9 @@ export function notifyReplay(job: JobResponse, name: string, hooks: SubmitHooks)
     const verdict = listVerdict(job);
     const message = `Inference: this exact file was already proved${when ? ` ${when}` : ''} — ${verdict.headline}. Showing that job.`;
     const show = verdict.claim !== 'none' ? vscode.window.showInformationMessage : vscode.window.showWarningMessage;
+    const same = hooks.sameAccount();
     void show(message, 'Run Again').then((choice) => {
-        if (choice === 'Run Again') {
+        if (choice === 'Run Again' && same()) {
             void hooks.runAgain(job);
         }
     });
