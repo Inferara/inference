@@ -125,18 +125,19 @@ mod gate {
     /// Every `.inf` under `tests/test_data/panic_free/`.
     ///
     /// Most of these name a construct the compiler once had no lowering for and
-    /// has since gained either a lowering or a rule that refuses it. Seven run
-    /// to a module, fifteen are refused by analysis, and three are stopped by
-    /// the type checker: one before its rule is reached, and the two repeated
-    /// array literal shapes the type checker owns. Each analysis row names the
+    /// has since gained either a lowering or a rule that refuses it. Eight run
+    /// to a module, seventeen are refused by analysis, and four are stopped by
+    /// the type checker: one before its rule is reached, the two repeated array
+    /// literal shapes the type checker owns, and a module constant whose
+    /// initializer is not a constant expression. Each analysis row names the
     /// rule that owns the construct. A construct in that group is refused by analysis
     /// rather than by code generation because analysis runs first — the code
     /// generation backstop behind each of them is pinned separately, by the
     /// negative codegen tests that skip analysis to reach it.
     ///
-    /// Two rows are here for the opposite reason. `arith_modes` and
-    /// `repeated_array_literal` name constructs that lower everywhere they can
-    /// be written, and their value is the breadth: a lowering missing from one
+    /// Three rows are here for the opposite reason. `arith_modes`,
+    /// `repeated_array_literal` and `module_constants` name constructs that
+    /// lower everywhere they can be written, and their value is the breadth: a lowering missing from one
     /// position out of several is a `todo!()` on a program the front end
     /// accepted, which is exactly what this sweep is for.
     const SHAPES: &[Shape] = &[
@@ -183,6 +184,26 @@ mod gate {
             declared: Module,
             why: "the unnamed parameter spends slot 0 and the reachability body's choice suffix \
                   begins after it, which is the alignment the frame plan asserts",
+        },
+        Shape {
+            stem: "const_initializer_not_constant",
+            declared: TypeCheck,
+            why: "a module constant is computed by the compiler, which has no value for a \
+                  call before the program runs, so the type checker refuses the initializer \
+                  where the value is decided",
+        },
+        Shape {
+            stem: "const_in_spec",
+            declared: Analysis(&["A032"]),
+            why: "a `const` inside a `spec` registers in the spec's scope, where no evaluation \
+                  or placement reaches it, so A032 refuses it at the declaration",
+        },
+        Shape {
+            stem: "static_data_exceeds_memory",
+            declared: Analysis(&["A058"]),
+            why: "constant data that fills the page leaves the stack no frame, which A058 \
+                  reports against the memory the module declares, before code generation \
+                  places a segment past the end of it",
         },
         Shape {
             stem: "repeat_count_not_literal",
@@ -281,6 +302,14 @@ mod gate {
                   every position one is written — a return expression, a method body, a \
                   comparison of sums, an annotation nested in another, and a `const` \
                   initializer — so the pipeline runs to a module through each of them",
+        },
+        Shape {
+            stem: "module_constants",
+            declared: Module,
+            why: "a module constant is an immediate or an address into the data segment, read \
+                  through a different path in each position — loop bound, literal and guarded \
+                  index, field, copy, argument, sret return, list element, enum comparison and \
+                  a specification body — so the pipeline runs to a module through each of them",
         },
         Shape {
             stem: "repeated_array_literal",

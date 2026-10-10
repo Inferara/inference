@@ -302,6 +302,27 @@ fn emit_operator(
         Operator::Unique { blockty } => {
             emit_nondet_block(function, UNIQUE_SUBOPCODE, *blockty, map)?;
         }
+        // A main body naming a data segment is refused rather than copied. The
+        // index itself would still resolve — the merge carries the main
+        // module's segments at their own indices — but the validator demands a
+        // `DataCount` section of any code that names a segment, and the output
+        // withholds one on purpose: SpaceWasm cannot decode section id 12. This
+        // refusal is what lets the merge's data-segment argument say no emitted
+        // body names a segment. Inference codegen emits neither operator, so it
+        // guards the public library API; an external body never arrives here
+        // with one, because a closure naming a segment is Tier C.
+        Operator::MemoryInit { .. } | Operator::DataDrop { .. } if origin == BodyOrigin::Main => {
+            let mnemonic = if matches!(op, Operator::MemoryInit { .. }) {
+                "memory.init"
+            } else {
+                "data.drop"
+            };
+            return Err(LinkError::UnsupportedConstruct(format!(
+                "main module body uses `{mnemonic}`, which names a data segment by index; the \
+                 merged output carries no DataCount section, which the validator requires of \
+                 code naming a segment"
+            )));
+        }
         // The main module's verification-only opcodes (the uzumaki rvalues, and
         // any non-det block reached here) are proof scaffolding with no
         // executable meaning: they are copied through verbatim and must bypass
@@ -1233,6 +1254,34 @@ mod tests {
                 )
             });
             assert!(survives, "main {name} must survive re-encoding verbatim");
+        }
+    }
+
+    #[test]
+    fn a_main_body_naming_a_data_segment_is_refused() {
+        // `memory.init` and `data.drop` are the only operators that name a data
+        // segment, and the merge's argument that main's segments need no
+        // renumbering and no DataCount section rests on no emitted main body
+        // naming one. Raw bodies: no locals, then the operator, then `end`.
+        let cases: [(&str, Vec<u8>); 2] = [
+            (
+                "memory.init",
+                // i32.const 0 ×3, memory.init data 0 memory 0
+                vec![
+                    0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x08, 0x00, 0x00, 0x0b,
+                ],
+            ),
+            // data.drop 0
+            ("data.drop", vec![0x00, 0xfc, 0x09, 0x00, 0x0b]),
+        ];
+        for (mnemonic, body) in cases {
+            let map = shifting_map();
+            let err = reencode_body(&body, &map, BodyOrigin::Main)
+                .expect_err("a main body naming a data segment must be refused");
+            assert!(
+                matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains(mnemonic)),
+                "expected an UnsupportedConstruct naming `{mnemonic}`, got {err:?}"
+            );
         }
     }
 }

@@ -163,6 +163,7 @@ pub(crate) mod gate {
         ("spec_mixed_kinds.inf", "spec_mixed_kinds"),
         ("spec_aggregate_values.inf", "spec_aggregate_values"),
         ("spec_array_repeat.inf", "spec_array_repeat"),
+        ("spec_module_consts.inf", "spec_module_consts"),
         ("spec_bounded_iteration.inf", "spec_bounded_iteration"),
         ("spec_bounds_realization.inf", "spec_bounds_realization"),
         (
@@ -1465,21 +1466,33 @@ pub(crate) mod gate {
             }
         }
 
-        // 4. The data-segment preamble line is conditional on a data segment,
-        //    and Inference codegen emits none, so no corpus module carries one.
-        //    Pinning its absence keeps the preamble free of anything a module
-        //    does not use, and keeps every committed `.v` byte-identical to the
-        //    output it had before byte literals gained a private delimiting key.
+        // 4. The data-segment preamble line is conditional on a data segment:
+        //    a module carries it exactly when its translation initializes
+        //    memory, which for Inference codegen means a program whose bodies
+        //    read an array or struct module constant. Pinning the equivalence
+        //    keeps the preamble free of anything a module does not use, and
+        //    keeps every data-free `.v` byte-identical to the output it had
+        //    before byte literals gained a private delimiting key. At least one
+        //    corpus module must carry a segment, so `coqc` elaborates the
+        //    data path of the translation and not only its empty case.
+        let line = "Local Delimit Scope Z_scope with Zst.";
         for m in &generated {
-            let line = "Local Delimit Scope Z_scope with Zst.";
-            assert!(
-                !m.v.contains(line),
-                "`{}` carries no data segment, so its preamble must not \
-                 carry `{line}`; got:\n{}",
+            let has_data = m.v.contains("moddata_init");
+            assert_eq!(
+                m.v.contains(line),
+                has_data,
+                "`{}`'s preamble must carry `{line}` exactly when the module has a data \
+                 segment; got:\n{}",
                 m.source,
                 m.v
             );
         }
+        assert!(
+            generated.iter().any(|m| m.v.contains("MD_active 0%N")),
+            "no corpus module carries a data segment, so `coqc` never elaborates one — \
+             keep a fixture whose bodies read an array or struct module constant in \
+             tests/test_data/inf/"
+        );
 
         // 5. Always-on guard: Rocq definitions are not overloadable, so a module
         //    spelling one top-level name twice is refused outright and nothing in
@@ -4420,6 +4433,69 @@ End Host.
         );
     }
 
+    /// Committed `.v` golden for the module-constants fixture. Regenerate with
+    /// the `#[ignore]`d [`regenerate::regenerate_module_consts_v`] after an
+    /// intentional emitter change.
+    fn module_consts_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_module_consts.v")
+    }
+
+    /// The proof-mode `.v` for the module-constants fixture must match a
+    /// committed golden byte-for-byte, and the golden must carry what a module
+    /// constant means on each side of the translation: in the module, an active
+    /// data segment directly above the stack holding the array and struct
+    /// constants' bytes; in a specification, the computed value — a constant
+    /// term where the source names `TOTAL`, `WEIGHTS[3]` or a field of
+    /// `BOUNDS`.
+    #[test]
+    fn spec_module_consts_matches_committed_v_golden() {
+        let generated = generate_v("spec_module_consts.inf", "spec_module_consts");
+        let golden_path = module_consts_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_module_consts_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_module_consts.inf drifted from the committed golden {}; \
+             if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_module_consts_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // The 16 bytes of `WEIGHTS` and the 8 of `BOUNDS` take 24 bytes, so the
+        // default stack gives up 32 and the segment starts at 65504.
+        assert!(
+            golden.contains("moddata_mode := MD_active 0%N (    BI_const_num (Vi32 65504) ::"),
+            "the data segment must sit directly above the stack:\n{golden}"
+        );
+        let spec = |n: u32| {
+            let head = format!("Definition spec_module_consts__ModuleConsts_hspec{n} : hassert :=");
+            let start = golden
+                .find(&head)
+                .unwrap_or_else(|| panic!("no hspec{n} in:\n{golden}"));
+            let body = &golden[start + head.len()..];
+            body[..body.find("\nDefinition").unwrap_or(body.len())].to_string()
+        };
+        assert!(
+            spec(1).contains("(T_const (Vi32 15)) (T_const (Vi32 15))")
+                && spec(1).contains("(T_const (Vi32 8)) (T_const (Vi32 8))"),
+            "`TOTAL` and `WEIGHTS[3]` must be their computed values:\n{}",
+            spec(1)
+        );
+        assert!(
+            spec(3).contains("(T_const (Vi32 (-100)))") && spec(3).contains("(T_const (Vi32 100))"),
+            "the fields of `BOUNDS` must be their computed values:\n{}",
+            spec(3)
+        );
+    }
+
     /// Committed `.v` golden for the repeated-array-literal fixture. Regenerate
     /// with the `#[ignore]`d [`regenerate::regenerate_array_repeat_v`] after an
     /// intentional emitter change.
@@ -5227,9 +5303,9 @@ End Host.
             aggregate_values_golden_path, array_repeat_golden_path, bounded_iteration_golden_path,
             bounded_prime_golden_path, bounds_realization_golden_path, exists_spec_golden_path,
             false_certificate_golden_path, generate_v, linked_corpus_entry_v,
-            linked_extern_golden_path, literal_ctx_golden_path, narrow_discharge_golden_path,
-            overflow_realization_golden_path, prime_golden_path, quantifier_alternation_golden_path,
-            unique_spec_golden_path,
+            linked_extern_golden_path, literal_ctx_golden_path, module_consts_golden_path,
+            narrow_discharge_golden_path, overflow_realization_golden_path, prime_golden_path,
+            quantifier_alternation_golden_path, unique_spec_golden_path,
         };
         use std::path::{Path, PathBuf};
 
@@ -5307,6 +5383,13 @@ End Host.
         fn regenerate_array_repeat_v() {
             let v = generate_v("spec_array_repeat.inf", "spec_array_repeat");
             write_golden(&v, &array_repeat_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_module_consts_v() {
+            let v = generate_v("spec_module_consts.inf", "spec_module_consts");
+            write_golden(&v, &module_consts_golden_path());
         }
 
         #[test]

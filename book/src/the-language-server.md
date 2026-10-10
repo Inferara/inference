@@ -319,7 +319,7 @@ into one sorted, deduplicated list, each tagged with a stable `code`:
 | Parser | `syntax` | unterminated string, missing `;` |
 | Import resolution | `import` | unresolved `use`, broken imported file |
 | Type checker | `type` | mismatched types, unknown name |
-| Analysis rules | `A001`…`A057` | non-det block constraints (see [Static Analysis](static-analysis.md)) |
+| Analysis rules | `A001`…`A058` | non-det block constraints (see [Static Analysis](static-analysis.md)) |
 
 Only the entry document's own diagnostics are published — errors inside an
 imported file are that file's diagnostics when *it* is open, though a broken
@@ -334,12 +334,16 @@ accepts. A document no manifest governs is analyzed for the default target,
 `wasm32`, and so is one whose manifest names no target or a target this
 compiler does not know.
 
-The shadow stack follows the project the same way. A036 measures the deepest
-call chain's frames against the stack the manifest's `[memory]` table lays out
-— `stack-size` when it is set, the default 64 KiB otherwise — so a project that
-declares `pages = 4` and `stack-size = 131072` is not warned about a 72 KB chain
-its build accepts. A table `infs` would refuse to build, and a document no
-manifest governs, are measured against the default stack.
+The memory follows the project the same way. A036 measures the deepest call
+chain's frames against the stack the manifest's `[memory]` table lays out —
+`stack-size` when it is set, the default 64 KiB otherwise, less whatever part
+of it the program's constant data needs when the memory has no other room —
+so a project that declares `pages = 4` and `stack-size = 131072` is not warned
+about a 72 KB chain its build accepts. A058 judges the stack and the constant
+data together against the table's `pages`, so a `stack-size` that leaves the
+data no room is underlined at the constant the build would refuse. A table
+`infs` would refuse to build, and a document no manifest governs, are measured
+against the default layout.
 
 The manifest is read once per open document and its answer kept until the
 document is closed, so a `[build] target` or `[memory]` table changed while a

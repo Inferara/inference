@@ -59,14 +59,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use inf_wasmparser::ExternalKind;
 use inference_hassert::{HAssert, HFnRef, HSpecMap, HTerm, SpecKind};
 use wasm_encoder::{
-    CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection, GlobalSection,
-    GlobalType as EncGlobalType, MemorySection, MemoryType as EncMemoryType, Module, NameMap,
-    NameSection, TypeSection, ValType as EncValType,
+    CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, Function, FunctionSection,
+    GlobalSection, GlobalType as EncGlobalType, MemorySection, MemoryType as EncMemoryType, Module,
+    NameMap, NameSection, TypeSection, ValType as EncValType,
 };
 
 use crate::closure;
 use crate::func_list::FuncList;
-use crate::parse::{FuncSig, GlobalDef, GlobalInit, ParsedModule, TypeEntry};
+use crate::parse::{
+    DataOffset, DataSegment, DataSegmentKind, FuncSig, GlobalDef, GlobalInit, ParsedModule,
+    TypeEntry,
+};
 use crate::rewrite::{BodyOrigin, IndexMap, call_edges, reencode_body};
 use crate::tier::{self, Tier, WriteContract};
 use crate::{ExternalSpecPolicy, ImportWriteSet, LinkError, LinkOptions, LinkOutput, LinkWarning};
@@ -260,6 +263,44 @@ pub(crate) fn validate_external(logical_module: &str, bytes: &[u8]) -> Result<()
         })?;
 
     Ok(())
+}
+
+/// The offset at which `emit` re-emits main-module data segment `index`, or the
+/// refusal naming the one property that keeps the merge from carrying it.
+///
+/// Admitted is exactly the shape Inference codegen emits for module-scope
+/// constants: active, over memory 0, at a lone `i32.const` offset. Why that
+/// shape survives the merge unchanged is argued at the call site in
+/// [`Plan::build`]; each refusal here is one of the assumptions that argument
+/// rests on failing. `emit` calls it again rather than trusting the plan, so
+/// the shape it writes and the shape the plan admitted cannot drift apart.
+fn main_data_offset(index: usize, segment: &DataSegment) -> Result<i32, LinkError> {
+    let reason = match segment.kind {
+        DataSegmentKind::Active {
+            memory_index: 0,
+            offset: DataOffset::I32Const(offset),
+        } => return Ok(offset),
+        DataSegmentKind::Passive => "is passive; the static merge preserves only active \
+             segments, and a passive one exists only to be named by a `memory.init` the merge \
+             does not carry"
+            .to_string(),
+        DataSegmentKind::Active {
+            memory_index: memory_index @ 1..,
+            ..
+        } => format!(
+            "targets memory {memory_index}; the static merge preserves only segments over \
+             memory 0, the single memory the merged output shares"
+        ),
+        DataSegmentKind::Active {
+            offset: DataOffset::Unsupported,
+            ..
+        } => "has an offset expression other than a lone `i32.const`; the static merge \
+             preserves only segments whose offset it can read as a plain address"
+            .to_string(),
+    };
+    Err(LinkError::UnsupportedConstruct(format!(
+        "main module data segment {index} {reason}"
+    )))
 }
 
 /// One merged external function, ready to be appended to the output.
@@ -487,22 +528,48 @@ impl Plan {
         contracts: Option<&[ImportWriteSet]>,
         options: &LinkOptions,
     ) -> Result<Self, LinkError> {
-        // 0. Reject a main module that carries its own data or element segments.
-        //    `emit` rebuilds the main module section-by-section and emits no
-        //    `DataSection`/`ElementSection`, so a main-side data segment would be
-        //    silently dropped (its memory initializer lost — a valid-but-wrong
-        //    `.wasm`/`.v`) and a main-side element segment would survive as an
-        //    orphaned table reference. Until full preservation-and-reindexing of
-        //    these sections exists, reject up front with a clean diagnostic,
-        //    mirroring the external-side Tier-C reasons. Today Inference codegen
-        //    emits neither section, so this guards the public library API rather
-        //    than the live CLI pipeline.
-        if main.data_count > 0 {
-            return Err(LinkError::UnsupportedConstruct(format!(
-                "main module declares {} data segment(s); the static merge does not yet \
-                 preserve and re-index main-side data segments",
-                main.data_count
-            )));
+        // 0. Admit the main module's data segments only in the shape `emit` can
+        //    carry verbatim, and refuse its element segments outright.
+        //
+        //    Inference codegen places module-scope compound constants in linear
+        //    memory above the shadow stack, in one active segment over memory 0
+        //    at an `i32.const` offset, so the merge must keep that segment or the
+        //    output reads zeroes where the constants should be: a valid-but-wrong
+        //    `.wasm`/`.v`. `emit` re-emits each segment unchanged, and three
+        //    facts are what make "unchanged" correct rather than merely easy:
+        //
+        //    - **No data index moves.** Only `memory.init` and `data.drop` name a
+        //      segment by index. Inference codegen emits neither, the main-body
+        //      re-encoder refuses both (so no reference survives to need
+        //      renumbering, nor a `DataCount` section to declare one), and an
+        //      external closure using either is Tier C, so no external segment
+        //      joins the space to shift main's.
+        //    - **No offset moves.** Main's memory stays memory 0 of the output,
+        //      so a constant offset names the same byte before and after.
+        //    - **The segment still fits.** The reconciled memory's minimum only
+        //      ever widens from main's (`reconcile_pair` takes the larger of the
+        //      two), so a segment instantiation could place in main's memory it
+        //      can place in the output's.
+        //
+        //    Anything else is refused in [`main_data_offset`] rather than
+        //    carried: a passive segment exists only to be named by a
+        //    `memory.init` the re-encoder refuses; a segment over another memory
+        //    has no memory to land in once the output's single shared memory is
+        //    the only one; and an offset that is not a lone `i32.const` is a
+        //    constant expression codegen never emits, which would need its own
+        //    argument that it still denotes the same address after the merge,
+        //    where a plain number needs none. The output never carries a
+        //    `DataCount` section either — SpaceWasm cannot decode section id 12
+        //    — and the validator demands one only of a module whose code names a
+        //    segment, which the first fact rules out.
+        //
+        //    An element segment is refused outright: `emit` writes no
+        //    `ElementSection` and no table for it to initialize, so it would
+        //    survive as an orphaned table reference. Inference codegen emits
+        //    none, so that guard protects the public library API rather than the
+        //    live CLI pipeline.
+        for (index, segment) in main.data_segments.iter().enumerate() {
+            main_data_offset(index, segment)?;
         }
         if main.element_count > 0 {
             return Err(LinkError::UnsupportedConstruct(format!(
@@ -1153,6 +1220,31 @@ impl Plan {
             code.function(&body);
         }
         module.section(&code);
+
+        // Data section: the main module's segments in data-index order, each at
+        // its own offset with its own bytes — section id 11, so it must follow
+        // Code and precede the custom sections below. `Plan::build` admitted
+        // only active, memory-0, `i32.const`-offset segments, and why each
+        // survives the merge unchanged is argued there. No `DataCount` section
+        // is written ahead of it: the validator requires one only of code that
+        // names a segment, which no emitted body does, and SpaceWasm cannot
+        // decode section id 12.
+        //
+        // Nothing is emitted for a module with no segments, so a data-free
+        // module's output is byte-identical to what it was before segments were
+        // carried at all.
+        if !main.data_segments.is_empty() {
+            let mut data = DataSection::new();
+            for (index, segment) in main.data_segments.iter().enumerate() {
+                let offset = main_data_offset(index, segment)?;
+                data.active(
+                    0,
+                    &ConstExpr::i32_const(offset),
+                    segment.bytes.iter().copied(),
+                );
+            }
+            module.section(&data);
+        }
 
         // Name section: preserve sane debug names so the Rocq translator emits
         // named `Definition`s. Subsections must appear in ascending id order:
@@ -2880,6 +2972,13 @@ impl MemoryReconciler {
     /// would be merged into an output the translator silently re-encodes as
     /// 32-bit, so it is rejected absolutely rather than on the reconcile path
     /// alone (audit C-4/L-1).
+    ///
+    /// Main's memory is the anchor and, unlike an external's, is never dropped:
+    /// it is what the main module's own data segments initialize, and `emit`
+    /// re-emits those at their original offsets. That is sound only because no
+    /// later fold shrinks it — [`reconcile_pair`] widens the minimum and keeps
+    /// the anchor's maximum — so every segment main's memory could hold, the
+    /// output's can.
     fn new(main_mem: Option<&inf_wasmparser::MemoryType>) -> Result<Self, LinkError> {
         if let Some(main_mem) = main_mem {
             reject_unsupported_memory_shape(main_mem, "<main module>")?;

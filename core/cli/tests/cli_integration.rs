@@ -2284,6 +2284,14 @@ fn a036_measures_against_the_requested_stack_size() {
         "the diagnostic must name the requested budget, not the default, got:\n{stderr}"
     );
     assert!(
+        stderr.contains("note: the build sets the stack to 8192 bytes"),
+        "the diagnostic must say where the stack size came from, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("help: or give the stack the") && stderr.contains("`--stack-size "),
+        "the diagnostic must name the flag that fixes it, got:\n{stderr}"
+    );
+    assert!(
         !stderr.contains("panicked"),
         "the smaller stack must produce a diagnostic, not a panic, got:\n{stderr}"
     );
@@ -6198,4 +6206,119 @@ fn a_program_with_no_host_import_prints_no_inventory_line() {
             "a program binding no host import must print no inventory line, with {args:?}:\n{stdout}"
         );
     }
+}
+
+/// A program with module-scope constants, an array one read by a body and a
+/// scalar one inlined.
+const MODULE_CONSTS_SOURCE: &str = "\
+const LEN: i32 = 3;
+const TABLE: [i32; 3] = [10, 20, 30];
+
+pub fn at(i: i32) -> i32 {
+    if i >= 0 && i < LEN {
+        return TABLE[i];
+    }
+    return 0;
+}
+";
+
+/// `infc` places an array constant in one active data segment directly above
+/// the default stack, which gives up exactly the 16-byte-rounded room the 12
+/// bytes need: the stack pointer starts at 65520 and the segment is written
+/// there.
+#[test]
+fn module_constants_compile_to_a_data_segment_above_the_stack() {
+    let wasm = compile_source_with(&[], MODULE_CONSTS_SOURCE);
+    let wat = wasmprinter::print_bytes(&wasm).expect("a printable module");
+    assert!(
+        wat.contains("(global (;0;) (mut i32) i32.const 65520)"),
+        "the stack gives the data its room:\n{wat}"
+    );
+    assert!(
+        wat.contains(
+            "(data (;0;) (i32.const 65520) \"\\0a\\00\\00\\00\\14\\00\\00\\00\\1e\\00\\00\\00\")"
+        ),
+        "the table's bytes sit at the top of the stack:\n{wat}"
+    );
+}
+
+/// A requested full-page stack leaves no room for the constant data, which
+/// A058 reports with the constants it holds and the flag that fixes it, before
+/// any artifact is written.
+#[test]
+fn a058_refuses_constant_data_beside_a_full_page_stack() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), MODULE_CONSTS_SOURCE).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--stack-size")
+        .arg("65536");
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("the program's constant data does not fit in linear memory"),
+        "got:\n{stderr}"
+    );
+    assert!(stderr.contains("12 bytes for `TABLE`"), "got:\n{stderr}");
+    assert!(stderr.contains("`--memory-pages 2`"), "got:\n{stderr}");
+    assert!(stderr.contains("`--stack-size 65520`"), "got:\n{stderr}");
+    assert!(!stderr.contains("panicked"), "got:\n{stderr}");
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a rejected build must leave no artifact"
+    );
+
+    // Following the first help builds.
+    compile_source_with(
+        &["--stack-size", "65536", "--memory-pages", "2"],
+        MODULE_CONSTS_SOURCE,
+    );
+}
+
+/// The Rocq translation of a program with constant data carries the active
+/// segment, so the proof describes the memory the module starts with.
+#[test]
+fn module_constants_reach_the_rocq_translation() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), MODULE_CONSTS_SOURCE).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path()).arg("-v");
+    cmd.assert().success();
+    let v = std::fs::read_to_string(temp.child("out").child("prog.v").path())
+        .expect("infc -v must have written out/prog.v");
+    assert!(
+        v.contains("MD_active 0%N"),
+        "the segment is active over memory 0:\n{v}"
+    );
+    assert!(
+        v.contains("moddata_init"),
+        "the segment's bytes are translated:\n{v}"
+    );
+}
+
+/// An initializer that is not a constant expression is a type error naming
+/// the constant, and the build stops before analysis.
+#[test]
+fn a_non_constant_initializer_is_refused_with_the_constant_named() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(
+        dest.path(),
+        "fn three() -> i32 { return 3; }\nconst X: i32 = three();\npub fn f() -> i32 { return X; }\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("the initializer of `const X` must be a constant expression, but a function call is not one"),
+        "got:\n{stderr}"
+    );
 }

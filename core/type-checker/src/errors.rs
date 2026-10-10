@@ -85,7 +85,7 @@ use std::fmt::{self, Display, Formatter};
 use inference_ast::nodes::{ArithMode, Location, OperatorKind, UnaryOperatorKind};
 use thiserror::Error;
 
-use crate::type_info::{TypeInfo, TypeInfoKind};
+use crate::type_info::{NumberType, TypeInfo, TypeInfoKind};
 
 /// How a diagnostic names the kind of value an arithmetic-mode annotation was
 /// written over, together with the clause saying why the annotation has nothing
@@ -364,6 +364,94 @@ pub(crate) const MIXED_PROVIDER_NOTE: &str =
     " A `host::` clause and a linked one are two different bindings even when they reduce to the \
      same import module string: a linked body is merged into the artifact at build time, while a \
      host body is supplied by the embedder at run time.";
+
+/// Why a module-scope `const` initializer has no value: the operation in it that
+/// would trap if the program ran it, as
+/// [`TypeCheckError::ConstEvaluationFailed`] reports it.
+///
+/// Each reason is a run-time trap the compiler meets ahead of time, worded as
+/// the fact about the operands rather than as a trap, because nothing ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstEvalFailure {
+    /// A literal whose value does not fit the type it is written at.
+    LiteralOutOfRange { literal: String, number: NumberType },
+    /// A checked `+`, `-`, `*` or unary `-` whose exact result does not fit its
+    /// type. `op` is the operator as written.
+    Overflow {
+        op: &'static str,
+        exact: i128,
+        number: NumberType,
+    },
+    /// A `/` or `%` whose divisor is zero.
+    DivisionByZero { op: &'static str },
+    /// A signed `/` of the type's minimum by `-1`, whose quotient is one past
+    /// the maximum.
+    DivisionOverflow { number: NumberType },
+    /// A `<<` or `>>` whose count is not below the operand's bit width.
+    ShiftCountOutOfRange {
+        op: &'static str,
+        count: i128,
+        number: NumberType,
+    },
+    /// An index past the end of the constant array it reads.
+    IndexOutOfBounds { index: i128, length: u32 },
+}
+
+impl Display for ConstEvalFailure {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            ConstEvalFailure::LiteralOutOfRange { literal, number } => {
+                let range = number.range();
+                write!(
+                    f,
+                    "the literal `{literal}` does not fit `{}`, whose values are {}..={}",
+                    number.as_str(),
+                    range.start(),
+                    range.end()
+                )
+            }
+            ConstEvalFailure::Overflow { op, exact, number } => {
+                let range = number.range();
+                write!(
+                    f,
+                    "`{op}` produces {exact}, which does not fit `{}` ({}..={}); write \
+                     `wrapping(...)` around it if the two's-complement wrap is the value you mean",
+                    number.as_str(),
+                    range.start(),
+                    range.end()
+                )
+            }
+            ConstEvalFailure::DivisionByZero { op } => write!(f, "`{op}` divides by zero"),
+            ConstEvalFailure::DivisionOverflow { number } => write!(
+                f,
+                "`/` divides the smallest `{ty}` by -1, and the quotient does not fit `{ty}`",
+                ty = number.as_str()
+            ),
+            ConstEvalFailure::ShiftCountOutOfRange { op, count, number } => write!(
+                f,
+                "`{op}` shifts by {count}, but a `{}` shift count must be in 0..{}",
+                number.as_str(),
+                number_bits(*number)
+            ),
+            ConstEvalFailure::IndexOutOfBounds { index, length } => write!(
+                f,
+                "index {index} is out of bounds for an array of length {length}; valid indices \
+                 are 0..{length}"
+            ),
+        }
+    }
+}
+
+/// The bit width of a number type: the bound a shift count must stay below.
+#[must_use = "returns the width without side effects"]
+pub(crate) fn number_bits(number: NumberType) -> u32 {
+    match number {
+        NumberType::I8 | NumberType::U8 => 8,
+        NumberType::I16 | NumberType::U16 => 16,
+        NumberType::I32 | NumberType::U32 => 32,
+        NumberType::I64 | NumberType::U64 => 64,
+    }
+}
 
 /// Represents a type checking error with source location.
 /// All type errors are tied to AST nodes and must have a location.
@@ -929,6 +1017,39 @@ pub enum TypeCheckError {
     )]
     PowOperatorNotSupported { location: Location },
 
+    /// A module-scope `const` whose initializer is not a constant expression:
+    /// `const N: i32 = compute();`, `const X: i32 = @;`.
+    ///
+    /// A module constant has no function to run its initializer in, so the
+    /// compiler computes the value itself and emits it — inline at every use
+    /// for a scalar, as bytes of the static data region for an array or struct.
+    /// That is only possible for an expression whose value is fixed before the
+    /// program runs. `construct` names the part of the initializer that is not,
+    /// as a noun phrase ("a function call").
+    #[error(
+        "{location}: the initializer of `const {name}` must be a constant expression, but {construct} is not one; a module-scope initializer may combine literals, enum variants, other module constants, arithmetic, comparisons, `checked`/`wrapping`, and array and struct literals of those"
+    )]
+    NonConstantInitializer {
+        name: String,
+        construct: &'static str,
+        location: Location,
+    },
+
+    /// A module-scope `const` initializer that is a constant expression but has
+    /// no value: an operation in it would trap at run time.
+    ///
+    /// The compiler computes a module constant the way the program would, under
+    /// the same arithmetic — a checked `+` that overflows, a division by zero, a
+    /// shift by more than the width, an index past the end. Where the program
+    /// would trap, there is no value to emit, so the build is refused instead,
+    /// at the operation that fails.
+    #[error("{location}: `const {name}` cannot be computed: {reason}")]
+    ConstEvaluationFailed {
+        name: String,
+        reason: ConstEvalFailure,
+        location: Location,
+    },
+
     /// The count of a repeated array literal is neither an integer literal nor
     /// a name: `[0; n + 1]`, `[0; len()]`.
     ///
@@ -1285,6 +1406,8 @@ impl TypeCheckError {
             | TypeCheckError::InvalidArraySize { location, .. }
             | TypeCheckError::NonLiteralArraySize { location, .. }
             | TypeCheckError::PowOperatorNotSupported { location }
+            | TypeCheckError::NonConstantInitializer { location, .. }
+            | TypeCheckError::ConstEvaluationFailed { location, .. }
             | TypeCheckError::RepeatCountNotLiteral { location }
             | TypeCheckError::RepeatedUzumaki { location }
             | TypeCheckError::MissingStructField { location, .. }

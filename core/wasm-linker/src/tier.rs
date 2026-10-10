@@ -317,9 +317,13 @@ fn check_write_contract(
 /// - An **active data segment** writes linear memory at instantiation whether
 ///   or not any instruction names it, so dropping an unreferenced one changes
 ///   what the merged program observes. (A *passive* segment is inert until a
-///   `memory.init` names it, so it could in principle be dropped — but
-///   [`crate::parse`] keeps only `data_count` and discards each segment's kind,
-///   so the two cannot be told apart here.) This is a *correctness* argument.
+///   `memory.init` names it, so it could in principle be dropped. The two kinds
+///   can be told apart now — [`crate::parse`] records each segment's kind, so
+///   that the merge can carry the *main* module's active segments — but this
+///   gate still keys on declaration alone: admitting an external's passive
+///   segment by dropping it is a relaxation to make on purpose, not a side
+///   effect of the parser having learned the difference.) This is a
+///   *correctness* argument.
 /// - An **element segment** is rejected on declaration as **conservatism**, not
 ///   on the data-segment argument. Dropping one is in fact unobservable: the
 ///   merged output declares no table for it to initialize, so nothing could read

@@ -124,6 +124,63 @@ pub struct MemoryLayoutError {
     pub surface: MemoryLayoutSource,
 }
 
+/// A program whose static data does not fit the memory beside its stack: the
+/// whole static footprint, which [`crate::MemoryLayout::with_static_data`]
+/// judges, exceeds the pages the module is guaranteed at instantiation.
+///
+/// Carries the numbers rather than a sentence, because the two callers word it
+/// for different readers: analysis names the constants that make up the data
+/// and the keys to change, and code generation, which only meets it when
+/// analysis was skipped, says what it refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("{}", static_data_message(self))]
+pub struct StaticDataError {
+    /// Bytes of static data the program places.
+    pub data_bytes: u64,
+    /// The stack the data has to share the memory with: the requested size,
+    /// or, for a default stack, the one frame it cannot shrink below.
+    pub stack_bytes: u32,
+    /// Whether the build asked for the stack size.
+    pub stack_requested: bool,
+    /// The memory's size in 64 KiB pages.
+    pub pages: u32,
+}
+
+impl StaticDataError {
+    /// The memory's size in bytes.
+    #[must_use]
+    pub fn memory_bytes(&self) -> u64 {
+        u64::from(self.pages) * u64::from(crate::PAGE_SIZE)
+    }
+
+    /// How many bytes the footprint exceeds the memory by.
+    #[must_use]
+    pub fn overflow_bytes(&self) -> u64 {
+        (u64::from(self.stack_bytes) + self.data_bytes).saturating_sub(self.memory_bytes())
+    }
+}
+
+fn static_data_message(error: &StaticDataError) -> String {
+    let memory = error.memory_bytes();
+    let pages = error.pages;
+    if error.stack_requested {
+        format!(
+            "the {}-byte shadow stack and {} bytes of static data need {} bytes, {} more than \
+             the {pages}-page ({memory}-byte) linear memory holds",
+            error.stack_bytes,
+            error.data_bytes,
+            u64::from(error.stack_bytes) + error.data_bytes,
+            error.overflow_bytes()
+        )
+    } else {
+        format!(
+            "{} bytes of static data leave no room for the shadow stack in the {pages}-page \
+             ({memory}-byte) linear memory, which has to hold both",
+            error.data_bytes
+        )
+    }
+}
+
 /// A named bounds-check policy that is not in the vocabulary.
 ///
 /// A struct rather than an enum because there is one way the request fails. The

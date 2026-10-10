@@ -487,7 +487,8 @@ are therefore properties of code generation:
   exported; methods and spec-inner functions are never exported. No dead-code-elimination pass
   runs, so a private, never-called function in a compiled file is still emitted.
 - **Linear memory is stack-first**: the shadow stack occupies the low end and grows downward
-  from its top toward 0, and anything above it is the data region. Its size is one fixed 64 KiB
+  from its top toward 0, and the program's array and struct module constants sit directly above
+  it, written by one active data segment at instantiation. Its size is one fixed 64 KiB
   page by default and is set through `[memory]` / `--memory-pages` / `--stack-size`, not by a
   link-time flag. `[memory] max-pages` / `--max-memory-pages` lets the contract's memory grow up
   to a declared bound.

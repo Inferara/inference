@@ -265,6 +265,7 @@ use inference_ast::nodes::{
 };
 use inference_fn_key::{FnKey, merged_name};
 use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HTerm};
+use inference_type_checker::module_consts::ConstValue;
 use inference_type_checker::{ExternIndex, ExternKind};
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
@@ -698,6 +699,11 @@ pub(super) struct SpecFnTranslator<'a> {
     /// the cap targets the aggregate amplification, and many-scalar bodies
     /// keep their pre-existing encoder backstop.
     leaves_introduced: u32,
+    /// The aggregate child of a literal being resolved, whose leaves the
+    /// literal's introduction has already counted with its own. A module
+    /// constant read whole as that child is not counted a second time; one
+    /// read anywhere else is counted as its value tree is built.
+    counted_child: Option<ExprId>,
     /// The reachability context, `Some` exactly while an `exists`/`unique`
     /// body translates in [`Mode::Reach`].
     reach: Option<ReachCtx<'a>>,
@@ -729,6 +735,7 @@ impl<'a> SpecFnTranslator<'a> {
             pending: Vec::new(),
             univ_guards: Vec::new(),
             leaves_introduced: 0,
+            counted_child: None,
             reach: None,
             env: FxHashMap::default(),
             diags: Vec::new(),
@@ -1835,6 +1842,15 @@ impl<'a> SpecFnTranslator<'a> {
                 self.number_literal(expr, &value)
             }
             Expr::BoolLiteral { value } => HTerm::Const(HConst::I32(i32::from(*value))),
+            // A module constant, bare or qualified, is its computed value. Asked
+            // first: a qualified constant has an enum variant's shape, and name
+            // resolution has already decided that a local of the same name
+            // shadows it by recording no constant for the expression.
+            Expr::Identifier(_) | Expr::TypeMemberAccess { .. }
+                if self.ctx.module_const_ref(expr).is_some() =>
+            {
+                self.module_const_term(expr)
+            }
             Expr::TypeMemberAccess {
                 expr: type_expr,
                 name,
@@ -1946,6 +1962,115 @@ impl<'a> SpecFnTranslator<'a> {
                 zero_sentinel()
             }
         }
+    }
+
+    /// A scalar module constant read in term position: its computed value, as
+    /// the constant code generation emits for it. An aggregate one read whole
+    /// is rejected exactly as an aggregate binding is — an aggregate is not a
+    /// term — and one with no value has its own diagnostic already, so it
+    /// stays silent.
+    fn module_const_term(&mut self, expr: ExprId) -> HTerm {
+        match self.module_const(expr) {
+            Some(value) if value.is_compound() => {
+                self.error_non_scalar_expr(expr);
+                zero_sentinel()
+            }
+            Some(value) => const_scalar_term(value),
+            None => zero_sentinel(),
+        }
+    }
+
+    /// The computed value of the module constant `expr` names, or `None` when
+    /// the expression names none or its initializer has no value.
+    fn module_const(&self, expr: ExprId) -> Option<&'a ConstValue> {
+        let ctx = self.ctx;
+        ctx.module_const_value(ctx.module_const_ref(expr)?)
+    }
+
+    /// A module constant's value, or the part of one a constant access chain
+    /// selected, read as a value tree at `at`.
+    ///
+    /// The leaves of an array or struct are constants, and they cost the leaf
+    /// budget exactly as a literal's do: a comparison against the value nests
+    /// one conjunct per leaf, and a non-constant index into it defines the
+    /// element by one case per element. The count is read off the computed
+    /// value and checked before the tree is built, so a constant too large for
+    /// one obligation is refused rather than expanded. A scalar is one
+    /// constant term and costs nothing, as it does in term position.
+    fn module_const_agg_value(&mut self, at: ExprId, value: &ConstValue) -> AggValue {
+        if value.is_compound() && self.counted_child != Some(at) {
+            let count = const_leaf_count(value);
+            if count > 0 && self.leaf_budget_exceeded(count) {
+                let rendered = self
+                    .ctx
+                    .get_node_typeinfo(node_expr(at))
+                    .map_or_else(|| "this value".to_string(), |t| t.to_string());
+                self.error(
+                    PCode::P013,
+                    self.arena[at].location,
+                    format!(
+                        "this `{rendered}` constant value has {count} scalar leaves, and this \
+                         specification already quantifies {} of the \
+                         {SPEC_FN_MAX_QUANTIFIED_LEAVES} one function may hold: each leaf \
+                         becomes a term of its own, a comparison against the value or a \
+                         non-constant index into it nests one conjunct per leaf, and the \
+                         assertion encoding caps how deeply one obligation may nest; read the \
+                         elements you need at constant indices, or state the property over a \
+                         smaller constant",
+                        self.leaves_introduced,
+                    ),
+                );
+                return AggValue::Sentinel;
+            }
+            self.leaves_introduced += count;
+        }
+        const_agg_value(value)
+    }
+
+    /// Takes the leading constant steps of a chain that reads a module
+    /// constant inside the constant's computed value, so `TABLE[3]` or
+    /// `GRID[1].xs[0]` reaches the one element it names without building any
+    /// other. Stops at the first non-constant index, whose case split needs
+    /// every element of the array it indexes.
+    ///
+    /// Returns the value reached, the access expression that reached it, and
+    /// the number of steps taken; `None` when a step was rejected, with its
+    /// diagnostic recorded, exactly as [`Self::walk_step`] rejects it.
+    fn walk_const_steps(
+        &mut self,
+        base: ExprId,
+        mut value: &'a ConstValue,
+        steps: &[AccessStep],
+    ) -> Option<(&'a ConstValue, ExprId, usize)> {
+        let mut reached = base;
+        for (taken, step) in steps.iter().enumerate() {
+            value = match *step {
+                AccessStep::Field { at, name } => {
+                    let Some(field) = value.field(&self.arena[name].name) else {
+                        self.error_non_scalar_expr(at);
+                        return None;
+                    };
+                    reached = at;
+                    field
+                }
+                AccessStep::Index { at, index } => {
+                    let Some(len) = value.element_count() else {
+                        self.error_non_scalar_expr(at);
+                        return None;
+                    };
+                    let Some(k) = self.fold_const_index(index) else {
+                        return Some((value, reached, taken));
+                    };
+                    let Some(element) = u32::try_from(k).ok().and_then(|p| value.element(p)) else {
+                        let _ = self.reject_out_of_bounds(index, k, len as usize);
+                        return None;
+                    };
+                    reached = at;
+                    element
+                }
+            };
+        }
+        Some((value, reached, steps.len()))
     }
 
     /// An enum variant reference, lowered to its zero-based tag constant.
@@ -2944,6 +3069,9 @@ impl<'a> SpecFnTranslator<'a> {
         if let Some(inner) = self.arena.transparent_inner(expr) {
             return self.agg_value(inner, mode);
         }
+        if let Some(value) = self.module_const(expr) {
+            return self.module_const_agg_value(expr, value);
+        }
         match &self.arena[expr].kind {
             Expr::Identifier(ident_id) => {
                 let name = self.arena[*ident_id].name.clone();
@@ -2976,10 +3104,22 @@ impl<'a> SpecFnTranslator<'a> {
     /// it apply to every candidate before the case split names one. `m[i][0]`
     /// is therefore one split over the rows with `[0]` applied inside it, not
     /// a split whose result is then indexed again.
+    ///
+    /// A chain over a module constant takes its constant steps inside the
+    /// computed value first, so only what the rest of the chain reads becomes
+    /// a value tree.
     fn access_chain(&mut self, expr: ExprId, mode: Mode) -> AggValue {
         let (base_expr, steps) = self.split_access_chain(expr);
-        let mut current = ChainValue::One(self.agg_value(base_expr, mode));
-        for step in &steps {
+        let (base, rest) = if let Some(value) = self.module_const(base_expr) {
+            let Some((value, at, taken)) = self.walk_const_steps(base_expr, value, &steps) else {
+                return AggValue::Sentinel;
+            };
+            (self.module_const_agg_value(at, value), &steps[taken..])
+        } else {
+            (self.agg_value(base_expr, mode), &steps[..])
+        };
+        let mut current = ChainValue::One(base);
+        for step in rest {
             match self.walk_step(current, step, mode) {
                 Some(next) => current = next,
                 None => return AggValue::Sentinel,
@@ -3578,7 +3718,8 @@ impl<'a> SpecFnTranslator<'a> {
     /// term (its witnesses pend as usual and scope over wherever the enclosing
     /// binding is read); a nested literal is part of the enclosing
     /// introduction, so it bypasses the budget re-count; anything else
-    /// aggregate-shaped resolves as a value.
+    /// aggregate-shaped resolves as a value — a module constant among them
+    /// without a re-count either, its leaves being this literal's own.
     fn literal_child(&mut self, expr: ExprId, shape: &AggShape, mode: Mode) -> AggValue {
         let child = self.arena.peel_transparent(expr);
         if let AggShape::Scalar(..) = shape {
@@ -3589,7 +3730,12 @@ impl<'a> SpecFnTranslator<'a> {
             Expr::ArrayLiteral { .. } | Expr::ArrayRepeat { .. } | Expr::StructLiteral { .. } => {
                 self.literal_value(child, shape, mode)
             }
-            _ => self.agg_value(child, mode),
+            _ => {
+                let outer = self.counted_child.replace(child);
+                let value = self.agg_value(child, mode);
+                self.counted_child = outer;
+                value
+            }
         }
     }
 
@@ -4310,6 +4456,65 @@ fn binop(ty: HNumType, op: HBinop, l: HTerm, r: HTerm) -> HTerm {
 
 fn relop(ty: HNumType, op: HRelop, l: HTerm, r: HTerm) -> HTerm {
     HTerm::Relop(ty, op, Box::new(l), Box::new(r))
+}
+
+/// A scalar module constant's computed value as the constant code generation
+/// emits for it: the low 32 or 64 bits of the two's-complement value, a `bool`
+/// as 0 or 1, an enum as its tag.
+#[allow(clippy::cast_possible_truncation)]
+fn const_scalar_term(value: &ConstValue) -> HTerm {
+    HTerm::Const(match value {
+        ConstValue::Int { value, number } => match number {
+            NumberType::I64 | NumberType::U64 => HConst::I64(*value as i64),
+            _ => HConst::I32(*value as i64 as i32),
+        },
+        ConstValue::Bool(value) => HConst::I32(i32::from(*value)),
+        ConstValue::Enum { tag } => HConst::I32(tag.cast_signed()),
+        ConstValue::Array(_) | ConstValue::Repeat { .. } | ConstValue::Struct(_) => {
+            unreachable!("a compound constant is a value tree, never one term")
+        }
+    })
+}
+
+/// The number of scalar leaves in a module constant's value, saturating like
+/// [`AggShape::leaf_count`]. Read off the computed value without visiting a
+/// repeated element more than once, and without visiting more than the first
+/// element of a list, whose elements share one type.
+fn const_leaf_count(value: &ConstValue) -> u32 {
+    match value {
+        ConstValue::Int { .. } | ConstValue::Bool(_) | ConstValue::Enum { .. } => 1,
+        ConstValue::Array(elements) => elements.first().map_or(0, |first| {
+            const_leaf_count(first)
+                .saturating_mul(u32::try_from(elements.len()).unwrap_or(u32::MAX))
+        }),
+        ConstValue::Repeat { value, count } => const_leaf_count(value).saturating_mul(*count),
+        ConstValue::Struct(fields) => fields.iter().fold(0u32, |acc, (_, field)| {
+            acc.saturating_add(const_leaf_count(field))
+        }),
+    }
+}
+
+/// A module constant's computed value as an aggregate value tree, its scalar
+/// leaves the terms [`const_scalar_term`] gives them.
+fn const_agg_value(value: &ConstValue) -> AggValue {
+    match value {
+        ConstValue::Int { .. } | ConstValue::Bool(_) | ConstValue::Enum { .. } => {
+            AggValue::Scalar(const_scalar_term(value))
+        }
+        ConstValue::Array(elements) => {
+            AggValue::Array(elements.iter().map(const_agg_value).collect())
+        }
+        ConstValue::Repeat { value, count } => {
+            let element = const_agg_value(value);
+            AggValue::Array(vec![element; *count as usize])
+        }
+        ConstValue::Struct(fields) => AggValue::Struct(
+            fields
+                .iter()
+                .map(|(name, field)| (name.clone(), const_agg_value(field)))
+                .collect(),
+        ),
+    }
 }
 
 fn zero_sentinel() -> HTerm {

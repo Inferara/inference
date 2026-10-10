@@ -58,12 +58,13 @@
 //! - `--42` and `- -42`, which A033 owns. See
 //!   `walker::separated_negated_literal` for why a literal carrying its own
 //!   sign is excluded here rather than reported twice.
-//! - A module-scope `const` initializer, which no function-body walk reaches.
-//!   The coverage is deliberately identical to A022's, since the two rules
-//!   partition one construct between them: a literal A022 cannot measure is not
-//!   one this rule needs to claim. Nothing escapes today either way — A032
-//!   rejects every module-scope `const` as not yet implemented — but the day
-//!   that feature lands, both rules must gain the position together.
+//!
+//! A module-scope `const` initializer is walked too, although no function-body
+//! walk reaches one: the separated spelling means there what it means in a
+//! body, and the one canonical way to write a negative literal holds wherever
+//! a literal is written. A022's half of the partition is kept there by the type
+//! checker, which computes the constant and measures every literal it reads —
+//! a detached `- 128` at `i8` is refused for the `128` before analysis runs.
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::ExprId;
@@ -90,6 +91,11 @@ crate::rule! {
                 walker::walk_expr(arena, expr_id, &mut |sub_id| {
                     check_negation(arena, &module_path, sub_id, &mut errors);
                 });
+            });
+        });
+        walker::for_each_module_const_initializer(ctx, &mut |expr_id, module_path| {
+            walker::walk_expr(arena, expr_id, &mut |sub_id| {
+                check_negation(arena, module_path, sub_id, &mut errors);
             });
         });
         errors

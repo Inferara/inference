@@ -251,11 +251,10 @@ mod analysis_rules_tests {
         );
     }
 
-    /// A module-scope `const` is checked in its own right, beside A032's
-    /// blanket rejection of every top-level `const`. There is no cross-rule
-    /// suppression.
+    /// A module-scope `const` is checked in its own right: now that module
+    /// constants are supported, this rule is the one that refuses a unit one.
     #[test]
-    fn a049_module_scope_const_reports_beside_a032() {
+    fn a049_module_scope_const_is_refused_by_this_rule_alone() {
         let source = r#"
             const U: () = ();
             pub fn main() -> i32 { return 0; }
@@ -265,8 +264,8 @@ mod analysis_rules_tests {
             vec!["the declared type of a variable", "a value"]
         );
         assert!(
-            has_error(source, "A032"),
-            "A032 must still reject the top-level `const`"
+            !has_error(source, "A032"),
+            "a module-scope `const` is no longer A032's business"
         );
     }
 

@@ -58,6 +58,25 @@ pub(crate) enum CodegenError {
         /// `TypeInfoKind` and have no source position to report.
         location: Option<Location>,
     },
+    /// A single function's frame is larger than the whole shadow stack, so no
+    /// call of it could ever be allocated. A036 rejects the same program with
+    /// the function's call chain named — a one-function chain is a chain — so
+    /// this is reachable only from a caller that skipped analysis.
+    #[error(
+        "{}:{}: a function body's frame needs {frame_bytes} bytes, more than the whole \
+         {stack_bytes}-byte shadow stack; A036 rejects it before code generation",
+        .location.start_line, .location.start_column
+    )]
+    FrameExceedsStack {
+        frame_bytes: u32,
+        stack_bytes: u32,
+        location: Location,
+    },
+    /// The program's static data does not fit the memory beside its stack. A058
+    /// rejects the same program naming its constants and the keys to change, so
+    /// this is reachable only from a caller that skipped analysis.
+    #[error("{0}; A058 rejects it before code generation")]
+    StaticDataDoesNotFit(inference_compiler_interface::StaticDataError),
     /// The function name was not found in the pre-built index map.
     /// This should never happen if the type-checker ran successfully.
     #[error(

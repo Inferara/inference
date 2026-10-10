@@ -324,4 +324,13 @@ mod analysis_rules_tests {
         );
         assert_eq!((location.start_line, location.start_column), (1, minus + 1));
     }
+
+    /// A module-scope `const` initializer is held to the one canonical
+    /// spelling too: a detached minus there is the same offence it is in a
+    /// body, and the glued literal is accepted.
+    #[test]
+    fn a046_rejects_a_spaced_negative_literal_in_a_module_scope_initializer() {
+        assert_a046("const X: i32 = - 5;\npub fn f() -> i32 { return X; }");
+        assert_no_a046("const X: i32 = -5;\npub fn f() -> i32 { return X; }");
+    }
 }

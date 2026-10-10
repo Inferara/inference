@@ -376,6 +376,13 @@ fn collect_expr_refs(arena: &AstArena, expr_id: ExprId, out: &mut Vec<String>) {
                 collect_expr_refs(arena, *elem, out);
             }
         }
+        // A field value reads what any other operand reads; the struct's name
+        // is a type, which is no definition value.
+        Expr::StructLiteral { fields, .. } => {
+            for (_, field) in fields {
+                collect_expr_refs(arena, *field, out);
+            }
+        }
         // The count is an integer literal, which refers to nothing.
         Expr::ArrayRepeat { value, .. } => {
             collect_expr_refs(arena, *value, out);

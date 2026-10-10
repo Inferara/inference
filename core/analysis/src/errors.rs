@@ -23,6 +23,9 @@
 use std::fmt::{self, Display, Formatter};
 
 use inference_ast::nodes::{ArithMode, BlockKind, GuardedOp, Location};
+use inference_compiler_interface::{
+    FRAME_ALIGNMENT, MemoryLayout, MemoryRequest, PAGE_SIZE, StaticDataError,
+};
 use inference_type_checker::errors::TypeMismatchContext;
 use inference_type_checker::type_info::NumberType;
 use thiserror::Error;
@@ -405,6 +408,221 @@ impl Display for ParamWords {
     }
 }
 
+/// One function's frame on the deepest call chain, as A036 itemizes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackFrame {
+    /// The function, as its canonical key renders (`Struct::method` for a
+    /// method, file-qualified across files).
+    pub function: String,
+    /// The bytes A036 charges its frame: a sound upper bound of the frame code
+    /// generation allocates.
+    pub bytes: u32,
+}
+
+/// The deepest call chain, in call order, each function with the frame it is
+/// charged.
+///
+/// The total is computed from the frames rather than stored beside them, so the
+/// two cannot disagree. `Display` renders the chain as `a -> b -> c`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackChain {
+    pub frames: Vec<StackFrame>,
+}
+
+impl StackChain {
+    /// The stack the chain needs: every frame on it at once.
+    #[must_use = "returns the total without modifying the chain"]
+    pub fn total(&self) -> u32 {
+        self.frames
+            .iter()
+            .fold(0u32, |total, frame| total.saturating_add(frame.bytes))
+    }
+}
+
+impl Display for StackChain {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self
+            .frames
+            .iter()
+            .map(|frame| frame.function.as_str())
+            .collect();
+        f.write_str(&names.join(" -> "))
+    }
+}
+
+/// One compound module constant's share of the static data region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstantDataItem {
+    /// The constant as a reader would name it from the entry file: bare for an
+    /// entry-file constant, `file::path::NAME` for one in another file.
+    pub name: String,
+    /// Its bytes in the region.
+    pub bytes: u64,
+}
+
+/// The constants that make up the static data region, largest first, and the
+/// region's total size — which exceeds their sum by the alignment padding
+/// between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstantData {
+    pub items: Vec<ConstantDataItem>,
+    pub total: u64,
+}
+
+/// How many constants a static-data note names before summarizing the rest.
+const CONSTANT_DATA_LISTED: usize = 4;
+
+impl Display for ConstantData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut items: Vec<String> = self
+            .items
+            .iter()
+            .take(CONSTANT_DATA_LISTED)
+            .map(|item| format!("{} bytes for `{}`", item.bytes, item.name))
+            .collect();
+        let rest = &self.items[self.items.len().min(CONSTANT_DATA_LISTED)..];
+        if !rest.is_empty() {
+            let bytes: u64 = rest.iter().map(|item| item.bytes).sum();
+            items.push(format!(
+                "{bytes} bytes for {} other constant{}",
+                rest.len(),
+                if rest.len() == 1 { "" } else { "s" }
+            ));
+        }
+        let listed: u64 = self.items.iter().map(|item| item.bytes).sum();
+        let padding = self.total.saturating_sub(listed);
+        if padding > 0 {
+            items.push(format!("{padding} bytes of alignment padding"));
+        }
+        f.write_str(&join_with_and(&items))
+    }
+}
+
+/// The message of [`AnalysisDiagnostic::StackDepthExceeded`].
+///
+/// The first sentence is the finding; the notes say where the bytes go and where
+/// the stack's size comes from, which is the part a reader cannot see from the
+/// source; the help names the smallest layout that holds the chain, in both the
+/// manifest's and the command line's spelling, because `infs` forwards the
+/// manifest as flags and the compiler cannot tell which one the build used.
+fn stack_depth_exceeded_message(chain: &StackChain, layout: MemoryLayout) -> String {
+    let total = chain.total();
+    let stack = layout.stack_size();
+    let mut lines = vec![format!(
+        "maximum stack depth {chain} uses {total} bytes, exceeding the {stack}-byte stack by {} \
+         bytes; reduce array/struct frame sizes along this call chain",
+        total.saturating_sub(stack)
+    )];
+    let framed: Vec<String> = chain
+        .frames
+        .iter()
+        .filter(|frame| frame.bytes > 0)
+        .map(|frame| format!("{} bytes for `{}`", frame.bytes, frame.function))
+        .collect();
+    if framed.len() > 1 {
+        lines.push(format!("note: its frames are {}", join_with_and(&framed)));
+    }
+    lines.push(format!("note: {}", stack_provenance(layout)));
+    if let Some(request) = layout.request_to_fit(total, u64::from(layout.data_size())) {
+        lines.push(format!(
+            "help: or give the stack the {total} bytes it needs: {}",
+            render_memory_request(request)
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Where a layout's stack size comes from, as a clause a note can carry.
+fn stack_provenance(layout: MemoryLayout) -> String {
+    let stack = layout.stack_size();
+    let pages = layout.pages();
+    let memory = u64::from(pages) * u64::from(PAGE_SIZE);
+    let data = layout.data_size();
+    if layout.is_stack_requested() {
+        format!("the build sets the stack to {stack} bytes")
+    } else if stack < PAGE_SIZE {
+        format!(
+            "the stack is {stack} bytes: the default {PAGE_SIZE}, less what the {data} bytes of \
+             constant data above it take from the {pages}-page ({memory}-byte) memory"
+        )
+    } else if pages == 1 {
+        format!("the stack is the default {stack} bytes, the whole of the 1-page memory")
+    } else {
+        format!("the stack is the default {stack} bytes")
+    }
+}
+
+/// A suggested change to the build's memory request, in the manifest's
+/// spelling and the command line's.
+fn render_memory_request(request: MemoryRequest) -> String {
+    let mut keys = Vec::new();
+    let mut flags = Vec::new();
+    if let Some(stack) = request.stack_size {
+        keys.push(format!("`stack-size = {stack}`"));
+        flags.push(format!("--stack-size {stack}"));
+    }
+    if let Some(pages) = request.pages {
+        keys.push(format!("`pages = {pages}`"));
+        flags.push(format!("--memory-pages {pages}"));
+    }
+    if let Some(max_pages) = request.max_pages {
+        keys.push(format!("`max-pages = {max_pages}`"));
+        flags.push(format!("--max-memory-pages {max_pages}"));
+    }
+    format!(
+        "{} under `[memory]`, or `{}`",
+        join_with_and(&keys),
+        flags.join(" ")
+    )
+}
+
+/// The message of [`AnalysisDiagnostic::StaticDataExceedsMemory`].
+///
+/// Names the constants that make up the data, since those are what the source
+/// shows, and then every fix that holds the program: more pages, and — when the
+/// build asked for a stack larger than its deepest call chain needs — a smaller
+/// stack that leaves the data its room.
+fn static_data_exceeds_memory_message(
+    data: &ConstantData,
+    refusal: &StaticDataError,
+    chain_bytes: u32,
+    layout: MemoryLayout,
+) -> String {
+    let mut lines = vec![
+        format!("the program's constant data does not fit in linear memory: {refusal}"),
+        format!("note: the constant data is {data}"),
+    ];
+    let stack_needed = chain_bytes.max(FRAME_ALIGNMENT);
+    let stack_kept = if layout.is_stack_requested() {
+        layout.stack_size()
+    } else {
+        stack_needed
+    };
+    if let Some(request) = layout.request_to_fit(stack_kept, data.total)
+        && let Some(pages) = request.pages
+    {
+        lines.push(format!(
+            "help: raise the memory to {pages} pages: {}",
+            render_memory_request(MemoryRequest {
+                stack_size: None,
+                ..request
+            })
+        ));
+    }
+    if layout.is_stack_requested() {
+        let room = refusal.memory_bytes().saturating_sub(data.total);
+        let room = room - room % u64::from(FRAME_ALIGNMENT);
+        if room >= u64::from(stack_needed) {
+            lines.push(format!(
+                "help: or lower the stack to at most {room} bytes, which still holds the deepest \
+                 call chain's {chain_bytes}: `stack-size = {room}` under `[memory]`, or \
+                 `--stack-size {room}`"
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
 /// `a`, `a and b`, `a, b and c`: a list read as one clause of a sentence.
 fn join_with_and(items: &[String]) -> String {
     match items {
@@ -708,8 +926,18 @@ pub enum AnalysisDiagnostic {
     #[error("return expression in compound-returning function must be a variable, literal, function call, or field/element access; assign the expression to a temporary variable first")]
     UnsupportedCompoundReturnExpression { location: Location },
 
-    #[error("top-level `const` declarations are not yet supported; declare `{name}` inside a function body, or track progress at https://github.com/Inferara/inference/issues/171")]
-    TopLevelConstNotSupported { name: String, location: Location },
+    /// A `const` declared inside a `spec` block. A module-scope `const` is
+    /// computed by the compiler and emitted; one inside a spec is registered in
+    /// the spec's own scope, where no initializer check, evaluation or static
+    /// data placement reaches it.
+    #[error(
+        "a `const` inside a `spec` block is not yet supported; declare `{name}` at module scope, outside `spec {spec_name}`, where the spec's functions can still read it"
+    )]
+    ConstInSpecNotSupported {
+        name: String,
+        spec_name: String,
+        location: Location,
+    },
 
     #[error("combined unary operators are prohibited: `{op_outer}{op_inner}`; combining unary operators reduces readability and risks misinterpretation, use parentheses with a temporary variable instead")]
     CombinedUnaryOperators {
@@ -729,11 +957,28 @@ pub enum AnalysisDiagnostic {
     #[error("recursive function call is not allowed: {cycle}; Inference forbids direct and indirect recursion (Power of 10, Rule 1) so stack usage stays statically bounded; restructure into an explicit loop")]
     RecursionDetected { cycle: String, location: Location },
 
-    #[error("maximum stack depth {chain} uses {depth_bytes} bytes, exceeding the {budget_bytes}-byte stack; reduce array/struct frame sizes along this call chain")]
+    /// The deepest call chain needs more shadow stack than the build's layout
+    /// gives it. `layout` is the layout with the program's static data placed,
+    /// so its stack is the one the module declares; `data_bytes` is that data,
+    /// which the help needs to suggest a layout that still holds it.
+    #[error("{message}", message = stack_depth_exceeded_message(.chain, *.layout))]
     StackDepthExceeded {
-        chain: String,
-        depth_bytes: u32,
-        budget_bytes: u32,
+        chain: StackChain,
+        layout: MemoryLayout,
+        location: Location,
+    },
+
+    /// The program's static footprint — the shadow stack and the constant data
+    /// placed above it — does not fit the pages the memory is guaranteed at
+    /// instantiation. `refusal` carries the numbers, `data` the constants that
+    /// make up the data, and `chain_bytes` the deepest call chain's need, which
+    /// decides whether shrinking a requested stack is a fix at all.
+    #[error("{message}", message = static_data_exceeds_memory_message(.data, .refusal, *.chain_bytes, *.layout))]
+    StaticDataExceedsMemory {
+        data: ConstantData,
+        refusal: StaticDataError,
+        chain_bytes: u32,
+        layout: MemoryLayout,
         location: Location,
     },
 
@@ -1000,11 +1245,12 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UzumakiOnCompoundArrayElement { location, .. }
             | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
             | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location }
-            | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. }
+            | AnalysisDiagnostic::ConstInSpecNotSupported { location, .. }
             | AnalysisDiagnostic::CombinedUnaryOperators { location, .. }
             | AnalysisDiagnostic::VisibilityInsideSpec { location, .. }
             | AnalysisDiagnostic::RecursionDetected { location, .. }
             | AnalysisDiagnostic::StackDepthExceeded { location, .. }
+            | AnalysisDiagnostic::StaticDataExceedsMemory { location, .. }
             | AnalysisDiagnostic::ArrayIndexConstOutOfBounds { location, .. }
             | AnalysisDiagnostic::DuplicateLocalName { location, .. }
             | AnalysisDiagnostic::NonDetOutsideSpec { location, .. }
@@ -1061,7 +1307,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. } => "A029",
             // A030: removed (multidimensional scalar array uzumaki is now supported at any depth)
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { .. } => "A031",
-            AnalysisDiagnostic::TopLevelConstNotSupported { .. } => "A032",
+            AnalysisDiagnostic::ConstInSpecNotSupported { .. } => "A032",
             AnalysisDiagnostic::CombinedUnaryOperators { .. } => "A033",
             AnalysisDiagnostic::VisibilityInsideSpec { .. } => "A034",
             AnalysisDiagnostic::RecursionDetected { .. } => "A035",
@@ -1087,6 +1333,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::ParamWordsExceeded { .. } => "A055",
             AnalysisDiagnostic::ArrayIndexNotProvenInBounds { .. } => "A056",
             AnalysisDiagnostic::AssertAlwaysFails { .. } => "A057",
+            AnalysisDiagnostic::StaticDataExceedsMemory { .. } => "A058",
         }
     }
 }
@@ -1629,14 +1876,47 @@ mod tests {
         );
         assert_eq!(
             AnalysisDiagnostic::StackDepthExceeded {
-                chain: "a -> b".to_string(),
-                depth_bytes: 80_000,
-                budget_bytes: 65_536,
+                chain: chain(&[("a", 40_000), ("b", 40_000)]),
+                layout: MemoryLayout::default(),
                 location: test_location(),
             }
             .rule_id(),
             "A036"
         );
+    }
+
+    /// A chain of `(function, frame bytes)` in call order.
+    fn chain(frames: &[(&str, u32)]) -> StackChain {
+        StackChain {
+            frames: frames
+                .iter()
+                .map(|&(function, bytes)| StackFrame {
+                    function: function.to_string(),
+                    bytes,
+                })
+                .collect(),
+        }
+    }
+
+    /// A layout as a build would request it, with `data` bytes of static data
+    /// placed.
+    fn placed(
+        pages: Option<u32>,
+        max_pages: Option<u32>,
+        stack_size: Option<u32>,
+        data: u64,
+    ) -> MemoryLayout {
+        MemoryLayout::resolve(
+            MemoryRequest {
+                pages,
+                max_pages,
+                stack_size,
+            },
+            inference_compiler_interface::MemoryLayoutSource::Flag,
+        )
+        .expect("a valid layout")
+        .with_static_data(data)
+        .expect("the data fits")
     }
 
     #[test]
@@ -1897,24 +2177,18 @@ mod tests {
     }
 
     #[test]
-    fn display_top_level_const_not_supported() {
-        let err = AnalysisDiagnostic::TopLevelConstNotSupported {
+    fn display_const_in_spec_not_supported() {
+        let err = AnalysisDiagnostic::ConstInSpecNotSupported {
             name: "X".to_string(),
+            spec_name: "Props".to_string(),
             location: test_location(),
         };
-        let text = err.to_string();
-        assert!(
-            text.contains("top-level `const`"),
-            "A032 diagnostic must mention top-level const, got: {text}"
+        assert_eq!(
+            err.to_string(),
+            "a `const` inside a `spec` block is not yet supported; declare `X` at module scope, \
+             outside `spec Props`, where the spec's functions can still read it"
         );
-        assert!(
-            text.contains('X'),
-            "A032 diagnostic must include the constant name, got: {text}"
-        );
-        assert!(
-            text.contains("inside a function body"),
-            "A032 diagnostic must suggest declaring inside a function body, got: {text}"
-        );
+        assert_eq!(err.rule_id(), "A032");
     }
 
     #[test]
@@ -1989,28 +2263,192 @@ mod tests {
         assert_eq!(err.rule_id(), "A035");
     }
 
+    /// The default layout: the chain, the overflow, every frame, where the
+    /// stack's size comes from, and the smallest layout that holds the chain.
     #[test]
     fn display_stack_depth_exceeded() {
         let err = AnalysisDiagnostic::StackDepthExceeded {
-            chain: "main -> work -> alloc".to_string(),
-            depth_bytes: 98_304,
-            budget_bytes: 65_536,
+            chain: chain(&[("main", 32_768), ("work", 0), ("alloc", 65_536)]),
+            layout: MemoryLayout::default(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "maximum stack depth main -> work -> alloc uses 98304 bytes, exceeding the 65536-byte \
+             stack by 32768 bytes; reduce array/struct frame sizes along this call chain\n\
+             note: its frames are 32768 bytes for `main` and 65536 bytes for `alloc`\n\
+             note: the stack is the default 65536 bytes, the whole of the 1-page memory\n\
+             help: or give the stack the 98304 bytes it needs: `stack-size = 98304` and \
+             `pages = 2` under `[memory]`, or `--stack-size 98304 --memory-pages 2`"
+        );
+        assert_eq!(err.rule_id(), "A036");
+    }
+
+    /// A requested stack too small for the chain: the stack grows inside the
+    /// memory it already has, so only the stack size changes.
+    #[test]
+    fn a_requested_stack_too_small_is_raised_in_place() {
+        let err = AnalysisDiagnostic::StackDepthExceeded {
+            chain: chain(&[("f", 12_288)]),
+            layout: placed(None, None, Some(8_192), 0),
             location: test_location(),
         };
         let text = err.to_string();
         assert!(
-            text.contains("main -> work -> alloc"),
-            "A036 diagnostic must include the call chain, got: {text}"
+            text.contains("exceeding the 8192-byte stack by 4096 bytes"),
+            "{text}"
         );
         assert!(
-            text.contains("98304"),
-            "A036 diagnostic must include the depth in bytes, got: {text}"
+            !text.contains("its frames are"),
+            "one frame needs no breakdown: {text}"
         );
         assert!(
-            text.contains("65536"),
-            "A036 diagnostic must include the budget in bytes, got: {text}"
+            text.contains("note: the build sets the stack to 8192 bytes"),
+            "{text}"
         );
-        assert_eq!(err.rule_id(), "A036");
+        assert!(
+            text.ends_with(
+                "help: or give the stack the 12288 bytes it needs: `stack-size = 12288` under \
+                 `[memory]`, or `--stack-size 12288`"
+            ),
+            "{text}"
+        );
+    }
+
+    /// A default stack that constant data shrank: the note says why the stack
+    /// is below 64 KiB, and more pages give it back without naming a stack size.
+    #[test]
+    fn a_stack_shrunk_by_constant_data_is_explained_and_given_back() {
+        let layout = placed(None, None, None, 2_048);
+        assert_eq!(layout.stack_size(), 63_488);
+        let err = AnalysisDiagnostic::StackDepthExceeded {
+            chain: chain(&[("g", 64_000)]),
+            layout,
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains(
+                "note: the stack is 63488 bytes: the default 65536, less what the 2048 bytes of \
+                 constant data above it take from the 1-page (65536-byte) memory"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "help: or give the stack the 64000 bytes it needs: `pages = 2` under `[memory]`, \
+                 or `--memory-pages 2`"
+            ),
+            "{text}"
+        );
+    }
+
+    /// A growable memory whose cap is below the size a fix needs raises the cap
+    /// in the same suggestion.
+    #[test]
+    fn a_growable_memory_raises_its_cap_with_its_size() {
+        let err = AnalysisDiagnostic::StackDepthExceeded {
+            chain: chain(&[("h", 200_000)]),
+            layout: placed(Some(2), Some(3), Some(65_536), 0),
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.ends_with(
+                "`stack-size = 200000`, `pages = 4` and `max-pages = 4` under `[memory]`, or \
+                 `--stack-size 200000 --memory-pages 4 --max-memory-pages 4`"
+            ),
+            "{text}"
+        );
+    }
+
+    /// A requested stack and constant data that need more than the pages: the
+    /// constants are named largest first, padding included, and both fixes are
+    /// offered because the deepest chain fits a smaller stack.
+    #[test]
+    fn display_static_data_exceeds_memory() {
+        let layout = placed(None, None, Some(65_536), 0);
+        let refusal = layout
+            .with_static_data(4_100)
+            .expect_err("no room above the stack");
+        let err = AnalysisDiagnostic::StaticDataExceedsMemory {
+            data: ConstantData {
+                items: vec![
+                    ConstantDataItem {
+                        name: "TABLE".to_string(),
+                        bytes: 4_000,
+                    },
+                    ConstantDataItem {
+                        name: "lib::LUT".to_string(),
+                        bytes: 96,
+                    },
+                ],
+                total: 4_100,
+            },
+            refusal,
+            chain_bytes: 1_024,
+            layout,
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "the program's constant data does not fit in linear memory: the 65536-byte shadow \
+             stack and 4100 bytes of static data need 69636 bytes, 4100 more than the 1-page \
+             (65536-byte) linear memory holds\n\
+             note: the constant data is 4000 bytes for `TABLE`, 96 bytes for `lib::LUT` and 4 \
+             bytes of alignment padding\n\
+             help: raise the memory to 2 pages: `pages = 2` under `[memory]`, or `--memory-pages 2`\n\
+             help: or lower the stack to at most 61424 bytes, which still holds the deepest call \
+             chain's 1024: `stack-size = 61424` under `[memory]`, or `--stack-size 61424`"
+        );
+        assert_eq!(err.rule_id(), "A058");
+    }
+
+    /// Data that leaves a default stack no room at all, with a chain too deep
+    /// for any smaller stack: only more pages are offered, and a long list of
+    /// constants is summarized.
+    #[test]
+    fn static_data_that_leaves_no_stack_offers_only_more_pages() {
+        let layout = MemoryLayout::default();
+        let refusal = layout
+            .with_static_data(65_536)
+            .expect_err("the data fills the page");
+        let items = (0..6)
+            .map(|i| ConstantDataItem {
+                name: format!("T{i}"),
+                bytes: 65_536 / 8,
+            })
+            .collect();
+        let err = AnalysisDiagnostic::StaticDataExceedsMemory {
+            data: ConstantData {
+                items,
+                total: 65_536,
+            },
+            refusal,
+            chain_bytes: 500,
+            layout,
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("65536 bytes of static data leave no room for the shadow stack"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "8192 bytes for `T3`, 16384 bytes for 2 other constants and 16384 bytes of \
+                 alignment padding"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("help: raise the memory to 2 pages: `pages = 2` under `[memory]`"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("lower the stack"),
+            "a default stack is not offered: {text}"
+        );
     }
 
     #[test]

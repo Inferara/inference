@@ -446,13 +446,13 @@ The resolved binary must report **Binaryen 116 or newer** (`wasm-opt --version`)
 The `[memory]` table sets the linear memory the emitted module declares, how far
 it may grow, and the share of it the shadow stack occupies. Every key is
 optional, and an absent table is identical to one with no keys: one fixed page,
-entirely stack.
+entirely stack — less whatever the program's constant data needs at its top.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `pages` | integer | `1` | Size of linear memory in 64 KiB pages: the memory section's minimum, and all the module is guaranteed at instantiation |
 | `max-pages` | integer | `pages` | The most pages the memory may grow to: the memory section's maximum |
-| `stack-size` | integer | `65536` | Size of the shadow stack in bytes, occupying `[0, stack-size)`; also the budget analysis rule A036 measures call chains against |
+| `stack-size` | integer | `65536`, less what constant data needs | Size of the shadow stack in bytes, occupying `[0, stack-size)`; also the budget analysis rule A036 measures call chains against |
 
 Any key may be given alone; the others keep their defaults. The three are
 validated on load as the layout they complete to, with the same rules and
@@ -465,6 +465,15 @@ wording `infc` applies to its flags:
 - `max-pages × 65536 + stack-size` is at most 2³². A stack overflow traps
   because the wrapped stack pointer lands past the end of memory, and growth
   moves that end up to the maximum.
+
+The program's array and struct module constants live directly above the stack,
+in one data segment the module writes at instantiation. When `stack-size` is
+not set, the stack keeps its 64 KiB if `pages` has room for the constants above
+it, and otherwise gives up exactly the part they need, rounded to 16 bytes — so
+a program with constant tables needs no `[memory]` table at all. A `stack-size`
+that is set is kept as written, and the stack and the constants together must
+fit `pages`; analysis rule A058 reports a build where they do not, naming the
+constants and the `pages` (or smaller `stack-size`) that holds them.
 
 A table that sets anything other than the defaults is declared by the module
 even when the program's own code uses no memory, so a linked module that
@@ -491,7 +500,7 @@ undeclared key is never forwarded, so a project that sets no maximum puts no
 ```toml
 [memory]
 pages = 4           # 256 KiB of linear memory
-stack-size = 131072 # half of it is shadow stack; the rest is the data region
+stack-size = 131072 # half of it is shadow stack; constant data goes above it
 ```
 
 ### [host-imports]

@@ -12,20 +12,24 @@ Three allocation strategies are available:
 2. **Heap allocation**: Use a `malloc`/`free` scheme or a garbage collector. Requires a runtime, introduces allocation failure modes, and makes formal verification significantly harder.
 3. **Shadow stack**: Reserve a region of linear memory and manage it with a stack pointer global, mirroring how native compilers manage function call frames.
 
-Inference uses option 3. Arrays have stack-scoped lifetimes (they are created when a function is entered and destroyed when it returns), so they fit naturally into a stack discipline. No runtime, no allocator, no GC.
+Inference uses option 3 for every array a function owns. Those arrays have stack-scoped lifetimes (they are created when a function is entered and destroyed when it returns), so they fit naturally into a stack discipline. No runtime, no allocator, no GC.
+
+Option 1 is the right one for exactly the case it fits: a module-scope `const` array or struct is immutable and lives for the whole run, so its bytes go in the module's data section, directly above the stack (see [Module Constants and the Static Data Region](#module-constants-and-the-static-data-region)). Option 2 is never used: a heap's failure modes are exactly what the static footprint check exists to rule out.
 
 ## Linear Memory Layout
 
-WebAssembly linear memory is a contiguous byte array. By default Inference allocates one page (64 KiB) and uses it entirely as a stack:
+WebAssembly linear memory is a contiguous byte array. By default Inference allocates one page (64 KiB) and uses it as a stack, less whatever the program's module constants need at its top:
 
 ```text
 Linear Memory (1 page = 64KB)
 +--------------------------------------------+  0x10000 (65536)
 |                                            |
 |     (free space)                           |
-|     (future: data sections, heap)          |
 |                                            |
-+-- __stack_pointer -------------------------+  STACK_SIZE (65536)
++--------------------------------------------+  STACK_SIZE + data
+|     static data: module constants          |
+|                                            |
++-- __stack_pointer -------------------------+  STACK_SIZE (65536 without constants)
 |                                            |
 |         Stack (grows downward)             |
 |                                            |
@@ -33,7 +37,7 @@ Linear Memory (1 page = 64KB)
   overflow below 0 = WASM OOB trap
 ```
 
-`__stack_pointer` is a mutable i32 WebAssembly global initialized to 65536 — the top of the stack region. When a function that needs a frame is called, `__stack_pointer` is decremented by the frame size; when the function returns, it is restored. Not every function that touches arrays needs a frame: a function whose only compound values are parameters it provably never writes reads them through the caller's pointers and never touches `__stack_pointer` at all (see [Array Parameter Passing](#array-parameter-passing)). The stack grows downward toward address 0, following the `--stack-first` convention used by Rust and Zig when targeting WebAssembly. Any stack overflow that pushes the pointer below address 0 causes a WASM out-of-bounds memory trap automatically, providing free overflow protection without a runtime guard. Future data sections and heap allocations will be placed above the stack region, starting at STACK_SIZE and growing upward.
+`__stack_pointer` is a mutable i32 WebAssembly global initialized to 65536 — the top of the stack region. When a function that needs a frame is called, `__stack_pointer` is decremented by the frame size; when the function returns, it is restored. Not every function that touches arrays needs a frame: a function whose only compound values are parameters it provably never writes reads them through the caller's pointers and never touches `__stack_pointer` at all (see [Array Parameter Passing](#array-parameter-passing)). The stack grows downward toward address 0, following the `--stack-first` convention used by Rust and Zig when targeting WebAssembly. Any stack overflow that pushes the pointer below address 0 causes a WASM out-of-bounds memory trap automatically, providing free overflow protection without a runtime guard. The static data region — the bytes of the module constants — starts at STACK_SIZE and grows upward; nothing is ever allocated above it.
 
 ### Configuring the layout
 
@@ -43,9 +47,9 @@ The layout above is the default, not a constant. A project sets it in the `[memo
 |---|---|---|---|
 | `pages` | `--memory-pages <N>` | `1` | Size of linear memory in 64 KiB pages: the memory section's minimum, and all a module is guaranteed at instantiation |
 | `max-pages` | `--max-memory-pages <N>` | `pages` | The most pages the memory may grow to: the memory section's maximum |
-| `stack-size` | `--stack-size <BYTES>` | `65536` | Size of the shadow stack, which spans `[0, stack-size)`, and the budget A036 measures call chains against |
+| `stack-size` | `--stack-size <BYTES>` | `65536`, less what constant data needs | Size of the shadow stack, which spans `[0, stack-size)`, and the budget A036 measures call chains against |
 
-Any key may be given alone; the others keep their defaults, and the three are checked together as the layout they complete to. The stack must fit in `pages`, and be a multiple of the 16-byte frame alignment. Whatever lies between the top of the stack and the end of memory is the data region: ordinary addressable memory that nothing the compiler emits reads or writes. The whole memory is exported, so a host reads a program's values in place — an array a program hands to a host import arrives as the address of the caller's copy, inside the stack region.
+Any key may be given alone; the others keep their defaults, and the three are checked together as the layout they complete to. The stack must fit in `pages`, and be a multiple of the 16-byte frame alignment. Directly above the stack lies the static data region, and above that, up to the end of memory, ordinary addressable memory that nothing the compiler emits reads or writes. The whole memory is exported, so a host reads a program's values in place — an array a program hands to a host import arrives as the address of the caller's copy, inside the stack region.
 
 The memory is **fixed** unless a build sets `max-pages` above `pages`: the memory section declares `min == max`, so `memory.grow` can never move the end of memory. Nothing the compiler emits grows memory; a larger maximum is room for a linked module or the host to grow into, and the linker refuses a module that grows memory against a fixed one. The maximum is always a number — there is no unbounded memory — and the `spacewasm` target refuses a growable one outright, because its interpreter is loaded with `memory.grow` disallowed.
 
@@ -54,6 +58,36 @@ A configured layout is declared even by a program whose own code touches no memo
 The overflow trap constrains the maximum. A wrapped stack pointer lands at `2^32 - stack-size` or above, and must land past the end of memory to trap, so the memory at its maximum and the stack must fit the 32-bit address space together: `max-pages × 64 KiB + stack-size ≤ 2^32`. The check is made against the maximum rather than the size because growth moves the end of memory up to it. A layout that breaks it is refused when the manifest loads or the flags are read.
 
 Programs without arrays do not get a memory section, a global section, or any memory-related exports. The compiler tracks a `has_memory` flag and only emits these sections when at least one function uses arrays — or when the build configures a layout other than the default (below). Existing programs produce identical WASM output — zero regression.
+
+## Module Constants and the Static Data Region
+
+A `const` declared at the top of a file is computed by the type checker, once, under the program's own arithmetic: a checked `+` that would overflow, a division by zero, a shift by the width or an index past the end refuses the build at that operation, since the program would trap there. What code generation emits for it depends on its type:
+
+- A **scalar** constant — an integer, a `bool`, an enum — is an immediate at every use, exactly the instruction its literal would be. It occupies no memory.
+- An **array or struct** constant that some function, method or specification reads is laid out as bytes of the **static data region**, in source order, each at its natural alignment, with the layout a frame slot of its type has. One active data segment writes the whole region at `STACK_SIZE` when the module is instantiated, and a read of the constant is `i32.const <address>`, where a compound binding's read would be `local.get` of its slot address — so indexing, field access, copying and passing it as an argument lower exactly as they do for a binding. A compound constant only another constant's initializer reads is folded into that constant's value and takes no bytes.
+
+```text
+const TABLE: [i32; 3] = [10, 20, 30];
+pub fn at(i: i32) -> i32 { if i >= 0 && i < 3 { return TABLE[i]; } return 0; }
+```
+
+```wat
+(memory (;0;) 1 1)
+(global (;0;) (mut i32) i32.const 65520)          ;; the stack gave up 16 bytes
+...
+  i32.const 65520                                 ;; TABLE's address
+  local.get 0
+  ...                                             ;; bounds guard, then index
+  i32.load
+...
+(data (;0;) (i32.const 65520) "\0a\00\00\00\14\00\00\00\1e\00\00\00")
+```
+
+Nothing ever writes the region. The type checker refuses an assignment rooted at a constant, however the constant is named — an item import included. A binding initialized from one receives a copy of its bytes, a callee that writes a compound parameter copies it into its own frame first, a returned constant is copied through the result pointer, and A047 refuses a constant at a `mut` parameter of an `external fn`. A host can write the exported memory, which is outside what the program controls, as it always was.
+
+**The stack makes room.** A stack the build did not size keeps its default 64 KiB when the memory has room for the data above it, and otherwise gives up exactly the part the data needs, rounded down to the 16-byte frame grid. A program with a few constant tables therefore builds in the default page with no `[memory]` table, and A036 measures its call chains against the smaller stack — naming the constant data in its note when that is why the stack is below 64 KiB. A `stack-size` the build asked for is never shrunk: the data has to fit between its top and the end of `pages`, which A058 checks, naming the constants and offering either more pages or a smaller stack that still holds the deepest call chain. The data is measured against `pages`, not `max-pages`, because it is written at instantiation, before any growth.
+
+Analysis and code generation read one placement, computed by the type checker, and place it with one function, `MemoryLayout::with_static_data`. That is what makes the stack A036 measures the stack the module declares.
 
 ## Stack Frame Layout
 
@@ -573,15 +607,16 @@ Zig also uses `--stack-first` layout when targeting WASM, placing the stack at l
 
 ## WASM Section Layout
 
-When `has_memory` is true, or the build configured a non-default layout, the compiler emits three additional sections in the WASM module:
+When `has_memory` is true, or the build configured a non-default layout, the compiler emits three additional sections in the WASM module, and a fourth when the program reads a compound module constant:
 
 | Section | Contents |
 |---|---|
 | Memory | `pages` minimum, `max-pages` maximum; by default `(memory 1 1)` |
-| Global | `__stack_pointer`: mutable i32, initialized to `stack-size`; by default `(global (mut i32) i32.const 65536)` |
+| Global | `__stack_pointer`: mutable i32, initialized to the stack size; by default `(global (mut i32) i32.const 65536)` |
 | Export | `"memory"` (memory 0), `"__stack_pointer"` (global 0) |
+| Data | one active segment over memory 0 at `i32.const <stack size>`, holding the static data region |
 
-These sections are ordered according to the WASM specification: Type, Function, Memory, Global, Export, Code, Name. The ordering is mandatory — a misordered module fails validation.
+These sections are ordered according to the WASM specification: Type, Function, Memory, Global, Export, Code, Data, Name. The ordering is mandatory — a misordered module fails validation. No `DataCount` section is emitted: it is required only by `memory.init` and `data.drop`, which nothing emits, and the SpaceWasm interpreter cannot decode one.
 
 When no function uses arrays and the layout is the default, these sections are omitted entirely. The output is byte-identical to what the compiler produced before array support was added.
 

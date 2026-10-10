@@ -293,6 +293,14 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
         ));
     }
 
+    // The program's static data sits directly above the stack, and a stack the
+    // build did not size gives up what the data needs. Placing it here, before
+    // anything reads the layout, is what makes the stack this module declares
+    // the one A036 measured: analysis places the same data the same way.
+    let layout = layout
+        .with_static_data(typed_context.static_data().size())
+        .map_err(CodegenError::StaticDataDoesNotFit)?;
+
     let arena = typed_context.arena();
 
     if !target.supports_non_det_functions() {
@@ -308,8 +316,9 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
         // approximation, which is what a backstop against instructions the
         // runtime cannot decode has to be. It stops at two definitions that ship
         // no instruction for it to be wrong about: a `Def::Spec`, whose body
-        // compile mode strips before emission, and a module-scope `const`, which
-        // emission drops rather than lowering.
+        // compile mode strips before emission, and a module-scope `const`, whose
+        // computed value is emitted as an immediate or as data, never its
+        // initializer as code.
         for source_file in typed_context.source_files() {
             if let Some(def_id) = arena.first_non_det_def_deep(&source_file.defs) {
                 cov_mark::hit!(wasm_codegen_target_rejects_nondet_function);
@@ -602,6 +611,7 @@ fn emit(
     let mut compiler = Compiler::new(module_name);
     compiler.set_emit_features(features);
     compiler.set_memory_layout(layout);
+    compiler.set_static_data(typed_context.static_data().image(typed_context));
 
     // Bounds checks are on for every build, in either compilation mode and at
     // every target and optimization level: no input reaching here can turn them
