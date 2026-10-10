@@ -15,7 +15,9 @@ import {
     mergeFirstPage,
     pollDelay,
     relativeTime,
+    rereadJob,
 } from '../prover/jobList';
+import { ApiError } from '../prover/api';
 import type { JobResponse, JobStatus } from '../prover/types';
 
 const job = (id: string, createdAt: string, status: JobStatus = 'Succeeded'): JobResponse => ({
@@ -118,6 +120,17 @@ describe('finishedJobs', () => {
         ];
         assert.deepStrictEqual(finishedJobs(previous, next, new Set(['a', 'b', 'c', 'd'])).map((j) => j.id), ['a']);
         assert.deepStrictEqual(finishedJobs(previous, next, new Set(['b'])).map((j) => j.id), []);
+    });
+
+    it('keeps a stale job whose re-read fails, and drops one the server deleted', async () => {
+        const running: JobResponse = { id: 'a', status: 'Running', holesClosed: 1 };
+        const fresh: JobResponse = { id: 'a', status: 'Succeeded', holesClosed: 2 };
+        assert.strictEqual(await rereadJob(running, async () => fresh), fresh);
+        assert.strictEqual(await rereadJob(running, async () => { throw new Error('socket hang up'); }), running);
+        assert.strictEqual(await rereadJob(running, async () => { throw new ApiError(503, 'unavailable'); }), running);
+        assert.strictEqual(await rereadJob(running, async () => { throw new ApiError(404, 'not found'); }), null);
+        // Kept as active, so the next load re-reads it again.
+        assert.deepStrictEqual(staleActiveJobs([running], []), [running]);
     });
 
     it('treats Lost as still moving (the server re-queues it)', () => {

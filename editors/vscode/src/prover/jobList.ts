@@ -3,6 +3,7 @@
  * under plain node.
  */
 
+import { ApiError } from './api';
 import { isCancelableStatus, isTerminalStatus } from './jobStatus';
 import { listVerdict } from './jobVerdict';
 import type { JobResponse, JobStatus } from './types';
@@ -171,6 +172,22 @@ export function staleActiveJobs(known: readonly JobResponse[], firstPage: readon
             return true;
         })
         .slice(0, MAX_STALE_REFRESH);
+}
+
+/**
+ * A stale job after its re-read: the server's copy, or the last known one when
+ * the read fails, so it stays tracked and the next load tries again. Only a
+ * job the server no longer has (deleted) is dropped.
+ */
+export async function rereadJob(
+    job: JobResponse,
+    read: (id: string) => Promise<JobResponse>,
+): Promise<JobResponse | null> {
+    try {
+        return await read(job.id);
+    } catch (err) {
+        return err instanceof ApiError && err.status === 404 ? null : job;
+    }
 }
 
 /**

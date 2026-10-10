@@ -439,7 +439,8 @@ function verdictActions(job: JobResponse, result: JobResultResponse | null, verd
             ? { action: 'openCertificate', label: 'Certificate', icon: 'linkExternal', ariaLabel: 'Open the certificate in the portal' }
             : { action: 'openPortal', label: 'Open in portal', icon: 'linkExternal', ariaLabel: 'Open this job in the portal' });
     }
-    if (['failed', 'timed-out', 'provision-failed', 'lost', 'canceled'].includes(verdict.kind)) {
+    // Not for Lost: the server runs it again by itself.
+    if (['failed', 'timed-out', 'provision-failed', 'canceled'].includes(verdict.kind)) {
         actions.push({ action: 'resubmit', label: 'Run Again', icon: 'rerun', ariaLabel: 'Run this proof job again' });
     }
     return actions;
