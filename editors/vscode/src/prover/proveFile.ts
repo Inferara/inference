@@ -10,6 +10,7 @@ import { ProverApi } from './api';
 import { BuildProblems } from './buildProblems';
 import { requireConfig } from './config';
 import { parseInfcDiagnostics, summarizeDiagnostics, type ParsedDiagnostics } from './infcDiagnostics';
+import { functionDeclaration } from './infSource';
 import { proveInfFile, type ProveOutcome } from './proveFlow';
 import type { DuplicateDefinition } from './submission';
 import {
@@ -311,20 +312,18 @@ async function duplicateInSource(
 ): Promise<vscode.Range | undefined> {
     try {
         const doc = await vscode.workspace.openTextDocument(source);
-        const pattern = new RegExp(`\\bfn\\s+${duplicate.name.replace(/[^\w]/g, '')}\\b`);
-        for (let i = 0; i < doc.lineCount; i++) {
-            const m = pattern.exec(doc.lineAt(i).text);
-            if (m) {
-                const range = new vscode.Range(i, m.index, i, m.index + m[0].length);
-                const diagnostic = new vscode.Diagnostic(
-                    range,
-                    `“${duplicate.name}” is also the module name (the file is named ${path.basename(source.fsPath)}). Rename the file or this function.`,
-                    vscode.DiagnosticSeverity.Error,
-                );
-                diagnostic.source = 'infc (proof build)';
-                problems.publish(source, new Map([[source.toString(), { uri: source, items: [diagnostic] }]]));
-                return range;
-            }
+        const name = duplicate.name.slice(duplicate.name.lastIndexOf('.') + 1).replace(/[^\w]/g, '');
+        const found = functionDeclaration(doc.getText(), name);
+        if (found) {
+            const range = new vscode.Range(found.line, found.start, found.line, found.end);
+            const diagnostic = new vscode.Diagnostic(
+                range,
+                `“${duplicate.name}” is also the module name (the file is named ${path.basename(source.fsPath)}). Rename the file or this function.`,
+                vscode.DiagnosticSeverity.Error,
+            );
+            diagnostic.source = 'infc (proof build)';
+            problems.publish(source, new Map([[source.toString(), { uri: source, items: [diagnostic] }]]));
+            return range;
         }
     } catch {
         // The source cannot be read; the notification still explains.
