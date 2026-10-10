@@ -16,8 +16,8 @@ export interface SubmitHooks {
     /** Submit a finished job's input again as a new job and show it. */
     runAgain(job: JobResponse): Promise<void>;
     /**
-     * Call when a notice about a job opens; the check it returns turns false
-     * once the server or account changes, as the job then belongs to neither.
+     * Call when a submission starts; the check it returns turns false once
+     * the server or account changes, as its job then belongs to neither.
      */
     sameAccount(): () => boolean;
 }
@@ -26,7 +26,7 @@ export interface SubmitHooks {
  * Tell the user that the server returned an existing job for this exact
  * file (its panel opens as usual), and offer Run Again for a finished one.
  */
-export function notifyReplay(job: JobResponse, name: string, hooks: SubmitHooks): void {
+export function notifyReplay(job: JobResponse, name: string, hooks: SubmitHooks, same: () => boolean): void {
     const when = relativeTime(job.createdAt, Date.now());
     if (isActiveJob(job)) {
         void vscode.window.showInformationMessage(
@@ -37,12 +37,21 @@ export function notifyReplay(job: JobResponse, name: string, hooks: SubmitHooks)
     const verdict = listVerdict(job);
     const message = `Inference: this exact file was already proved${when ? ` ${when}` : ''} — ${verdict.headline}. Showing that job.`;
     const show = verdict.claim !== 'none' ? vscode.window.showInformationMessage : vscode.window.showWarningMessage;
-    const same = hooks.sameAccount();
     void show(message, 'Run Again').then((choice) => {
         if (choice === 'Run Again' && same()) {
             void hooks.runAgain(job);
         }
     });
+}
+
+/**
+ * The server or account changed while `name` was being submitted: its job is
+ * on the server it was sent to, which the views no longer show.
+ */
+export function notifySubmittedElsewhere(name: string, job: JobResponse, serverUrl: string): void {
+    void vscode.window.showInformationMessage(
+        `Inference: ${name} was submitted to ${serverUrl} as job ${job.id}. The proof server or API key has changed since, so the job isn't shown here.`,
+    );
 }
 
 const UPLOAD_NOTICE_KEY = 'inference.prover.uploadNotice';
@@ -154,6 +163,8 @@ export function registerSubmitProofCommand(
     hooks: SubmitHooks,
 ): vscode.Disposable {
     return vscode.commands.registerCommand('inference.submitProof', async (arg?: unknown) => {
+        // The job belongs to the server and key the submission starts with.
+        const same = hooks.sameAccount();
         const config: ProverConfig | undefined = await requireConfig(context.secrets);
         if (!config) {
             return;
@@ -188,8 +199,12 @@ export function registerSubmitProofCommand(
                 return;
             }
             log.info(`Prover: submitted ${filename} (${outcome.holes} holes) → job ${outcome.job.id}${outcome.replayed ? ' (existing job)' : ''}`);
+            if (!same()) {
+                notifySubmittedElsewhere(filename, outcome.job, config.serverUrl);
+                return;
+            }
             if (outcome.replayed) {
-                notifyReplay(outcome.job, filename, hooks);
+                notifyReplay(outcome.job, filename, hooks, same);
             }
             await hooks.showJob(outcome.job, { vPath: uri.fsPath, vSha256: outcome.sha256 });
         } catch (err) {

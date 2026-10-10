@@ -7,11 +7,20 @@ import { detectInfs } from '../toolchain/detection';
 import { runDoctor } from '../toolchain/doctor';
 import { run } from '../utils/spawn';
 import { ProverApi } from './api';
+import { BuildProblems } from './buildProblems';
 import { requireConfig } from './config';
 import { parseInfcDiagnostics, summarizeDiagnostics, type ParsedDiagnostics } from './infcDiagnostics';
 import { proveInfFile, type ProveOutcome } from './proveFlow';
 import type { DuplicateDefinition } from './submission';
-import { confirmUpload, notifyReplay, pickFile, saveBeforeRun, submitErrorMessage, type SubmitHooks } from './submitProof';
+import {
+    confirmUpload,
+    notifyReplay,
+    notifySubmittedElsewhere,
+    pickFile,
+    saveBeforeRun,
+    submitErrorMessage,
+    type SubmitHooks,
+} from './submitProof';
 import { installableVersion, resolvedInfcPath } from './toolchainIdentity';
 
 /** Last compiler check, shown in the Configuration view. */
@@ -101,6 +110,8 @@ export function registerProveFileCommand(
             vscode.window.showInformationMessage('Inference: a proof build is already running.');
             return;
         }
+        // The job belongs to the server and key the build starts with.
+        const same = hooks.sameAccount();
         const config = await requireConfig(context.secrets);
         if (!config) {
             return;
@@ -162,7 +173,7 @@ export function registerProveFileCommand(
                 cancelled: () => progress.cancelled,
             });
             progress.pause();
-            again = (await report(outcome, uri, log, hooks, onCompilerCheck, problems)) === 'again';
+            again = (await report(outcome, uri, { log, hooks, onCompilerCheck, problems, same, serverUrl: config.serverUrl })) === 'again';
         } catch (err) {
             progress.pause();
             log.error(`Prover: prove ${source}: ${err instanceof Error ? err.message : err}`);
@@ -180,20 +191,23 @@ export function registerProveFileCommand(
 }
 
 /**
- * The Problems entries from proof builds. Each build owns what it published
- * (the entry file and any imported files) and replaces it on the next build
- * of the same entry; an edit clears a file's entries, and errors for a file
- * edited while its build ran are not published (they describe old text).
+ * The Problems entries from proof builds (the entry file and any imported
+ * files; see {@link BuildProblems}). An edit clears a file's entries, and
+ * errors for a file edited while its build ran are not published (they
+ * describe old text).
  */
 class ProveProblems implements vscode.Disposable {
     private readonly collection = vscode.languages.createDiagnosticCollection('inference-prove');
-    private readonly owned = new Map<string, vscode.Uri[]>();
+    private readonly builds = new BuildProblems<vscode.Diagnostic>();
+    private readonly uris = new Map<string, vscode.Uri>();
     private edited: Set<string> | null = null;
     private readonly onEdit = vscode.workspace.onDidChangeTextDocument((e) => {
         if (e.contentChanges.length === 0) {
             return;
         }
-        this.edited?.add(e.document.uri.toString());
+        const key = e.document.uri.toString();
+        this.edited?.add(key);
+        this.builds.forget(key);
         if (this.collection.has(e.document.uri)) {
             this.collection.delete(e.document.uri);
         }
@@ -201,12 +215,24 @@ class ProveProblems implements vscode.Disposable {
 
     /** A build of `source` starts: drop what its previous build published. */
     start(source: vscode.Uri): void {
-        for (const uri of this.owned.get(source.toString()) ?? []) {
+        for (const key of this.builds.start(source.toString())) {
+            this.show(key);
+        }
+        this.edited = new Set();
+    }
+
+    /** Show every entry's errors for one file. */
+    private show(key: string): void {
+        const uri = this.uris.get(key);
+        if (!uri) {
+            return;
+        }
+        const items = this.builds.shown(key, (d) => `${d.range.start.line}:${d.range.start.character}|${d.message}`);
+        if (items.length > 0) {
+            this.collection.set(uri, items);
+        } else {
             this.collection.delete(uri);
         }
-        this.collection.delete(source);
-        this.owned.delete(source.toString());
-        this.edited = new Set();
     }
 
     finish(): void {
@@ -215,17 +241,16 @@ class ProveProblems implements vscode.Disposable {
 
     /** Publish `source`'s build errors per file; returns how many were published. */
     publish(source: vscode.Uri, byFile: ReadonlyMap<string, { uri: vscode.Uri; items: vscode.Diagnostic[] }>): number {
-        const owned = this.owned.get(source.toString()) ?? [];
         let count = 0;
         for (const [key, { uri, items }] of byFile) {
             if (this.edited?.has(key)) {
                 continue;
             }
-            this.collection.set(uri, items);
-            owned.push(uri);
+            this.uris.set(key, uri);
+            this.builds.add(source.toString(), key, items);
+            this.show(key);
             count += items.length;
         }
-        this.owned.set(source.toString(), owned);
         return count;
     }
 
@@ -307,18 +332,31 @@ async function duplicateInSource(
     return undefined;
 }
 
+interface ReportContext {
+    log: vscode.LogOutputChannel;
+    hooks: SubmitHooks;
+    onCompilerCheck: (check: CompilerCheck) => void;
+    problems: ProveProblems;
+    /** False once the server or account changed after the command started. */
+    same: () => boolean;
+    /** The server the build checked against and uploaded to. */
+    serverUrl: string;
+}
+
 async function report(
     outcome: ProveOutcome,
     sourceUri: vscode.Uri,
-    log: vscode.LogOutputChannel,
-    hooks: SubmitHooks,
-    onCompilerCheck: (check: CompilerCheck) => void,
-    problems: ProveProblems,
+    { log, hooks, onCompilerCheck, problems, same, serverUrl }: ReportContext,
 ): Promise<'again' | void> {
     const infPath = sourceUri.fsPath;
     const source = path.basename(infPath);
     switch (outcome.kind) {
         case 'submitted': {
+            if (!same()) {
+                log.info(`Prover: ${source} → job ${outcome.job.id} on ${serverUrl}; the server or account changed since`);
+                notifySubmittedElsewhere(source, outcome.job, serverUrl);
+                return;
+            }
             onCompilerCheck(
                 outcome.checked
                     ? { state: 'match', detail: 'matches the accepted compiler' }
@@ -326,7 +364,7 @@ async function report(
             );
             log.info(`Prover: ${source} → ${outcome.vPath} (${outcome.holes} holes) → job ${outcome.job.id}${outcome.replayed ? ' (existing job)' : ''}`);
             if (outcome.replayed) {
-                notifyReplay(outcome.job, source, hooks);
+                notifyReplay(outcome.job, source, hooks, same);
             }
             await hooks.showJob(outcome.job, { infPath, vPath: outcome.vPath, vSha256: outcome.vSha256 });
             return;
