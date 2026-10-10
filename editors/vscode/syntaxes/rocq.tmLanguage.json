@@ -173,11 +173,11 @@
           }
         },
         {
-          "match": "\\bHint\\s+(?:Resolve|Rewrite|Unfold|Constructors|Extern|Immediate|Mode|Cut|Variables)\\b",
+          "match": "\\bHint\\s+(?:Resolve|Rewrite|Unfold|Constructors|Extern|Immediate|Mode|Cut|Variables)\\b(?!')",
           "name": "keyword.other.vernacular.rocq"
         },
         {
-          "match": "\\b(?:Implicit\\s+(?:Types?|Arguments)|Next\\s+Obligation|Solve\\s+(?:All\\s+)?Obligations|Admit\\s+Obligations|Create\\s+HintDb)\\b",
+          "match": "\\b(?:Implicit\\s+(?:Types?|Arguments)|Next\\s+Obligation|Solve\\s+(?:All\\s+)?Obligations|Admit\\s+Obligations|Create\\s+HintDb)\\b(?!')",
           "name": "keyword.other.vernacular.rocq"
         },
         {
@@ -189,11 +189,11 @@
     "proof": {
       "patterns": [
         {
-          "match": "\\b(Defined|Proof|Save|Qed)\\b",
+          "match": "\\b(Defined|Proof|Save|Qed)\\b(?!')",
           "name": "keyword.control.proof.rocq"
         },
         {
-          "match": "\\b(Admitted|Abort)\\b|\\badmit\\b",
+          "match": "\\b(?:Admitted|Abort|admit)\\b(?!')",
           "name": "keyword.control.admit.rocq"
         }
       ]
@@ -212,7 +212,7 @@
           }
         },
         {
-          "match": "\\b(exactly_once|abstract|progress|timeout|repeat|first|solve|using|once|now|try|at|by|do)\\b",
+          "match": "\\b(exactly_once|abstract|progress|timeout|repeat|first|solve|using|once|now|try|at|by|do)\\b(?!')",
           "name": "keyword.control.tactical.rocq"
         },
         {
@@ -220,7 +220,7 @@
           "name": "support.function.tactic.rocq"
         },
         {
-          "match": "\\b(match)\\s+(goal)\\b",
+          "match": "\\b(match)\\s+(goal)\\b(?!')",
           "captures": {
             "1": {
               "name": "keyword.control.rocq"
@@ -231,7 +231,7 @@
           }
         },
         {
-          "match": "\\bcontext\\b(?=\\s*(?:[\\p{L}_][\\p{L}\\p{N}_']*\\s*)?\\[)",
+          "match": "\\bcontext\\b(?!')(?=\\s*(?:[\\p{L}_][\\p{L}\\p{N}_']*\\s*)?\\[)",
           "name": "keyword.other.ltac.rocq"
         }
       ]

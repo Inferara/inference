@@ -21,8 +21,9 @@ export function registerRocqHighlighting(): vscode.Disposable {
     const shown = new Set<string>();
     const keptByUser = new Set<string>();
     // VS Code reports a language change as a close and an open in the same
-    // turn; a real close is followed by the reopen later, if at all.
-    let changing: string | undefined;
+    // turn; a real close is followed by the reopen later, if at all. Several
+    // documents can close in one turn, so each is tracked on its own.
+    const closing = new Set<string>();
 
     const show = (doc: vscode.TextDocument): void => {
         const key = doc.uri.toString();
@@ -41,18 +42,17 @@ export function registerRocqHighlighting(): vscode.Disposable {
             if (!shown.has(key)) {
                 return;
             }
-            changing = key;
+            closing.add(key);
             queueMicrotask(() => {
-                if (changing === key) {
-                    changing = undefined;
+                // Still pending: a real close, so a reopen starts afresh.
+                if (closing.delete(key)) {
                     keptByUser.delete(key);
                 }
             });
         }),
         vscode.workspace.onDidOpenTextDocument((doc) => {
             const key = doc.uri.toString();
-            if (changing === key) {
-                changing = undefined;
+            if (closing.delete(key)) {
                 if (doc.languageId !== ROCQ_LANGUAGE_ID) {
                     keptByUser.add(key);
                 }

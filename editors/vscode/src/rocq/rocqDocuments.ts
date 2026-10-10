@@ -21,13 +21,35 @@ function escapeRegExp(text: string): string {
     return text.replace(/[.+^${}()|[\]\\]/g, '\\$&');
 }
 
-/**
- * Whether a `files.associations` glob matches a path the way VS Code applies
- * it: case-insensitively, against the whole path when the pattern has a `/`,
- * else against the file name. Supports `**`, `*` and `?`.
- */
-export function associationMatches(pattern: string, filePath: string): boolean {
-    const target = pattern.includes('/') ? filePath : filePath.slice(filePath.lastIndexOf('/') + 1);
+/** Index of the `close` that ends the group opened at `open`, or -1. */
+function closing(pattern: string, open: number, close: string): number {
+    let depth = 0;
+    for (let i = open; i < pattern.length; i++) {
+        if (pattern[i] === pattern[open]) depth++;
+        else if (pattern[i] === close && --depth === 0) return i;
+    }
+    return -1;
+}
+
+/** Split a `{a,b}` group's inside at its top-level commas. */
+function alternatives(inside: string): string[] {
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < inside.length; i++) {
+        if (inside[i] === '{') depth++;
+        else if (inside[i] === '}') depth--;
+        else if (inside[i] === ',' && depth === 0) {
+            parts.push(inside.slice(start, i));
+            start = i + 1;
+        }
+    }
+    parts.push(inside.slice(start));
+    return parts;
+}
+
+/** A glob as a regular expression source (VS Code syntax: `**`, `*`, `?`, `{a,b}`, `[abc]`, `[!a]`). */
+function globSource(pattern: string): string {
     let source = '';
     for (let i = 0; i < pattern.length; i++) {
         const c = pattern[i];
@@ -44,11 +66,36 @@ export function associationMatches(pattern: string, filePath: string): boolean {
             source += '[^/]*';
         } else if (c === '?') {
             source += '[^/]';
+        } else if (c === '{' && closing(pattern, i, '}') > i) {
+            const end = closing(pattern, i, '}');
+            source += `(?:${alternatives(pattern.slice(i + 1, end)).map(globSource).join('|')})`;
+            i = end;
+        } else if (c === '[' && pattern.indexOf(']', i + 2) > i) {
+            const end = pattern.indexOf(']', i + 2);
+            let set = pattern.slice(i + 1, end);
+            const negated = set.startsWith('!') || set.startsWith('^');
+            if (negated) set = set.slice(1);
+            source += `[${negated ? '^/' : ''}${set.replace(/[\\\]^]/g, '\\$&')}]`;
+            i = end;
         } else {
             source += escapeRegExp(c);
         }
     }
-    return new RegExp(`^${source}$`, 'i').test(target);
+    return source;
+}
+
+/**
+ * Whether a `files.associations` glob matches a path the way VS Code applies
+ * it: case-insensitively, against the whole path when the pattern has a `/`,
+ * else against the file name.
+ */
+export function associationMatches(pattern: string, filePath: string): boolean {
+    const target = pattern.includes('/') ? filePath : filePath.slice(filePath.lastIndexOf('/') + 1);
+    try {
+        return new RegExp(`^${globSource(pattern)}$`, 'i').test(target);
+    } catch {
+        return false; // a malformed pattern matches nothing
+    }
 }
 
 /**

@@ -147,6 +147,12 @@ describe("Rocq grammar: proofs", () => {
     assertPlain("exact apply'.", "apply'");
   });
 
+  it("does not colour primed identifiers as keywords", () => {
+    for (const name of ["Qed'", "Admitted'", "admit'", "try'", "repeat'", "Proof'"]) {
+      assertPlain(`exact ${name}.`, name);
+    }
+  });
+
   it("names Ltac definitions and match goal", () => {
     assertScope("Ltac signed_constants :=", "signed_constants", "entity.name.function.tactic");
     assertScope("  repeat match goal with", "match", "keyword.control");
