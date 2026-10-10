@@ -100,6 +100,7 @@ interface RawResponse {
     status: number;
     /** Raw bytes — JSON callers decode UTF-8, artifact downloads keep them. */
     body: Buffer;
+    headers: http.IncomingHttpHeaders;
 }
 
 /**
@@ -197,7 +198,7 @@ function request(opts: RequestOptions, remaining: number): Promise<RawResponse> 
                     chunks.push(chunk);
                 });
                 res.on('end', () => {
-                    resolve({ status, body: Buffer.concat(chunks) });
+                    resolve({ status, body: Buffer.concat(chunks), headers: res.headers });
                 });
                 res.on('error', (err) =>
                     reject(
@@ -340,8 +341,8 @@ export class ProverApi {
      * `POST /api/v1/jobs` — submit a `.v` file (JSON + base64) → 202.
      *
      * `idempotencyKey` must be a UUID (the server parses the header as a
-     * Guid); resubmitting with the same key replays the original 202 instead
-     * of creating a second job.
+     * Guid); resubmitting with the same key answers 202 with the existing job,
+     * as it is now (its current status), instead of creating a second job.
      *
      * `options` is empty for normal use. The server always picks provider and
      * agent from deployment config; callers may set only the optional
@@ -353,17 +354,40 @@ export class ProverApi {
         options: SubmitJobOptions = {},
         idempotencyKey?: string,
     ): Promise<JobResponse> {
+        return (await this.submitJobWithMeta(filename, content, options, idempotencyKey)).job;
+    }
+
+    /**
+     * {@link submitJob}, plus whether the server replayed an existing job for
+     * this key (`Idempotent-Replayed`; null when the server does not say).
+     */
+    async submitJobWithMeta(
+        filename: string,
+        content: Uint8Array,
+        options: SubmitJobOptions = {},
+        idempotencyKey?: string,
+    ): Promise<{ job: JobResponse; replayHeader: boolean | null }> {
         const body: SubmitJobRequest = {
             schemaVersion: 1,
             filename,
             contentBase64: Buffer.from(content).toString('base64'),
             options,
         };
-        return this.post<JobResponse>(
-            '/api/v1/jobs',
-            body,
-            idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+        const url = buildUrl(this.serverUrl, '/api/v1/jobs');
+        const res = await request(
+            {
+                method: 'POST',
+                url,
+                apiKey: this.apiKey,
+                body,
+                headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+            },
+            MAX_REDIRECTS,
         );
+        const job = parse<JobResponse>(url, res);
+        const raw = res.headers['idempotent-replayed'];
+        const value = (Array.isArray(raw) ? raw[0] : raw)?.trim().toLowerCase();
+        return { job, replayHeader: value === 'true' ? true : value === 'false' ? false : null };
     }
 
     /**

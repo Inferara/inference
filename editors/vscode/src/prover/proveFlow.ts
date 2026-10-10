@@ -10,7 +10,7 @@
 import * as path from 'path';
 
 import type { ProverApi } from './api';
-import { generatedVPath, submitVFile } from './submission';
+import { generatedVPath, preflight, submitVFile, type DuplicateDefinition } from './submission';
 import {
     compareIdentity,
     parseAbiVersion,
@@ -40,12 +40,17 @@ export interface ProveDeps {
         options: { cwd?: string; env?: Record<string, string>; timeoutMs?: number },
     ): Promise<CommandResult>;
     readFile(filePath: string): Promise<Uint8Array>;
-    api: Pick<ProverApi, 'getMeta' | 'submitJob'>;
+    api: Pick<ProverApi, 'getMeta' | 'submitJobWithMeta'>;
     /**
      * Asked only when the server does not publish its accepted compiler.
      * Resolve true to compile and submit without the identity check.
      */
     confirmUnchecked(): Promise<boolean>;
+    /**
+     * Asked after a successful build, right before the first upload to this
+     * server (the upload notice). Resolve false to stop.
+     */
+    confirmUpload(): Promise<boolean>;
     /** Progress for the notification and the output channel. */
     progress(message: string): void;
     /** True once the user cancelled; checked again right before the upload. */
@@ -53,7 +58,16 @@ export interface ProveDeps {
 }
 
 export type ProveOutcome =
-    | { kind: 'submitted'; job: JobResponse; vPath: string; vSha256: string; holes: number; checked: boolean }
+    | {
+          kind: 'submitted';
+          job: JobResponse;
+          vPath: string;
+          vSha256: string;
+          holes: number;
+          checked: boolean;
+          /** The server returned an existing job for this exact file. */
+          replayed: boolean;
+      }
     | { kind: 'no-infs' }
     | { kind: 'no-infc' }
     | {
@@ -64,7 +78,7 @@ export type ProveOutcome =
       }
     | { kind: 'build-failed'; exitCode: number; output: string; timedOut: boolean }
     | { kind: 'no-output'; output: string }
-    | { kind: 'preflight-failed'; vPath: string; problem: string }
+    | { kind: 'preflight-failed'; vPath: string; problem: string; duplicate?: DuplicateDefinition }
     | { kind: 'cancelled' };
 
 /** Build budget: the compiler is fast; this bounds a hang, not a real build. */
@@ -95,7 +109,7 @@ export async function proveInfFile(infPath: string, deps: ProveDeps): Promise<Pr
         return { kind: 'no-infs' };
     }
 
-    deps.progress('Checking the compiler…');
+    deps.progress('Checking your compiler…');
     const infcPath = await deps.resolveInfc(infsPath);
     if (!infcPath) {
         return { kind: 'no-infc' };
@@ -144,13 +158,28 @@ export async function proveInfFile(infPath: string, deps: ProveDeps): Promise<Pr
     }
 
     const bytes = await deps.readFile(vPath);
-    if (deps.cancelled()) {
+    // Check the file before asking to upload it: a doomed upload never asks.
+    const checked = preflight(path.basename(vPath), bytes, meta.maxUploadBytes, true);
+    if (!checked.ok) {
+        return {
+            kind: 'preflight-failed',
+            vPath,
+            problem: checked.problem,
+            ...(checked.duplicate ? { duplicate: checked.duplicate } : {}),
+        };
+    }
+    if (deps.cancelled() || !(await deps.confirmUpload()) || deps.cancelled()) {
         return { kind: 'cancelled' };
     }
-    deps.progress(`Submitting ${path.basename(vPath)}…`);
+    deps.progress(`Uploading ${path.basename(vPath)}…`);
     const submitted = await submitVFile(deps.api, path.basename(vPath), bytes, meta.maxUploadBytes);
     if (submitted.kind === 'preflight-failed') {
-        return { kind: 'preflight-failed', vPath, problem: submitted.problem };
+        return {
+            kind: 'preflight-failed',
+            vPath,
+            problem: submitted.problem,
+            ...(submitted.duplicate ? { duplicate: submitted.duplicate } : {}),
+        };
     }
     return {
         kind: 'submitted',
@@ -159,5 +188,6 @@ export async function proveInfFile(infPath: string, deps: ProveDeps): Promise<Pr
         vSha256: submitted.sha256,
         holes: submitted.holes,
         checked: verdict.kind === 'match',
+        replayed: submitted.replayed,
     };
 }

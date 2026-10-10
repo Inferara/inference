@@ -98,6 +98,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 3.3 | Activate extension with a **healthy** toolchain | Status bar shows `$(check) Inference`. Tooltip: "Inference: Toolchain healthy" **[A]** | |
 | 3.4 | Activate with toolchain that has **warnings** (e.g., infc found but not in managed location) | Status bar shows `$(warning) Inference` (warning background). Tooltip shows doctor summary. **[A]** | |
 | 3.5 | Activate with toolchain that has **errors** | Status bar shows `$(error) Inference` (error background). Tooltip shows doctor summary. **[A]** | |
+| 3.5a | Activate with a custom `inference.path` whose doctor fails only a non-compiler check (e.g. Platform) while `Resolved infc` is OK | Status bar shows `$(warning) Inference` without a red background; tooltip says the compiler works and names the failing check; Configuration shows "Status: works with issues" **[A]** | |
 | 3.6 | Click the status bar item | Runs `inference.runDoctor` command | |
 
 ---
@@ -107,7 +108,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
 | 3a.1 | Observe activity bar | Inference icon (file_icon.svg) appears in activity bar | |
-| 3a.2 | Click the Inference icon | Configuration view opens with "Toolchain" and "Settings" groups | |
+| 3a.2 | Click the Inference icon | Configuration view opens with "Toolchain", "Proof Server" and "Settings" groups; the Proof Jobs view is below it | |
 | 3a.3 | Toolchain group shows infs path, version, home, platform, status | Each property shows correct resolved value | |
 | 3a.4 | Settings group shows Path, Auto Install, Check for Updates | Each shows current setting value (e.g., "(auto-detect)", "enabled") | |
 | 3a.5 | Click a Settings item (e.g., "Auto Install: enabled") | VS Code settings editor opens filtered to that setting key | |
@@ -420,18 +421,26 @@ accepts (`GET /api/v1/meta` → `acceptedToolchain`).
 | 14.1 | Without a key, open the Inference sidebar | Proof Jobs shows the welcome with "Set API Key"; Configuration > Proof Server shows "API key: not set" | |
 | 14.2 | Run "Inference: Set Proof Server API Key" with a wrong key | "The proof server rejected this API key; nothing was stored." | |
 | 14.3 | Same, with a valid key | "Connected to {server} as a {role} account"; the jobs list loads | |
-| 14.4 | Open an `.inf`, click "Prove This File" in the editor title | Progress shows compiler check → compile → submit; `out/<file>.v` appears beside the source; the job panel opens and the job is selected in Proof Jobs | |
-| 14.5 | Same, with a compiler the server does not accept | Modal names commit/ABI differences and yours vs accepted; nothing is compiled or uploaded. When the accepted compiler is a release, "Install infc X" switches the toolchain | |
+| 14.4 | Edit an `.inf` without saving, click "Prove This File" in the editor title | The file is saved (status bar note, no dialog); progress shows compiler check → compile → upload; the upload notice appears once per server, after the compile and with no progress toast under it; `out/<file>.v` appears beside the source; the job panel opens and the job is selected in Proof Jobs | |
+| 14.5 | Same, with a compiler the server does not accept | Modal names commit/ABI differences and yours vs accepted; nothing is compiled or uploaded. When the accepted compiler is a release, "Install X and Prove" switches the toolchain ("Inference toolchain vX is now the default.") and proves again | |
+| 14.5a | Against a server without `acceptedToolchain` | "This proof server doesn't say which compiler it accepts" is asked once; "Continue for This Server" is remembered and not asked on the next Prove | |
 | 14.6 | Cancel the progress notification during compilation | The build process stops; nothing is uploaded | |
-| 14.7 | Prove an `.inf` with a compile error | "Compiling {file} failed (exit N)" with "Show Output"; the output channel has the compiler's lines | |
-| 14.8 | Submit the same `.v` twice ("Submit Rocq File for Proof") | The second submit opens the existing job | |
-| 14.9 | Watch a running job | Phase ribbon advances; obligations update; agent activity reads as lines scoped to theorem and attempt; the log keeps up to 2000 lines | |
-| 14.10 | Cancel a running job (tree inline button or panel) | Confirmation, then the job moves to Canceling/Canceled | |
-| 14.11 | Open a finished Verified job | Green claim badge only with the verifier's full acceptance; "Open completed proof", "Compare with input" and "Open certificate in portal" work; the compare is a read-only diff | |
-| 14.12 | Open a StructuralOnly job | Warning banner: structural validity only, not a functional-correctness claim | |
+| 14.7 | Prove an `.inf` with a syntax error, then one with a type error | "{file} has N compile errors. L:C message" with "Show Problems"; the Problems panel lists each error at its line (source "infc (proof build)"); editing the file clears them | |
+| 14.7a | Prove `clamp.inf` containing `fn clamp` | Not uploaded: "the generated Rocq file defines “clamp” twice…"; "Go to fn clamp" selects the function; Problems shows it | |
+| 14.7b | Prove an entry that imports a file with a syntax error (`use lib::broken;`); then fix `lib/broken.inf` and prove again | The error is listed under `lib/broken.inf`, not the entry; after the fixed build the entry is gone from Problems. Editing a file while its build runs leaves no stale entries for it | |
+| 14.8 | Submit the same `.v` twice ("Submit Rocq File for Proof"); also re-prove an unchanged `.inf` whose job finished | The second submit opens the existing job with "already being proved" (running) or "this exact file was already proved … — {result}" with "Run Again" (finished) | |
+| 14.9 | Watch a running job | The step row advances; obligations update in place (an expanded obligation stays open); the timer shows elapsed and remaining time; Activity groups lines by obligation, Steps/Agent/All and the text filter work and survive updates; the list keeps up to 2000 rows | |
+| 14.10 | Cancel a running job (tree inline button or panel) while its worker is still starting | Confirmation mentions up to ~90 s; the job shows "Canceling…" with that explanation, then Canceled | |
+| 14.11 | Open a finished Verified job | "Proved and independently verified" (green) only with the verifier's full acceptance; "Open proof", "Compare with input" and "Certificate" work; the compare is a read-only diff; "How this was verified" lists five passing checks and the assumptions | |
+| 14.12 | Open a StructuralOnly job | "Structural validity only" (amber): not a functional-correctness result | |
+| 14.12a | Open a job that failed to compile on the server | "The prover could not compile your file" with the first Rocq error and "Go to line N"; the line opens in the local `.v` when unchanged, else in the uploaded copy | |
+| 14.12a2 | In a finished Verified job, expand a proved obligation → "Go to proof"; in a running or failed job, expand an obligation → "Go to theorem" | "Go to proof" opens the returned proof (read-only) at that theorem, not at a `TODO` marker; "Go to theorem" opens the submitted `.v` at the `Theorem` line (the local file when unchanged) | |
+| 14.12b | Reload the window with a job panel open | The panel comes back and loads the job | |
+| 14.12c | Switch to a light, dark and high-contrast theme with a panel open | Every state stays readable; focus outlines are visible when tabbing | |
+| 14.12d | Start a proof, hide the Proof Jobs view and wait for it to finish | The status bar item shows the job and its progress; a notification reports the result with "Open" | |
 | 14.13 | Run a finished job again from its menu | A new job starts from the stored input and opens | |
 | 14.14 | Delete a finished job | Confirmation mentions purge within 7 days; the job leaves the list | |
-| 14.15 | Filter by status, then "Load more…" past 50 jobs | Only that status is listed (view description shows it); older jobs append | |
+| 14.15 | Filter by status, then "Load more…" past 50 jobs | Only that status is listed (view description shows it, the title bar shows "Show All Proof Jobs"); older jobs append | |
 | 14.16 | Set `inference.prover.serverUrl` to `http://localhost:8088` against a local deployment | Jobs list, submit and live updates work over plain HTTP on loopback | |
 | 14.17 | With jobs listed and a job panel open, change `inference.prover.serverUrl` (or clear the key) | Open job panels close and the list shows only the new server's jobs; nothing from the previous server reappears | |
 | 14.18 | With a running job's panel in polling mode (block the stream, e.g. a proxy that drops SSE), let the job finish | The final events (`job.verifying`, `job.completed`) appear in the log without a manual refresh | |

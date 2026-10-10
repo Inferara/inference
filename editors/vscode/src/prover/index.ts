@@ -48,6 +48,12 @@ export function registerProver(
         const config = await resolveConfig(secrets).catch(() => null);
         return config ? origins.get(config.serverUrl, jobId) : undefined;
     };
+    /** Bumped when the server or account changes. */
+    let account = 0;
+    const sameAccount = () => {
+        const at = account;
+        return () => at === account;
+    };
     const runAgain = async (job: JobResponse) => {
         const fresh = await resubmitJob(secrets, log, job);
         if (fresh) {
@@ -185,6 +191,7 @@ export function registerProver(
     // A different server or key means different jobs: drop what is loaded
     // and every open panel before loading again.
     const changed = () => {
+        account++;
         status.reset();
         jobs.reset();
         panels.closeAll();
@@ -192,8 +199,8 @@ export function registerProver(
         onStatusChanged();
     };
     disposables.push(
-        registerSubmitProofCommand(context, log, { showJob }),
-        registerProveFileCommand(context, log, { showJob }, (check) => {
+        registerSubmitProofCommand(context, log, { showJob, runAgain, sameAccount }),
+        registerProveFileCommand(context, log, { showJob, runAgain, sameAccount }, (check) => {
             compilerCheck = check;
             onStatusChanged();
         }),
