@@ -61,6 +61,22 @@ describe('jobVerdict claim rules', () => {
         assert.strictEqual(jobVerdict({ job: JOB, resultState: 'failed' }).claim, 'none');
     });
 
+    it('claims structural validity only with a matching, fully accepted verifier result', () => {
+        const job: JobResponse = { ...JOB, claimClass: 'StructuralOnly', obligations: [{ name: 'valid_m', kind: 'module', status: 'proved' }] };
+        const result: JobResultResponse = {
+            ...RESULT, claimClass: 'StructuralOnly',
+            assumptionReports: [{ target: 'valid_m', assumptions: [], kernelOutput: 'Closed', policyPassed: true }],
+        };
+        const accepted = jobVerdict({ job, result });
+        assert.strictEqual(accepted.claim, 'structural');
+        assert.ok(accepted.body.includes('independently re-verified'));
+        assert.strictEqual(jobVerdict({ job }).kind, 'loading');
+        assert.strictEqual(jobVerdict({ job, resultState: 'failed' }).claim, 'none');
+        assert.strictEqual(jobVerdict({ job, result: { ...result, verificationOutcome: null } }).claim, 'none');
+        assert.strictEqual(jobVerdict({ job, result: { ...result, compileOk: false } }).claim, 'none');
+        assert.strictEqual(jobVerdict({ job, result: { ...result, claimClass: 'Verified' } }).claim, 'none');
+    });
+
     it('never shows the success tone without the full evidence (exhaustive over key fields)', () => {
         const statuses: JobStatus[] = ['Succeeded', 'PartialSuccess', 'CompileGoals', 'Failed'];
         const modes: Array<RunMode | null> = ['prove', 'compile-goals', 'unknown', null];
@@ -92,6 +108,14 @@ describe('jobVerdict claim rules', () => {
                                     verifierAcceptedFull(result, ['valid_m__S']);
                                 if (v.tone === 'ok' || v.claim === 'proved') {
                                     assert.ok(fullyBacked, JSON.stringify({ status, mode, claimClass, verificationOutcome, flags, closed }));
+                                }
+                                if (v.claim === 'structural') {
+                                    const structurallyBacked =
+                                        isProvedSuccess(job.status, job.mode, job.holesTotal, job.holesClosed, 'Verified') &&
+                                        job.claimClass === 'StructuralOnly' &&
+                                        resultMatchesJob(job, result) &&
+                                        verifierAcceptedFull(result, ['valid_m__S']);
+                                    assert.ok(structurallyBacked, JSON.stringify({ status, mode, claimClass, verificationOutcome, flags, closed }));
                                 }
                             }
                         }

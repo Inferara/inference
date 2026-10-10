@@ -27,7 +27,11 @@ function clean(lines: string[]): string {
     return text.length > 600 ? `${text.slice(0, 600)}…` : text;
 }
 
-/** First located error, else the first `Error:` block, else null. */
+/**
+ * First located error, else the first `Error:` block, else null. Warnings use
+ * the same location header, so a located block counts only when its message
+ * is an error.
+ */
 export function firstBuildError(log: string): BuildError | null {
     const lines = log.replace(/\r\n?/g, '\n').split('\n');
     for (let i = 0; i < lines.length; i++) {
@@ -41,6 +45,9 @@ export function firstBuildError(log: string): BuildError | null {
                 break;
             }
             body.push(lines[j]);
+        }
+        if (!/^\s*Error:/.test(body.find((l) => l.trim() !== '') ?? '')) {
+            continue;
         }
         const message = clean(body);
         if (message) {

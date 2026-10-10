@@ -256,8 +256,16 @@ const GROUP_TITLES: Record<ObligationView['group'], string> = {
     active: 'Working',
     problem: 'Not closed',
     waiting: 'Waiting',
-    done: 'Proved',
+    done: 'Closed',
 };
+
+/**
+ * The closed group is titled like its rows ("Proved" only when the run's
+ * verdict claims a proof; else "Closed" or "Closed — not verified").
+ */
+function groupTitle(group: ObligationView['group'], items: readonly ObligationView[]): string {
+    return group === 'done' && items[0] ? items[0].statusLabel : GROUP_TITLES[group];
+}
 
 function obligationsRegion(view: JobView): string {
     const list = view.obligations;
@@ -276,7 +284,7 @@ function obligationsRegion(view: JobView): string {
     const groups = (['active', 'problem', 'waiting', 'done'] as const)
         .map((g) => [g, list.filter((o) => o.group === g)] as const)
         .filter(([, items]) => items.length > 0)
-        .map(([g, items]) => `<details class="group" open data-key="grp:${g}"><summary data-focus-key="grp:${g}"><span class="chev">${icon('chevron')}</span>${esc(GROUP_TITLES[g])} (${items.length})</summary>${items.map(obligationDetails).join('')}</details>`);
+        .map(([g, items]) => `<details class="group" open data-key="grp:${g}"><summary data-focus-key="grp:${g}"><span class="chev">${icon('chevron')}</span>${esc(groupTitle(g, items))} (${items.length})</summary>${items.map(obligationDetails).join('')}</details>`);
     return `<div class="obligations">${groups.join('')}</div>`;
 }
 

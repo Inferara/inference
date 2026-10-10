@@ -13,13 +13,55 @@ function escapeRegExp(text: string): string {
 }
 
 /**
+ * The text with comments (nested `(* *)`) and string contents replaced by
+ * spaces, keeping every line break, so line numbers stay valid. As in Rocq,
+ * a string inside a comment is skipped as a whole.
+ */
+export function maskCommentsAndStrings(text: string): string {
+    let out = '';
+    let depth = 0;
+    let inString = false;
+    const blank = (c: string) => (c === '\n' || c === '\r' ? c : ' ');
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        const next = text[i + 1];
+        if (inString) {
+            if (c === '"' && next === '"') {
+                out += '  ';
+                i++;
+            } else if (c === '"') {
+                inString = false;
+                out += depth > 0 ? ' ' : c;
+            } else {
+                out += blank(c);
+            }
+        } else if (c === '(' && next === '*') {
+            depth++;
+            out += '  ';
+            i++;
+        } else if (depth > 0 && c === '*' && next === ')') {
+            depth--;
+            out += '  ';
+            i++;
+        } else if (c === '"') {
+            inString = true;
+            out += depth > 0 ? ' ' : c;
+        } else {
+            out += depth > 0 ? blank(c) : c;
+        }
+    }
+    return out;
+}
+
+/**
  * The 1-based line declaring `name` (or, for a qualified name, its last
- * segment), or undefined when the text has no such declaration.
+ * segment), or undefined when the text has no such declaration. Comments and
+ * strings are ignored.
  */
 export function declarationLine(text: string, name: string): number | undefined {
     const last = name.split('.').pop() ?? name;
     const names = last && last !== name ? [name, last] : [name];
-    const lines = text.split(/\r\n?|\n/);
+    const lines = maskCommentsAndStrings(text).split(/\r\n?|\n/);
     for (const candidate of names) {
         if (!candidate) {
             continue;

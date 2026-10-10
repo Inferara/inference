@@ -76,6 +76,8 @@ interface PanelState {
     ready: boolean;
     /** Regions last sent to the webview. */
     sent: Partial<Regions>;
+    /** The clock last sent to the webview (JSON). */
+    sentClock: string;
 }
 
 /**
@@ -172,6 +174,7 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
             buildLogFetched: false,
             ready: false,
             sent: {},
+            sentClock: '',
         };
         this.states.set(id, state);
         panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'icons', 'file_icon.svg');
@@ -266,7 +269,7 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
                 void openInPortal(this.secrets, state.job, 'certificate');
                 break;
             case 'openPortal':
-                void openInPortal(this.secrets, state.job, undefined);
+                void openInPortal(this.secrets, state.job, 'job');
                 break;
             case 'copyJobId':
                 void vscode.env.clipboard.writeText(id).then(() =>
@@ -544,11 +547,14 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
                 return;
             }
             fresh.historyFetched = true;
-            const before = fresh.run.rows.length;
+            // At the row cap new rows replace old ones, so count additions.
+            let added = 0;
             for (const env of events) {
-                applyEvent(fresh.run, env);
+                if (applyEvent(fresh.run, env).row) {
+                    added++;
+                }
             }
-            if (fresh.ready && fresh.run.rows.length !== before) {
+            if (fresh.ready && added > 0) {
                 void fresh.panel.webview.postMessage({ command: 'activity', rows: fresh.run.rows, reset: true });
             }
         } catch (err) {
@@ -575,6 +581,11 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
                 fresh.buildError = firstBuildError(text);
             }
         } catch (err) {
+            // Let the next refresh try again.
+            const fresh = this.states.get(id);
+            if (fresh) {
+                fresh.buildLogFetched = false;
+            }
             this.log.warn(`Job ${id} build log: ${err instanceof Error ? err.message : err}`);
         }
     }
@@ -743,10 +754,15 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
                 const local = vscode.Uri.file(state.origin.vPath);
                 try {
                     const bytes = await vscode.workspace.fs.readFile(local);
-                    const digest = crypto.createHash('sha256').update(bytes).digest('hex');
-                    if (digest === target.sha256.toLowerCase()) {
-                        await showAtLine(await vscode.workspace.openTextDocument(local), line);
-                        return;
+                    const sha = target.sha256.toLowerCase();
+                    if (crypto.createHash('sha256').update(bytes).digest('hex') === sha) {
+                        // An open editor may hold unsaved edits that move lines.
+                        const doc = await vscode.workspace.openTextDocument(local);
+                        const text = Buffer.from(doc.getText(), 'utf-8');
+                        if (!doc.isDirty || crypto.createHash('sha256').update(text).digest('hex') === sha) {
+                            await showAtLine(doc, line);
+                            return;
+                        }
                     }
                 } catch {
                     // The local file is gone; fall back to the uploaded copy.
@@ -853,13 +869,19 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
                 changed[key] = regions[key];
             }
         }
-        if (Object.keys(changed).length === 0) {
-            return false;
+        const clock = this.clock(state);
+        const clockJson = JSON.stringify(clock);
+        const regionsChanged = Object.keys(changed).length > 0;
+        if (regionsChanged) {
+            state.sent = { ...state.sent, ...changed };
+            void state.panel.webview.postMessage({ command: 'regions', regions: changed });
         }
-        state.sent = { ...state.sent, ...changed };
-        void state.panel.webview.postMessage({ command: 'regions', regions: changed });
-        void state.panel.webview.postMessage({ command: 'clock', clock: this.clock(state) });
-        return true;
+        // The clock can change on its own (an end time from a late event).
+        if (clockJson !== state.sentClock) {
+            state.sentClock = clockJson;
+            void state.panel.webview.postMessage({ command: 'clock', clock });
+        }
+        return regionsChanged;
     }
 
     /** Full state for a webview that (re)loaded. */
@@ -869,13 +891,15 @@ export class JobDetailViewManager implements vscode.Disposable, vscode.WebviewPa
             return;
         }
         const regions = this.regions(state);
+        const clock = this.clock(state);
         state.sent = regions;
+        state.sentClock = JSON.stringify(clock);
         void state.panel.webview.postMessage({
             command: 'snapshot',
             jobId: id,
             regions,
             rows: state.run.rows.slice(-EVENT_LOG_CAP),
-            clock: this.clock(state),
+            clock,
         });
     }
 

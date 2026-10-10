@@ -13,7 +13,7 @@
 import { duplicateNameHint, type BuildError } from './buildLog';
 import { isProvedSuccess } from './jobPresentation';
 import { errorCodeText } from './runModel';
-import type { JobResponse, JobResultResponse, ObligationDto } from './types';
+import type { ClaimClass, JobResponse, JobResultResponse, ObligationDto } from './types';
 import {
     hasCompleteAssumptionEvidence,
     normalizedVerifierOutcome,
@@ -298,21 +298,14 @@ export function jobVerdict(input: VerdictInput): Verdict {
                 'The independent verifier did not accept this result, so no proof is claimed.',
                 verifierRejections(result, provedTargets, false));
         }
-        if (job.claimClass === 'StructuralOnly') {
-            const accepted = Boolean(result && hasVerifierVerdict);
-            const caveats = result && !hasVerifierVerdict
-                ? ['Checked only inside the worker; no independent verification is recorded.']
-                : [];
-            return verdict('structural', 'warn', 'warning', 'Structural only', 'Structural validity only',
-                `${accepted ? `All ${plural(total, 'obligation')} closed and independently re-verified.` : `All ${plural(total, 'obligation')} closed.`} They establish structural validity (Wasm module typing) only — this is not a functional-correctness result.`,
-                [...caveats, ...contentCaveats(obligations)], 'structural');
-        }
-        if (job.claimClass !== 'Verified') {
+        if (job.claimClass !== 'Verified' && job.claimClass !== 'StructuralOnly') {
             return verdict('unverified', 'warn', 'warning', 'Not verified', 'Behavior not verified',
                 job.claimClass
                     ? 'The server did not classify this result as a behavioral proof, so the closed obligations are not shown as proved behavior.'
                     : 'The server did not provide a claim class, so the closed obligations are not shown as proved behavior.');
         }
+        // Structural and behavioral claims need the same evidence: a matching
+        // result the independent verifier fully accepted (as in the portal).
         if (!result) {
             return resultState === 'failed'
                 ? verdict('unverified', 'warn', 'warning', 'Not verified', 'Verifier evidence unavailable',
@@ -324,14 +317,23 @@ export function jobVerdict(input: VerdictInput): Verdict {
             return verdict('unverified', 'warn', 'warning', 'Not verified', 'Not independently verified',
                 'This result was checked only inside the worker; no independent verification is recorded, so no proof is claimed.');
         }
+        const structural = job.claimClass === 'StructuralOnly';
+        // isProvedSuccess checks the status, mode and counts; a structural run
+        // carries its own claim class, which resultMatchesJob compares.
+        const claimFor = (claimClass: ClaimClass | null | undefined) => (structural ? 'Verified' : claimClass);
         const proved =
-            isProvedSuccess(job.status, job.mode, job.holesTotal, job.holesClosed, job.claimClass) &&
-            isProvedSuccess(result.status, result.mode, result.holesTotal, result.holesClosed, result.claimClass) &&
+            isProvedSuccess(job.status, job.mode, job.holesTotal, job.holesClosed, claimFor(job.claimClass)) &&
+            isProvedSuccess(result.status, result.mode, result.holesTotal, result.holesClosed, claimFor(result.claimClass)) &&
             matches &&
             verifierAcceptedFull(result, provedTargets);
         if (!proved) {
             return verdict('unverified', 'warn', 'warning', 'Not verified', 'Not proved',
                 'This view cannot confirm a proof for this run.');
+        }
+        if (structural) {
+            return verdict('structural', 'warn', 'warning', 'Structural only', 'Structural validity only',
+                `All ${plural(total, 'obligation')} closed and independently re-verified. They establish structural validity (Wasm module typing) only — this is not a functional-correctness result.`,
+                contentCaveats(obligations), 'structural');
         }
         const grounded = obligations.filter((o) => o.content === 'grounded').length;
         return verdict('verified', 'ok', 'pass', 'Verified', 'Proved and independently verified',
