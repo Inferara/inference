@@ -100,7 +100,7 @@ function dataAttrs(data: Record<string, string> | undefined): string {
 
 function button(a: ActionView, extraClass = ''): string {
     const cls = [a.style ?? 'secondary', extraClass].filter(Boolean).join(' ');
-    const focusKey = `${a.action}:${a.data?.artifact ?? ''}:${a.data?.line ?? ''}`;
+    const focusKey = `${a.action}:${a.data?.artifact ?? ''}:${a.data?.line ?? ''}:${a.data?.obligation ?? ''}`;
     return `<button type="button" class="${cls}" data-action="${esc(a.action)}"${dataAttrs(a.data)} data-focus-key="${esc(focusKey)}"${
         a.ariaLabel ? ` aria-label="${esc(a.ariaLabel)}"` : ''
     }>${a.icon ? icon(a.icon) : ''}${esc(a.label)}</button>`;
@@ -227,13 +227,18 @@ function obligationDetails(o: ObligationView): string {
         o.specList ? `<dt>Specification</dt><dd><code>${esc(o.specList)}</code></dd>` : '',
         o.attempts ? `<dt>Attempts</dt><dd>${o.attempts}</dd>` : '',
     ].join('');
+    const goto = o.goto.target === 'proof'
+        ? button({
+              action: 'gotoTheorem', label: 'Go to proof', icon: 'goto', data: { obligation: o.name, artifact: o.goto.artifact },
+              ariaLabel: `Show the proof of ${o.shortName} in the completed file`,
+          }, 'link')
+        : button({
+              action: 'gotoTheorem', label: 'Go to theorem', icon: 'goto',
+              data: { obligation: o.name, ...(o.goto.line !== undefined ? { line: String(o.goto.line) } : {}) },
+              ariaLabel: `Go to ${o.shortName} in the submitted file`,
+          }, 'link');
     const actions = [
-        o.line !== undefined
-            ? button({
-                  action: 'gotoLine', label: `Go to line ${o.line}`, icon: 'goto', data: { line: String(o.line), obligation: o.name },
-                  ariaLabel: `Go to ${o.shortName} at line ${o.line} of the submitted file`,
-              }, 'link')
-            : '',
+        goto,
         `<button type="button" class="link" data-action="show-activity" data-obligation="${esc(o.name)}" data-focus-key="${esc(`act:${o.name}`)}" aria-label="${esc(`Show activity for ${o.shortName}`)}">${icon('search')}Show activity</button>`,
     ].join('');
     return `<details class="obl tone-${o.tone}" data-key="${esc(key)}" data-status="${esc(o.status)}" data-kind="${esc(o.kindLabel)}">
