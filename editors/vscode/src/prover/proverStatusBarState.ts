@@ -78,3 +78,19 @@ export function proverStatusState(input: ProverStatusInput): ProverStatusState {
     }
     return { visible: false, icon: 'server', text: '', tooltip: '', jobId: null };
 }
+
+/**
+ * The job a click opens: its copy in the latest load, else the saved result
+ * the item shows (a finished job drops out of the load once newer jobs push
+ * it off the first page).
+ */
+export function clickedJob(
+    jobId: string | null,
+    jobs: readonly JobResponse[],
+    lastFinished: JobResponse | null,
+): JobResponse | undefined {
+    if (!jobId) {
+        return undefined;
+    }
+    return jobs.find((j) => j.id === jobId) ?? (lastFinished?.id === jobId ? lastFinished : undefined);
+}

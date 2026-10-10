@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { finishedJobs, isActiveJob, newestJob, nextStatuses } from './jobList';
 import { listVerdict } from './jobVerdict';
 import { VERDICT_CODICONS, type JobsSnapshot } from './jobsTree';
-import { proverStatusState } from './proverStatusBarState';
+import { clickedJob, proverStatusState } from './proverStatusBarState';
 import type { JobResponse, JobStatus } from './types';
 
 /** Internal command behind the status bar item. */
@@ -30,6 +30,8 @@ export class ProverStatus implements vscode.Disposable {
     private lastFinished: JobResponse | null = null;
     private target: string | null = null;
     private snapshot: JobsSnapshot | null = null;
+    /** Counts resets, so a notice answered after one does not act on the new server. */
+    private generation = 0;
 
     constructor(private readonly hooks: ProverStatusHooks) {
         this.item.name = 'Inference Proof Jobs';
@@ -52,6 +54,7 @@ export class ProverStatus implements vscode.Disposable {
 
     /** The server or account changed: forget its jobs and last result. */
     reset(): void {
+        this.generation++;
         this.previous = new Map();
         this.watched.clear();
         this.lastFinished = null;
@@ -109,9 +112,13 @@ export class ProverStatus implements vscode.Disposable {
         // submitted file that did not compile fails again until it is changed.
         const retry = ['failed', 'timed-out', 'provision-failed', 'lost', 'completed-compile-error'].includes(verdict.kind);
         const actions = retry ? ['Open', 'Run Again'] : ['Open'];
+        const generation = this.generation;
         const choice = good && verdict.tone === 'ok'
             ? await vscode.window.showInformationMessage(message, ...actions)
             : await vscode.window.showWarningMessage(message, ...actions);
+        if (generation !== this.generation) {
+            return; // the job belongs to the server or account used before
+        }
         if (choice === 'Open') {
             await this.hooks.openJob(job);
         } else if (choice === 'Run Again') {
@@ -120,7 +127,7 @@ export class ProverStatus implements vscode.Disposable {
     }
 
     private async onClick(): Promise<void> {
-        const job = this.target ? this.snapshot?.tracking.find((j) => j.id === this.target) : undefined;
+        const job = clickedJob(this.target, this.snapshot?.tracking ?? [], this.lastFinished);
         if (job) {
             if (!isActiveJob(job)) {
                 this.lastFinished = null; // seen

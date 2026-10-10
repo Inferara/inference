@@ -1,7 +1,7 @@
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { proverStatusState } from '../prover/proverStatusBarState';
+import { clickedJob, proverStatusState } from '../prover/proverStatusBarState';
 import type { DoctorResult } from '../toolchain/doctor';
 import type { JobResponse } from '../prover/types';
 import { determineStatusBarState, failingChecks, toolchainHealth } from '../ui/statusBarState';
@@ -36,6 +36,16 @@ describe('proverStatusState', () => {
         assert.ok(state.tooltip.includes('Proved and independently verified'));
         const problem = proverStatusState({ jobs: [], problem: { kind: 'network', message: 'offline' }, lastFinished: done, nameOf });
         assert.deepStrictEqual([problem.icon, problem.text], ['server', 'Proof server']);
+    });
+
+    it('opens the saved result on click after newer jobs push it out of the load', () => {
+        const done: JobResponse = { id: 'a', status: 'Succeeded', filename: 'b.v' };
+        const fresh: JobResponse = { ...done, holesTotal: 1 };
+        const state = proverStatusState({ jobs: [], problem: null, lastFinished: done, nameOf });
+        assert.strictEqual(clickedJob(state.jobId, [], done), done);
+        assert.strictEqual(clickedJob('a', [fresh], done), fresh, 'the loaded copy is newer');
+        assert.strictEqual(clickedJob('c', [fresh], done), undefined);
+        assert.strictEqual(clickedJob(null, [fresh], done), undefined);
     });
 });
 
