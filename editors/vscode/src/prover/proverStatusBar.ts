@@ -110,7 +110,7 @@ export class ProverStatus implements vscode.Disposable {
         const good = verdict.claim !== 'none';
         // A returned proof that did not compile may succeed on another run; a
         // submitted file that did not compile fails again until it is changed.
-        const retry = ['failed', 'timed-out', 'provision-failed', 'lost', 'completed-compile-error'].includes(verdict.kind);
+        const retry = ['failed', 'timed-out', 'provision-failed', 'completed-compile-error'].includes(verdict.kind);
         const actions = retry ? ['Open', 'Run Again'] : ['Open'];
         const generation = this.generation;
         const choice = good && verdict.tone === 'ok'

@@ -507,6 +507,13 @@ describe('renderJobDetailHtml', () => {
         assert.ok(html.includes('fixture-stdlib.v'));
     });
 
+    it('offers no Run Again for a Lost job (the server runs it again by itself)', () => {
+        const html = renderJobDetailHtml({ ...JOB, status: 'Lost' }, BASE_OPTS);
+        assert.strictEqual(verdictOf(html).kind, 'lost');
+        assert.ok(!html.includes('data-action="resubmit"'));
+        assert.ok(html.includes('runs the job again by itself'));
+    });
+
     it('explains a failed job in words and keeps the raw code under Technical details', () => {
         const failed: JobResponse = {
             ...JOB,

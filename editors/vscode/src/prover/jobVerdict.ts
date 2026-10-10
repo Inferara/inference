@@ -235,7 +235,7 @@ function terminalFailure(job: JobResponse, input: VerdictInput): Verdict {
                 job.errorReason ? [job.errorReason] : []);
         case 'Lost':
             return verdict('lost', 'warn', 'warning', 'Worker lost', 'Worker lost',
-                'The worker stopped responding. The server retries lost jobs automatically; if this one stays lost, run it again.');
+                'The worker stopped responding. The server runs the job again by itself; a job that loses its worker three times fails.');
         case 'Canceled':
             return verdict('canceled', 'muted', 'canceled', 'Canceled', 'Canceled',
                 'The run was canceled before it finished.');

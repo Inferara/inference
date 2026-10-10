@@ -11,6 +11,7 @@ import {
     mergeFirstPage,
     PAGE_SIZE,
     pollDelay,
+    rereadJob,
     staleActiveJobs,
 } from './jobList';
 import { listVerdict, type Verdict, type VerdictIcon } from './jobVerdict';
@@ -266,7 +267,7 @@ export class ProofJobsProvider implements vscode.TreeDataProvider<JobTreeItem>, 
             if (!more) {
                 const newest = this.filter ? await api.listJobs({ limit: PAGE_SIZE }) : page;
                 const stale = staleActiveJobs([...this.tracked, ...this.jobs], newest);
-                const reread = await Promise.all(stale.map((j) => api.getJob(j.id).catch(() => null)));
+                const reread = await Promise.all(stale.map((j) => rereadJob(j, (id) => api.getJob(id))));
                 tracked = [...newest, ...reread.filter((j): j is JobResponse => j !== null)];
             }
             if (generation !== this.generation) {
