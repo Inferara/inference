@@ -53,6 +53,23 @@ describe('associationMatches', () => {
         assert.strictEqual(associationMatches('**/c/*.v', '/a/b/x.v'), false);
     });
 
+    it('supports brace alternatives and character classes', () => {
+        assert.strictEqual(associationMatches('*.{v,txt}', '/w/a.v'), true);
+        assert.strictEqual(associationMatches('*.{v,txt}', '/w/a.txt'), true);
+        assert.strictEqual(associationMatches('*.{v,txt}', '/w/a.vo'), false);
+        assert.strictEqual(associationMatches('{**/rtl/*.v,*.sv}', '/w/rtl/top.v'), true);
+        assert.strictEqual(associationMatches('*.[vV]', '/w/a.v'), true);
+        assert.strictEqual(associationMatches('[!a].v', '/w/b.v'), true);
+        assert.strictEqual(associationMatches('[!a].v', '/w/a.v'), false);
+        assert.strictEqual(associationMatches('[a-c].v', '/w/b.v'), true);
+        assert.strictEqual(shouldShowAsRocq({ languageId: 'plaintext', path: '/w/a.v' }, ['*.{v,txt}']), false);
+    });
+
+    it('treats unclosed groups literally', () => {
+        assert.strictEqual(associationMatches('{a.v', '/w/{a.v'), true);
+        assert.strictEqual(associationMatches('[a.v', '/w/[a.v'), true);
+    });
+
     it('treats other characters literally', () => {
         assert.strictEqual(associationMatches('a+b.v', '/w/a+b.v'), true);
         assert.strictEqual(associationMatches('a+b.v', '/w/aab.v'), false);
