@@ -30,6 +30,21 @@ describe('parseInfcDiagnostics (output of the accepted infc, d71a9c3e)', () => {
         ]);
     });
 
+    it('keeps a parse error without a position, such as a missing import', () => {
+        const missing = 'imported file not found for `use lib::missing;` (expected `/w/lib/missing.inf`); did you mean `lib::mising`?';
+        const parsed = parseInfcDiagnostics(`Parse error: ${missing}\n`);
+        assert.deepStrictEqual(parsed, { located: [], unlocated: [missing] });
+        assert.strictEqual(summarizeDiagnostics(parsed), `1 compile error. ${missing}`);
+        assert.deepStrictEqual(
+            parseInfcDiagnostics('Parse error: failed to parse `x.inf`:\n  unexpected end of input').unlocated,
+            ['failed to parse `x.inf`:\nunexpected end of input'],
+        );
+        assert.deepStrictEqual(
+            parseInfcDiagnostics('Parse error: failed to read `/w/x.inf`: permission denied').unlocated,
+            ['failed to read `/w/x.inf`: permission denied'],
+        );
+    });
+
     it('splits type errors joined on one line, keeping colons and backticks in messages', () => {
         const parsed = parseInfcDiagnostics(
             'Parsed: types.inf\nType checking failed: 2:5: type mismatch in variable definition: expected `Bool`, found `i32`; 3:12: use of undeclared variable `z`; math::ops:3:5: type mismatch in return statement: expected `i32`, found `Unit`',

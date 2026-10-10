@@ -8,6 +8,7 @@
  *       2:15: expected an expression
  *     Parse error: failed to parse imported file `a::b`:
  *       3:1: expected an item
+ *     Parse error: imported file not found for `use a::c;` (expected `…/a/c.inf`)
  *     Type checking failed: 2:5: type mismatch …; 3:12: use of undeclared variable `z`
  *     [module::path:]4:1: error[A036]: …     (or warning[…], kept as a warning)
  *     error: <message without a position>
@@ -88,12 +89,22 @@ export function parseInfcDiagnostics(output: string): ParsedDiagnostics {
         if (/^Parse error:/.test(line)) {
             // An imported file is named by its module path in the header only.
             const imported = new RegExp(`failed to parse imported file \`(${MODULE})\``).exec(line);
+            const details: string[] = [];
+            let count = 0;
             for (let j = i + 1; j < lines.length && /^\s+\S/.test(lines[j]); j++) {
                 const d = located(lines[j].trim());
                 if (d) {
                     found.push(imported && !d.module ? { ...d, module: imported[1] } : d);
+                    count++;
+                } else {
+                    details.push(lines[j].trim());
                 }
                 i = j;
+            }
+            // A missing import, an unreadable file and the like have no position.
+            if (count === 0) {
+                const header = line.replace(/^Parse error:\s*/, '');
+                unlocated.push(details.length ? [header, ...details].join('\n') : header.replace(/:$/, ''));
             }
             continue;
         }
@@ -147,6 +158,6 @@ export function summarizeDiagnostics(parsed: ParsedDiagnostics): string | null {
         return null;
     }
     const first = errors[0];
-    const head = first ? `${first.line}:${first.column} ${first.message.split('\n')[0]}` : parsed.unlocated[0];
+    const head = (first ? `${first.line}:${first.column} ${first.message}` : parsed.unlocated[0]).split('\n')[0];
     return `${plural(total, 'compile error')}${warnings ? ` and ${plural(warnings, 'warning')}` : ''}. ${head}`;
 }
