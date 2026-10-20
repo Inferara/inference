@@ -9,12 +9,15 @@
 //! paths inside the destination, and checks every member of an archive before
 //! it writes any: an archive holding a link or a path that leaves the
 //! destination is refused whole. A tar.gz wrapped in a ZIP is checked only once
-//! the ZIP is written, so [`extract_archive`] removes a destination it created
-//! when extraction fails, and a refused archive leaves nothing behind.
+//! the ZIP is written, so [`extract_archive`] extracts into a private directory
+//! beside the destination and moves it into place only once the whole archive
+//! is written: a refused archive leaves nothing behind, and a failed
+//! extraction never touches a destination another install created.
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tar::Archive;
 
 /// Extracts a ZIP archive to the destination directory.
@@ -69,6 +72,7 @@ pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         } else {
             entry_path.clone()
         };
+        ensure_member_path_stays_inside(&relative_path)?;
 
         let output_path = dest_dir.join(&relative_path);
 
@@ -158,10 +162,14 @@ fn extract_nested_tar_gz_if_present(dest_dir: &Path) -> Result<()> {
 /// Automatically detects the archive format based on the file extension
 /// and calls the appropriate extractor.
 ///
-/// When extraction fails, a destination this call created is removed, so a
-/// refused or broken archive leaves no half-written directory behind: an
-/// install takes an existing toolchain directory to mean the version is
-/// installed. A destination that existed before is left as it is.
+/// A destination that does not exist yet is extracted into a private
+/// directory beside it (see `staging_dir_for`) and moved into place only once
+/// the whole archive is written. A refused or broken archive therefore leaves
+/// no half-written directory, which an install would take to mean the version
+/// is installed, and a failed extraction removes only its own staging
+/// directory, never a destination a concurrent install of the same version
+/// published meanwhile. A destination that already exists is extracted into
+/// in place, and left as it is when extraction fails.
 ///
 /// # Errors
 ///
@@ -170,6 +178,7 @@ fn extract_nested_tar_gz_if_present(dest_dir: &Path) -> Result<()> {
 /// - The archive cannot be opened or extracted, or holds a member that is
 ///   unsafe to extract
 /// - Directory or file creation fails
+/// - The destination appeared while the archive was being extracted
 ///
 /// # Example
 ///
@@ -179,17 +188,74 @@ fn extract_nested_tar_gz_if_present(dest_dir: &Path) -> Result<()> {
 /// extract_archive(Path::new("archive.zip"), Path::new("output_dir"))?;
 /// ```
 pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
-    let dest_existed = std::fs::symlink_metadata(dest_dir).is_ok();
+    let staging = match staging_dir_for(dest_dir) {
+        Some(staging) if std::fs::symlink_metadata(dest_dir).is_err() => staging,
+        _ => return extract_by_format(archive_path, dest_dir),
+    };
+    let result = create_staging_dir(&staging)
+        .and_then(|()| extract_by_format(archive_path, &staging))
+        .and_then(|()| publish_staged(&staging, dest_dir));
+    if result.is_err() {
+        std::fs::remove_dir_all(&staging).ok();
+    }
+    result
+}
+
+/// Extracts the archive with the extractor its extension names.
+fn extract_by_format(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     let path_str = archive_path.to_string_lossy();
-    let result = if path_str.ends_with(".tar.gz") || path_str.ends_with(".tgz") {
+    if path_str.ends_with(".tar.gz") || path_str.ends_with(".tgz") {
         extract_tar_gz(archive_path, dest_dir)
     } else {
         extract_zip(archive_path, dest_dir)
-    };
-    if result.is_err() && !dest_existed {
-        std::fs::remove_dir_all(dest_dir).ok();
     }
-    result
+}
+
+/// The private directory [`extract_archive`] extracts into before moving the
+/// result to `dest_dir`: `.<name>.partial-<pid>-<n>` beside it, so the move is
+/// a rename on one filesystem, unique to this process and this call. The
+/// leading `.` keeps it apart from every version directory, since a release
+/// manifest's version must start with a letter or a digit, and out of the
+/// installed versions `infs list` reports. `None` when `dest_dir` has no
+/// parent or no name to stage beside.
+fn staging_dir_for(dest_dir: &Path) -> Option<PathBuf> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let name = dest_dir.file_name()?.to_string_lossy();
+    let parent = dest_dir.parent()?;
+    let call = NEXT.fetch_add(1, Ordering::Relaxed);
+    Some(parent.join(format!(".{name}.partial-{}-{call}", std::process::id())))
+}
+
+/// Creates `staging` and its parent. A directory of that name can only be
+/// one a crashed process with this process's id left, so it is removed first.
+fn create_staging_dir(staging: &Path) -> Result<()> {
+    if let Some(parent) = staging.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    std::fs::remove_dir_all(staging).ok();
+    std::fs::create_dir(staging)
+        .with_context(|| format!("Failed to create directory: {}", staging.display()))
+}
+
+/// Moves the fully extracted `staging` to `dest_dir`, refusing to replace a
+/// destination that appeared meanwhile, such as one a concurrent install of
+/// the same version published first.
+fn publish_staged(staging: &Path, dest_dir: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(dest_dir).is_ok() {
+        anyhow::bail!(
+            "{} appeared while the archive was being extracted; another install may have \
+             finished first",
+            dest_dir.display()
+        );
+    }
+    std::fs::rename(staging, dest_dir).with_context(|| {
+        format!(
+            "Failed to move the extracted archive from {} to {}",
+            staging.display(),
+            dest_dir.display()
+        )
+    })
 }
 
 /// Extracts a tar.gz archive to the destination directory.
@@ -245,6 +311,7 @@ pub fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         } else {
             entry_path.clone()
         };
+        ensure_member_path_stays_inside(&relative_path)?;
 
         let output_path = dest_dir.join(&relative_path);
 
@@ -473,12 +540,24 @@ fn zip_member_path<R: std::io::Read>(
 /// and `.` stay inside it.
 ///
 /// `is_absolute` alone is not enough on Windows, where `\Windows\x` and `C:x`
-/// are relative and yet `dest.join` of either leaves `dest`.
+/// are relative and yet `dest.join` of either leaves `dest`. A name is also
+/// refused if it is more than a plain name on its own, as `C:` is on Windows:
+/// Windows reads a drive only at the start of a path, so `pkg/C:/x` passes as
+/// three plain names, and becomes the absolute `C:/x` once the root folder the
+/// members share is stripped.
 fn ensure_member_path_stays_inside(path: &Path) -> Result<()> {
-    if path
-        .components()
-        .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
-    {
+    let leaves = path.components().any(|c| match c {
+        Component::Normal(name) => {
+            let mut alone = Path::new(name).components();
+            !matches!(
+                (alone.next(), alone.next()),
+                (Some(Component::Normal(_)), None)
+            )
+        }
+        Component::CurDir => false,
+        Component::Prefix(_) | Component::RootDir | Component::ParentDir => true,
+    });
+    if leaves {
         anyhow::bail!(
             "Refusing to extract path with parent directory or absolute reference: {}",
             path.display()
@@ -1271,8 +1350,8 @@ mod tests {
 
         /// Asserts that `result` refused the archive with a message holding
         /// each of `needles`, and that nothing was written: no destination,
-        /// and `outside/` holding only the secret, with its bytes and its mode.
-        /// Returns the message.
+        /// no staging directory left beside it, and `outside/` holding only
+        /// the secret, with its bytes and its mode. Returns the message.
         fn assert_refused(&self, result: Result<()>, needles: &[&str]) -> String {
             let message = format!(
                 "{:#}",
@@ -1288,6 +1367,7 @@ mod tests {
                 !self.dest.exists(),
                 "a refused archive must not create the destination"
             );
+            assert_no_staging_left(self.temp.path());
             self.assert_outside_untouched();
             message
         }
@@ -1327,6 +1407,22 @@ mod tests {
                 "nothing may be written beside the destination"
             );
         }
+    }
+
+    /// Asserts that `dir` holds no staging directory `extract_archive` made.
+    fn assert_no_staging_left(dir: &Path) {
+        let staging: Vec<String> = std::fs::read_dir(dir)
+            .expect("Should read the destination's parent")
+            .map(|entry| {
+                entry
+                    .expect("Should read directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.contains(".partial-"))
+            .collect();
+        assert!(staging.is_empty(), "staging directories left behind: {staging:?}");
     }
 
     /// A member of a hostile tar archive.
@@ -1562,8 +1658,16 @@ mod tests {
             Some("pkg/./../../outside/planted"),
             None,
         ];
+        // Windows reads a drive only at the start of a path, so `pkg/C:/...`
+        // is three plain names until the shared `pkg` is stripped.
         #[cfg(windows)]
-        names.extend([Some(r"..\planted"), Some(r"\planted"), Some("C:planted")]);
+        names.extend([
+            Some(r"..\planted"),
+            Some(r"\planted"),
+            Some("C:planted"),
+            Some("pkg/C:planted"),
+            Some("pkg/C:/outside/planted"),
+        ]);
 
         for name in names {
             let scene = HostileScene::new("hostile.tar.gz");
@@ -1741,8 +1845,8 @@ mod tests {
     /// A tar.gz wrapped in a ZIP is extracted with links refused too: a
     /// symbolic link inside it, and a member written through it, never reach
     /// `outside/`. The inner archive is checked only after the ZIP has written
-    /// it, so `extract_archive` removes the destination it created, leaving
-    /// no partial toolchain behind.
+    /// it, so `extract_archive` extracts into a staging directory it removes
+    /// on failure, leaving no partial toolchain behind.
     #[test]
     fn extract_zip_refuses_a_nested_tar_gz_holding_a_symlink() {
         let scene = HostileScene::new("hostile.zip");
@@ -1801,6 +1905,121 @@ mod tests {
                 b"kept"
             );
             scene.assert_outside_untouched();
+        }
+    }
+
+    /// A destination that did not exist is published whole, and the staging
+    /// directory it was extracted into is gone.
+    #[test]
+    fn extract_archive_publishes_the_staged_destination() {
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("toolchains").join("0.1.0");
+        create_tar_gz_with_root(&archive_path, "root-folder");
+
+        extract_archive(&archive_path, &dest_dir).expect("Should extract");
+
+        assert_eq!(
+            std::fs::read(dest_dir.join("infc")).expect("infc must be published"),
+            b"binary content"
+        );
+        assert_no_staging_left(&temp_dir.path().join("toolchains"));
+    }
+
+    /// The staging directory is a hidden sibling of the destination, unique
+    /// to each call, so that two extractions never share one.
+    #[test]
+    fn staging_dir_for_is_a_hidden_sibling_unique_to_each_call() {
+        let dest = Path::new("home").join("toolchains").join("0.1.0");
+
+        let first = staging_dir_for(&dest).expect("a staging directory");
+        let second = staging_dir_for(&dest).expect("a staging directory");
+
+        assert_eq!(first.parent(), dest.parent());
+        let name = first.file_name().expect("a name").to_string_lossy().into_owned();
+        assert!(name.starts_with(".0.1.0.partial-"), "{name}");
+        assert_ne!(first, second);
+        assert!(staging_dir_for(Path::new("/")).is_none());
+    }
+
+    /// A failed extraction never removes a destination it did not create,
+    /// even one that appeared while it ran, as when a concurrent install of
+    /// the same version publishes first. The archive is a FIFO, so the
+    /// extraction waits on it, past its check that the destination is absent,
+    /// while the other install publishes.
+    #[cfg(unix)]
+    #[test]
+    fn extract_archive_failure_never_removes_a_destination_another_install_published() {
+        let scene = HostileScene::new("hostile.tar.gz");
+        let hostile = scene.temp.path().join("hostile-bytes.tar.gz");
+        create_hostile_tar_gz(
+            &hostile,
+            &[HostileMember::Link(tar::EntryType::Symlink, "escape", &scene.outside())],
+        );
+        let hostile = std::fs::read(&hostile).expect("Should read the hostile archive");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&scene.archive)
+            .status()
+            .expect("Should run mkfifo");
+        assert!(status.success(), "mkfifo must create the archive FIFO");
+
+        let (archive, dest) = (scene.archive.clone(), scene.dest.clone());
+        let extraction = std::thread::spawn(move || extract_archive(&archive, &dest));
+        // Opening a FIFO to write returns once a reader has opened it, and
+        // the extraction opens the archive only after finding no destination.
+        let (opened, open_result) = std::sync::mpsc::channel();
+        let fifo = scene.archive.clone();
+        std::thread::spawn(move || {
+            let _ = opened.send(std::fs::OpenOptions::new().write(true).open(fifo));
+        });
+        let mut writer = open_result
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the extraction must open the archive")
+            .expect("Should open the FIFO to write");
+
+        std::fs::create_dir(&scene.dest).expect("the other install publishes");
+        std::fs::write(scene.dest.join("infc"), b"theirs").expect("Should write theirs");
+        let _ = writer.write_all(&hostile);
+        drop(writer);
+        let result = extraction.join().expect("the extraction must not panic");
+
+        result.expect_err("the hostile archive must be refused");
+        assert_eq!(
+            std::fs::read(scene.dest.join("infc")).expect("the published install must survive"),
+            b"theirs"
+        );
+        assert_no_staging_left(scene.temp.path());
+        scene.assert_outside_untouched();
+    }
+
+    /// A destination that appeared while the archive was being extracted,
+    /// such as one a concurrent install of the same version published first,
+    /// is neither replaced nor removed.
+    #[test]
+    fn publish_staged_refuses_a_destination_that_appeared() {
+        let temp_dir = temp_test_dir();
+        let staging = temp_dir.path().join(".0.1.0.partial-1-0");
+        let dest = temp_dir.path().join("0.1.0");
+        std::fs::create_dir(&staging).expect("Should create staging");
+        std::fs::write(staging.join("infc"), b"ours").expect("Should write ours");
+        for theirs in [None, Some(b"theirs".as_slice())] {
+            std::fs::create_dir_all(&dest).expect("Should create the destination");
+            if let Some(bytes) = theirs {
+                std::fs::write(dest.join("infc"), bytes).expect("Should write theirs");
+            }
+
+            let message = format!(
+                "{:#}",
+                publish_staged(&staging, &dest).expect_err("must not replace the destination")
+            );
+
+            assert!(message.contains("appeared while the archive was being extracted"));
+            assert_eq!(
+                std::fs::read(dest.join("infc")).ok().as_deref(),
+                theirs,
+                "the destination must keep what it held"
+            );
+            assert_eq!(std::fs::read(staging.join("infc")).expect("staging kept"), b"ours");
         }
     }
 
