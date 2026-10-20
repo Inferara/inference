@@ -74,7 +74,10 @@ pub(crate) enum PCode {
     ///   non-scalar, non-aggregate parameter there is unrepresentable for the
     ///   first reason instead, and takes the first wording.
     P004,
-    /// A call that cannot be represented as a `T_app` term.
+    /// A call that cannot be represented as a `T_app` term. One of its reasons
+    /// is a callee declared inside a `spec` block: such a function is not part
+    /// of the module the obligations are about, so an application of one would
+    /// name a function the verified module does not have.
     P005,
     /// `@` outside a `let` right-hand side or a call-argument position.
     P006,
@@ -197,8 +200,8 @@ pub(crate) enum PCode {
     /// body the downstream judgment reduces. Two wordings, keyed on which of
     /// those the body is.
     ///
-    /// A `forall` or plain specification function — a helper `fn` declared
-    /// inside a `spec` block included, since it is translated into an
+    /// A `forall` or plain specification function — a value-returning `fn`
+    /// declared inside a `spec` block included, since it is translated into an
     /// obligation of its own — becomes a *term*, and a term's `+`, `-` and `*`
     /// are the wrapping machine operators: `HBinop` denotes
     /// `Wasm_int.int_add`/`int_sub`/`int_mul`, modular at the operand width,

@@ -1656,9 +1656,11 @@ mod tests {
 
     #[test]
     fn spec_fn_called_by_bare_name_from_sibling_spec_fn_ok() {
-        // The supported intra-spec call form: a bare-name call to a sibling spec
-        // function. This must keep type-checking — it is the path proof-mode codegen
-        // relies on, resolved inside the spec scope.
+        // The intra-spec call form: a bare-name call to a sibling spec function.
+        // This must keep type-checking — resolved inside the spec scope, it is the
+        // call proof-mode codegen lowers in a spec body. (Proof-mode translation
+        // still refuses the call in an obligation with `P005`: no obligation may
+        // apply a function declared in a `spec` block.)
         assert_ok(&[(
             vec![],
             "spec Check { fn inner() -> i32 { return 42; } \

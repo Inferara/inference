@@ -349,20 +349,26 @@ pub fn read_first() -> i32 {
 
     #[test]
     fn proof_mode_spec_fn_calls_sibling_spec_fn_by_bare_name() {
-        // A spec function calling a sibling spec function by its bare name is the
-        // supported intra-spec call form. Proof mode emits the spec bodies, so this
-        // is where the call is actually lowered; it must produce a valid module and
-        // never miss its callee index. (The qualified `Spec::fn()` form is rejected
-        // at type-check, so it never reaches codegen.)
+        // A spec body calling a sibling spec function by its bare name is the
+        // intra-spec call form. Proof mode emits the spec bodies, so this is where
+        // the call is actually lowered; it must produce a valid module and never
+        // miss its callee index. (The qualified `Spec::fn()` form is rejected at
+        // type-check, so it never reaches codegen.)
         //
-        // Both functions carry a claim because a spec free function that only
-        // computes has no obligation and is rejected before any WASM is emitted;
-        // `inner` still returns a value, which is what keeps the sibling call in
-        // term position where the callee index has to be resolved.
+        // The call sits in a spec *method*: a method body is lowered but carries
+        // no obligation, so nothing translates the call. In a spec function's
+        // claim the same call is refused (`P005`, below) — a function declared in
+        // a `spec` block is not part of the module an obligation is about. `inner`
+        // asserts something because a spec free function that only computes is
+        // rejected before any WASM is emitted.
         let source = r#"
             spec Check {
                 fn inner() -> i32 { assert(42 == 42); return 42; }
-                fn outer() forall { assert(inner() == 42); }
+                struct Probe {
+                    x: i32;
+                    fn read(self) -> i32 { return inner() + self.x; }
+                }
+                fn outer() forall { let a: i32 = @; assert(a + 0 == a); }
             }
             pub fn main() -> i32 { return 0; }
         "#;
@@ -370,6 +376,21 @@ pub fn read_first() -> i32 {
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Proof-mode spec sibling-call WASM is invalid: {e}"));
+
+        let applied = r#"
+            spec Check {
+                fn inner() -> i32 { assert(42 == 42); return 42; }
+                fn outer() forall { assert(inner() == 42); }
+            }
+            pub fn main() -> i32 { return 0; }
+        "#;
+        let refused = codegen_with_target_mode(applied, Target::Wasm32, CompilationMode::Proof)
+            .expect_err("an obligation applying a spec sibling must fail code generation")
+            .to_string();
+        assert!(
+            refused.contains("P005") && refused.contains("inside spec `Check`"),
+            "the refusal must be the spec-local P005, got: {refused}"
+        );
     }
 
     #[test]

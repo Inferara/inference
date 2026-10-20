@@ -214,10 +214,13 @@ pub fn helper() -> i32 {
 /// that rule, so this program is legal and the call has a local target to reach.
 /// A probe that widened back out to a program-wide name table would find the
 /// import, emit `call <import_idx>`, and produce a module that validates and
-/// links: the obligation would then be about the foreign body rather than the
-/// function the specification is written about. `wasm_codegen_extern_out_of_scope`
-/// is what records that the probe saw the name as an import elsewhere and still
-/// declined it here.
+/// links: the call would then reach the foreign body rather than the function
+/// it is written beside. `wasm_codegen_extern_out_of_scope` is what records that
+/// the probe saw the name as an import elsewhere and still declined it here.
+///
+/// The call is written in a spec method, whose body is lowered but carries no
+/// obligation: in a spec function's claim it would be refused instead (`P005`),
+/// since no obligation may apply a function declared in a `spec` block.
 ///
 /// Proof mode, because compile mode emits no specification function at all.
 #[test]
@@ -246,9 +249,16 @@ spec S {
         return a * 10;
     }
 
+    struct Probe {
+        x: i32;
+        fn scaled(self) -> i32 {
+            return scale(self.x);
+        }
+    }
+
     fn probe() forall {
         let x: i32 = @;
-        assert(scale(x) == x * 10);
+        assert(x + 0 == x);
     }
 }
 

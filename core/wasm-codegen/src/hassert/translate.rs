@@ -567,7 +567,19 @@ enum Callee {
 }
 
 impl Callee {
-    /// The name-section symbol the application references.
+    /// The symbol the application references, resolved downstream against the
+    /// `name` section by string equality.
+    ///
+    /// A defined callee is rendered by `FnKey`'s `Display`, which for the only
+    /// keys that reach here — free functions and struct methods — is exactly
+    /// [`FnKey::name_section_symbol`]. The two renderings part only for a spec
+    /// key, and there `Display` is the safe one: [`Self::Defined`] never holds a
+    /// spec key ([`CalleeError::SpecLocal`] refuses it first), but were one to
+    /// slip through, its folded `Spec.name` form is carried by no function and
+    /// fails closed downstream, whereas the bare name-section form may be
+    /// carried by an unrelated program function of the same name, which the
+    /// translator — dropping spec carriers from an applied symbol's candidates —
+    /// would then apply in its place.
     fn symbol(self) -> String {
         match self {
             Callee::Defined { key, .. } => key.to_string(),
@@ -596,6 +608,21 @@ enum CalleeError {
     /// not a callable — and its compiled form has hidden trailing choice
     /// parameters no call site supplies.
     ReachabilitySpec { kind: &'static str },
+    /// A deterministic function defined inside a `spec` block — a spec free
+    /// function, or an associated function of a spec-inner struct
+    /// ([`PCode::P005`]). Carries the bare spec name, and the struct's name for
+    /// the second form.
+    ///
+    /// A `forall`/plain spec function is omitted from the module record the
+    /// obligations are about, and both the linker and the proof translator drop
+    /// specification functions from an applied symbol's candidates, so an
+    /// application of one names a function the verified module does not have.
+    /// It is refused here, where the call site is still known, rather than left
+    /// to fail the translation after code generation reported success.
+    SpecLocal {
+        spec: String,
+        struct_name: Option<String>,
+    },
 }
 
 /// The classification of a call's result, deciding whether it can be a term.
@@ -2432,11 +2459,15 @@ impl<'a> SpecFnTranslator<'a> {
     /// [`CalleeError`] the call site raises.
     ///
     /// Mirrors code generation's resolution: an `external fn` visible in the
-    /// enclosing scope resolves by declaration; a bare same-file call (including
-    /// a spec-sibling helper) is resolved spec-first then by the current file's
-    /// free key; a cross-file item import, a `::`-qualified free function, and an
-    /// associated function use the type-checker-recorded target; an instance
-    /// method has no term encoding.
+    /// enclosing scope resolves by declaration; a bare same-file call is
+    /// resolved spec-first then by the current file's free key; a cross-file
+    /// item import, a `::`-qualified free function, and an associated function
+    /// use the type-checker-recorded target; an instance method has no term
+    /// encoding.
+    ///
+    /// Resolving spec-first matters even though a spec-local callee is never
+    /// applicable: it is the function the call lowers to, so it is the one the
+    /// call site has to be refused for ([`CalleeError::SpecLocal`]).
     fn resolve_callee(&self, function: ExprId) -> Result<Callee, CalleeError> {
         match &self.arena[function].kind {
             Expr::Identifier(ident_id) => {
@@ -2467,7 +2498,8 @@ impl<'a> SpecFnTranslator<'a> {
                     ));
                 }
                 // Same-file: the spec-mangled sibling key first, then the file's
-                // free key — exactly `resolve_free_callee_idx`.
+                // free key — the order `resolve_free_callee_idx` lowers the call
+                // by. A sibling found here is refused by `validate_body`.
                 let spec_key =
                     FnKey::spec_free_folded(self.module_path, self.spec_name, name.clone());
                 if let Some(def_id) = self.callee.get(&spec_key) {
@@ -2507,6 +2539,23 @@ impl<'a> SpecFnTranslator<'a> {
                     ),
                     None => FnKey::free_in(target.module_path.clone(), target.name.clone()),
                 };
+                // A same-file associated call may name a struct declared inside
+                // this spec, which code generation registers under the spec key
+                // and resolves spec-first; a cross-file one never does.
+                if self.callee.get(&key).is_none()
+                    && let Some(struct_name) = &target.receiver_struct
+                    && target.module_path == self.module_path
+                {
+                    let spec_key = FnKey::spec_method_folded(
+                        self.module_path,
+                        self.spec_name,
+                        struct_name.clone(),
+                        target.name.clone(),
+                    );
+                    if let Some(def_id) = self.callee.get(&spec_key) {
+                        return self.validate_body(spec_key, def_id);
+                    }
+                }
                 self.validate_defined(key)
             }
             Expr::MemberAccess { .. } => Err(CalleeError::NotApplicable(
@@ -2530,14 +2579,32 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// Rejects a callee whose body contains non-deterministic constructs — it can
-    /// carry no realized claim.
+    /// carry no realized claim — and then one defined inside a `spec` block,
+    /// which the verified module does not contain.
+    ///
+    /// Every defined callee passes through here, so the spec-local refusal holds
+    /// for each resolution arm. The non-determinism check runs first because its
+    /// reason is the more specific one: a quantified sibling cannot be moved out
+    /// of its `spec` block at all, so the spec-local remedy would not fit it.
     fn validate_body(&self, key: FnKey, def_id: DefId) -> Result<Callee, CalleeError> {
         if self.arena.def_is_non_det(def_id) {
             return Err(CalleeError::NotApplicable(
                 "its body is non-deterministic and has no executable meaning",
             ));
         }
-        Ok(Callee::Defined { key, def_id })
+        match key {
+            FnKey::SpecFree { spec, .. } => Err(CalleeError::SpecLocal {
+                spec,
+                struct_name: None,
+            }),
+            FnKey::SpecMethod {
+                spec, struct_name, ..
+            } => Err(CalleeError::SpecLocal {
+                spec,
+                struct_name: Some(struct_name),
+            }),
+            FnKey::Free { .. } | FnKey::Method { .. } => Ok(Callee::Defined { key, def_id }),
+        }
     }
 
     /// Resolves an `external fn` declaration to the symbol its linked body
@@ -3277,10 +3344,10 @@ impl<'a> SpecFnTranslator<'a> {
     ///
     /// Two rules under one code, keyed on the quantifier of the *function*
     /// rather than on where an expression sits inside it. A `forall` or plain
-    /// body — a helper `fn` declared inside a `spec` block included, since it is
-    /// translated into an obligation of its own — becomes a term, and a term's
-    /// arithmetic is the wrapping machine operator with no second operator for
-    /// an annotation to select, so either spelling is refused. An
+    /// body — a value-returning `fn` declared inside a `spec` block included,
+    /// since it is translated into an obligation of its own — becomes a term,
+    /// and a term's arithmetic is the wrapping machine operator with no second
+    /// operator for an annotation to select, so either spelling is refused. An
     /// `exists`/`unique`-quantified body is compiled and reduced by its own
     /// obligation, so an operator whose effective mode traps is refused instead
     /// and the annotation that makes arithmetic modular is exactly the remedy.
@@ -3399,6 +3466,17 @@ impl<'a> SpecFnTranslator<'a> {
         });
         let mut findings: Vec<(Location, GuardReason)> = Vec::new();
         for (call_id, function) in calls {
+            // A spec-local callee is refused outright where the call is
+            // translated (`P005`). Reporting what it reaches as well would add a
+            // second error whose remedies both dead-end — the `forall` claim it
+            // points to refuses the same call, and `wrapping(...)` in a spec
+            // body is `P017` — for a call that has to go regardless.
+            if matches!(
+                self.resolve_callee(function),
+                Err(CalleeError::SpecLocal { .. })
+            ) {
+                continue;
+            }
             if let Some(reason) = self.guard_reach.reason_for_call(
                 self.ctx,
                 self.callee,
@@ -4172,6 +4250,28 @@ impl<'a> SpecFnTranslator<'a> {
     fn emit_callee_error(&mut self, function: ExprId, error: &CalleeError) {
         match error {
             CalleeError::NotApplicable(reason) => self.error_call(function, reason),
+            CalleeError::SpecLocal { spec, struct_name } => {
+                let name = self.call_display_name(function);
+                // What has to move is whatever the `spec` block declares: the
+                // function itself, or the struct an associated function belongs to.
+                let rule = "an obligation can apply only functions that module contains";
+                let reason = match struct_name {
+                    None => format!(
+                        "`{name}` is declared inside spec `{spec}`, so it is not part of the \
+                         module the obligations are about, and {rule}; move `{name}` out of the \
+                         `spec` block to file scope, where it is compiled into the module and an \
+                         obligation can apply it"
+                    ),
+                    Some(struct_name) => format!(
+                        "`{name}` belongs to struct `{struct_name}`, which is declared inside spec \
+                         `{spec}`, so `{name}` is not part of the module the obligations are \
+                         about, and {rule}; move struct `{struct_name}` out of the `spec` block to \
+                         file scope, where its functions are compiled into the module and an \
+                         obligation can apply `{name}`"
+                    ),
+                };
+                self.error_call(function, &reason);
+            }
             CalleeError::ReachabilitySpec { kind } => {
                 let name = self.call_display_name(function);
                 let article = quantifier_article(kind);
@@ -4183,14 +4283,16 @@ impl<'a> SpecFnTranslator<'a> {
                          `{kind}`-quantified spec function, and its obligation is a claim about \
                          running its own body with its own choices — there is no predicate to \
                          apply here; state the property you want directly in this body, or move \
-                         the shared part into an ordinary function both spec functions can call"
+                         the shared part into a file-scope function that both spec functions can \
+                         call"
                     ),
                 );
             }
         }
     }
 
-    /// A readable callee name for a diagnostic (bare name, or `Type::method`).
+    /// A readable callee name for a diagnostic: the identifier the call names,
+    /// without any `Type::` or receiver part.
     fn call_display_name(&self, function: ExprId) -> String {
         match &self.arena[function].kind {
             Expr::Identifier(id) => self.arena[*id].name.clone(),

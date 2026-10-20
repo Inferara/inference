@@ -579,29 +579,38 @@ mod scenario_4_per_spec_emission {
     /// `validate_rocq_identifier` (Peano successor constructor) if anyone
     /// later threads this binary through `wasm_to_v`.
     ///
-    /// `helper` returns a value *and* states a property: a spec free function
-    /// that only computed would be rejected before it could be the callee, so
-    /// the only way to keep an intra-spec call under test is to have the callee
-    /// assert something of its own.
+    /// The call is written in a spec *method*, whose body is lowered but
+    /// carries no obligation. Written in a spec function's claim instead, the
+    /// same call is refused before lowering matters (`P005`): no obligation may
+    /// apply a function declared in a `spec` block. `helper` states a property
+    /// of its own because a spec free function that only computed would be
+    /// rejected before any WASM was emitted.
     #[test]
     fn intra_spec_call_lowers_to_correct_function_index() {
-        let source = r#"fn base() -> i32 { return 99; } spec Sp { fn helper() -> i32 { assert(base() == 99); return 99; } fn caller() { assert(helper() == 99); } }"#;
+        let source = r#"fn base() -> i32 { return 99; } spec Sp { fn helper() -> i32 { assert(base() == 99); return 99; } struct Probe { x: i32; fn read(self) -> i32 { return helper() + self.x; } } fn caller() { assert(base() == 99); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
 
+        // Spec free functions are registered first, in source order, then spec
+        // methods: `helper`, `caller`, `read`.
         let by_spec = output.spec_func_indices_by_spec();
         let s_indices = by_spec
             .get("Sp")
             .expect("spec Sp should have a per-spec index list");
         assert_eq!(
             s_indices.len(),
-            2,
-            "spec Sp should expose two inner-function indices (helper, caller); got {s_indices:?}"
+            3,
+            "spec Sp should expose three inner-function indices (helper, caller, read); \
+             got {s_indices:?}"
         );
-        assert_ne!(
-            s_indices[0], s_indices[1],
-            "spec-inner functions must occupy distinct WASM function indices"
+        let (helper_idx, read_idx) = (s_indices[0], s_indices[2]);
+        let call_target = read_first_call_operand_for_func(wasm, read_idx)
+            .expect("spec method `read` should contain a Call instruction");
+        assert_eq!(
+            call_target, helper_idx,
+            "spec method `read` must call the sibling `helper` at idx {helper_idx}; \
+             observed call operand: {call_target}"
         );
     }
 
@@ -613,28 +622,29 @@ mod scenario_4_per_spec_emission {
     /// spec-aware lookup that pointed the operand at index 0 would not surface
     /// in `top()` runtime checking.
     ///
-    /// `inner` returns a value *and* states a property, because a spec free
-    /// function that only computed would be rejected before it could be the
-    /// callee under test.
+    /// The intra-spec call sits in a spec method, as in
+    /// `intra_spec_call_lowers_to_correct_function_index`: an obligation may not
+    /// apply `inner`, so a method body is where such a call is still lowered.
     #[test]
     fn intra_spec_call_resolves_to_spec_inner_definition() {
         // Spec is named `Sp` (not `S`) because the per-spec index map is
         // embedded into the WASM `inference.spec_funcs` section keyed by spec
         // name; `S` would collide with the Peano successor constructor that
         // `validate_rocq_identifier` rejects.
-        let source = r#"fn helper() -> i32 { return 1; } pub fn top() -> i32 { return helper(); } spec Sp { fn inner() -> i32 { assert(helper() == 1); return 99; } fn caller() { assert(inner() == 99); } }"#;
+        let source = r#"fn helper() -> i32 { return 1; } pub fn top() -> i32 { return helper(); } spec Sp { fn inner() -> i32 { assert(helper() == 1); return 99; } struct Probe { x: i32; fn read(self) -> i32 { return inner() + self.x; } } fn caller() { assert(helper() == 1); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
 
+        // `inner`, `caller`, then the method `read`.
         let by_spec = output.spec_func_indices_by_spec();
         let s_indices = by_spec
             .get("Sp")
             .expect("spec Sp should have a per-spec index list");
         assert_eq!(
             s_indices.len(),
-            2,
-            "spec Sp should expose two inner-function indices; got {s_indices:?}"
+            3,
+            "spec Sp should expose three inner-function indices; got {s_indices:?}"
         );
 
         // Confirm at runtime that the top-level export `top` returns the
@@ -651,16 +661,15 @@ mod scenario_4_per_spec_emission {
         let v = top.call(&mut store, ()).expect("top() call should succeed");
         assert_eq!(v, 1, "top() must call the top-level `helper` (returns 1)");
 
-        // The spec-inner `caller`'s body must contain a `Call` instruction
-        // whose operand is the spec-inner `inner`'s WASM index (the first of
-        // the two indices recorded for spec `Sp`).
+        // The spec method `read`'s body must contain a `Call` instruction whose
+        // operand is the spec-inner `inner`'s WASM index.
         let spec_inner_idx = s_indices[0];
-        let spec_caller_idx = s_indices[1];
-        let call_target = read_first_call_operand_for_func(wasm, spec_caller_idx)
-            .expect("spec-inner `caller` should contain a Call instruction");
+        let spec_method_idx = s_indices[2];
+        let call_target = read_first_call_operand_for_func(wasm, spec_method_idx)
+            .expect("spec method `read` should contain a Call instruction");
         assert_eq!(
             call_target, spec_inner_idx,
-            "spec-inner `caller` must call the spec-inner `inner` at idx {spec_inner_idx}; \
+            "spec method `read` must call the spec-inner `inner` at idx {spec_inner_idx}; \
              observed call operand: {call_target}"
         );
     }
