@@ -54,5 +54,6 @@ RUN cargo build --workspace \
     && cargo test --workspace --no-run
 
 # Run the default members' tests, as CI does, so the log shows the image works. A failure is reported but does
-# not fail the build: the scanner can still use an image with one broken test.
-RUN cargo test || echo "WARNING: cargo test reported failures"
+# not fail the build: the scanner can still use an image with one broken test. `--no-fail-fast` keeps one
+# failing test binary from hiding the results of the ones after it.
+RUN cargo test --no-fail-fast || echo "WARNING: cargo test reported failures"

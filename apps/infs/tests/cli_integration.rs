@@ -508,6 +508,40 @@ fn require_infc() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Reports whether `dir`, already made read-only, actually refuses this process
+/// a write, by trying to create a file in it.
+///
+/// It does not for a process that bypasses permission checks, such as root in a
+/// container image. There the permission-denied error the caller sets out to
+/// provoke cannot happen, so the caller is skipped. Under CI the run aborts
+/// instead, as in [`require_infc`]: every CI leg runs unprivileged, and cargo
+/// captures the skip notice, so a skip there would read as a pass.
+///
+/// # Panics
+///
+/// When `dir` is still writable during a CI run.
+#[cfg(unix)]
+fn read_only_dir_refuses_writes(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".write_probe");
+    if std::fs::File::create(&probe).is_err() {
+        return true;
+    }
+    std::fs::remove_file(&probe).expect("Failed to remove the write probe");
+
+    assert!(
+        !is_ci(),
+        "{} is read-only but this process can still write to it, so it bypasses \
+         permission checks; a CI run must not silently skip the permission-denied \
+         tests (unset CI or set CI=0 to restore the local skip).",
+        dir.display()
+    );
+    eprintln!(
+        "Skipping test: this process can write to a read-only directory (running as \
+         root?), so the permission-denied path cannot be provoked."
+    );
+    false
+}
+
 /// Builds a path from its segments so the expectations below carry no
 /// platform-specific separator.
 fn joined(segments: &[&str]) -> std::path::PathBuf {
@@ -5290,6 +5324,9 @@ fn new_handles_permission_denied() {
         .permissions();
     perms.set_mode(0o555);
     std::fs::set_permissions(readonly_dir.path(), perms).expect("Failed to set permissions");
+    if !read_only_dir_refuses_writes(readonly_dir.path()) {
+        return;
+    }
 
     // Run from temp directory but try to create project in the read-only subdirectory
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
@@ -5338,6 +5375,9 @@ fn init_handles_permission_denied() {
         .permissions();
     perms.set_mode(0o555);
     std::fs::set_permissions(readonly_dir.path(), perms).expect("Failed to set permissions");
+    if !read_only_dir_refuses_writes(readonly_dir.path()) {
+        return;
+    }
 
     // Run from work_dir but use -C or pass path to init in the readonly dir
     // Note: infs init takes name as positional arg, not path, so we need to cd into it
@@ -6099,6 +6139,9 @@ fn build_fails_on_readonly_output_directory() {
         .permissions();
     perms.set_mode(0o555);
     std::fs::set_permissions(out_dir.path(), perms).expect("Failed to set permissions");
+    if !read_only_dir_refuses_writes(out_dir.path()) {
+        return;
+    }
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.env("INFC_PATH", &infc_path)
