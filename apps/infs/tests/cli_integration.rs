@@ -5405,6 +5405,139 @@ fn build_v_rejects_unique_block_with_p002() {
     );
 }
 
+/// Asserts that a `-v` build was refused for applying a function declared inside
+/// spec `spec` — the targeted `P005`, not the proof translation failing after
+/// code generation reported success — and that it left no artifact in `out`.
+fn assert_spec_local_refusal(
+    outcome: assert_cmd::assert::Assert,
+    out: &assert_fs::fixture::ChildPath,
+    stem: &str,
+    spec: &str,
+) {
+    let output = outcome.failure().get_output().clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("P005") && stderr.contains(&format!("inside spec `{spec}`")),
+        "the build must be refused with the spec-local P005, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("WASM->V translation failed"),
+        "the refusal must come from code generation, not the proof translation:\n{stderr}"
+    );
+    for extension in ["v", "wasm"] {
+        let artifact = out.child(format!("{stem}.{extension}"));
+        assert!(
+            !artifact.path().exists(),
+            "a refused proof-mode build must write no .{extension}, found: {}",
+            artifact.path().display()
+        );
+    }
+}
+
+/// A `-v` build whose obligation applies a function declared in the same `spec`
+/// block is refused before anything is written (#390).
+///
+/// The helper asserts something of its own, so it is not the vacuous helper
+/// `P010` already refuses: it is a specification in its own right, and only
+/// applying it is wrong. It used to pass analysis and code generation, print
+/// "Codegen complete", and then fail the proof translation with an internal
+/// "no defined function in the module carries" message, because a function
+/// declared in a `spec` block is not part of the module the obligations are about.
+#[test]
+fn build_v_refuses_an_obligation_applying_a_spec_local_function() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("spec_local.inf");
+    source
+        .write_str(
+            "pub fn main() -> i32 {\n    return 0;\n}\n\nspec HelperSpec {\n    fn helper(n: i32) \
+             -> i32 {\n        assert(n > 0);\n        return n;\n    }\n\n    fn property() \
+             forall {\n        let a: i32 = @;\n        assert(helper(a) == a);\n    }\n}\n",
+        )
+        .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(source.path())
+        .arg("-v");
+
+    assert_spec_local_refusal(cmd.assert(), &temp.child("out"), "spec_local", "HelperSpec");
+}
+
+/// The same refusal for a spec in a non-entry file of a project: the spec's own
+/// file is where its function is resolved, and the diagnostic names the spec as
+/// written rather than by its file-folded key.
+#[test]
+fn project_build_v_refuses_a_sub_file_spec_applying_its_own_function() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(
+        &temp,
+        "demo",
+        "use lib::arith::{add};\n\npub fn main() -> i32 {\n    return add(1, 2);\n}\n",
+    );
+    write_src_file(
+        &temp,
+        "lib/arith.inf",
+        "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n\nspec ArithChecks {\n    fn \
+         seven() -> i32 {\n        let x: i32 = 7;\n        assert(x == 7);\n        return x;\n    \
+         }\n\n    fn prop() forall {\n        assert(seven() == 7);\n    }\n}\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("-v");
+
+    assert_spec_local_refusal(cmd.assert(), &temp.child("out"), "main", "ArithChecks");
+}
+
+/// The remedy the refusal names works: the same function moved out of the `spec`
+/// block to its file's top level builds, and the obligation applies it.
+#[test]
+fn project_build_v_applies_a_function_moved_out_of_its_spec() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(
+        &temp,
+        "demo",
+        "use lib::arith::{add};\n\npub fn main() -> i32 {\n    return add(1, 2);\n}\n",
+    );
+    write_src_file(
+        &temp,
+        "lib/arith.inf",
+        "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n\nfn seven() -> i32 {\n    \
+         return 7;\n}\n\nspec ArithChecks {\n    fn prop() forall {\n        assert(seven() == \
+         7);\n    }\n}\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("-v");
+
+    cmd.assert().success();
+    let v = std::fs::read_to_string(temp.child("out").child("main.v").path())
+        .expect("the build must write out/main.v");
+    assert!(
+        v.contains("T_app"),
+        "the obligation must apply the moved function:\n{v}"
+    );
+}
+
 /// QA: TC-13.8 - Verify the same `unique`-only fixture compiles in compile mode
 /// (no `-v`): the proof-only spec is stripped and the executable `main` is
 /// compiled, so the mode boundary — rejected under `-v`, accepted without it —
