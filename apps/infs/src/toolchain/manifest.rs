@@ -368,7 +368,66 @@ async fn fetch_manifest_from_network() -> Result<Manifest> {
     let manifest: Manifest = serde_json::from_str(&text)
         .with_context(|| format!("Failed to parse manifest from {url}"))?;
 
+    validate_manifest(&manifest)
+        .with_context(|| format!("Refusing the release manifest from {url}"))?;
+
     Ok(manifest)
+}
+
+/// Refuses a manifest that names a version or a file `infs` could not use as
+/// a path component.
+///
+/// `infs install` extracts a version to `toolchains/<version>` and downloads a
+/// file to `downloads/<file name>`, so each must be a single plain file name.
+/// A version of `../../x`, or a URL ending in `..\..\x.exe` (a separator on
+/// Windows, which the URL parser reads as `/`), would put the toolchain or the
+/// download outside the toolchain home. The checksum beside each file does not
+/// guard this: it comes from the same manifest.
+///
+/// # Errors
+///
+/// Returns an error naming the first version or file name that is not a plain
+/// file name (see [`is_plain_file_name`]).
+fn validate_manifest(manifest: &Manifest) -> Result<()> {
+    for entry in manifest {
+        anyhow::ensure!(
+            is_plain_file_name(&entry.version),
+            "version {:?} is not a plain file name: a version may hold only ASCII letters, \
+             digits, `.`, `-`, `+` and `_`, must start with a letter or a digit, and must not \
+             end with `.`",
+            entry.version
+        );
+        for file in &entry.files {
+            anyhow::ensure!(
+                is_plain_file_name(file.filename()),
+                "version {} names the file {:?} (from {:?}), which is not a plain file name: \
+                 a file name may hold only ASCII letters, digits, `.`, `-`, `+` and `_`, must \
+                 start with a letter or a digit, and must not end with `.`",
+                entry.version,
+                file.filename(),
+                file.url
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is a single plain file name on every platform: ASCII
+/// letters, digits, `.`, `-`, `+` and `_`, starting with a letter or a digit
+/// and not ending with `.`.
+///
+/// That rules out an empty name, `.` and `..`, both separators, a drive
+/// prefix and control characters, whatever the host, and a trailing `.`,
+/// which Windows drops, so that `0.1.0.` would name `0.1.0`'s directory. It
+/// admits every semantic version and every release file name published so
+/// far. A Windows device name such as `NUL` passes; it can only make the
+/// install fail.
+fn is_plain_file_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && !name.ends_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
 }
 
 /// Fetches the release manifest and finds the artifact for a specific version and platform.
@@ -1069,5 +1128,134 @@ mod tests {
         };
         // Whitespace is preserved (not trimmed)
         assert_eq!(entry.filename(), "infc-linux-x64.tar.gz ");
+    }
+
+    /// A manifest with one version holding one file at `url`.
+    fn manifest_with(version: &str, url: &str) -> Manifest {
+        vec![VersionEntry {
+            version: version.to_string(),
+            stable: true,
+            files: vec![FileEntry {
+                url: url.to_string(),
+                sha256: "a".repeat(64),
+            }],
+        }]
+    }
+
+    /// Every version and file name the distribution server has published,
+    /// and the other shapes a semantic version takes, pass the check.
+    #[test]
+    fn validate_manifest_accepts_published_versions_and_file_names() {
+        let manifest: Manifest =
+            serde_json::from_str(sample_manifest_json()).expect("Should parse manifest");
+        validate_manifest(&manifest).expect("the sample manifest is valid");
+
+        for version in [
+            "0.0.6",
+            "0.0.1-gamma.2",
+            "0.0.1-beta.1",
+            "1.0.0+build.5",
+            "1.0.0-rc.1+20261020",
+            "nightly_2026-10-20",
+        ] {
+            for file in [
+                "infc-linux-x64.tar.gz",
+                "infc-macos-apple-silicon.tar.gz",
+                "infc-windows-x64.zip",
+                "infs-windows-x64.zip",
+            ] {
+                let url = format!(
+                    "https://github.com/Inferara/inference/releases/download/v{version}/{file}"
+                );
+                validate_manifest(&manifest_with(version, &url))
+                    .unwrap_or_else(|e| panic!("{version} with {file} must pass: {e:#}"));
+            }
+        }
+    }
+
+    /// A version `infs install` could not use as one directory under
+    /// `toolchains/` is refused, and the refusal quotes it. Before the fix a
+    /// manifest whose only stable version was `../../x` made `infs install`
+    /// extract the toolchain to `<home>/../x`.
+    #[test]
+    fn validate_manifest_refuses_a_version_that_is_not_a_plain_file_name() {
+        for version in [
+            "../escape",
+            "../../.local/share",
+            "0.1.0/../../escape",
+            "..",
+            ".",
+            "",
+            "a/b",
+            "a\\b",
+            "..\\escape",
+            "/abs",
+            "C:escape",
+            ".hidden",
+            "-flag",
+            " 0.1.0",
+            "0.1.0 ",
+            "0.1.0\n",
+            "0.1.0\0",
+            "0.1.0:stream",
+            "0.1.0.",
+            "0.1.0%2F..",
+            "0.1.0\u{2215}x",
+        ] {
+            let error = validate_manifest(&manifest_with(
+                version,
+                "https://example.com/infc-linux-x64.tar.gz",
+            ))
+            .expect_err(&format!("version {version:?} must be refused"));
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(&format!("version {version:?} is not a plain file name")),
+                "{message}"
+            );
+        }
+    }
+
+    /// A file URL whose last segment `infs` could not use as one file name
+    /// under `downloads/` is refused. A backslash is a separator on Windows,
+    /// where the URL parser also reads it as `/`, so `..\..\x.exe` would
+    /// download `https://host/x.exe` to a path outside `downloads/`.
+    #[test]
+    fn validate_manifest_refuses_a_file_name_that_is_not_plain() {
+        for url in [
+            "https://example.com/..\\..\\infc-windows-x64.zip",
+            "https://example.com/dir\\infc-linux-x64.tar.gz",
+            "https://example.com/..",
+            "https://example.com/.",
+            "https://example.com/",
+            "https://example.com/C:infc-windows-x64.zip",
+            "https://example.com/infc-linux-x64.tar.gz?token=1",
+            "https://example.com/..%2F..%2Finfc-linux-x64.tar.gz",
+            "https://example.com/infc-linux-x64.tar.gz ",
+            "https://example.com/infc-linux-x64.tar.gz.",
+            "infc-linux-x64.tar.gz\n",
+        ] {
+            let error = validate_manifest(&manifest_with("0.1.0", url))
+                .expect_err(&format!("{url:?} must be refused"));
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("which is not a plain file name") && message.contains("0.1.0"),
+                "{message}"
+            );
+        }
+    }
+
+    /// One unsafe entry refuses the whole manifest, wherever it sits: a
+    /// manifest that names one is not trusted for the others.
+    #[test]
+    fn validate_manifest_refuses_the_whole_manifest_for_one_unsafe_entry() {
+        let mut manifest: Manifest =
+            serde_json::from_str(sample_manifest_json()).expect("Should parse manifest");
+        manifest.push(VersionEntry {
+            version: "../escape".to_string(),
+            stable: false,
+            files: Vec::new(),
+        });
+
+        assert!(validate_manifest(&manifest).is_err());
     }
 }
