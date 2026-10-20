@@ -13,11 +13,13 @@ use clap::Args;
 
 use crate::toolchain::ToolchainPaths;
 use crate::toolchain::manifest::{fetch_manifest, find_version};
+use crate::toolchain::paths::parse_version_arg;
 
 /// Arguments for the default command.
 #[derive(Args)]
 pub struct DefaultArgs {
     /// Version to set as default (e.g., "0.2.0").
+    #[clap(value_parser = parse_version_arg)]
     pub version: String,
 }
 
