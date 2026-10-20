@@ -57,6 +57,7 @@ cobertura.xml
 !.github/
 !.github/workflows/
 !.cargo/
+!.oss-scanner/
 !.gitattributes
 !editors/vscode/.vscodeignore
 
