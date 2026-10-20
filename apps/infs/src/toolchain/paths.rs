@@ -336,6 +336,14 @@ impl ToolchainPaths {
     }
 
     /// Returns the path to a specific toolchain version's installation directory.
+    ///
+    /// `version` is joined unchecked, so it must name one entry of
+    /// `toolchains/`: `..` would name the toolchain home, and an absolute path
+    /// would replace `toolchains/` altogether. A fetched manifest's versions
+    /// have been checked to be plain file names (see [`is_plain_file_name`]),
+    /// an installed version is the name of an entry read from `toolchains/`,
+    /// and a version given on the command line is read with
+    /// [`parse_version_arg`].
     #[must_use = "returns the path without side effects"]
     pub fn toolchain_dir(&self, version: &str) -> PathBuf {
         self.toolchains.join(version)
@@ -751,6 +759,50 @@ impl ToolchainPaths {
     }
 }
 
+/// Whether `name` is a single plain file name on every platform: ASCII
+/// letters, digits, `.`, `-`, `+` and `_`, starting with a letter or a digit
+/// and not ending with `.`.
+///
+/// That rules out an empty name, `.` and `..`, both separators, a root, a
+/// drive prefix and control characters, whatever the host, and a trailing
+/// `.`, which Windows drops, so that `0.1.0.` would name `0.1.0`'s directory.
+/// It admits every semantic version and every release file name published so
+/// far. A Windows device name such as `NUL` passes; it names a device, not a
+/// directory, so it can only make a command fail.
+pub(crate) fn is_plain_file_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && !name.ends_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+}
+
+/// Reads a toolchain version given on the command line, which must be a plain
+/// file name (see [`is_plain_file_name`]).
+///
+/// [`ToolchainPaths::toolchain_dir`] joins a version unchecked, and
+/// `infs uninstall` removes the directory it names, so any other argument
+/// would remove a directory outside `toolchains/`: `..` the toolchain home,
+/// `../..` the user's home directory, an empty version or `.` every
+/// toolchain, and an absolute path whatever it names. Reading the argument
+/// with this parser refuses it while clap parses the command line, before the
+/// command looks at the toolchain home.
+///
+/// # Errors
+///
+/// Returns why `text` is refused. clap prints it after the argument it quotes.
+pub(crate) fn parse_version_arg(text: &str) -> Result<String, String> {
+    if is_plain_file_name(text) {
+        Ok(text.to_string())
+    } else {
+        Err(
+            "not a plain file name: a version may hold only ASCII letters, digits, `.`, `-`, \
+             `+` and `_`, must start with a letter or a digit, and must not end with `.`"
+                .to_string(),
+        )
+    }
+}
+
 /// Creates a symbolic link (Unix) or hard link (Windows) from source to target.
 fn create_link(source: &Path, target: &Path) -> Result<()> {
     #[cfg(unix)]
@@ -818,6 +870,63 @@ mod tests {
             paths.toolchain_dir("0.1.0"),
             temp.path().join("toolchains").join("0.1.0")
         );
+    }
+
+    /// Every published version, and each form a semantic version takes, reads
+    /// back unchanged.
+    #[test]
+    fn parse_version_arg_accepts_plain_versions() {
+        for version in [
+            "0.0.6",
+            "0.0.1-gamma.2",
+            "0.0.1-beta.1",
+            "1.0.0+build.5",
+            "1.0.0-rc.1+20261020",
+            "nightly_2026-10-20",
+            "0.0.0-nonexistent",
+        ] {
+            assert_eq!(parse_version_arg(version).as_deref(), Ok(version));
+        }
+    }
+
+    /// A version that would not name one entry of `toolchains/` on every
+    /// platform is refused with the rule it breaks. Before the fix
+    /// `infs uninstall ../..` removed `toolchains/../..`, the user's home
+    /// directory.
+    #[test]
+    fn parse_version_arg_refuses_a_version_that_is_not_a_plain_file_name() {
+        for version in [
+            "",
+            ".",
+            "..",
+            "../..",
+            "../escape",
+            "0.1.0/../..",
+            "a/b",
+            "a\\b",
+            "..\\..",
+            "/",
+            "/home/user",
+            "~",
+            "~/.inference",
+            "C:x",
+            "C:\\",
+            "\\x",
+            "\\\\server\\share",
+            ".hidden",
+            "-x",
+            " 0.1.0",
+            "0.1.0 ",
+            "0.1.0\n",
+            "0.1.0\0",
+            "0.1.0.",
+            "0.1.0:stream",
+            "0.1.0\u{2215}x",
+        ] {
+            let error =
+                parse_version_arg(version).expect_err(&format!("{version:?} must be refused"));
+            assert!(error.starts_with("not a plain file name: "), "{error}");
+        }
     }
 
     #[test]
