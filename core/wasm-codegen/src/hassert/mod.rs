@@ -53,6 +53,10 @@
 //! produces no obligation either way — but one that carries an `assert`, at any
 //! depth, raises `P009` rather than dropping that assertion silently.
 //!
+//! Giving a spec function an `assert` of its own makes it a specification, not
+//! a helper: no obligation may apply a function declared in a `spec` block
+//! (`P005`), because the module the obligations are about does not contain it.
+//!
 //! ## Obligation depth and the encoding cap
 //!
 //! The `inference.hspecs` codec caps assertion-tree depth at
@@ -388,8 +392,11 @@ fn vacuous_obligation_diagnostic(
              — state the property where it constrains the program"
         ),
         None => format!(
-            "spec function `{name}` only computes a value and states no property, {vacuous} — \
-             assert a property about the computation, or move the function out of the `spec` block"
+            "spec function `{name}` only computes a value and states no property, {vacuous} — if \
+             it is a helper, move `{name}` out of the `spec` block to file scope, where \
+             obligations can apply it (none can apply a function declared in a `spec` block); if \
+             it is meant to be a specification in its own right, assert a property about the \
+             computation"
         ),
     };
     HassertDiagnostic::new(

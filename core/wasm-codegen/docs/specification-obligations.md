@@ -432,9 +432,9 @@ Write each bound in the operand's own signedness.
 Two positions cannot carry this at all, and both are rejected rather than silently
 reinterpreted.
 
-**A body that becomes a term** — `forall`, plain, and a helper `fn` declared inside a
-`spec` block, which is translated into an obligation of its own — may not carry either
-annotation (**P017**, first wording). Its `+`, `-` and `*` are the modular machine
+**A body that becomes a term** — `forall`, plain, and a value-returning `fn` declared
+inside a `spec` block, which is translated into an obligation of its own — may not carry
+either annotation (**P017**, first wording). Its `+`, `-` and `*` are the modular machine
 operators and no second operator exists downstream, so both spellings would translate
 identically and whichever was written would vanish. State the range as an `assume` over
 the operands and leave the guard in the executable function whose realization the
@@ -526,7 +526,7 @@ function.
 | P004 | `()`, a function type, an out-of-surface aggregate *parameter* | not representable |
 | P004 | an aggregate read whole in term position, an aggregate call argument included | an aggregate is not a term; name the component you mean |
 | P004 | an *aggregate* parameter of an `exists`/`unique` body | the obligation denotes against a real frame, where the parameter is one pointer local |
-| P005 | a call that is not a `T_app`: an `extern` callee this build supplies no body for — an *unbound* one (no `use … from` binding, so this build names no module at all to take a body from) or a *host*-bound one (`use … from host::<module>;`, whose body the embedder supplies at run time, so it is never spliced into the artifact an obligation is about) — an instance method, one that does not resolve to a function this module defines or links, a non-deterministic-bodied callee, or — in term position only — one whose result is not a single scalar, compound or `()` alike | the symbol has to name a function of the emitted module, applied at its real signature; a bare call *statement* is unaffected, becoming `HA_app_ok` at any result arity |
+| P005 | a call that is not a `T_app`: an `extern` callee this build supplies no body for — an *unbound* one (no `use … from` binding, so this build names no module at all to take a body from) or a *host*-bound one (`use … from host::<module>;`, whose body the embedder supplies at run time, so it is never spliced into the artifact an obligation is about) — an instance method, one that does not resolve to a function this module defines or links, a non-deterministic-bodied callee, a function declared inside a `spec` block (a spec free function, or an associated function of a spec-inner struct — not part of the module an obligation is about; move it, or its struct, to file scope), or — in term position only — one whose result is not a single scalar, compound or `()` alike | the symbol has to name a function of the emitted module, applied at its real signature; a bare call *statement* is unaffected, becoming `HA_app_ok` at any result arity |
 | P006 | a bare `@` outside a `let` right-hand side or a call-argument position | a choice needs a name or a parameter slot for the obligation to read it back |
 | P007 | `forall` inside an `exists`/`unique` body | see *Alternating Quantifiers* |
 | P008 | an out-of-surface compound `@` in **any** body; any compound `@` in an `exists`/`unique` body | out of surface, there is no leaf tree to build; in a reachability body a choice arrives as one scalar parameter of the run |

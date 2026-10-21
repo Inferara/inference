@@ -1458,17 +1458,42 @@ fn if_condition_may_be_a_call_result() {
 
 // ----- 8. calls ----------------------------------------------------------
 
-/// A call to a specification sibling resolves by that sibling's *folded* key, so
-/// `helper` applied from `prop` is `T_app "S.helper"`. Both functions state a
-/// property of their own, because a specification function that only computes is
-/// rejected outright — a `return`-only sibling could not be the callee here.
+/// Asserts that `diagnostics` is exactly the one `P005` refusing an application
+/// of `name`, declared inside spec `spec`, and returns it.
+fn sole_spec_local_refusal(diagnostics: &[String], name: &str, spec: &str) -> String {
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly the spec-local refusal, got: {diagnostics:?}"
+    );
+    let diagnostic = diagnostics[0].clone();
+    assert!(diagnostic.contains("error[P005]"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&format!("call to `{name}` cannot be used in a specification term")),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&format!("inside spec `{spec}`")),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("out of the `spec` block"),
+        "the refusal must name the remedy: {diagnostic}"
+    );
+    diagnostic
+}
+
+/// A specification sibling is not a callee an obligation can apply. Both
+/// functions state a property of their own — a sibling that only computes is
+/// `P010` before it could be a callee — so the helper is a legitimate
+/// specification; what is refused is applying it, because a function declared in
+/// a `spec` block is not part of the module the obligations are about.
 ///
-/// The translation pass is driven directly, without the compile around it: the
-/// full pipeline cannot yet resolve a specification-local helper's `T_app`, but
-/// that is a separate open defect in the driver, not in the resolution this test
-/// pins.
+/// The refusal used to be a `T_app` by the sibling's folded key (`S.helper`),
+/// which no function in the emitted module carries: code generation reported
+/// success and the proof translation then failed.
 #[test]
-fn spec_sibling_helper_is_a_t_app_by_its_folded_key() {
+fn a_spec_sibling_cannot_be_applied_by_an_obligation() {
     let source = "\
 spec S {
   fn helper(n: i32) -> i32 {
@@ -1481,24 +1506,194 @@ spec S {
   }
 }
 ";
-    let map = ok(source);
-    // The helper carries its own obligation and keeps its place in source order.
+    let ctx = type_check(source);
+    let (map, diagnostics) = translate(&ctx);
+    let refusal = sole_spec_local_refusal(&diagnostics, "helper", "S");
+    assert!(
+        refusal.contains("move `helper` out of the `spec` block"),
+        "{refusal}"
+    );
+    // The helper's own obligation is unaffected; only the application is refused.
     assert_eq!(
         obligation_named(&map, "S", "S.helper"),
         imp(guard(0), nz(gts(local(0), i32c(0))))
     );
-    assert_eq!(
-        obligation_named(&map, "S", "S.prop"),
-        imp(
-            guard(0),
-            nz(rel(
-                HNumType::I32,
-                HRelop::Eq,
-                app("S.helper", vec![local(0)]),
-                local(0)
-            ))
-        )
+    let applied: Vec<String> = map
+        .values()
+        .flatten()
+        .flat_map(|entry| applied_symbols(&entry.hassert))
+        .collect();
+    assert!(
+        applied.is_empty(),
+        "no obligation may apply a spec sibling: {applied:?}"
     );
+}
+
+/// The refusal holds wherever the sibling is applied from: every position that
+/// translates a call into a term or an `HA_app_ok`, under every quantifier that
+/// produces an obligation. Each source raises the one `P005` and nothing else.
+///
+/// The arithmetic `exists` row is the one that could double up: a reachability
+/// body's calls are also checked for what they reach (`P018`), and the helper's
+/// `n + 1` traps on overflow. That finding is suppressed for a call that has to
+/// go regardless, since both of its remedies dead-end on this callee.
+#[test]
+fn a_spec_sibling_is_refused_from_every_application_position() {
+    const VALUE: &str = "fn h(n: i32) -> i32 { assert(n == n); return n; }";
+    const VOID: &str = "fn v(n: i32) { assert(n == n); }";
+    const WRAPPING: &str = "fn h(n: i32) -> i32 { assert(n == n); return n + 1; }";
+    let rows: [(&str, &str, &str, &str); 13] = [
+        ("forall term", VALUE, "fn p() forall { let a: i32 = @; assert(h(a) == a); }", "h"),
+        ("let binding", VALUE, "fn p() forall { let y: i32 = h(3); assert(y == 3); }", "h"),
+        ("statement call", VOID, "fn p() forall { let a: i32 = @; v(a); assert(a == a); }", "v"),
+        ("plain caller", VALUE, "fn p() { assert(h(3) == 3); }", "h"),
+        ("return only", VALUE, "fn p() -> i32 { return h(3); }", "h"),
+        ("if branch", VALUE, "fn p() forall { let a: i32 = @; if a > 0 { assert(h(a) == a); } }", "h"),
+        (
+            "short-circuit operand",
+            VALUE,
+            "fn p() forall { let a: i32 = @; assert(a > 0 && h(a) == a); }",
+            "h",
+        ),
+        ("call argument", VALUE, "fn p() forall { assert(top(h(1)) == 1); }", "h"),
+        ("exists term", VALUE, "fn p() exists { let a: i32 = @; assert(h(a) == 3); }", "h"),
+        ("exists statement", VOID, "fn p() exists { let a: i32 = @; v(a); assert(a == 3); }", "v"),
+        ("unique term", VALUE, "fn p() unique { let a: i32 = @; assert(h(a) == 3); }", "h"),
+        ("exists if branch", VALUE, "fn p() exists { let a: i32 = @; if a > 0 { assert(h(a) == 3); } }", "h"),
+        (
+            "exists arithmetic helper",
+            WRAPPING,
+            "fn p() exists { let a: i32 = @; assert(h(a) == 3); }",
+            "h",
+        ),
+    ];
+    for (row, sibling, caller, name) in rows {
+        let source =
+            format!("fn top(n: i32) -> i32 {{ return n; }}\nspec S {{\n  {sibling}\n  {caller}\n}}\n");
+        let ctx = type_check(&source);
+        let (_, diagnostics) = translate(&ctx);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "{row}: expected exactly the spec-local refusal, got: {diagnostics:?}"
+        );
+        sole_spec_local_refusal(&diagnostics, name, "S");
+    }
+}
+
+/// A spec in a sub-file is refused the same way, naming the spec as its author
+/// wrote it rather than by its file-folded key.
+#[test]
+fn a_sub_file_spec_sibling_is_refused_by_its_bare_spec_name() {
+    let ctx = type_check_multi(&[
+        (vec![], "use lib::{add};\npub fn main() -> i32 { return add(1, 2); }\n"),
+        (
+            vec!["lib"],
+            "pub fn add(x: i32, y: i32) -> i32 { return x + y; }\nspec Checks {\n  fn seven() \
+             -> i32 { let x: i32 = 7; assert(x == 7); return x; }\n  fn prop() forall { \
+             assert(seven() == 7); }\n}\n",
+        ),
+    ]);
+    let (_, diagnostics) = translate(&ctx);
+    let refusal = sole_spec_local_refusal(&diagnostics, "seven", "Checks");
+    assert!(!refusal.contains("lib_Checks"), "{refusal}");
+}
+
+/// An associated function of a struct declared inside the spec is refused for
+/// the same reason, and the remedy names the struct, which is what has to move.
+/// It used to read "does not resolve to a function this module defines", which
+/// sent its author looking for a typo.
+#[test]
+fn a_spec_inner_associated_function_is_refused_naming_its_struct() {
+    let source = "\
+spec S {
+  struct Box {
+    v: i32;
+    fn twice(v: i32) -> i32 { return v + v; }
+  }
+  fn prop() forall {
+    let a: i32 = @;
+    assert(Box::twice(a) == a + a);
+  }
+}
+";
+    let ctx = type_check(source);
+    let (_, diagnostics) = translate(&ctx);
+    let refusal = sole_spec_local_refusal(&diagnostics, "twice", "S");
+    assert!(refusal.contains("struct `Box`"), "{refusal}");
+    assert!(!refusal.contains("does not resolve"), "{refusal}");
+}
+
+/// The soundness half of the refusal. A spec-local function's `name`-section
+/// symbol is its bare name, and an unrelated program function may carry the same
+/// one: here the entry file's own `compute`. Had the sibling been applied by that
+/// bare symbol, the proof translation — which drops specification functions from
+/// an applied symbol's candidates — would have resolved it to the entry file's
+/// `compute` and proved a claim about the wrong function. The call is refused
+/// instead, so no obligation names `compute` at all.
+#[test]
+fn a_spec_sibling_is_refused_even_where_its_bare_name_is_carried() {
+    let ctx = type_check_multi(&[
+        (
+            vec![],
+            "use lib::checks;\npub fn compute(n: i32) -> i32 { return n + n; }\npub fn main() -> \
+             i32 { return compute(1); }\n",
+        ),
+        (
+            vec!["lib", "checks"],
+            "spec Checks {\n  fn compute(n: i32) -> i32 { assert(n == n); return n; }\n  fn prop() \
+             forall { let a: i32 = @; assert(compute(a) == a); }\n}\n",
+        ),
+    ]);
+    let (map, diagnostics) = translate(&ctx);
+    sole_spec_local_refusal(&diagnostics, "compute", "Checks");
+    let applied: Vec<String> = map
+        .values()
+        .flatten()
+        .flat_map(|entry| applied_symbols(&entry.hassert))
+        .collect();
+    assert!(applied.is_empty(), "{applied:?}");
+}
+
+/// A spec sibling wins over a same-named item import, exactly as code generation
+/// resolves the call — so the call is refused as spec-local rather than applied
+/// as the imported function it does not lower to.
+#[test]
+fn a_spec_sibling_shadowing_an_import_is_refused_not_applied_as_the_import() {
+    let ctx = type_check_multi(&[
+        (
+            vec![],
+            "use lib::{add};\npub fn main() -> i32 { return add(1, 2); }\nspec S {\n  fn add(a: i32, \
+             b: i32) -> i32 { assert(a == a); return a + b; }\n  fn prop() forall { let a: i32 = \
+             @; assert(add(a, 0) == a); }\n}\n",
+        ),
+        (
+            vec!["lib"],
+            "pub fn add(x: i32, y: i32) -> i32 { return x + y; }\n",
+        ),
+    ]);
+    let (_, diagnostics) = translate(&ctx);
+    sole_spec_local_refusal(&diagnostics, "add", "S");
+}
+
+/// What the refusal leaves alone: a file-scope function is still applied, from a
+/// universal body and from a reachability body alike — the latter's body is the
+/// one the judgment reduces, and the callee it reaches is in the module.
+#[test]
+fn a_file_scope_function_is_still_applied_from_every_quantifier() {
+    for body in [
+        "forall { let a: i32 = @; assert(top(a) == a); }",
+        "exists { let a: i32 = @; assert(top(a) == 3); }",
+    ] {
+        let source =
+            format!("fn top(n: i32) -> i32 {{ return n; }}\nspec S {{\n  fn p() {body}\n}}\n");
+        let map = ok(&source);
+        assert_eq!(
+            applied_symbols(&sole_obligation(&map, "S")),
+            vec!["top".to_string()],
+            "{body}"
+        );
+    }
 }
 
 #[test]
@@ -2620,9 +2815,14 @@ fn the_vacuity_report_names_the_construct_the_body_wrote() {
         computed.contains("spec function `f` only computes a value and states no property"),
         "{computed}"
     );
+    // Moving the function out leads: a helper an obligation applies has to live
+    // at file scope, so the `assert` remedy is the second one, for a function
+    // that is meant to be a specification of its own.
     assert!(
         computed.contains(
-            "assert a property about the computation, or move the function out of the `spec` block"
+            "if it is a helper, move `f` out of the `spec` block to file scope, where obligations \
+             can apply it (none can apply a function declared in a `spec` block); if it is meant \
+             to be a specification in its own right, assert a property about the computation"
         ),
         "{computed}"
     );
