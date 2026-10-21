@@ -46,7 +46,7 @@
 //! resolves to an existing graph node, so callers never produce a false
 //! positive.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, NodeId, StmtId};
@@ -110,12 +110,27 @@ pub(crate) struct FnNode {
     /// size a mutable-`self` frame slot. `None` for free and associated
     /// functions.
     pub(crate) struct_name: Option<String>,
+    /// Whether an earlier node was built from a definition with this one's
+    /// [`SourceIdentity`]: this definition repeats a name its file, spec and
+    /// struct already define. The type checker reports that, so only the
+    /// resilient IDE path, which analyses a program that failed to type-check,
+    /// ever builds such a node. It carries the earlier node's key by
+    /// construction, and [`resolve_adjacency`] tolerates that duplicate.
+    pub(crate) redefinition: bool,
 }
+
+/// What a function definition is called in the source: its defining file, its
+/// enclosing spec, its enclosing struct, and its name. [`node_key`] is a
+/// function of these four, so two definitions that share them share a key, and
+/// one of them is a redefinition. Two definitions that share a key but not
+/// these are two functions the key fails to tell apart.
+type SourceIdentity = (Vec<String>, Option<String>, Option<String>, String);
 
 /// Builds the whole-program call graph across every source file.
 pub(crate) fn build_call_graph(ctx: &TypedContext) -> Vec<FnNode> {
     let arena = ctx.arena();
     let mut nodes: Vec<FnNode> = Vec::new();
+    let mut defined: HashSet<SourceIdentity> = HashSet::new();
     for source_file in ctx.source_files() {
         collect_defs(
             ctx,
@@ -124,6 +139,7 @@ pub(crate) fn build_call_graph(ctx: &TypedContext) -> Vec<FnNode> {
             &source_file.module_path,
             None,
             None,
+            &mut defined,
             &mut nodes,
         );
     }
@@ -132,8 +148,10 @@ pub(crate) fn build_call_graph(ctx: &TypedContext) -> Vec<FnNode> {
 
 /// Recurses through definitions, tracking the defining file's module path, the
 /// enclosing spec name, and the enclosing struct/type name so the graph keys
-/// match the [`FnKey`] codegen assigns. `ExternFunction` has no body and is
-/// never a node.
+/// match the [`FnKey`] codegen assigns. `defined` collects the
+/// [`SourceIdentity`] of every function seen so far, which is how a
+/// redefinition is recognised. `ExternFunction` has no body and is never a
+/// node.
 #[allow(clippy::too_many_arguments)]
 fn collect_defs(
     ctx: &TypedContext,
@@ -142,6 +160,7 @@ fn collect_defs(
     module_path: &[String],
     spec: Option<&str>,
     type_name: Option<&str>,
+    defined: &mut HashSet<SourceIdentity>,
     nodes: &mut Vec<FnNode>,
 ) {
     for &def_id in def_ids {
@@ -149,6 +168,12 @@ fn collect_defs(
             Def::Function { name, body, .. } => {
                 let fname = arena[*name].name.clone();
                 let key = node_key(module_path, spec, type_name, &fname);
+                let redefinition = !defined.insert((
+                    module_path.to_vec(),
+                    spec.map(str::to_string),
+                    type_name.map(str::to_string),
+                    fname,
+                ));
                 let mut edges = Vec::new();
                 collect_calls_in_block(ctx, arena, *body, module_path, spec, &mut edges);
                 nodes.push(FnNode {
@@ -159,15 +184,34 @@ fn collect_defs(
                     location: arena[def_id].location,
                     module_path: module_path.to_vec(),
                     struct_name: type_name.map(str::to_string),
+                    redefinition,
                 });
             }
             Def::Struct { name, methods, .. } => {
                 let tn = arena[*name].name.clone();
-                collect_defs(ctx, arena, methods, module_path, spec, Some(&tn), nodes);
+                collect_defs(
+                    ctx,
+                    arena,
+                    methods,
+                    module_path,
+                    spec,
+                    Some(&tn),
+                    defined,
+                    nodes,
+                );
             }
             Def::Spec { name, defs, .. } => {
                 let sn = arena[*name].name.clone();
-                collect_defs(ctx, arena, defs, module_path, Some(&sn), type_name, nodes);
+                collect_defs(
+                    ctx,
+                    arena,
+                    defs,
+                    module_path,
+                    Some(&sn),
+                    type_name,
+                    defined,
+                    nodes,
+                );
             }
             Def::Enum { .. }
             | Def::Constant { .. }
@@ -384,8 +428,8 @@ fn is_parse_recovered(key: &FnKey) -> bool {
 /// edge is dropped, so callers can never manufacture a false edge.
 pub(crate) fn resolve_adjacency(nodes: &[FnNode]) -> Vec<Vec<(usize, Location)>> {
     // Build the key → index map, keeping the first node on a duplicate key and
-    // tripping a debug-build assertion on a duplicate that is *not* the product of
-    // parse recovery.
+    // tripping a debug-build assertion on a duplicate that is neither the product
+    // of parse recovery nor a redefinition.
     //
     // On the fail-fast compiler path `FnKey` is injective: the type checker
     // rejects genuine duplicate definitions before analysis runs, so no two nodes
@@ -394,15 +438,18 @@ pub(crate) fn resolve_adjacency(nodes: &[FnNode]) -> Vec<Vec<(usize, Location)>>
     // to one key — which is exactly the same-named-type / canonical-key bug class
     // this repo has shipped (#63): a recursive function's self-edge can resolve to
     // the wrong same-keyed node, masking the cycle from A035/A036. That warrants a
-    // loud failure in debug builds, so the tripwire fires unless the offending key
-    // is parse-recovered.
+    // loud failure in debug builds, so the tripwire fires unless the offending
+    // node is exempt.
     //
     // The IDE resilient path has no injectivity guarantee, and its duplicates are
-    // benign: error recovery lowers every unparseable top-level construct to an
-    // `<error>` placeholder function (a single stray `forall { }` lowers to two),
-    // and a program caught mid-edit can momentarily name the same function twice,
-    // so distinct nodes legitimately carry the same key. Such a key always carries
-    // the parser's recovery marker, so [`is_parse_recovered`] exempts it.
+    // benign. They come in two kinds. Error recovery lowers every unparseable
+    // top-level construct to an `<error>` placeholder function (a single stray
+    // `forall { }` lowers to two); such a key carries the parser's recovery
+    // marker, which [`is_parse_recovered`] recognises. And a program caught
+    // mid-edit can define the same function twice, under a real name; the type
+    // checker reports that redefinition, and the node records it
+    // ([`FnNode::redefinition`]). An identity break is neither: two definitions
+    // that differ in file, spec, struct or name and still share a key.
     //
     // Either way the first node wins: keeping it is a deterministic, total
     // degradation — an already-broken program may have a self-edge resolve to the
@@ -413,7 +460,7 @@ pub(crate) fn resolve_adjacency(nodes: &[FnNode]) -> Vec<Vec<(usize, Location)>>
     for (i, n) in nodes.iter().enumerate() {
         if let Some(&existing) = index.get(&n.key) {
             debug_assert!(
-                is_parse_recovered(&n.key),
+                n.redefinition || is_parse_recovered(&n.key),
                 "duplicate call-graph key `{}` at node {i} (already node {existing}); \
                  FnKey must be injective or A035/A036 may miss a self-edge",
                 n.key
@@ -510,6 +557,7 @@ pub(crate) fn test_node(name: &str, callees: &[&str]) -> FnNode {
         location: Location::default(),
         module_path: Vec::new(),
         struct_name: None,
+        redefinition: false,
     }
 }
 
@@ -536,6 +584,7 @@ mod tests {
             location: loc(),
             module_path: Vec::new(),
             struct_name: None,
+            redefinition: false,
         }
     }
 
@@ -618,12 +667,12 @@ mod tests {
     }
 
     /// The IDE resilient path can present two nodes under the same `FnKey`: a
-    /// single stray `forall { }` lowers to two `<error>` placeholder functions,
-    /// and a program mid-edit can name the same function twice. Because the key
-    /// carries the parser's recovery marker, the duplicate-key tripwire is
-    /// suppressed in *every* build — even debug — so building the adjacency must
-    /// not panic; it keeps the first same-keyed node deterministically, so an edge
-    /// naming that key resolves to it and every other node still yields a row.
+    /// single stray `forall { }` lowers to two `<error>` placeholder functions.
+    /// Because the key carries the parser's recovery marker, the duplicate-key
+    /// tripwire is suppressed in *every* build — even debug — so building the
+    /// adjacency must not panic; it keeps the first same-keyed node
+    /// deterministically, so an edge naming that key resolves to it and every
+    /// other node still yields a row.
     #[test]
     fn adjacency_tolerates_duplicate_recovered_key() {
         let dup_key = || FnKey::free_in(Vec::new(), "<error>");
@@ -641,6 +690,30 @@ mod tests {
             adj[2],
             vec![(0, loc())],
             "an edge naming the duplicated key resolves to the first same-keyed node"
+        );
+    }
+
+    /// The other duplicate the IDE resilient path presents: a program mid-edit
+    /// defines one function twice under a real name. `build_call_graph` marks the
+    /// second node as a redefinition, and the tripwire is suppressed for it in
+    /// every build, as for a recovered key. The first node keeps the key.
+    #[test]
+    fn adjacency_tolerates_redefinition() {
+        let key = || FnKey::free_in(Vec::new(), "func");
+        let redefinition = FnNode {
+            redefinition: true,
+            ..node(key(), vec![])
+        };
+        let nodes = vec![
+            node(key(), vec![free_edge("func", Vec::new())]),
+            redefinition,
+        ];
+        let adj = resolve_adjacency(&nodes);
+        assert_eq!(adj.len(), 2, "every node yields an adjacency row");
+        assert_eq!(
+            adj[0],
+            vec![(0, loc())],
+            "the first definition's self-call resolves to the first node"
         );
     }
 

@@ -1039,6 +1039,48 @@ fn analysis_of_trivially_broken_source_does_not_panic() {
     }
 }
 
+#[test]
+fn analysis_of_a_redefined_function_does_not_panic() {
+    // A file caught mid-edit can define one function twice. The type checker
+    // reports the redefinition, and the language server still runs every rule on
+    // what it recovered, so the call graph shared by A035/A036 meets two nodes
+    // under one `FnKey` whose name is real rather than a parse-recovery
+    // placeholder. That is a redefinition, not two functions the key failed to
+    // tell apart, and it must not trip the duplicate-key tripwire. The first
+    // definition keeps the key, so its self-call is still reported by A035.
+    for (tag, source) in [
+        (
+            "free",
+            "fn func() { func(); }\nfn func() -> i32 { return 1; }",
+        ),
+        (
+            "method",
+            "struct P { x: i32; fn m(self) { self.m(); } fn m(self) {} }",
+        ),
+        ("spec", "spec S { fn f() { f(); } fn f() {} }"),
+    ] {
+        let tree = TempTree::new(tag);
+        let entry = tree.write("main.inf", source);
+        let mut db = RootDatabase::default();
+        db.open_document(&entry, source);
+
+        let analysis = db.analysis(&entry);
+        assert!(
+            !analysis.type_errors().is_empty(),
+            "{tag}: the redefinition must be reported by the type checker"
+        );
+        assert!(
+            analysis.findings().iter().any(|f| f.rule_id == "A035"),
+            "{tag}: the first definition's self-call must still be reported as A035, got {:?}",
+            analysis
+                .findings()
+                .iter()
+                .map(|f| f.rule_id)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 // Analysis findings are tagged with rule id and severity
 
 #[test]
