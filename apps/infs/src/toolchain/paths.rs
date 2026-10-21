@@ -504,6 +504,10 @@ impl ToolchainPaths {
     /// Lists all installed toolchain versions.
     ///
     /// Returns a sorted list of version strings for all installed toolchains.
+    /// A directory whose name starts with `.` is not one: it is an extraction
+    /// in progress, or one a crash left (see `archive::extract_archive`), and no
+    /// version starts with `.`, since the release manifest refuses one that
+    /// does.
     ///
     /// # Errors
     ///
@@ -527,6 +531,7 @@ impl ToolchainPaths {
             if path.is_dir()
                 && let Some(name) = path.file_name()
                 && let Some(name_str) = name.to_str()
+                && !name_str.starts_with('.')
             {
                 versions.push(name_str.to_string());
             }
@@ -874,6 +879,21 @@ mod tests {
             .list_installed_versions()
             .expect("Should list versions");
         assert!(versions.is_empty());
+    }
+
+    /// The staging directory an extraction in progress, or one a crash left,
+    /// keeps beside the version directories is not reported as a version.
+    #[test]
+    fn list_installed_versions_skips_staging_directories() {
+        let (_temp, paths) = temp_paths();
+        for name in ["0.1.0", "0.2.0", ".0.3.0.partial-123-0", ".hidden"] {
+            std::fs::create_dir_all(paths.toolchains.join(name)).expect("Should create dir");
+        }
+
+        let versions = paths
+            .list_installed_versions()
+            .expect("Should list versions");
+        assert_eq!(versions, ["0.1.0", "0.2.0"]);
     }
 
     #[test]

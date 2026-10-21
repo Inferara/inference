@@ -2,10 +2,22 @@
 //!
 //! This module provides functionality for extracting ZIP and tar.gz archives
 //! used during toolchain and self-update installations.
+//!
+//! An archive's checksum comes from the same release manifest as its URL, so
+//! it proves the download is the one the server meant, not that the server is
+//! honest. Extraction therefore writes only regular files and directories, at
+//! paths inside the destination, and checks every member of an archive before
+//! it writes any: an archive holding a link or a path that leaves the
+//! destination is refused whole. A tar.gz wrapped in a ZIP is checked only once
+//! the ZIP is written, so [`extract_archive`] extracts into a private directory
+//! beside the destination and moves it into place only once the whole archive
+//! is written: a refused archive leaves nothing behind, and a failed
+//! extraction never touches a destination another install created.
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tar::Archive;
 
 /// Extracts a ZIP archive to the destination directory.
@@ -19,6 +31,10 @@ use tar::Archive;
 /// Returns an error if:
 /// - The archive cannot be opened
 /// - The archive is not a valid ZIP file
+/// - A member is a symbolic link, or its path leaves the destination;
+///   nothing is written then
+/// - The archive wraps a tar.gz that [`extract_tar_gz`] refuses; the ZIP's
+///   own members are written by then
 /// - Directory or file creation fails
 /// - File extraction fails
 ///
@@ -35,32 +51,17 @@ pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     let mut archive = zip::ZipArchive::new(file)
         .with_context(|| format!("Failed to read ZIP archive: {}", archive_path.display()))?;
 
+    let strip_prefix = find_common_root_folder(&mut archive)?;
+
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("Failed to create directory: {}", dest_dir.display()))?;
-
-    let strip_prefix = find_common_root_folder(&mut archive);
 
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
             .with_context(|| format!("Failed to read archive entry {i}"))?;
 
-        let entry_path = entry
-            .enclosed_name()
-            .with_context(|| format!("Invalid entry path in archive: entry {i}"))?;
-
-        // Security: defense-in-depth check (enclosed_name already filters these)
-        // Reject paths with parent directory references or absolute paths
-        if entry_path.is_absolute()
-            || entry_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            anyhow::bail!(
-                "Refusing to extract path with parent directory or absolute reference: {}",
-                entry_path.display()
-            );
-        }
+        let entry_path = zip_member_path(&entry, i)?;
 
         let relative_path = if let Some(ref prefix) = strip_prefix {
             match entry_path.strip_prefix(prefix) {
@@ -71,6 +72,7 @@ pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         } else {
             entry_path.clone()
         };
+        ensure_member_path_stays_inside(&relative_path)?;
 
         let output_path = dest_dir.join(&relative_path);
 
@@ -160,12 +162,23 @@ fn extract_nested_tar_gz_if_present(dest_dir: &Path) -> Result<()> {
 /// Automatically detects the archive format based on the file extension
 /// and calls the appropriate extractor.
 ///
+/// A destination that does not exist yet is extracted into a private
+/// directory beside it (see `staging_dir_for`) and moved into place only once
+/// the whole archive is written. A refused or broken archive therefore leaves
+/// no half-written directory, which an install would take to mean the version
+/// is installed, and a failed extraction removes only its own staging
+/// directory, never a destination a concurrent install of the same version
+/// published meanwhile. A destination that already exists is extracted into
+/// in place, and left as it is when extraction fails.
+///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The archive format cannot be determined
-/// - The archive cannot be opened or extracted
+/// - The archive cannot be opened or extracted, or holds a member that is
+///   unsafe to extract
 /// - Directory or file creation fails
+/// - The destination appeared while the archive was being extracted
 ///
 /// # Example
 ///
@@ -175,12 +188,74 @@ fn extract_nested_tar_gz_if_present(dest_dir: &Path) -> Result<()> {
 /// extract_archive(Path::new("archive.zip"), Path::new("output_dir"))?;
 /// ```
 pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    let staging = match staging_dir_for(dest_dir) {
+        Some(staging) if std::fs::symlink_metadata(dest_dir).is_err() => staging,
+        _ => return extract_by_format(archive_path, dest_dir),
+    };
+    let result = create_staging_dir(&staging)
+        .and_then(|()| extract_by_format(archive_path, &staging))
+        .and_then(|()| publish_staged(&staging, dest_dir));
+    if result.is_err() {
+        std::fs::remove_dir_all(&staging).ok();
+    }
+    result
+}
+
+/// Extracts the archive with the extractor its extension names.
+fn extract_by_format(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     let path_str = archive_path.to_string_lossy();
     if path_str.ends_with(".tar.gz") || path_str.ends_with(".tgz") {
         extract_tar_gz(archive_path, dest_dir)
     } else {
         extract_zip(archive_path, dest_dir)
     }
+}
+
+/// The private directory [`extract_archive`] extracts into before moving the
+/// result to `dest_dir`: `.<name>.partial-<pid>-<n>` beside it, so the move is
+/// a rename on one filesystem, unique to this process and this call. The
+/// leading `.` keeps it apart from every version directory, since a release
+/// manifest's version must start with a letter or a digit, and out of the
+/// installed versions `infs list` reports. `None` when `dest_dir` has no
+/// parent or no name to stage beside.
+fn staging_dir_for(dest_dir: &Path) -> Option<PathBuf> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let name = dest_dir.file_name()?.to_string_lossy();
+    let parent = dest_dir.parent()?;
+    let call = NEXT.fetch_add(1, Ordering::Relaxed);
+    Some(parent.join(format!(".{name}.partial-{}-{call}", std::process::id())))
+}
+
+/// Creates `staging` and its parent. A directory of that name can only be
+/// one a crashed process with this process's id left, so it is removed first.
+fn create_staging_dir(staging: &Path) -> Result<()> {
+    if let Some(parent) = staging.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    std::fs::remove_dir_all(staging).ok();
+    std::fs::create_dir(staging)
+        .with_context(|| format!("Failed to create directory: {}", staging.display()))
+}
+
+/// Moves the fully extracted `staging` to `dest_dir`, refusing to replace a
+/// destination that appeared meanwhile, such as one a concurrent install of
+/// the same version published first.
+fn publish_staged(staging: &Path, dest_dir: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(dest_dir).is_ok() {
+        anyhow::bail!(
+            "{} appeared while the archive was being extracted; another install may have \
+             finished first",
+            dest_dir.display()
+        );
+    }
+    std::fs::rename(staging, dest_dir).with_context(|| {
+        format!(
+            "Failed to move the extracted archive from {} to {}",
+            staging.display(),
+            dest_dir.display()
+        )
+    })
 }
 
 /// Extracts a tar.gz archive to the destination directory.
@@ -194,6 +269,8 @@ pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
 /// Returns an error if:
 /// - The archive cannot be opened
 /// - The archive is not a valid tar.gz file
+/// - A member is not a regular file or a directory, or its path leaves the
+///   destination; nothing is written then
 /// - Directory or file creation fails
 /// - File extraction fails
 ///
@@ -204,10 +281,10 @@ pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
 /// extract_tar_gz(Path::new("archive.tar.gz"), Path::new("output_dir"))?;
 /// ```
 pub fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    let strip_prefix = find_common_root_folder_tar(archive_path)?;
+
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("Failed to create directory: {}", dest_dir.display()))?;
-
-    let strip_prefix = find_common_root_folder_tar(archive_path)?;
 
     let file = std::fs::File::open(archive_path)
         .with_context(|| format!("Failed to open archive: {}", archive_path.display()))?;
@@ -221,23 +298,9 @@ pub fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         let mut entry = entry
             .with_context(|| format!("Failed to read tar entry: {}", archive_path.display()))?;
 
-        let entry_path = entry
-            .path()
-            .with_context(|| "Failed to get entry path")?
-            .into_owned();
-
-        // Security: reject paths with parent directory references or absolute paths
-        // to prevent path traversal attacks (e.g., "../../../etc/passwd")
-        if entry_path.is_absolute()
-            || entry_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            anyhow::bail!(
-                "Refusing to extract path with parent directory or absolute reference: {}",
-                entry_path.display()
-            );
-        }
+        let Some(entry_path) = tar_member_path(&entry)? else {
+            continue;
+        };
 
         let relative_path = if let Some(ref prefix) = strip_prefix {
             match entry_path.strip_prefix(prefix) {
@@ -248,6 +311,7 @@ pub fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         } else {
             entry_path.clone()
         };
+        ensure_member_path_stays_inside(&relative_path)?;
 
         let output_path = dest_dir.join(&relative_path);
 
@@ -270,7 +334,12 @@ pub fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Finds a common root folder shared by all tar.gz archive entries.
+/// Checks every member of a tar.gz archive and finds the common root folder
+/// they share.
+///
+/// Refuses the archive, before anything is extracted, if a member is unsafe to
+/// extract (see [`tar_member_path`]); this is the pass that reads every member
+/// ahead of the one that writes them.
 ///
 /// Returns `Some(prefix)` if all entries start with the same folder name
 /// AND there are nested entries (paths with more than one component).
@@ -286,6 +355,7 @@ fn find_common_root_folder_tar(archive_path: &Path) -> Result<Option<PathBuf>> {
     let mut archive = Archive::new(decoder);
 
     let mut common_root: Option<PathBuf> = None;
+    let mut roots_differ = false;
     let mut has_nested_entries = false;
 
     for entry in archive
@@ -295,7 +365,9 @@ fn find_common_root_folder_tar(archive_path: &Path) -> Result<Option<PathBuf>> {
         let entry = entry
             .with_context(|| format!("Failed to read tar entry: {}", archive_path.display()))?;
 
-        let path = entry.path().with_context(|| "Failed to get entry path")?;
+        let Some(path) = tar_member_path(&entry)? else {
+            continue;
+        };
 
         // Track if we have any entries with nested paths (depth > 1)
         if path.components().count() > 1 {
@@ -307,23 +379,28 @@ fn find_common_root_folder_tar(archive_path: &Path) -> Result<Option<PathBuf>> {
         };
         let root = PathBuf::from(first_component.as_os_str());
 
+        // Keep reading after the roots differ: every member must be checked.
         match &common_root {
             None => common_root = Some(root),
-            Some(existing) if existing != &root => return Ok(None),
+            Some(existing) if existing != &root => roots_differ = true,
             Some(_) => {}
         }
     }
 
     // Only strip common root if there are nested entries
     // (root is actually a containing folder, not just a flat file)
-    if has_nested_entries {
+    if has_nested_entries && !roots_differ {
         Ok(common_root)
     } else {
         Ok(None)
     }
 }
 
-/// Finds a common root folder shared by all archive entries.
+/// Checks every member of a ZIP archive and finds the common root folder they
+/// share.
+///
+/// Refuses the archive, before anything is extracted, if a member is unsafe to
+/// extract (see [`zip_member_path`]).
 ///
 /// Returns `Some(prefix)` if all entries start with the same folder name
 /// AND there are nested entries (paths with more than one component).
@@ -333,40 +410,160 @@ fn find_common_root_folder_tar(archive_path: &Path) -> Result<Option<PathBuf>> {
 /// treated as "common root folders" and stripped away.
 fn find_common_root_folder<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
-) -> Option<PathBuf> {
-    if archive.is_empty() {
-        return None;
-    }
-
+) -> Result<Option<PathBuf>> {
     let mut common_root: Option<PathBuf> = None;
+    let mut roots_differ = false;
     let mut has_nested_entries = false;
 
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).ok()?;
-        let path = entry.enclosed_name()?;
+        let entry = archive
+            .by_index(i)
+            .with_context(|| format!("Failed to read archive entry {i}"))?;
+        let path = zip_member_path(&entry, i)?;
 
         // Track if we have any entries with nested paths (depth > 1)
         if path.components().count() > 1 {
             has_nested_entries = true;
         }
 
-        let first_component = path.components().next()?;
+        // Keep reading after the roots differ: every member must be checked.
+        let Some(first_component) = path.components().next() else {
+            roots_differ = true;
+            continue;
+        };
         let root = PathBuf::from(first_component.as_os_str());
 
         match &common_root {
             None => common_root = Some(root),
-            Some(existing) if existing != &root => return None,
+            Some(existing) if existing != &root => roots_differ = true,
             Some(_) => {}
         }
     }
 
     // Only strip common root if there are nested entries
     // (root is actually a containing folder, not just a flat file)
-    if has_nested_entries {
-        common_root
+    if has_nested_entries && !roots_differ {
+        Ok(common_root)
     } else {
-        None
+        Ok(None)
     }
+}
+
+/// The path to extract a tar member at, or `None` for a header that carries
+/// only metadata.
+///
+/// Only regular files and directories are extracted. A symbolic or a hard
+/// link may name any file on the system: a later member written through it
+/// lands outside the destination, and so does whatever follows it afterwards,
+/// such as setting `infc` executable. A device node or a FIFO has no place in
+/// a release archive. Each is refused, and so is a path that leaves the
+/// destination (see [`ensure_member_path_stays_inside`]).
+///
+/// The `tar` crate folds a GNU long name or a pax extended header into the
+/// member it describes, but yields a pax global header, and an extension
+/// header in a pre-POSIX header, as a member of its own, and writes nothing
+/// for it, so it is skipped.
+fn tar_member_path<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> Result<Option<PathBuf>> {
+    let kind = entry.header().entry_type();
+    if kind.is_pax_global_extensions()
+        || kind.is_pax_local_extensions()
+        || kind.is_gnu_longname()
+        || kind.is_gnu_longlink()
+    {
+        return Ok(None);
+    }
+
+    let path = entry
+        .path()
+        .with_context(|| "Failed to get entry path")?
+        .into_owned();
+
+    if !kind.is_file() && !kind.is_dir() {
+        anyhow::bail!(
+            "Refusing to extract `{}`: it is {}, and an archive may hold only regular files \
+             and directories",
+            path.display(),
+            describe_entry_type(kind)
+        );
+    }
+    ensure_member_path_stays_inside(&path)?;
+
+    Ok(Some(path))
+}
+
+/// Names a tar member type that is not extracted, for the refusal.
+fn describe_entry_type(kind: tar::EntryType) -> String {
+    match kind {
+        tar::EntryType::Symlink => "a symbolic link".to_string(),
+        tar::EntryType::Link => "a hard link".to_string(),
+        tar::EntryType::Char => "a character device".to_string(),
+        tar::EntryType::Block => "a block device".to_string(),
+        tar::EntryType::Fifo => "a FIFO".to_string(),
+        tar::EntryType::Continuous => "a contiguous file".to_string(),
+        tar::EntryType::GNUSparse => "a sparse file".to_string(),
+        other => format!("a member of type `{}`", other.as_byte().escape_ascii()),
+    }
+}
+
+/// The path to extract member `index` of a ZIP archive at.
+///
+/// `enclosed_name` drops a leading root and resolves `..` within the name, but
+/// its result still needs the check after it. On Windows a later component
+/// such as `C:x` (`pkg/C:x`) replaces the path it is pushed onto, and before
+/// zip 9 a name behind a verbatim prefix (`\\?\C:\../x`) came back as `../x`.
+/// A symbolic link is refused, as in [`tar_member_path`].
+/// This extractor writes every other member as a plain file, so a link would
+/// otherwise become a file holding its target's path, which is never what the
+/// archive meant.
+fn zip_member_path<R: std::io::Read>(
+    entry: &zip::read::ZipFile<'_, R>,
+    index: usize,
+) -> Result<PathBuf> {
+    let path = entry
+        .enclosed_name()
+        .with_context(|| format!("Invalid entry path in archive: entry {index}"))?;
+
+    if entry.is_symlink() {
+        anyhow::bail!(
+            "Refusing to extract `{}`: it is a symbolic link, and an archive may hold only \
+             regular files and directories",
+            path.display()
+        );
+    }
+    ensure_member_path_stays_inside(&path)?;
+
+    Ok(path)
+}
+
+/// Refuses a member path that could reach outside the directory it is joined
+/// to: one with a `..` component, a root or a drive prefix. Only plain names
+/// and `.` stay inside it.
+///
+/// `is_absolute` alone is not enough on Windows, where `\Windows\x` and `C:x`
+/// are relative and yet `dest.join` of either leaves `dest`. A name is also
+/// refused if it is more than a plain name on its own, as `C:` is on Windows:
+/// Windows reads a drive only at the start of a path, so `pkg/C:/x` passes as
+/// three plain names, and becomes the absolute `C:/x` once the root folder the
+/// members share is stripped.
+fn ensure_member_path_stays_inside(path: &Path) -> Result<()> {
+    let leaves = path.components().any(|c| match c {
+        Component::Normal(name) => {
+            let mut alone = Path::new(name).components();
+            !matches!(
+                (alone.next(), alone.next()),
+                (Some(Component::Normal(_)), None)
+            )
+        }
+        Component::CurDir => false,
+        Component::Prefix(_) | Component::RootDir | Component::ParentDir => true,
+    });
+    if leaves {
+        anyhow::bail!(
+            "Refusing to extract path with parent directory or absolute reference: {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Sets executable permissions on the managed binaries within a toolchain
@@ -1098,10 +1295,733 @@ mod tests {
         );
     }
 
-    // Note: The `tar` crate itself prevents creating archives with `..` paths,
-    // so we cannot easily test path traversal rejection. The security check in
-    // extract_tar_gz provides defense-in-depth for archives from untrusted sources.
-    // ZIP's `enclosed_name()` method also provides similar protection.
+    // Hostile archives
+    //
+    // Each test below extracts an archive a compromised or spoofed release
+    // server could send into `dest/`, beside an `outside/` directory holding a
+    // `secret` file, and requires the archive to be refused before anything is
+    // written: no `dest/`, and `outside/` holding only the untouched secret.
+
+    /// A temporary directory with an archive path, the destination an archive
+    /// is extracted to, and `outside/` beside it, seeded with a `secret` file.
+    struct HostileScene {
+        temp: assert_fs::TempDir,
+        archive: PathBuf,
+        dest: PathBuf,
+        outside: PathBuf,
+    }
+
+    const SECRET: &[u8] = b"private key";
+
+    impl HostileScene {
+        fn new(archive_name: &str) -> Self {
+            let temp = temp_test_dir();
+            let archive = temp.path().join(archive_name);
+            let dest = temp.path().join("dest");
+            let outside = temp.path().join("outside");
+            std::fs::create_dir(&outside).expect("Should create outside/");
+            std::fs::write(outside.join("secret"), SECRET).expect("Should write the secret");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    outside.join("secret"),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .expect("Should make the secret private");
+            }
+            Self {
+                temp,
+                archive,
+                dest,
+                outside,
+            }
+        }
+
+        /// `outside/secret`, as a link target an archive can name.
+        fn secret(&self) -> String {
+            self.outside.join("secret").display().to_string()
+        }
+
+        /// `outside/`, as a link target an archive can name.
+        fn outside(&self) -> String {
+            self.outside.display().to_string()
+        }
+
+        /// Asserts that `result` refused the archive with a message holding
+        /// each of `needles`, and that nothing was written: no destination,
+        /// no staging directory left beside it, and `outside/` holding only
+        /// the secret, with its bytes and its mode. Returns the message.
+        fn assert_refused(&self, result: Result<()>, needles: &[&str]) -> String {
+            let message = format!(
+                "{:#}",
+                result.expect_err("a hostile archive must be refused")
+            );
+            for needle in needles {
+                assert!(
+                    message.contains(needle),
+                    "the refusal must mention `{needle}`: {message}"
+                );
+            }
+            assert!(
+                !self.dest.exists(),
+                "a refused archive must not create the destination"
+            );
+            assert_no_staging_left(self.temp.path());
+            self.assert_outside_untouched();
+            message
+        }
+
+        /// Asserts that `outside/` holds only the secret, with its bytes and
+        /// its mode.
+        fn assert_outside_untouched(&self) {
+            let mut names: Vec<String> = std::fs::read_dir(&self.outside)
+                .expect("Should read outside/")
+                .map(|entry| {
+                    entry
+                        .expect("Should read directory entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            assert_eq!(names, ["secret"], "nothing may be written into outside/");
+            let secret = self.outside.join("secret");
+            assert_eq!(
+                std::fs::read(&secret).expect("Should read the secret"),
+                SECRET,
+                "the secret's bytes must not change"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::symlink_metadata(&secret)
+                    .expect("Should stat the secret")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600, "the secret's mode must not change");
+            }
+            assert!(
+                !self.temp.path().join("planted").exists(),
+                "nothing may be written beside the destination"
+            );
+        }
+    }
+
+    /// Asserts that `dir` holds no staging directory `extract_archive` made.
+    fn assert_no_staging_left(dir: &Path) {
+        let staging: Vec<String> = std::fs::read_dir(dir)
+            .expect("Should read the destination's parent")
+            .map(|entry| {
+                entry
+                    .expect("Should read directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.contains(".partial-"))
+            .collect();
+        assert!(staging.is_empty(), "staging directories left behind: {staging:?}");
+    }
+
+    /// A member of a hostile tar archive.
+    enum HostileMember<'a> {
+        /// A regular file holding the bytes.
+        File(&'a str, &'a [u8]),
+        /// A link of the type (symbolic or hard) to the target.
+        Link(tar::EntryType, &'a str, &'a str),
+        /// An empty member of another type, such as a device node or a FIFO.
+        Special(tar::EntryType, &'a str),
+        /// A regular file whose header names `harmless`, preceded by a GNU
+        /// long-name header that names it the path.
+        LongName(&'a str, &'a [u8]),
+        /// A regular file whose header names `harmless`, preceded by a pax
+        /// extended header whose `path` record names it the path.
+        PaxPath(&'a str, &'a [u8]),
+    }
+
+    /// The tar header name field's length.
+    const TAR_NAME_FIELD: usize = 100;
+
+    /// Appends a GNU long-name (`L`) or long-link (`K`) header, or a pax
+    /// extended header (`x`), carrying `data`, for the member after it.
+    fn append_extension_header<W: Write>(builder: &mut Builder<W>, kind: u8, data: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::new(kind));
+        header.as_mut_bytes()[..13].copy_from_slice(b"././@LongLink");
+        header.set_size(u64::try_from(data.len()).expect("a header fits"));
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, data).expect("Should append extension header");
+    }
+
+    /// A GNU long name or long link, as the bytes of its header: the name and
+    /// a terminating NUL.
+    fn gnu_long(name: &str) -> Vec<u8> {
+        let mut bytes = name.as_bytes().to_vec();
+        bytes.push(0);
+        bytes
+    }
+
+    /// One pax record, `<length> <key>=<value>\n`, whose length counts itself.
+    fn pax_record(key: &str, value: &str) -> Vec<u8> {
+        let body = format!(" {key}={value}\n");
+        let mut length = body.len();
+        while format!("{length}{body}").len() != length {
+            length += 1;
+        }
+        format!("{length}{body}").into_bytes()
+    }
+
+    /// Packs `members` into a tar.gz, writing each header's name and link
+    /// target byte for byte: the `tar` crate's builder refuses a `..` or a
+    /// rooted name, and an attacker's tool does not. A name or a link target
+    /// too long for its header field goes in a GNU long-name or long-link
+    /// header, so a long temporary directory still fits.
+    fn create_hostile_tar_gz(archive_path: &Path, members: &[HostileMember<'_>]) {
+        let file = std::fs::File::create(archive_path).expect("Should create file");
+        let mut builder = Builder::new(GzEncoder::new(file, Compression::default()));
+        for member in members {
+            let mut header = tar::Header::new_gnu();
+            let (name, data): (&str, &[u8]) = match *member {
+                HostileMember::File(name, bytes) => {
+                    header.set_entry_type(tar::EntryType::Regular);
+                    (name, bytes)
+                }
+                HostileMember::Link(kind, name, target) => {
+                    header.set_entry_type(kind);
+                    if target.len() < TAR_NAME_FIELD {
+                        header
+                            .set_link_name_literal(target)
+                            .expect("a short link target fits in a tar header");
+                    } else {
+                        append_extension_header(&mut builder, b'K', &gnu_long(target));
+                    }
+                    (name, b"".as_slice())
+                }
+                HostileMember::Special(kind, name) => {
+                    header.set_entry_type(kind);
+                    if kind == tar::EntryType::GNUSparse {
+                        // An empty sparse map over an empty file, so that the
+                        // `tar` crate reads the header and the check sees it.
+                        header
+                            .as_gnu_mut()
+                            .expect("a GNU header")
+                            .set_real_size(0);
+                    }
+                    (name, b"".as_slice())
+                }
+                HostileMember::LongName(name, bytes) => {
+                    append_extension_header(&mut builder, b'L', &gnu_long(name));
+                    ("harmless", bytes)
+                }
+                HostileMember::PaxPath(name, bytes) => {
+                    append_extension_header(&mut builder, b'x', &pax_record("path", name));
+                    ("harmless", bytes)
+                }
+            };
+            let name = if name.len() < TAR_NAME_FIELD {
+                name
+            } else {
+                append_extension_header(&mut builder, b'L', &gnu_long(name));
+                "long"
+            };
+            header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_size(u64::try_from(data.len()).expect("a member fits in a tar header"));
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, data).expect("Should append member");
+        }
+        builder
+            .into_inner()
+            .expect("Should finish tar")
+            .finish()
+            .expect("Should finish gzip");
+    }
+
+    /// A symbolic link followed by a member written through it is refused,
+    /// whether the link names `outside/` by an absolute or a relative path,
+    /// and whether or not the archive has a root folder to strip.
+    ///
+    /// Before the fix the link was created and the member landed in
+    /// `outside/`.
+    #[test]
+    fn extract_tar_gz_refuses_a_member_written_through_a_symlink() {
+        for (link, through, target) in [
+            ("escape", "escape/planted", None),
+            ("escape", "escape/planted", Some("../outside")),
+            ("pkg/escape", "pkg/escape/planted", None),
+            ("pkg/escape", "pkg/escape/planted", Some("../../outside")),
+        ] {
+            let scene = HostileScene::new("hostile.tar.gz");
+            let outside = scene.outside();
+            let target = target.unwrap_or(&outside);
+            create_hostile_tar_gz(
+                &scene.archive,
+                &[
+                    HostileMember::Link(tar::EntryType::Symlink, link, target),
+                    HostileMember::File(through, b"planted"),
+                ],
+            );
+
+            let result = extract_archive(&scene.archive, &scene.dest);
+
+            scene.assert_refused(result, &[link, "symbolic link"]);
+        }
+    }
+
+    /// A symbolic link with no member after it is refused too: left in place,
+    /// it is followed by whatever reads the toolchain next, such as setting
+    /// `infc` executable, which would make the secret world-readable.
+    #[test]
+    fn extract_tar_gz_refuses_a_lone_symlink() {
+        let scene = HostileScene::new("hostile.tar.gz");
+        let secret = scene.secret();
+        create_hostile_tar_gz(
+            &scene.archive,
+            &[
+                HostileMember::File("README.md", b"readme"),
+                HostileMember::Link(tar::EntryType::Symlink, "infc", &secret),
+            ],
+        );
+
+        let result = extract_archive(&scene.archive, &scene.dest);
+
+        scene.assert_refused(result, &["infc", "symbolic link"]);
+    }
+
+    /// A hard link is refused, whether it names a file outside the archive or
+    /// a member inside it. A hard link to the secret shares its inode, so
+    /// setting `infc` executable would change the secret's mode.
+    #[test]
+    fn extract_tar_gz_refuses_a_hard_link() {
+        let scene = HostileScene::new("hostile.tar.gz");
+        let secret = scene.secret();
+        create_hostile_tar_gz(
+            &scene.archive,
+            &[HostileMember::Link(tar::EntryType::Link, "infc", &secret)],
+        );
+        let result = extract_archive(&scene.archive, &scene.dest);
+        scene.assert_refused(result, &["infc", "hard link"]);
+
+        let scene = HostileScene::new("hostile.tar.gz");
+        create_hostile_tar_gz(
+            &scene.archive,
+            &[
+                HostileMember::File("infc", b"binary content"),
+                HostileMember::Link(tar::EntryType::Link, "inference-lsp", "infc"),
+            ],
+        );
+        let result = extract_archive(&scene.archive, &scene.dest);
+        scene.assert_refused(result, &["inference-lsp", "hard link"]);
+    }
+
+    /// Every member type other than a regular file and a directory is
+    /// refused and named, including one the `tar` crate does not know.
+    #[test]
+    fn extract_tar_gz_refuses_every_type_but_files_and_directories() {
+        for (kind, described) in [
+            (tar::EntryType::Char, "a character device"),
+            (tar::EntryType::Block, "a block device"),
+            (tar::EntryType::Fifo, "a FIFO"),
+            (tar::EntryType::Continuous, "a contiguous file"),
+            (tar::EntryType::GNUSparse, "a sparse file"),
+            (tar::EntryType::new(b'Z'), "a member of type `Z`"),
+        ] {
+            let scene = HostileScene::new("hostile.tar.gz");
+            create_hostile_tar_gz(
+                &scene.archive,
+                &[
+                    HostileMember::File("infc", b"binary content"),
+                    HostileMember::Special(kind, "device"),
+                ],
+            );
+
+            let result = extract_archive(&scene.archive, &scene.dest);
+
+            scene.assert_refused(result, &["`device`", described]);
+        }
+    }
+
+    /// A member path with a `..` component or a root is refused, on every
+    /// platform, together with the drive-relative and rooted forms Windows
+    /// does not count as absolute.
+    #[test]
+    fn extract_tar_gz_refuses_member_paths_that_leave_the_destination() {
+        // `None` stands for `outside/planted` spelled as an absolute path.
+        #[allow(unused_mut)]
+        let mut names = vec![
+            Some("../planted"),
+            Some("../outside/planted"),
+            Some("pkg/../../planted"),
+            Some("pkg/./../../outside/planted"),
+            None,
+        ];
+        // Windows reads a drive only at the start of a path, so `pkg/C:/...`
+        // is three plain names until the shared `pkg` is stripped.
+        #[cfg(windows)]
+        names.extend([
+            Some(r"..\planted"),
+            Some(r"\planted"),
+            Some("C:planted"),
+            Some("pkg/C:planted"),
+            Some("pkg/C:/outside/planted"),
+        ]);
+
+        for name in names {
+            let scene = HostileScene::new("hostile.tar.gz");
+            let absolute = scene.outside.join("planted").display().to_string();
+            let name = name.unwrap_or(&absolute);
+            create_hostile_tar_gz(
+                &scene.archive,
+                &[
+                    HostileMember::File("pkg/infc", b"binary content"),
+                    HostileMember::File(name, b"planted"),
+                ],
+            );
+
+            let result = extract_archive(&scene.archive, &scene.dest);
+
+            scene.assert_refused(result, &["Refusing to extract path"]);
+        }
+    }
+
+    /// The path checked is the one the member is extracted at: a `..` the
+    /// header's own name field hides behind `harmless`, in a GNU long name or
+    /// a pax `path` record, is refused as one in the field is.
+    #[test]
+    fn extract_tar_gz_refuses_a_path_from_a_long_name_or_a_pax_record() {
+        for name in ["../planted", "../outside/planted", "pkg/../../planted"] {
+            for member in [
+                HostileMember::LongName(name, b"planted"),
+                HostileMember::PaxPath(name, b"planted"),
+            ] {
+                let scene = HostileScene::new("hostile.tar.gz");
+                create_hostile_tar_gz(
+                    &scene.archive,
+                    &[HostileMember::File("pkg/infc", b"binary content"), member],
+                );
+
+                let result = extract_archive(&scene.archive, &scene.dest);
+
+                scene.assert_refused(result, &["Refusing to extract path", name]);
+            }
+        }
+    }
+
+    /// A pax global header, which `git archive` writes first, carries only
+    /// metadata: it is skipped rather than refused or written as a file, and
+    /// it no longer keeps the root folder the members share from being
+    /// stripped.
+    #[test]
+    fn extract_tar_gz_skips_a_pax_global_header() {
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("output");
+        {
+            let file = std::fs::File::create(&archive_path).expect("Should create file");
+            let mut builder = Builder::new(GzEncoder::new(file, Compression::default()));
+            let record = b"15 comment=abc\n";
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header
+                .set_path("pax_global_header")
+                .expect("Should set path");
+            header.set_size(u64::try_from(record.len()).expect("fits"));
+            header.set_cksum();
+            builder
+                .append(&header, record.as_slice())
+                .expect("Should append the global header");
+            let mut header = tar::Header::new_ustar();
+            header.set_size(14);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "pkg/infc", b"binary content".as_slice())
+                .expect("Should append file");
+            builder.finish().expect("Should finish");
+        }
+
+        extract_tar_gz(&archive_path, &dest_dir).expect("Should extract");
+
+        assert_eq!(
+            std::fs::read(dest_dir.join("infc")).expect("infc must be extracted at the root"),
+            b"binary content"
+        );
+        assert!(!dest_dir.join("pkg").exists(), "the root folder must be stripped");
+        assert!(
+            !dest_dir.join("pax_global_header").exists(),
+            "the global header must not be written as a file"
+        );
+    }
+
+    /// A symbolic link in a ZIP archive is refused, whether a member is
+    /// written through it or it stands alone. This extractor creates no
+    /// links, so it used to write each as a file holding its target's path.
+    #[test]
+    fn extract_zip_refuses_a_symlink_member() {
+        for through in [Some("escape/planted"), None] {
+            let scene = HostileScene::new("hostile.zip");
+            {
+                let file = std::fs::File::create(&scene.archive).expect("Should create file");
+                let mut zip = zip::ZipWriter::new(file);
+                let options = zip::write::SimpleFileOptions::default();
+                zip.add_symlink("escape", scene.outside(), options)
+                    .expect("Should add symlink");
+                if let Some(through) = through {
+                    zip.start_file(through, options).expect("Should start file");
+                    zip.write_all(b"planted").expect("Should write");
+                }
+                zip.finish().expect("Should finish");
+            }
+
+            let result = extract_archive(&scene.archive, &scene.dest);
+
+            scene.assert_refused(result, &["escape", "symbolic link"]);
+        }
+    }
+
+    /// A ZIP member whose name climbs out of the archive is refused before
+    /// anything is written.
+    #[test]
+    fn extract_zip_refuses_member_paths_that_leave_the_destination() {
+        for name in ["../planted", "../outside/planted", "pkg/../../planted"] {
+            let scene = HostileScene::new("hostile.zip");
+            {
+                let file = std::fs::File::create(&scene.archive).expect("Should create file");
+                let mut zip = zip::ZipWriter::new(file);
+                let options = zip::write::SimpleFileOptions::default();
+                zip.start_file("pkg/infc", options).expect("Should start file");
+                zip.write_all(b"binary content").expect("Should write");
+                zip.start_file(name, options).expect("Should start file");
+                zip.write_all(b"planted").expect("Should write");
+                zip.finish().expect("Should finish");
+            }
+
+            let result = extract_archive(&scene.archive, &scene.dest);
+
+            scene.assert_refused(result, &["Invalid entry path"]);
+        }
+    }
+
+    /// A ZIP member name `enclosed_name` turns into one that leaves the
+    /// destination is refused by the check after it. Before zip 9, the `/`s
+    /// behind a verbatim prefix were not separators, so `\\?\C:\../outside/x`
+    /// came back as `../outside/x`; zip 9 refuses the name itself. On Windows,
+    /// `pkg/C:planted` comes back as `C:planted`, which a join puts outside the
+    /// destination.
+    #[test]
+    fn extract_zip_refuses_a_name_enclosed_name_lets_through() {
+        #[allow(unused_mut)]
+        let mut names = vec![r"\\?\C:\../outside/planted"];
+        #[cfg(windows)]
+        names.push("pkg/C:planted");
+
+        for name in names {
+            let scene = HostileScene::new("hostile.zip");
+            {
+                let file = std::fs::File::create(&scene.archive).expect("Should create file");
+                let mut zip = zip::ZipWriter::new(file);
+                let options = zip::write::SimpleFileOptions::default();
+                zip.start_file("pkg/infc", options).expect("Should start file");
+                zip.write_all(b"binary content").expect("Should write");
+                zip.start_file(name, options).expect("Should start file");
+                zip.write_all(b"planted").expect("Should write");
+                zip.finish().expect("Should finish");
+            }
+
+            let result = extract_archive(&scene.archive, &scene.dest);
+
+            let message = scene.assert_refused(result, &[]);
+            assert!(
+                message.contains("Refusing to extract path")
+                    || message.contains("Invalid entry path"),
+                "{name:?} must be refused as a path: {message}"
+            );
+        }
+    }
+
+    /// A tar.gz wrapped in a ZIP is extracted with links refused too: a
+    /// symbolic link inside it, and a member written through it, never reach
+    /// `outside/`. The inner archive is checked only after the ZIP has written
+    /// it, so `extract_archive` extracts into a staging directory it removes
+    /// on failure, leaving no partial toolchain behind.
+    #[test]
+    fn extract_zip_refuses_a_nested_tar_gz_holding_a_symlink() {
+        let scene = HostileScene::new("hostile.zip");
+        let inner = scene.temp.path().join("inner.tar.gz");
+        create_hostile_tar_gz(
+            &inner,
+            &[
+                HostileMember::Link(tar::EntryType::Symlink, "escape", &scene.outside()),
+                HostileMember::File("escape/planted", b"planted"),
+            ],
+        );
+        {
+            let file = std::fs::File::create(&scene.archive).expect("Should create file");
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("infc-linux-x64.tar.gz", options)
+                .expect("Should start file");
+            zip.write_all(&std::fs::read(&inner).expect("Should read inner tar.gz"))
+                .expect("Should write");
+            zip.finish().expect("Should finish");
+        }
+
+        let result = extract_archive(&scene.archive, &scene.dest);
+
+        scene.assert_refused(result, &["escape", "symbolic link"]);
+    }
+
+    /// A failed extraction removes only a destination it created: one that
+    /// existed before keeps what it held.
+    #[test]
+    fn extract_archive_keeps_a_destination_that_existed_when_extraction_fails() {
+        for (archive_name, is_zip) in [("hostile.tar.gz", false), ("hostile.zip", true)] {
+            let scene = HostileScene::new(archive_name);
+            if is_zip {
+                let file = std::fs::File::create(&scene.archive).expect("Should create file");
+                let mut zip = zip::ZipWriter::new(file);
+                let options = zip::write::SimpleFileOptions::default();
+                zip.add_symlink("escape", scene.outside(), options)
+                    .expect("Should add symlink");
+                zip.finish().expect("Should finish");
+            } else {
+                create_hostile_tar_gz(
+                    &scene.archive,
+                    &[HostileMember::Link(tar::EntryType::Symlink, "escape", &scene.outside())],
+                );
+            }
+            std::fs::create_dir(&scene.dest).expect("Should create the destination");
+            std::fs::write(scene.dest.join("kept"), b"kept").expect("Should write kept");
+
+            extract_archive(&scene.archive, &scene.dest)
+                .expect_err("the archive must be refused");
+
+            assert_eq!(
+                std::fs::read(scene.dest.join("kept"))
+                    .expect("the destination must keep its files"),
+                b"kept"
+            );
+            scene.assert_outside_untouched();
+        }
+    }
+
+    /// A destination that did not exist is published whole, and the staging
+    /// directory it was extracted into is gone.
+    #[test]
+    fn extract_archive_publishes_the_staged_destination() {
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("toolchains").join("0.1.0");
+        create_tar_gz_with_root(&archive_path, "root-folder");
+
+        extract_archive(&archive_path, &dest_dir).expect("Should extract");
+
+        assert_eq!(
+            std::fs::read(dest_dir.join("infc")).expect("infc must be published"),
+            b"binary content"
+        );
+        assert_no_staging_left(&temp_dir.path().join("toolchains"));
+    }
+
+    /// The staging directory is a hidden sibling of the destination, unique
+    /// to each call, so that two extractions never share one.
+    #[test]
+    fn staging_dir_for_is_a_hidden_sibling_unique_to_each_call() {
+        let dest = Path::new("home").join("toolchains").join("0.1.0");
+
+        let first = staging_dir_for(&dest).expect("a staging directory");
+        let second = staging_dir_for(&dest).expect("a staging directory");
+
+        assert_eq!(first.parent(), dest.parent());
+        let name = first.file_name().expect("a name").to_string_lossy().into_owned();
+        assert!(name.starts_with(".0.1.0.partial-"), "{name}");
+        assert_ne!(first, second);
+        assert!(staging_dir_for(Path::new("/")).is_none());
+    }
+
+    /// A failed extraction never removes a destination it did not create,
+    /// even one that appeared while it ran, as when a concurrent install of
+    /// the same version publishes first. The archive is a FIFO, so the
+    /// extraction waits on it, past its check that the destination is absent,
+    /// while the other install publishes.
+    #[cfg(unix)]
+    #[test]
+    fn extract_archive_failure_never_removes_a_destination_another_install_published() {
+        let scene = HostileScene::new("hostile.tar.gz");
+        let hostile = scene.temp.path().join("hostile-bytes.tar.gz");
+        create_hostile_tar_gz(
+            &hostile,
+            &[HostileMember::Link(tar::EntryType::Symlink, "escape", &scene.outside())],
+        );
+        let hostile = std::fs::read(&hostile).expect("Should read the hostile archive");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&scene.archive)
+            .status()
+            .expect("Should run mkfifo");
+        assert!(status.success(), "mkfifo must create the archive FIFO");
+
+        let (archive, dest) = (scene.archive.clone(), scene.dest.clone());
+        let extraction = std::thread::spawn(move || extract_archive(&archive, &dest));
+        // Opening a FIFO to write returns once a reader has opened it, and
+        // the extraction opens the archive only after finding no destination.
+        let (opened, open_result) = std::sync::mpsc::channel();
+        let fifo = scene.archive.clone();
+        std::thread::spawn(move || {
+            let _ = opened.send(std::fs::OpenOptions::new().write(true).open(fifo));
+        });
+        let mut writer = open_result
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the extraction must open the archive")
+            .expect("Should open the FIFO to write");
+
+        std::fs::create_dir(&scene.dest).expect("the other install publishes");
+        std::fs::write(scene.dest.join("infc"), b"theirs").expect("Should write theirs");
+        let _ = writer.write_all(&hostile);
+        drop(writer);
+        let result = extraction.join().expect("the extraction must not panic");
+
+        result.expect_err("the hostile archive must be refused");
+        assert_eq!(
+            std::fs::read(scene.dest.join("infc")).expect("the published install must survive"),
+            b"theirs"
+        );
+        assert_no_staging_left(scene.temp.path());
+        scene.assert_outside_untouched();
+    }
+
+    /// A destination that appeared while the archive was being extracted,
+    /// such as one a concurrent install of the same version published first,
+    /// is neither replaced nor removed.
+    #[test]
+    fn publish_staged_refuses_a_destination_that_appeared() {
+        let temp_dir = temp_test_dir();
+        let staging = temp_dir.path().join(".0.1.0.partial-1-0");
+        let dest = temp_dir.path().join("0.1.0");
+        std::fs::create_dir(&staging).expect("Should create staging");
+        std::fs::write(staging.join("infc"), b"ours").expect("Should write ours");
+        for theirs in [None, Some(b"theirs".as_slice())] {
+            std::fs::create_dir_all(&dest).expect("Should create the destination");
+            if let Some(bytes) = theirs {
+                std::fs::write(dest.join("infc"), bytes).expect("Should write theirs");
+            }
+
+            let message = format!(
+                "{:#}",
+                publish_staged(&staging, &dest).expect_err("must not replace the destination")
+            );
+
+            assert!(message.contains("appeared while the archive was being extracted"));
+            assert_eq!(
+                std::fs::read(dest.join("infc")).ok().as_deref(),
+                theirs,
+                "the destination must keep what it held"
+            );
+            assert_eq!(std::fs::read(staging.join("infc")).expect("staging kept"), b"ours");
+        }
+    }
 
     #[test]
     fn extract_tar_gz_empty_archive() {

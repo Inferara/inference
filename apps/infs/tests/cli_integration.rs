@@ -4467,6 +4467,238 @@ fn install_uses_custom_dist_server() {
         .stderr(predicate::str::contains("invalid-test-server"));
 }
 
+// Hostile distribution server
+//
+// These run `infs install` against a stub distribution server that serves a
+// release manifest and an archive at a matching checksum, as a compromised or
+// spoofed server could. Each isolates `INFERENCE_HOME` and the user's home
+// directory inside the test's temporary directory and requires that nothing
+// is written outside `INFERENCE_HOME`.
+
+/// Spawns a throwaway HTTP/1.1 server on `127.0.0.1:0` that answers a `GET` of
+/// each path in `routes` with its body, and any other path with `404`, then
+/// returns its base URL. `routes` receives the base URL first, so a body such
+/// as a release manifest can link back to the server.
+fn spawn_dist_server_stub(routes: impl FnOnce(&str) -> Vec<(String, Vec<u8>)>) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub listener");
+    let base = format!("http://{}", listener.local_addr().expect("stub local addr"));
+    let routes = routes(&base);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while let Ok(1) = stream.read(&mut byte) {
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") || request.len() > 8192 {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            let path = request.split_whitespace().nth(1).unwrap_or_default();
+            let (status, body) = routes
+                .iter()
+                .find(|(route, _)| route == path)
+                .map_or(("404 Not Found", &[][..]), |(_, body)| {
+                    ("200 OK", body.as_slice())
+                });
+            let header = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            if stream.write_all(header.as_bytes()).is_err() {
+                continue;
+            }
+            let _ = stream.write_all(body);
+            let _ = stream.flush();
+        }
+    });
+    base
+}
+
+/// The file name of the host's `infc` release archive, as `infs install`
+/// matches it against the platform it detects.
+fn host_infc_archive_name() -> String {
+    format!("infc-{}-x64.tar.gz", std::env::consts::OS)
+}
+
+/// A release manifest whose one stable version is `version`, holding the
+/// archive `<base>/<file>` with checksum `sha256`.
+fn one_version_manifest(base: &str, version: &str, file: &str, sha256: &str) -> Vec<u8> {
+    serde_json::json!([{
+        "version": version,
+        "stable": true,
+        "files": [{ "url": format!("{base}/{file}"), "sha256": sha256 }],
+    }])
+    .to_string()
+    .into_bytes()
+}
+
+/// `infs install` (latest) wired to the stub at `base`, with the toolchain home
+/// at `home` and the user's home directory at `<temp>/user-home`, so that not
+/// even a regression that completes the install can reach a real shell
+/// profile.
+fn stub_install_cmd(temp: &assert_fs::TempDir, home: &std::path::Path, base: &str) -> Command {
+    let user_home = temp.path().join("user-home");
+    std::fs::create_dir_all(&user_home).expect("create the user's home");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFERENCE_HOME", home)
+        .env("INFS_DIST_SERVER", base)
+        .env("HOME", &user_home)
+        .env("USERPROFILE", &user_home)
+        .env_remove("SHELL")
+        .arg("install");
+    cmd
+}
+
+/// The names in `dir`, sorted.
+fn sorted_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read directory")
+        .map(|entry| {
+            entry
+                .expect("read directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// `infs install` refuses a release manifest whose version would put the
+/// toolchain outside `toolchains/`, and writes nothing outside
+/// `INFERENCE_HOME`.
+///
+/// The stub serves a well-formed archive at a matching checksum, so before
+/// the fix the install went through: it extracted `infc` to
+/// `<home>/toolchains/../../escaped`, beside the home, and made that the
+/// default toolchain.
+#[test]
+fn install_refuses_a_manifest_version_that_leaves_toolchains() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let archive_name = host_infc_archive_name();
+    let tarball = build_tarball(&[("infc", b"fake infc")]);
+    let sha = sha256_hex(&tarball);
+    let base = spawn_dist_server_stub(|base| {
+        vec![
+            (
+                "/releases.json".to_string(),
+                one_version_manifest(base, "../../escaped", &archive_name, &sha),
+            ),
+            (format!("/{archive_name}"), tarball),
+        ]
+    });
+
+    stub_install_cmd(&temp, &home, &base)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Refusing the release manifest from"))
+        .stderr(predicate::str::contains(
+            "version \"../../escaped\" is not a plain file name",
+        ));
+
+    assert_eq!(
+        sorted_names(temp.path()),
+        ["home", "user-home"],
+        "nothing may be written beside the toolchain home"
+    );
+    assert!(
+        sorted_names(&home.join("toolchains")).is_empty(),
+        "no toolchain may be installed"
+    );
+}
+
+/// `infs install` refuses an archive holding a symbolic link with a member
+/// written through it, and writes nothing outside `INFERENCE_HOME`, nor a
+/// partial toolchain under `toolchains/`.
+///
+/// Before the fix the link was created and `planted` landed in `outside/`.
+#[test]
+fn install_refuses_an_archive_holding_a_symlink() {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use tar::{Builder, EntryType, Header};
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    // A toolchain already installed keeps a regression that completes this
+    // install from configuring PATH, which on Windows writes the registry.
+    std::fs::create_dir_all(home.join("toolchains").join("0.0.0")).unwrap();
+
+    let mut tarball = Vec::new();
+    {
+        let mut builder = Builder::new(GzEncoder::new(&mut tarball, Compression::default()));
+        let mut header = Header::new_gnu();
+        header.set_size(9);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "infc", b"fake infc".as_slice())
+            .expect("append infc");
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Symlink);
+        header.set_size(0);
+        builder
+            .append_link(&mut header, "escape", &outside)
+            .expect("append the symlink");
+        let mut header = Header::new_gnu();
+        header.set_size(7);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "escape/planted", b"planted".as_slice())
+            .expect("append the member written through the symlink");
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+    }
+    let archive_name = host_infc_archive_name();
+    let sha = sha256_hex(&tarball);
+    let base = spawn_dist_server_stub(|base| {
+        vec![
+            (
+                "/releases.json".to_string(),
+                one_version_manifest(base, "0.0.1", &archive_name, &sha),
+            ),
+            (format!("/{archive_name}"), tarball),
+        ]
+    });
+
+    stub_install_cmd(&temp, &home, &base)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Refusing to extract `escape`: it is a symbolic link",
+        ));
+
+    assert!(
+        sorted_names(&outside).is_empty(),
+        "nothing may be written through the link"
+    );
+    assert_eq!(
+        sorted_names(&home.join("toolchains")),
+        ["0.0.0"],
+        "a refused archive must leave no partial toolchain"
+    );
+    assert_eq!(
+        sorted_names(temp.path()),
+        ["home", "outside", "user-home"],
+        "nothing may be written beside the toolchain home"
+    );
+}
+
 /// Verifies that `infs self` without a subcommand shows an error.
 ///
 /// **Expected behavior**: Exit with non-zero code when no subcommand is provided.
