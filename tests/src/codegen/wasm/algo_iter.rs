@@ -166,7 +166,8 @@ mod algo_iter_tests {
     }
 
     /// The Inference, rustc, and zig builds of the same algorithms agree on every
-    /// observable result; the test skips when either external compiler is absent.
+    /// observable result, except that the Inference build traps where its checked
+    /// arithmetic overflows; the test skips when either external compiler is absent.
     ///
     /// Both external compilers emit into a per-run `TempDir`, named through the
     /// operating system's exclusive-create loop, so concurrent test processes never
@@ -176,7 +177,7 @@ mod algo_iter_tests {
     fn algo_iter_cross_compiler_test() {
         use crate::utils::{get_test_data_path, wasm_codegen};
         use std::process::Command;
-        use wasmtime::{Engine, Instance, Module, Store, TypedFunc};
+        use wasmtime::{Engine, Instance, Module, Store, Trap, TypedFunc};
 
         // Compile Inference source
         let test_name = "algo_iter";
@@ -310,6 +311,35 @@ mod algo_iter_tests {
             }};
         }
 
+        // The three `pow` functions check the multiply into `result`, where the
+        // Rust and Zig builds wrap it. On an input whose checked multiply
+        // overflows, `$checked` is `None` and the Inference build must trap;
+        // everywhere else the three builds must agree.
+        macro_rules! compare_or_trap {
+            ($name:expr, $ty:ty, $args:expr, $checked:expr) => {{
+                if $checked.is_some() {
+                    compare!($name, $ty, $args);
+                } else {
+                    let inf_f: TypedFunc<_, $ty> = inf_instance
+                        .get_typed_func(&mut inf_store, $name)
+                        .unwrap_or_else(|e| panic!("Inference: failed to get '{}': {e}", $name));
+                    let Err(err) = inf_f.call(&mut inf_store, $args) else {
+                        panic!(
+                            "Inference: {}({:?}) overflows its checked multiply and must trap",
+                            $name, $args
+                        );
+                    };
+                    assert_eq!(
+                        *err.downcast_ref::<Trap>().expect("wasmtime Trap"),
+                        Trap::UnreachableCodeReached,
+                        "Inference: {}({:?}) must trap on the overflow guard",
+                        $name,
+                        $args
+                    );
+                }
+            }};
+        }
+
         // --- fibonacci_iter (i32): exhaustive -5..=46, 52 inputs ---
         for n in -5..=46_i32 {
             compare!("fibonacci_iter", i32, n);
@@ -358,7 +388,7 @@ mod algo_iter_tests {
             .collect();
         for &base in &pow_bases {
             for exp in 0..=30_i32 {
-                compare!("pow_iter", i32, (base, exp));
+                compare_or_trap!("pow_iter", i32, (base, exp), checked_pow_i32(base, exp));
             }
         }
 
@@ -390,7 +420,7 @@ mod algo_iter_tests {
             .collect();
         for &base in &pow_i64_bases {
             for exp in 0..=62_i64 {
-                compare!("pow_iter_i64", i64, (base, exp));
+                compare_or_trap!("pow_iter_i64", i64, (base, exp), checked_pow_i64(base, exp));
             }
         }
 
@@ -410,7 +440,9 @@ mod algo_iter_tests {
         let pow_u16_bases: &[i32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100, 255, 256, 65535];
         for &base in pow_u16_bases {
             for exp in 0..=15_i32 {
-                compare!("pow_u16", i32, (base, exp));
+                let checked =
+                    checked_pow_u16(u16::try_from(base).unwrap(), u16::try_from(exp).unwrap());
+                compare_or_trap!("pow_u16", i32, (base, exp), checked);
             }
         }
 
@@ -419,6 +451,29 @@ mod algo_iter_tests {
             compare!("is_prime_bool", i32, n);
         }
     }
+
+    // `pow_iter`, `pow_iter_i64` and `pow_u16` as `algo_iter.inf` writes them: the
+    // squaring wraps and the multiply into `result` is checked. `None` marks an input
+    // whose checked multiply overflows, where the Inference build traps.
+    macro_rules! checked_pow {
+        ($name:ident, $ty:ty) => {
+            fn $name(base: $ty, exp: $ty) -> Option<$ty> {
+                let (mut result, mut b, mut e): ($ty, $ty, $ty) = (1, base, exp);
+                while e > 0 {
+                    if e & 1 == 1 {
+                        result = result.checked_mul(b)?;
+                    }
+                    b = b.wrapping_mul(b);
+                    e >>= 1;
+                }
+                Some(result)
+            }
+        };
+    }
+
+    checked_pow!(checked_pow_i32, i32);
+    checked_pow!(checked_pow_i64, i64);
+    checked_pow!(checked_pow_u16, u16);
 }
 
 /// Test data regeneration helper.
