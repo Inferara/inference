@@ -12,11 +12,13 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::toolchain::ToolchainPaths;
+use crate::toolchain::paths::parse_version_arg;
 
 /// Arguments for the uninstall command.
 #[derive(Args)]
 pub struct UninstallArgs {
     /// Version to uninstall (e.g., "0.1.0").
+    #[clap(value_parser = parse_version_arg)]
     pub version: String,
 }
 

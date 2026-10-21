@@ -22,9 +22,11 @@
 //! ### Phase 2: Toolchain Management
 //!
 //! 7. **Install command**: Help display, error handling without network
-//! 8. **Uninstall command**: Help display, nonexistent version handling
+//! 8. **Uninstall command**: Help display, nonexistent version handling, refusal
+//!    of a version that is not a plain file name
 //! 9. **List command**: Success on empty state, appropriate messaging
-//! 10. **Default command**: Help display, argument validation, error handling
+//! 10. **Default command**: Help display, argument validation, error handling,
+//!     refusal of a version that is not a plain file name
 //! 11. **Doctor command**: Health checks execution, output verification
 //! 12. **Self update command**: Help display, subcommand validation, error handling
 //!
@@ -4053,6 +4055,175 @@ fn uninstall_nonexistent_shows_message() {
         .stderr(predicate::str::contains("not installed"));
 }
 
+// Version arguments that are not plain file names
+//
+// `infs uninstall` and `infs default` join their version to `toolchains/`.
+// These run them with versions that name some other directory, against a
+// toolchain home laid out so that, before the fix, each of those directories
+// existed and `infs uninstall` removed it.
+
+/// A toolchain home at `<temp>/home` beside a sentinel file `<temp>/sentinel`,
+/// with `0.1.0` installed and set as the default and a directory
+/// `toolchains/a/b`. Returns the home.
+fn home_beside_a_sentinel(temp: &assert_fs::TempDir) -> std::path::PathBuf {
+    let home = temp.path().join("home");
+    let installed = home.join("toolchains").join("0.1.0");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(installed.join("infc"), b"fake infc").unwrap();
+    let nested = home.join("toolchains").join("a").join("b");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("keep"), b"keep").unwrap();
+    std::fs::write(home.join("default"), "0.1.0").unwrap();
+    std::fs::write(temp.path().join("sentinel"), b"sentinel").unwrap();
+    home
+}
+
+/// `infs` run from `temp` with the toolchain home at `home` and `HOME` at
+/// `temp`, so that not even a regression that ignored `INFERENCE_HOME` could
+/// reach the real home directory.
+fn infs_beside_a_sentinel(temp: &std::path::Path, home: &std::path::Path) -> Command {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFERENCE_HOME", home)
+        .env("HOME", temp)
+        .current_dir(temp);
+    cmd
+}
+
+/// Versions that name a directory other than one entry of `toolchains/` in
+/// the layout [`home_beside_a_sentinel`] builds in `temp`, for a command run
+/// from `temp`.
+fn versions_naming_other_directories(temp: &std::path::Path) -> Vec<String> {
+    let mut versions: Vec<String> = [
+        // `toolchains/` itself.
+        "",
+        ".",
+        // The home, and its parent.
+        "..",
+        "../..",
+        // A directory below an entry, with either separator.
+        "a/b",
+        "a\\b",
+        // `0.1.0` on Windows, which drops a trailing `.`.
+        "0.1.0.",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    // An absolute path replaces `toolchains/` when joined to it.
+    versions.push(temp.to_string_lossy().into_owned());
+    #[cfg(windows)]
+    {
+        // So does a path with a drive and no root: `<drive>:home`, read from
+        // the current directory on that drive, names the home.
+        use std::path::{Component, Prefix};
+        let Some(Component::Prefix(prefix)) = temp.components().next() else {
+            panic!("{} has no drive prefix", temp.display());
+        };
+        let (Prefix::Disk(drive) | Prefix::VerbatimDisk(drive)) = prefix.kind() else {
+            panic!("{} is not on a drive", temp.display());
+        };
+        versions.push(format!("{}:home", char::from(drive)));
+    }
+    versions
+}
+
+/// Requires that the layout [`home_beside_a_sentinel`] built in `temp` is
+/// exactly as it was built: the home, its parent and the sentinel survive,
+/// nothing is added, and `0.1.0` is still installed and the default.
+fn assert_home_and_sentinel_untouched(
+    temp: &std::path::Path,
+    home: &std::path::Path,
+    command: &str,
+) {
+    assert!(temp.is_dir(), "{command} must leave the home's parent");
+    assert_eq!(
+        std::fs::read(temp.join("sentinel")).ok().as_deref(),
+        Some(&b"sentinel"[..]),
+        "{command} must leave the sentinel beside the home"
+    );
+    assert!(home.is_dir(), "{command} must leave the home");
+    assert_eq!(
+        sorted_names(temp),
+        ["home", "sentinel"],
+        "{command} must write nothing beside the home"
+    );
+    assert_eq!(
+        sorted_names(home),
+        ["default", "toolchains"],
+        "{command} must write nothing in the home"
+    );
+    assert_eq!(
+        sorted_names(&home.join("toolchains")),
+        ["0.1.0", "a"],
+        "{command} must leave every toolchain"
+    );
+    assert!(
+        home.join("toolchains").join("0.1.0").join("infc").is_file(),
+        "{command} must leave 0.1.0 installed"
+    );
+    assert!(
+        home.join("toolchains")
+            .join("a")
+            .join("b")
+            .join("keep")
+            .is_file(),
+        "{command} must leave toolchains/a/b"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join("default")).ok().as_deref(),
+        Some("0.1.0"),
+        "{command} must leave 0.1.0 the default"
+    );
+}
+
+/// `infs uninstall` refuses a version that is not a plain file name, naming
+/// it, before it touches the toolchain home.
+///
+/// Before the fix it removed the directory `toolchains/<version>` named: `..`
+/// removed the whole toolchain home, `../..` its parent (with the default
+/// home, the user's home directory), `''` every toolchain, and an absolute
+/// path whatever it names.
+#[test]
+fn uninstall_refuses_a_version_that_is_not_a_plain_file_name() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let home = home_beside_a_sentinel(&temp);
+
+    for version in versions_naming_other_directories(temp.path()) {
+        let mut cmd = infs_beside_a_sentinel(temp.path(), &home);
+        cmd.arg("uninstall").arg(&version);
+
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "invalid value '{version}' for '<VERSION>': not a plain file name"
+            )));
+        assert_home_and_sentinel_untouched(
+            temp.path(),
+            &home,
+            &format!("infs uninstall {version:?}"),
+        );
+    }
+}
+
+/// `infs uninstall` still removes the toolchain a plain version names, and
+/// nothing else.
+#[test]
+fn uninstall_removes_only_the_named_toolchain() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let home = home_beside_a_sentinel(&temp);
+    std::fs::create_dir_all(home.join("toolchains").join("0.2.0")).unwrap();
+
+    let mut cmd = infs_beside_a_sentinel(temp.path(), &home);
+    cmd.arg("uninstall").arg("0.2.0");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Toolchain 0.2.0 uninstalled successfully.",
+        ));
+    assert_home_and_sentinel_untouched(temp.path(), &home, "infs uninstall 0.2.0");
+}
+
 // List Command Tests
 
 /// Verifies that `infs list` runs successfully even with no toolchains installed.
@@ -4214,6 +4385,35 @@ fn default_nonexistent_version_shows_error() {
     cmd.assert().failure().stderr(
         predicate::str::contains("not installed").or(predicate::str::contains("does not exist")),
     );
+}
+
+/// `infs default` refuses a version that is not a plain file name, naming it,
+/// before it touches the toolchain home or fetches the release manifest.
+///
+/// Before the fix `infs default ..` found `toolchains/..` installed, wrote
+/// `..` to the `default` file, and only then failed to find an `infc` to link.
+#[test]
+fn default_refuses_a_version_that_is_not_a_plain_file_name() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let home = home_beside_a_sentinel(&temp);
+
+    for version in versions_naming_other_directories(temp.path()) {
+        let mut cmd = infs_beside_a_sentinel(temp.path(), &home);
+        cmd.env("INFS_DIST_SERVER", "http://localhost:1")
+            .arg("default")
+            .arg(&version);
+
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "invalid value '{version}' for '<VERSION>': not a plain file name"
+            )));
+        assert_home_and_sentinel_untouched(
+            temp.path(),
+            &home,
+            &format!("infs default {version:?}"),
+        );
+    }
 }
 
 // Doctor Command Tests

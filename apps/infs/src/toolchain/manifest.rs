@@ -34,6 +34,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::Platform;
+use super::paths::is_plain_file_name;
 
 /// Environment variable to override the distribution server URL.
 pub const DIST_SERVER_ENV: &str = "INFS_DIST_SERVER";
@@ -410,24 +411,6 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Whether `name` is a single plain file name on every platform: ASCII
-/// letters, digits, `.`, `-`, `+` and `_`, starting with a letter or a digit
-/// and not ending with `.`.
-///
-/// That rules out an empty name, `.` and `..`, both separators, a drive
-/// prefix and control characters, whatever the host, and a trailing `.`,
-/// which Windows drops, so that `0.1.0.` would name `0.1.0`'s directory. It
-/// admits every semantic version and every release file name published so
-/// far. A Windows device name such as `NUL` passes; it can only make the
-/// install fail.
-fn is_plain_file_name(name: &str) -> bool {
-    name.starts_with(|c: char| c.is_ascii_alphanumeric())
-        && !name.ends_with('.')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
 }
 
 /// Fetches the release manifest and finds the artifact for a specific version and platform.
