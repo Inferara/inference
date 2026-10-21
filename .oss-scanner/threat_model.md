@@ -53,12 +53,13 @@ Less important: `tools/inf-wast`, which is a test-only dependency of `inf-wasmpa
 
 ## How to exercise it
 
-The image has every test binary prebuilt, plus `wasmtime` and `coqc` (Coq 8.20.1). Everything runs offline.
+The image has every test binary prebuilt, plus `wasmtime`, `coqc` (Coq 8.20.1), Zig, and Rust's `wasm32-unknown-unknown` target. Everything runs offline.
 
 - **Tests**:
   - `cargo test`: the default members, as CI runs them.
   - `cargo test-full`: also covers `tools/`.
   - `cargo test -p inference-tests rocq_typecheck::`: compiles the emitted Rocq with `coqc`.
+  - `cargo test -p inference-tests cross_compiler`: compiles the same algorithms with Inference, rustc and Zig, and asserts all three Wasm modules agree, input by input. To test a suspected miscompile this way, copy one of these tests (`tests/src/codegen/wasm/algo_iter.rs`).
   - `cargo test -p inference-tests --test stellar`: deploys contracts on an in-process Soroban host (`soroban-env-host`).
 - **Compile one file**:
   - `target/debug/infc path/to/file.inf --out-dir /tmp/out` writes `file.wasm`.

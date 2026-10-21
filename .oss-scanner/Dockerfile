@@ -34,13 +34,28 @@ RUN curl -fsSL -o /tmp/wasmtime.tar.xz \
     && rm /tmp/wasmtime.tar.xz \
     && wasmtime --version
 
+# The cross-compiler tests (`algo_iter`, `algo_array`) compile the same algorithms with rustc and Zig and assert
+# that all three Wasm modules agree, input by input. Without both compilers they skip and pass without comparing.
+# The checksum is the one ziglang.org publishes in its download index.
+ARG ZIG_VERSION=0.17.0
+ARG ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+RUN curl -fsSL -o /tmp/zig.tar.xz \
+      "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+    && echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/zig.tar.xz -C /opt \
+    && ln -s "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig \
+    && rm /tmp/zig.tar.xz \
+    && zig version
+
 # The scanner's contract: the checkout lives inside the image, at /src.
 COPY . /src
 WORKDIR /src
 
-# Install the toolchain rust-toolchain.toml names, then fetch every crate the workspace, its tests and its
-# benches need. Cargo.lock is not tracked, so `cargo fetch` resolves one here and every later step uses it.
+# Install the toolchain rust-toolchain.toml names, with the wasm32 target the cross-compiler tests build their
+# Rust reference with, then fetch every crate the workspace, its tests and its benches need. Cargo.lock is not
+# tracked, so `cargo fetch` resolves one here and every later step uses it.
 RUN rustup toolchain install \
+    && rustup target add wasm32-unknown-unknown \
     && rustc --version \
     && cargo fetch
 
