@@ -5,6 +5,7 @@ mod arith_mode;
 mod array_tests;
 mod associated_functions;
 mod coverage;
+mod duplicate_method;
 mod duplicate_parameter_name;
 mod duplicate_type_parameter_name;
 mod error_recovery;
