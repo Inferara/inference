@@ -1,0 +1,52 @@
+name: ClusterFuzzLite PR fuzzing
+
+# Fuzzes a pull request for a few minutes with every target ClusterFuzzLite
+# builds from .clusterfuzzlite/build.sh, in code-change mode: it starts from the
+# corpus the scheduled batch run (cflite_batch.yml) last uploaded, and fails the
+# check when an input crashes a target. The crashing input is uploaded as an
+# artifact of this run. The paths are those the fuzz targets build from, and
+# their seed corpora.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'core/**'
+      - 'tools/inf-wasmparser/**'
+      - 'tests/test_data/**'
+      - 'Cargo.toml'
+      - '.clusterfuzzlite/**'
+      - '.github/workflows/cflite_pr.yml'
+
+permissions: read-all
+
+jobs:
+  PR:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.sanitizer }}-${{ github.ref }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer:
+          - address
+    steps:
+      - name: Build Fuzzers (${{ matrix.sanitizer }})
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: ${{ matrix.sanitizer }}
+      - name: Run Fuzzers (${{ matrix.sanitizer }})
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          language: rust
+          fuzz-seconds: 300
+          mode: 'code-change'
+          sanitizer: ${{ matrix.sanitizer }}
+          output-sarif: true

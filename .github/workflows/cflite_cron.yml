@@ -1,0 +1,31 @@
+name: ClusterFuzzLite cron tasks
+
+# Prunes the corpus batch fuzzing (cflite_batch.yml) grows: drops every input
+# that adds no coverage the rest of the corpus lacks, and uploads the result in
+# its place. Once a day, at 03:00 UTC, between two batch runs.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  Pruning:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+      - name: Run Fuzzers
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          language: rust
+          fuzz-seconds: 600
+          mode: 'prune'
+          output-sarif: true

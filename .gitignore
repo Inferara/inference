@@ -43,6 +43,11 @@ test_data/**/*.json
 # Local end-to-end linker scratchpad (kept locally, never committed)
 scratch/
 
+# What `cargo fuzz run` writes into a fuzz crate: the corpus it grows and the
+# inputs that crashed. `target/` above already covers its build output.
+**/fuzz/corpus/
+**/fuzz/artifacts/
+
 # Coverage reports
 lcov.info
 *.profraw
@@ -58,6 +63,7 @@ cobertura.xml
 !.github/workflows/
 !.cargo/
 !.oss-scanner/
+!.clusterfuzzlite/
 !.gitattributes
 !editors/vscode/.vscodeignore
 

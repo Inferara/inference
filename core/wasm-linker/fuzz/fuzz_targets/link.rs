@@ -17,11 +17,12 @@
 //! ## Running
 //!
 //! `cargo-fuzz` and a nightly toolchain are required and are intentionally *not*
-//! part of the default workspace (this crate declares its own `[workspace]`):
+//! part of the default workspace (this crate declares its own `[workspace]`).
+//! From the repository root:
 //!
 //! ```text
 //! cargo install cargo-fuzz
-//! cargo +nightly fuzz run link
+//! cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link
 //! ```
 //!
 //! ## Seed corpus
@@ -31,10 +32,11 @@
 //! / over-declared-locals / main-passive-data-segment cases, plus positive
 //! controls for a pure external and an active main-side data segment)
 //! lives at `core/wasm-linker/fuzz/seeds/link/`. Start the fuzzer from it for
-//! fast coverage:
+//! fast coverage, after a corpus directory the fuzzer may write to:
 //!
 //! ```text
-//! cargo +nightly fuzz run link core/wasm-linker/fuzz/seeds/link
+//! cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link \
+//!     ~/.cache/inference-fuzz/link core/wasm-linker/fuzz/seeds/link
 //! ```
 //!
 //! Those seeds are reproducible: `regenerate_fuzz_seeds` in

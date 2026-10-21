@@ -19,10 +19,21 @@ the default build. `cargo build` / `cargo test` at the repo root never touch it.
 
 ## Running
 
+From the repository root, with a nightly toolchain and `cargo-fuzz`:
+
 ```sh
 cargo install cargo-fuzz
-cargo +nightly fuzz run link core/wasm-linker/fuzz/seeds/link
+mkdir -p ~/.cache/inference-fuzz/link
+cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link \
+    ~/.cache/inference-fuzz/link core/wasm-linker/fuzz/seeds/link
 ```
+
+The first directory is the corpus the fuzzer writes to; the committed seeds
+after it are only read.
+
+ClusterFuzzLite builds this target with `.clusterfuzzlite/build.sh` and runs it
+on pull requests (`.github/workflows/cflite_pr.yml`) and every six hours on
+`main` (`cflite_batch.yml`), seeded from `seeds/link/`.
 
 ## Seed corpus
 

@@ -1,0 +1,40 @@
+name: ClusterFuzzLite batch fuzzing
+
+# Fuzzes `main` for an hour, every six hours, with every target ClusterFuzzLite
+# builds from .clusterfuzzlite/build.sh. Each run starts from the corpus the
+# previous one uploaded as an artifact, and uploads the grown corpus for the
+# next run and for PR fuzzing (cflite_pr.yml). A crashing input fails the run
+# and is uploaded as an artifact. The corpus is pruned daily (cflite_cron.yml).
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  BatchFuzzing:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer:
+          - address
+    steps:
+      - name: Build Fuzzers (${{ matrix.sanitizer }})
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          sanitizer: ${{ matrix.sanitizer }}
+      - name: Run Fuzzers (${{ matrix.sanitizer }})
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          language: rust
+          fuzz-seconds: 3600
+          mode: 'batch'
+          sanitizer: ${{ matrix.sanitizer }}
+          output-sarif: true
