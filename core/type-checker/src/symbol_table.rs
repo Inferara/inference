@@ -837,11 +837,18 @@ impl Scope {
             .map(|(_, _, mutability)| *mutability)
     }
 
-    pub(crate) fn insert_method(&mut self, type_name: &str, method_info: MethodInfo) {
-        self.methods
-            .entry(type_name.to_string())
-            .or_default()
-            .push(method_info);
+    pub(crate) fn insert_method(
+        &mut self,
+        type_name: &str,
+        method_info: MethodInfo,
+    ) -> anyhow::Result<()> {
+        let methods = self.methods.entry(type_name.to_string()).or_default();
+        let name = &method_info.signature.name;
+        if methods.iter().any(|m| m.signature.name == *name) {
+            bail!("Method `{name}` already exists on `{type_name}` in this scope");
+        }
+        methods.push(method_info);
+        Ok(())
     }
 
     /// Add an unresolved import to this scope
@@ -2172,8 +2179,7 @@ impl SymbolTable {
                 scope_id: current.as_u32(),
                 has_self,
             };
-            self.scopes[current.index()].insert_method(type_name, method_info);
-            Ok(())
+            self.scopes[current.index()].insert_method(type_name, method_info)
         } else {
             bail!("No active scope to register method")
         }

@@ -1,0 +1,50 @@
+[package]
+name = "inference-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Detach this crate from the parent Inference workspace, as
+# `core/wasm-linker/fuzz` does: `cargo fuzz` needs a nightly toolchain that is
+# not part of the default build, so these targets must never be pulled into
+# `cargo build`/`cargo test`. The parent's `core/*` glob only matches direct
+# children of `core/`, so `core/inference/fuzz` is already excluded; the empty
+# `[workspace]` table makes this directory its own workspace root as well.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+inference = { path = ".." }
+inference-parser = { path = "../../parser" }
+inference-type-checker = { path = "../../type-checker" }
+inference-analysis = { path = "../../analysis" }
+inference-wasm-codegen = { path = "../../wasm-codegen" }
+inference-stellar-abi = { path = "../../stellar-abi" }
+inference-target-conformance = { path = "../../target-conformance" }
+inf-wasmparser = { path = "../../../tools/inf-wasmparser" }
+# Stock upstream wasmparser, at the version and features the workspace holds it
+# at: the `compile` target asks it whether an executable module is WebAssembly
+# 1.0, which the fork cannot answer because it accepts the custom opcodes.
+wasmparser = { version = "0.254.0", default-features = false, features = ["std", "validate", "features"] }
+
+# Each fuzz target is its own binary. `test = false`/`doc = false` keep the
+# harness out of the normal test/doc build path.
+[[bin]]
+name = "front_end"
+path = "fuzz_targets/front_end.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compile"
+path = "fuzz_targets/compile.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

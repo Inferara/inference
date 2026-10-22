@@ -4954,6 +4954,41 @@ fn a_void_return_builds_without_aborting() {
     );
 }
 
+/// A struct that defines one method twice used to pass the type checker and
+/// analysis and then abort code generation, which assigned the second definition
+/// the function index the first already held (found while reducing a fuzzing
+/// crash, #544). The type checker now refuses the repeat as it refuses a
+/// repeated free function, so the build ends with a diagnostic, status 1 and no
+/// artifact.
+#[test]
+fn a_repeated_method_is_refused_without_aborting() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(
+        dest.path(),
+        "struct P { x: i32; fn m(self) -> i32 { return 1; } fn m(self) -> i32 { return 2; } }\n\
+         pub fn main() -> i32 { let p: P = P { x: 0 }; return p.m(); }",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+    let assert = cmd
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("error registering method `P::m`"));
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    assert!(
+        !stderr.contains("panicked"),
+        "a repeated method must be refused, not abort the compiler, got:\n{stderr}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a refused build must leave no artifact"
+    );
+}
+
 /// The other half: a construct that genuinely cannot be lowered is refused with
 /// a rule diagnostic, not with an abort.
 ///

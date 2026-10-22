@@ -145,6 +145,7 @@ mod tests {
             location: loc(),
             module_path: Vec::new(),
             struct_name: None,
+            redefinition: false,
         }
     }
 
