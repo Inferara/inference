@@ -4,11 +4,11 @@
 //! A finished `.wasm` is all `infs` has to go on. Whether a verification-only
 //! opcode leaked into an ordinary function, whether the module carries bulk
 //! memory, whether it records which of its functions trap on arithmetic
-//! overflow, which functions it imports from its environment — none of that is
-//! recorded anywhere but in the bytes, so each answer costs a parse. Asking them
-//! together costs one, and it keeps the answers consistent with one another: no
-//! caller can pair a bulk-memory verdict taken from one traversal with a guard
-//! record taken from another.
+//! overflow, which functions and which memory it imports from its environment —
+//! none of that is recorded anywhere but in the bytes, so each answer costs a
+//! parse. Asking them together costs one, and it keeps the answers consistent
+//! with one another: no caller can pair a bulk-memory verdict taken from one
+//! traversal with a guard record taken from another.
 //!
 //! The questions are about the artifact, not about any one thing done to it, so
 //! the scan sits beside the commands rather than inside one. A command that
@@ -63,25 +63,53 @@ pub(crate) enum ArtifactScan {
     /// An ordinary executable artifact: whether it carries any bulk-memory
     /// operator, whether it records which of its functions trap on arithmetic
     /// overflow, whether it records which of its functions omit a bounds guard,
-    /// and the `(module, field)` of every function it imports, in import-section
-    /// order.
+    /// the `(module, field)` of every function it imports, in import-section
+    /// order, and the memory it imports, if it imports one.
     ///
-    /// Only function imports are listed, because a function is the only kind of
-    /// import an Inference artifact carries: code generation emits no other
-    /// kind, and the linker refuses a main module that imports any other kind.
+    /// A function and a memory are the only kinds of import an Inference
+    /// artifact carries. Code generation emits a memory import only for a
+    /// layout that asks to import its memory, and `infc`'s link step holds the
+    /// artifact to exactly that layout's `env.memory` and refuses a main module
+    /// that imports any other kind: a table, a global, a tag, or a second
+    /// memory.
     Executable {
         uses_bulk_memory: bool,
         records_overflow_guards: bool,
         records_elided_bounds: bool,
         function_imports: Vec<(String, String)>,
+        memory_import: Option<ScannedMemoryImport>,
     },
 }
 
-/// Scans `wasm_bytes` once for the five facts a caller needs up front:
+/// A memory import as an artifact's import section spells it: the two-level
+/// name and the limits, in 64 KiB pages.
+///
+/// Read from the bytes rather than taken from the layout the build asked for,
+/// so a caller that has to supply the memory supplies the one the artifact it
+/// is about to run declares — after linking and, in a project, after
+/// `[build.wasm-opt]` — rather than the one a manifest describes. The limits
+/// are `u64`s because that is how `inf_wasmparser` represents them, wide enough
+/// for a 64-bit memory; a 32-bit memory, the only kind an Inference artifact
+/// imports, encodes each as a `u32` LEB128. `inf_wasmparser` calls the minimum
+/// `initial`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScannedMemoryImport {
+    /// The import's module name, the first half of its two-level name.
+    pub module: String,
+    /// The import's field name, the second half of its two-level name.
+    pub field: String,
+    /// The fewest pages the supplied memory may have.
+    pub minimum: u64,
+    /// The most pages the supplied memory may have, or `None` when the import
+    /// sets no maximum.
+    pub maximum: Option<u64>,
+}
+
+/// Scans `wasm_bytes` once for the six facts a caller needs up front:
 /// whether a verification-only construct leaked into the artifact, whether the
 /// artifact carries bulk memory, whether it records which of its functions trap
-/// on arithmetic overflow, whether it records which omit a bounds guard, and
-/// which functions it imports.
+/// on arithmetic overflow, whether it records which omit a bounds guard, which
+/// functions it imports, and which memory it imports.
 ///
 /// Compile-mode builds strip `spec` blocks, so a well-formed executable artifact
 /// carries no verification construct. Finding one means it leaked into an
@@ -104,6 +132,7 @@ pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<Artifa
     let mut records_overflow_guards = false;
     let mut records_elided_bounds = false;
     let mut function_imports = Vec::new();
+    let mut memory_import = None;
     for payload in Parser::new(0).parse_all(wasm_bytes) {
         let payload = payload
             .map_err(|err| anyhow::anyhow!("failed to scan {}: {err}", artifact.display()))?;
@@ -131,9 +160,22 @@ pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<Artifa
                     TypeRef::Func(_) => {
                         function_imports.push((import.module.to_string(), import.name.to_string()));
                     }
-                    // Code generation emits function imports only, and the
-                    // linker refuses a main module that imports any other kind,
-                    // so no Inference artifact reaches this arm.
+                    // Memory 0, the one every memory instruction of an
+                    // Inference artifact addresses. `infc`'s link step admits
+                    // no second memory import, so a later one is left to the
+                    // arm below.
+                    TypeRef::Memory(ty) if memory_import.is_none() => {
+                        memory_import = Some(ScannedMemoryImport {
+                            module: import.module.to_string(),
+                            field: import.name.to_string(),
+                            minimum: ty.initial,
+                            maximum: ty.maximum,
+                        });
+                    }
+                    // Code generation emits no other import, and the link step
+                    // refuses a main module that imports a table, a global, a
+                    // tag or a second memory, so no Inference artifact reaches
+                    // this arm.
                     TypeRef::Table(_)
                     | TypeRef::Memory(_)
                     | TypeRef::Global(_)
@@ -169,6 +211,7 @@ pub(crate) fn scan_artifact(wasm_bytes: &[u8], artifact: &Path) -> Result<Artifa
         records_overflow_guards,
         records_elided_bounds,
         function_imports,
+        memory_import,
     })
 }
 
@@ -311,6 +354,7 @@ mod tests {
                 records_overflow_guards: false,
                 records_elided_bounds: true,
                 function_imports: Vec::new(),
+                memory_import: None,
             }
         );
     }
@@ -359,6 +403,7 @@ mod tests {
                 records_overflow_guards: true,
                 records_elided_bounds: false,
                 function_imports: Vec::new(),
+                memory_import: None,
             }
         );
     }
@@ -377,6 +422,7 @@ mod tests {
                 records_overflow_guards: false,
                 records_elided_bounds: false,
                 function_imports: Vec::new(),
+                memory_import: None,
             }
         );
     }
@@ -393,6 +439,7 @@ mod tests {
                 records_overflow_guards: false,
                 records_elided_bounds: false,
                 function_imports: Vec::new(),
+                memory_import: None,
             }
         );
     }
@@ -420,6 +467,7 @@ mod tests {
                     records_overflow_guards: false,
                     records_elided_bounds: false,
                     function_imports: Vec::new(),
+                    memory_import: None,
                 },
                 "{name} must be reported as bulk memory"
             );
@@ -439,8 +487,9 @@ mod tests {
     }
 
     /// Every function import is listed, in import-section order and unsorted, and
-    /// no other kind of import is: the scan skips the memory import between the
-    /// two functions, and the functions on either side of it keep their order.
+    /// no other kind of import is: the memory import between the two functions
+    /// is reported on its own, and the functions on either side of it keep their
+    /// order.
     #[test]
     fn scan_artifact_lists_function_imports_in_import_order() {
         use wasm_encoder::{EntityType, MemoryType};
@@ -467,6 +516,12 @@ mod tests {
                     ("fprime_core".to_string(), "telemetry".to_string()),
                     ("env".to_string(), "clock_ms".to_string()),
                 ],
+                memory_import: Some(ScannedMemoryImport {
+                    module: "env".to_string(),
+                    field: "memory".to_string(),
+                    minimum: 1,
+                    maximum: None,
+                }),
             }
         );
     }
@@ -500,6 +555,146 @@ mod tests {
                 "no function import was declared, got: {function_imports:?}"
             );
         }
+    }
+
+    /// A memory import of `minimum` pages, at most `maximum`, unshared and
+    /// 32-bit, as an Inference artifact declares one.
+    fn imported_memory(minimum: u64, maximum: Option<u64>) -> wasm_encoder::EntityType {
+        wasm_encoder::EntityType::Memory(wasm_encoder::MemoryType {
+            minimum,
+            maximum,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        })
+    }
+
+    /// What the scan reports `module` imports as its memory.
+    fn memory_import_of(module: &[u8]) -> Option<ScannedMemoryImport> {
+        let ArtifactScan::Executable { memory_import, .. } = scan(module) else {
+            panic!("an ordinary module is an executable artifact");
+        };
+        memory_import
+    }
+
+    /// The memory import as written: its two names and both limits, copied
+    /// rather than assumed. A fixed memory, a growable one, one with no maximum,
+    /// a zero minimum beside the largest 32-bit maximum, and one under a name
+    /// that is not `env.memory` each read back exactly, so `infs run` can supply
+    /// the memory the artifact declares whatever the layout that built it.
+    ///
+    /// Fails if a limit is dropped, swapped or defaulted, or if the names are
+    /// taken from anywhere but the import.
+    #[test]
+    fn scan_artifact_reports_a_memory_imports_names_and_limits() {
+        let rows: [(&str, &str, u64, Option<u64>); 5] = [
+            ("env", "memory", 1, Some(1)),
+            ("env", "memory", 2, Some(8)),
+            ("env", "memory", 1, None),
+            ("env", "memory", 0, Some(65_536)),
+            ("host", "heap", 3, Some(5)),
+        ];
+        for (module_name, field, minimum, maximum) in rows {
+            let module =
+                module_with_imports(&[(module_name, field, imported_memory(minimum, maximum))]);
+            assert_eq!(
+                scan(&module),
+                ArtifactScan::Executable {
+                    uses_bulk_memory: false,
+                    records_overflow_guards: false,
+                    records_elided_bounds: false,
+                    function_imports: Vec::new(),
+                    memory_import: Some(ScannedMemoryImport {
+                        module: module_name.to_string(),
+                        field: field.to_string(),
+                        minimum,
+                        maximum,
+                    }),
+                },
+                "{module_name}.{field} ({minimum}, {maximum:?})"
+            );
+        }
+    }
+
+    /// A module that defines its memory, or has none, imports no memory, and
+    /// one that imports only functions, a table or a global does not either:
+    /// only a memory import is reported as one.
+    #[test]
+    fn scan_artifact_reports_no_memory_import_for_a_module_that_imports_none() {
+        use crate::testing::module_with_memory_and_raw_body;
+        use wasm_encoder::{EntityType, GlobalType, RefType, TableType, ValType};
+
+        let table = EntityType::Table(TableType {
+            element_type: RefType::FUNCREF,
+            table64: false,
+            minimum: 1,
+            maximum: None,
+            shared: false,
+        });
+        let global = EntityType::Global(GlobalType {
+            val_type: ValType::I32,
+            mutable: false,
+            shared: false,
+        });
+        for module in [
+            module_with_raw_body(&[0x0b]),
+            module_with_memory_and_raw_body(&[0x0b]),
+            module_with_imports(&[("env", "clock_ms", EntityType::Function(0))]),
+            module_with_imports(&[("env", "table", table), ("env", "global", global)]),
+        ] {
+            assert_eq!(memory_import_of(&module), None);
+        }
+    }
+
+    /// With two memory imports only the first is reported — memory 0, the one
+    /// an Inference artifact's memory instructions address — and the function
+    /// imports on either side of both keep their order. A table import ahead of
+    /// the memory does not displace it.
+    ///
+    /// Fails if a later memory import overwrites the first, or if reporting the
+    /// memory stops the function imports being listed.
+    #[test]
+    fn scan_artifact_reports_the_first_memory_import_beside_the_functions() {
+        use wasm_encoder::{EntityType, RefType, TableType};
+
+        let table = EntityType::Table(TableType {
+            element_type: RefType::FUNCREF,
+            table64: false,
+            minimum: 1,
+            maximum: None,
+            shared: false,
+        });
+        let module = module_with_imports(&[
+            ("env", "table", table),
+            ("env", "memory", imported_memory(2, Some(8))),
+            ("env", "clock_ms", EntityType::Function(0)),
+            ("env", "second", imported_memory(4, Some(4))),
+            ("fprime_core", "telemetry", EntityType::Function(0)),
+        ]);
+        let ArtifactScan::Executable {
+            function_imports,
+            memory_import,
+            ..
+        } = scan(&module)
+        else {
+            panic!("an ordinary module is an executable artifact");
+        };
+        assert_eq!(
+            memory_import,
+            Some(ScannedMemoryImport {
+                module: "env".to_string(),
+                field: "memory".to_string(),
+                minimum: 2,
+                maximum: Some(8),
+            })
+        );
+        assert_eq!(
+            function_imports,
+            [
+                ("env".to_string(), "clock_ms".to_string()),
+                ("fprime_core".to_string(), "telemetry".to_string()),
+            ]
+        );
     }
 
     /// The type of the function a module exports under a name, read in the

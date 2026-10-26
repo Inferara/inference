@@ -282,10 +282,13 @@ mode = "compile"
 # keep their defaults. The memory is fixed at `pages` unless `max-pages` lets it
 # grow, which only a linked module or the host can do. `stack-size` also sets
 # the budget A036 measures call-chain frame usage against, so a smaller stack
-# tightens that diagnostic.
+# tightens that diagnostic. `import = true` imports the memory from the host as
+# `env.memory` instead of defining it, for the `wasm32` target only, and not in
+# a proof build.
 # pages = 1
 # max-pages = 1
 # stack-size = 65536
+# import = false
 
 # [verification]
 # Output directory for proof artifacts (honored only in proof mode).
@@ -582,6 +585,81 @@ mod tests {
         let manifest = InferenceToml::from_toml(&uncommented)
             .expect("the uncommented bounds-checks line must load");
         assert_eq!(manifest.build.bounds_checks.as_deref(), Some("all"));
+    }
+
+    /// The scaffolded `[memory]` block documents every key the table takes,
+    /// `import` among them with the target it is limited to and the proof build
+    /// it is refused in, and loads once uncommented: as written, where `import =
+    /// false` keeps the memory the module's own, and with the import switched
+    /// on, where the same block asks for an imported memory at the documented
+    /// numbers.
+    ///
+    /// Fails if the template drops a key or the import's comment, or spells a
+    /// line the loader refuses.
+    #[test]
+    fn the_scaffolded_memory_comment_documents_the_import_and_loads() {
+        let content = manifest_content("demo");
+        for line in [
+            "# [memory]",
+            "# pages = 1",
+            "# max-pages = 1",
+            "# stack-size = 65536",
+            "# import = false",
+        ] {
+            assert!(
+                content.lines().any(|candidate| candidate == line),
+                "the scaffolded `[memory]` block lacks `{line}`:\n{content}"
+            );
+        }
+        let comment: String = content
+            .lines()
+            .skip_while(|line| *line != "# [memory]")
+            .take_while(|line| *line != "# pages = 1")
+            .collect::<Vec<_>>()
+            .join("\n");
+        for fragment in [
+            "`import = true`",
+            "`env.memory`",
+            "`wasm32`",
+            "a proof build",
+        ] {
+            assert!(
+                comment.contains(fragment),
+                "the `[memory]` comment must say what the import does and where, naming \
+                 {fragment}:\n{comment}"
+            );
+        }
+
+        let uncomment = |content: &str| {
+            [
+                "[memory]",
+                "pages = 1",
+                "max-pages = 1",
+                "stack-size = 65536",
+                "import = ",
+            ]
+            .into_iter()
+            .fold(content.to_string(), |content, line| {
+                content.replace(&format!("# {line}"), line)
+            })
+        };
+        let as_written = InferenceToml::from_toml(&uncomment(&content))
+            .expect("the uncommented memory block must load");
+        assert!(!as_written.memory.import);
+        let layout = as_written.memory.resolved_layout().unwrap();
+        assert_eq!((layout.pages(), layout.max_pages()), (1, 1));
+        assert!(!layout.is_imported());
+
+        let importing = uncomment(&content).replace("import = false", "import = true");
+        let manifest = InferenceToml::from_toml(&importing)
+            .expect("the uncommented memory block must load with the import switched on");
+        assert!(manifest.memory.import);
+        let layout = manifest.memory.resolved_layout().unwrap();
+        assert!(layout.is_imported());
+        assert_eq!(
+            (layout.pages(), layout.max_pages(), layout.stack_size()),
+            (1, 1, 65_536)
+        );
     }
 
     #[test]

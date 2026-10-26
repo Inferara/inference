@@ -63,7 +63,8 @@ pub struct ManifestSettings {
     /// The `[memory]` table's keys as written — every key unset when the
     /// manifest has no table — or `None` when the table holds something `infs`
     /// refuses to load before any layout is considered: a key it does not know,
-    /// or a value that is not an integer a `u32` can hold.
+    /// a size that is not an integer a `u32` can hold, or an `import` that is
+    /// not a boolean.
     ///
     /// The keys are not validated as a layout, for the reason
     /// [`Self::build_target`] is not: whether they describe a memory a build can
@@ -89,6 +90,9 @@ pub struct MemoryKeys {
     pub max_pages: Option<u32>,
     /// `stack-size`: shadow stack size in bytes.
     pub stack_size: Option<u32>,
+    /// `import`: whether the memory is imported from the host rather than
+    /// defined by the module. Unset reads as `false`, as `infs` reads it.
+    pub import: bool,
 }
 
 /// Reads the settings that govern `file` from the nearest ancestor manifest, or
@@ -129,29 +133,33 @@ pub fn manifest_settings(file: &Path) -> Option<ManifestSettings> {
 }
 
 /// The keys of `manifest`'s `[memory]` table, or `None` when `infs` would refuse
-/// to load the table: it is not a table, it holds a key `infs` does not know, or
-/// a value is not an integer a `u32` can hold.
+/// to load the table: it is not a table, it holds a key `infs` does not know, a
+/// size is not an integer a `u32` can hold, or `import` is not a boolean.
 ///
 /// A manifest with no `[memory]` table has every key unset, exactly as `infs`
 /// reads it. A value out of `u32` range is not a size `infs` would load, so it
-/// makes the table unusable rather than being read as a truncation of itself.
+/// makes the table unusable rather than being read as a truncation of itself;
+/// an `import` of `1` or `"yes"` is not a boolean `infs` would load either, and
+/// reading it as `false` would resolve a defined memory for a manifest that
+/// asks for an imported one.
 fn memory_keys(manifest: &toml::Table) -> Option<MemoryKeys> {
     let Some(table) = manifest.get("memory") else {
         return Some(MemoryKeys::default());
     };
+    let size = |value: &toml::Value| {
+        value
+            .as_integer()
+            .and_then(|value| u32::try_from(value).ok())
+    };
     let mut keys = MemoryKeys::default();
     for (key, value) in table.as_table()? {
-        let slot = match key.as_str() {
-            "pages" => &mut keys.pages,
-            "max-pages" => &mut keys.max_pages,
-            "stack-size" => &mut keys.stack_size,
+        match key.as_str() {
+            "pages" => keys.pages = Some(size(value)?),
+            "max-pages" => keys.max_pages = Some(size(value)?),
+            "stack-size" => keys.stack_size = Some(size(value)?),
+            "import" => keys.import = value.as_bool()?,
             _ => return None,
-        };
-        *slot = Some(
-            value
-                .as_integer()
-                .and_then(|value| u32::try_from(value).ok())?,
-        );
+        }
     }
     Some(keys)
 }
@@ -537,7 +545,9 @@ mod tests {
 
     /// Every `[memory]` key comes back as written, and each independently: a
     /// manifest that sets only one leaves the others to the caller's default,
-    /// and one with no table leaves all three unset.
+    /// and one with no table leaves every number unset and the memory defined.
+    /// `import = false` reads as the absent key, and `import = true` comes back
+    /// alone or beside the numbers, in either order.
     #[test]
     fn settings_carry_the_memory_keys_as_written() {
         for (table, expected) in [
@@ -547,6 +557,7 @@ mod tests {
                     pages: Some(4),
                     max_pages: Some(8),
                     stack_size: Some(131_072),
+                    import: false,
                 },
             ),
             (
@@ -567,6 +578,31 @@ mod tests {
                 "[memory]\nstack-size = 32768\n",
                 MemoryKeys {
                     stack_size: Some(32_768),
+                    ..MemoryKeys::default()
+                },
+            ),
+            (
+                "[memory]\nimport = true\n",
+                MemoryKeys {
+                    import: true,
+                    ..MemoryKeys::default()
+                },
+            ),
+            ("[memory]\nimport = false\n", MemoryKeys::default()),
+            (
+                "[memory]\npages = 4\nmax-pages = 8\nstack-size = 131072\nimport = true\n",
+                MemoryKeys {
+                    pages: Some(4),
+                    max_pages: Some(8),
+                    stack_size: Some(131_072),
+                    import: true,
+                },
+            ),
+            (
+                "[memory]\nimport = true\nstack-size = 32768\n",
+                MemoryKeys {
+                    stack_size: Some(32_768),
+                    import: true,
                     ..MemoryKeys::default()
                 },
             ),
@@ -606,7 +642,9 @@ mod tests {
     /// A table `infs` would refuse before considering any layout is unusable as
     /// a whole, rather than read with the offending key dropped: dropping
     /// `max-pages = "8"` from `pages = 4, stack-size = 131072` would resolve a
-    /// 128 KiB stack for a project `infs` refuses to build.
+    /// 128 KiB stack for a project `infs` refuses to build. An `import` that is
+    /// not a boolean — `1`, `"true"`, `"yes"`, an array — is refused the same
+    /// way, as is the plural `imports`, rather than read as either answer.
     #[test]
     fn a_memory_table_infs_would_refuse_is_unusable_as_a_whole() {
         for table in [
@@ -616,6 +654,11 @@ mod tests {
             "[memory]\npages = 1.5\n",
             "[memory]\npages = 4\nstack_size = 131072\n",
             "[memory]\npage = 2\n",
+            "[memory]\nimport = 1\n",
+            "[memory]\nimport = \"true\"\n",
+            "[memory]\npages = 4\nimport = \"yes\"\nstack-size = 131072\n",
+            "[memory]\nimport = [true]\nstack-size = 32768\n",
+            "[memory]\nimports = true\n",
         ]
         .map(|table| format!("{VALID_MANIFEST}\n{table}"))
         // A root key, so it precedes the `[package]` header it would otherwise

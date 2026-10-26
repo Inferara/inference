@@ -262,9 +262,10 @@ fn manifest_target(name: Option<&str>) -> TargetName {
 ///
 /// The keys are resolved exactly as `infs` and `infc` resolve them, filling an
 /// absent key from the default layout, so a table that sets only `pages` keeps
-/// the default stack and one that sets only `stack-size` gets that stack. The
-/// maximum does not move the stack, but it takes part in deciding whether the
-/// table is usable at all, so it is resolved with the other two. An
+/// the default stack and one that sets only `stack-size` gets that stack.
+/// Neither the maximum nor `import` moves the stack, but the maximum takes part
+/// in deciding whether the table is usable at all, and both are resolved with
+/// the other two so that the layout is the one the build resolves. An
 /// unusable table falls back for the reason [`manifest_target`] gives: `infs`
 /// refuses to build it, so there is no build for the editor to agree with, and
 /// the default layout is the one under which the rest of the file is still
@@ -276,7 +277,7 @@ fn manifest_layout(memory: Option<MemoryKeys>) -> MemoryLayout {
                 pages: keys.pages,
                 max_pages: keys.max_pages,
                 stack_size: keys.stack_size,
-                import: false,
+                import: keys.import,
             };
             MemoryLayout::resolve(request, MemoryLayoutSource::Manifest).ok()
         })
@@ -1891,3 +1892,75 @@ const _: () = {
     const fn assert_send<T: Send>() {}
     assert_send::<RootDatabase>();
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The keys `manifest` would carry, with `import` as given.
+    fn keys(
+        pages: Option<u32>,
+        max_pages: Option<u32>,
+        stack_size: Option<u32>,
+        import: bool,
+    ) -> MemoryKeys {
+        MemoryKeys {
+            pages,
+            max_pages,
+            stack_size,
+            import,
+        }
+    }
+
+    /// A manifest's `[memory]` keys resolve to the layout a build of the
+    /// project resolves, the import included: the editor and the build then
+    /// describe one memory, so a check that comes to read whether the memory is
+    /// imported reads the manifest's answer rather than a defined memory's.
+    /// Every number is kept beside the import, an absent one is filled from
+    /// the default, and a table `infs` refuses falls back whole to the default
+    /// layout, which defines its memory.
+    #[test]
+    fn manifest_layout_keeps_the_import_beside_the_numbers() {
+        let default = MemoryLayout::default();
+        let rows = [
+            (
+                Some(keys(None, None, None, true)),
+                (true, 1, 1, default.stack_size()),
+            ),
+            (
+                Some(keys(Some(2), Some(8), Some(32_768), true)),
+                (true, 2, 8, 32_768),
+            ),
+            (
+                Some(keys(None, None, Some(32_768), true)),
+                (true, 1, 1, 32_768),
+            ),
+            (
+                Some(keys(Some(2), Some(8), Some(32_768), false)),
+                (false, 2, 8, 32_768),
+            ),
+            (
+                Some(keys(Some(4), Some(2), None, true)),
+                (false, 1, 1, default.stack_size()),
+            ),
+            (
+                Some(MemoryKeys::default()),
+                (false, 1, 1, default.stack_size()),
+            ),
+            (None, (false, 1, 1, default.stack_size())),
+        ];
+        for (memory, (imported, pages, max_pages, stack_size)) in rows {
+            let layout = manifest_layout(memory);
+            assert_eq!(
+                (
+                    layout.is_imported(),
+                    layout.pages(),
+                    layout.max_pages(),
+                    layout.stack_size()
+                ),
+                (imported, pages, max_pages, stack_size),
+                "{memory:?}"
+            );
+        }
+    }
+}

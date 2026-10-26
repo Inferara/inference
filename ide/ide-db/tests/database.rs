@@ -1755,6 +1755,11 @@ fn a_manifest_stack_size_reaches_analysis() {
         "pages = 4\nstack-size = 131072\n",
         // A maximum does not move the stack, and a usable one does not unseat it.
         "pages = 4\nmax-pages = 8\nstack-size = 131072\n",
+        // Nor does importing the memory: the stack sits at the bottom of the
+        // imported memory exactly as of a defined one.
+        "pages = 4\nimport = true\nstack-size = 131072\n",
+        "pages = 4\nmax-pages = 8\nstack-size = 131072\nimport = true\n",
+        "pages = 4\nstack-size = 131072\nimport = false\n",
     ] {
         let findings = chain_findings_under(Some(&manifest_with_memory(table)), "stack-larger");
         assert_eq!(
@@ -1785,6 +1790,16 @@ fn a_project_without_a_larger_stack_is_measured_against_the_default() {
             "pages = 4\nmax-pages = \"8\"\nstack-size = 131072\n",
         )),
         Some(manifest_with_memory("pages = 4\npage = 2\nstack-size = 131072\n")),
+        // An `import` that is not a boolean is one `infs` refuses as well, and
+        // the table falls back whole rather than without it.
+        Some(manifest_with_memory(
+            "pages = 4\nimport = 1\nstack-size = 131072\n",
+        )),
+        Some(manifest_with_memory(
+            "pages = 4\nimport = \"true\"\nstack-size = 131072\n",
+        )),
+        // Importing the memory alone leaves the default stack in force.
+        Some(manifest_with_memory("import = true\n")),
     ] {
         let findings = chain_findings_under(manifest.as_deref(), "stack-default");
         assert_eq!(findings.len(), 1, "under manifest {manifest:?}: {findings:?}");
@@ -1823,6 +1838,40 @@ fn a_smaller_manifest_stack_tightens_the_budget() {
                 assert!(findings[0].contains(budget), "{}", findings[0]);
             }
         }
+    }
+}
+
+/// A table that imports its memory reaches analysis like one that defines it,
+/// so its `stack-size` is the budget A036 measures against: one ~40 KB frame
+/// over the 32 KB stack the table declares is a finding naming that stack.
+/// Before the key was read the whole table was one the editor could not use,
+/// and the frame was measured against the default 64 KB stack, where it fits.
+/// The same table with `import = false`, and with the keys in another order,
+/// reads the same.
+#[test]
+fn an_imported_memory_table_still_sets_the_budget() {
+    let source = "pub fn heavy() -> i32 { forall { let arr: [i64; 5000] = @; \
+                  let x: i64 = arr[0]; } return 0; }\n";
+    for table in [
+        "import = true\nstack-size = 32768\n",
+        "stack-size = 32768\nimport = true\n",
+        "pages = 2\nmax-pages = 8\nstack-size = 32768\nimport = true\n",
+        "import = false\nstack-size = 32768\n",
+    ] {
+        let manifest = manifest_with_memory(table);
+        let tree = TempTree::new("stack-imported");
+        tree.write("Inference.toml", &manifest);
+        let main = tree.write("src/main.inf", source);
+        let mut db = RootDatabase::default();
+        db.open_document(&main, source);
+
+        let findings = a036_findings(&mut db, &main);
+        assert_eq!(findings.len(), 1, "{manifest}: {findings:?}");
+        assert!(
+            findings[0].contains("exceeding the 32768-byte stack"),
+            "{manifest}: {}",
+            findings[0]
+        );
     }
 }
 

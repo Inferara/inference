@@ -64,7 +64,10 @@
 //! construction: the optimizer may only remove imports, so optimized bytes
 //! importing a function the input did not are refused before they land, and the
 //! artifact `infc` wrote stays in place. An import no policy was asked about
-//! never ships.
+//! never ships. The memory import, which `infc`'s link step held to the
+//! build's layout, is held tighter still: it is a contract with the host rather
+//! than an interface the program may narrow, so optimized bytes that add,
+//! remove, rename or re-limit it are refused the same way.
 //!
 //! It lives under `commands/` for the same reason as
 //! [`crate::commands::project_build`]: spawning an external tool and propagating
@@ -81,7 +84,7 @@ use inf_wasmparser::{Parser, Payload, WasmFeatures};
 use inference_compiler_interface::TargetName;
 
 use crate::artifact::{
-    ArtifactScan, BOUNDS_ELIDED_SECTION_NAME, CHECKED_SECTION_NAME,
+    ArtifactScan, BOUNDS_ELIDED_SECTION_NAME, CHECKED_SECTION_NAME, ScannedMemoryImport,
     VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS, scan_artifact,
 };
 use crate::commands::build::BuildMode;
@@ -214,8 +217,10 @@ pub(crate) fn post_build_optimize(
     // conventional relative spelling the refusal below uses, so the two
     // failures name one file. The import list is read from the input too, as
     // the set `infc`'s inventory line described and its allowlist admitted, for
-    // the one that lands to be held to and compared against.
-    let (uses_bulk_memory, records_overflow_guards, records_elided_bounds, compiled_imports) =
+    // the one that lands to be held to and compared against; and so is the
+    // memory import, which `infc`'s link step held to the layout and the one
+    // that lands has to keep exactly.
+    let (uses_bulk_memory, records_overflow_guards, records_elided_bounds, compiled) =
         match scan_artifact(&wasm_bytes, Path::new("out/main.wasm"))? {
             ArtifactScan::VerificationConstruct(construct) => bail!(
                 "`[build.wasm-opt]` is enabled but `out/main.wasm` contains the \
@@ -229,11 +234,15 @@ pub(crate) fn post_build_optimize(
                 records_overflow_guards,
                 records_elided_bounds,
                 function_imports,
+                memory_import,
             } => (
                 uses_bulk_memory,
                 records_overflow_guards,
                 records_elided_bounds,
-                function_imports,
+                CompiledImports {
+                    functions: function_imports,
+                    memory: memory_import,
+                },
             ),
         };
     let renumbered_records = renumbered_records(records_overflow_guards, records_elided_bounds);
@@ -252,7 +261,7 @@ pub(crate) fn post_build_optimize(
         &wasm_path,
         uses_bulk_memory,
         &renumbered_records,
-        &compiled_imports,
+        &compiled,
         ctx.manifest.build.resolved_target()?,
     )?;
     let after = std::fs::metadata(&wasm_path)
@@ -263,7 +272,7 @@ pub(crate) fn post_build_optimize(
         "wasm-opt -O{}: main.wasm {before} -> {after} bytes",
         config.level
     );
-    if let Some(line) = import_change_line(&compiled_imports, &landed.function_imports) {
+    if let Some(line) = import_change_line(&compiled.functions, &landed.function_imports) {
         println!("{line}");
     }
     // The compiler printed these numbers about the module it wrote, and the
@@ -611,6 +620,11 @@ fn wasm_opt_doctor_absent(name: &str, paths: Option<&ToolchainPaths>) -> DoctorC
 /// else is what stops Binaryen from introducing bulk memory into an artifact that
 /// had none.
 ///
+/// `--zero-filled-memory` is never passed, and that omission is what keeps an
+/// imported memory's data segment intact: the flag lets Binaryen assume the
+/// memory starts zeroed and drop the zero bytes of a segment as already there,
+/// which holds of a memory the module defines but not of one a host supplies.
+///
 /// `-O<level>` works uniformly for every value `WasmOptConfig` validates, so
 /// there is no second mapping table.
 fn wasm_opt_args(
@@ -654,23 +668,26 @@ fn wasm_opt_args(
 /// answer measures. The measurement it carries is returned rather than dropped,
 /// because it is the one that describes the artifact the build leaves behind,
 /// and so is the import set, which the optimizer may have narrowed.
-/// `compiled_imports` is the input's import set, which the landed one may
-/// narrow and may not grow. `renumbered_records` names the function-index
-/// records the input carries, which the landed bytes carry in opaque form.
+/// `compiled_imports` is the input's imports: its function imports, which the
+/// landed ones may narrow and may not grow, and its memory import, which the
+/// landed one has to match exactly. `renumbered_records` names the
+/// function-index records the input carries, which the landed bytes carry in
+/// opaque form.
 ///
 /// # Errors
 ///
 /// Errors if `wasm-opt` cannot be spawned, exits nonzero, produces output that
 /// cannot be read, fails re-validation, carries a verification-only construct,
-/// imports a function the input did not, or fails the target's conformance
-/// check, or if the final rename fails.
+/// imports a function the input did not, imports a memory other than the
+/// input's, or fails the target's conformance check, or if the final rename
+/// fails.
 fn optimize_in_place(
     wasm_opt: &Path,
     level: &str,
     wasm_path: &Path,
     uses_bulk_memory: bool,
     renumbered_records: &[&str],
-    compiled_imports: &[(String, String)],
+    compiled_imports: &CompiledImports,
     target: TargetName,
 ) -> Result<Landed> {
     let tmp_path = optimized_tmp_path(wasm_path);
@@ -796,30 +813,35 @@ fn optimize_in_place(
 
 /// The `(module, field)` of every function `landing` imports, in import-section
 /// order, read by the scan that also asks whether it carries a verification
-/// construct, and held to the input's set, `compiled`.
+/// construct, and held to the input's imports, `compiled`.
 ///
 /// The optimizer's input was scanned for a construct and refused if it carried
 /// one, so a construct found here is one the optimizer introduced.
 /// Re-validation cannot see it — the workspace validator decodes those opcodes
-/// as ordinary operators — so this is where it is refused. An import `compiled`
-/// lacks is refused here too, by [`ensure_no_import_added`]. `landing` was
-/// written to `tmp_path`, which a parse failure names; `wasm_path` is the
-/// original the refusals say is unchanged.
+/// as ordinary operators — so this is where it is refused. A function import
+/// `compiled` lacks is refused here too, by [`ensure_no_import_added`], and so
+/// is a memory import other than the one `compiled` has, by
+/// [`ensure_memory_import_unchanged`]. `landing` was written to `tmp_path`,
+/// which a parse failure names; `wasm_path` is the original the refusals say is
+/// unchanged.
 ///
 /// # Errors
 ///
 /// Errors if `landing` cannot be parsed, carries a verification-only construct,
-/// or imports a function `compiled` does not.
+/// imports a function `compiled` does not, or imports a memory other than the
+/// one `compiled` does.
 fn landed_function_imports(
     landing: &[u8],
     tmp_path: &Path,
     wasm_path: &Path,
-    compiled: &[(String, String)],
+    compiled: &CompiledImports,
 ) -> Result<Vec<(String, String)>> {
-    let function_imports = match scan_artifact(landing, tmp_path)? {
+    let (function_imports, memory) = match scan_artifact(landing, tmp_path)? {
         ArtifactScan::Executable {
-            function_imports, ..
-        } => function_imports,
+            function_imports,
+            memory_import,
+            ..
+        } => (function_imports, memory_import),
         ArtifactScan::VerificationConstruct(construct) => bail!(
             "wasm-opt produced an artifact carrying the verification-only construct \
              `{construct}`, which the artifact it was given did not carry. The original {} is \
@@ -827,7 +849,8 @@ fn landed_function_imports(
             wasm_path.display()
         ),
     };
-    ensure_no_import_added(compiled, &function_imports, wasm_path)?;
+    ensure_no_import_added(&compiled.functions, &function_imports, wasm_path)?;
+    ensure_memory_import_unchanged(compiled.memory.as_ref(), memory.as_ref(), wasm_path)?;
     Ok(function_imports)
 }
 
@@ -865,6 +888,72 @@ fn ensure_no_import_added(
         added.join(", "),
         wasm_path.display()
     )
+}
+
+/// Refuses `landed` unless it is the memory import `compiled` is: the same
+/// two-level name at the same minimum and the same maximum, or no memory
+/// import where the compiler's artifact has none.
+///
+/// `infc`'s link step holds the artifact's memory import to the layout the
+/// build resolved, and the optimizer is the only transformation after that
+/// check, so this is where the import that ships is held to it again. A changed
+/// import is not a smaller module but a different contract with the host. The
+/// overflow trap's headroom rests on `max-pages × 64 KiB + stack-size <= 2^32`,
+/// which import matching keeps true of any memory a host supplies only while
+/// the import's maximum is no larger than the layout's, so a maximum that grew
+/// or went missing voids it; any changed limit contradicts the layout the build
+/// echoed; and an import added or removed changes who owns the memory. Like an
+/// added function import, such an output is discarded rather than reported.
+/// `wasm_path` is the original the refusal says is left in place.
+///
+/// # Errors
+///
+/// Errors if `landed` and `compiled` differ in presence, module, field,
+/// minimum or maximum.
+fn ensure_memory_import_unchanged(
+    compiled: Option<&ScannedMemoryImport>,
+    landed: Option<&ScannedMemoryImport>,
+    wasm_path: &Path,
+) -> Result<()> {
+    if compiled == landed {
+        return Ok(());
+    }
+    bail!(
+        "`[build.wasm-opt]` produced an artifact that imports {}, where the artifact it was \
+         given imports {}. The optimizer may not change the memory import, so the optimized \
+         output is discarded and {} is left as the compiler wrote it; try `--no-wasm-opt`, or a \
+         different Binaryen version.",
+        memory_import_phrase(landed),
+        memory_import_phrase(compiled),
+        wasm_path.display()
+    )
+}
+
+/// `memory` as [`ensure_memory_import_unchanged`] names it: `` `env.memory`
+/// with a minimum of 2 pages and a maximum of 8 ``, `` … and no maximum `` for
+/// an import that sets none, and `no memory` for an artifact that imports none.
+fn memory_import_phrase(memory: Option<&ScannedMemoryImport>) -> String {
+    let Some(memory) = memory else {
+        return "no memory".to_string();
+    };
+    let maximum = match memory.maximum {
+        Some(maximum) => format!("a maximum of {maximum}"),
+        None => "no maximum".to_string(),
+    };
+    let (module, field, minimum) = (&memory.module, &memory.field, memory.minimum);
+    let pages = if minimum == 1 { "page" } else { "pages" };
+    format!("`{module}.{field}` with a minimum of {minimum} {pages} and {maximum}")
+}
+
+/// The imports of the artifact `infc` wrote, which the optimized one is held
+/// to before it lands.
+#[derive(Debug, Default)]
+struct CompiledImports {
+    /// The `(module, field)` of every function it imports, in import-section
+    /// order.
+    functions: Vec<(String, String)>,
+    /// The memory it imports, or `None` when it defines its own.
+    memory: Option<ScannedMemoryImport>,
 }
 
 /// What [`optimize_in_place`] learned about the artifact it put in place.
@@ -1690,6 +1779,161 @@ mod tests {
         }
     }
 
+    /// The memory import `module.field` of `minimum` pages, at most `maximum`.
+    fn memory_import(
+        module: &str,
+        field: &str,
+        minimum: u64,
+        maximum: Option<u64>,
+    ) -> ScannedMemoryImport {
+        ScannedMemoryImport {
+            module: module.to_string(),
+            field: field.to_string(),
+            minimum,
+            maximum,
+        }
+    }
+
+    /// A memory import is named by its own two-level name and both limits,
+    /// whatever they are: a minimum of one page in the singular and any other in
+    /// the plural, zero included, and `no maximum` for an import that sets
+    /// none. An artifact that imports no memory is named as importing `no
+    /// memory`.
+    #[test]
+    fn a_memory_import_is_named_with_its_name_and_both_limits() {
+        let rows = [
+            (
+                Some(memory_import("env", "memory", 2, Some(8))),
+                "`env.memory` with a minimum of 2 pages and a maximum of 8",
+            ),
+            (
+                Some(memory_import("env", "memory", 1, Some(1))),
+                "`env.memory` with a minimum of 1 page and a maximum of 1",
+            ),
+            (
+                Some(memory_import("env", "memory", 1, None)),
+                "`env.memory` with a minimum of 1 page and no maximum",
+            ),
+            (
+                Some(memory_import("env", "memory", 0, Some(65_536))),
+                "`env.memory` with a minimum of 0 pages and a maximum of 65536",
+            ),
+            (
+                Some(memory_import("host", "heap", 3, None)),
+                "`host.heap` with a minimum of 3 pages and no maximum",
+            ),
+            (None, "no memory"),
+        ];
+        for (memory, phrase) in rows {
+            assert_eq!(memory_import_phrase(memory.as_ref()), phrase, "{memory:?}");
+        }
+    }
+
+    /// An optimized artifact whose memory import is the compiler's lands: no
+    /// memory import on either side, or the same two-level name at the same
+    /// minimum and maximum, the maximum's absence included.
+    #[test]
+    fn an_unchanged_memory_import_lands() {
+        let original = Path::new("out").join("main.wasm");
+        let rows = [
+            None,
+            Some(memory_import("env", "memory", 1, Some(1))),
+            Some(memory_import("env", "memory", 2, Some(8))),
+            Some(memory_import("env", "memory", 1, None)),
+        ];
+        for memory in rows {
+            let landed = memory.clone();
+            let outcome =
+                ensure_memory_import_unchanged(memory.as_ref(), landed.as_ref(), &original);
+            assert!(
+                outcome.is_ok(),
+                "{memory:?} kept as it was must land, got: {outcome:?}"
+            );
+        }
+    }
+
+    /// Any change to the memory import is refused, naming the import that would
+    /// have landed, then the compiler's, then the original the build keeps:
+    /// an import added to an artifact that defines its memory, one removed,
+    /// either limit moved, a maximum dropped or added, and either half of the
+    /// two-level name changed.
+    ///
+    /// Fails if any one of the five things compared stops being compared, or if
+    /// the two imports are named the wrong way round.
+    #[test]
+    fn a_changed_memory_import_is_refused_naming_both() {
+        let two_to_eight = memory_import("env", "memory", 2, Some(8));
+        let rows = [
+            (
+                None,
+                Some(two_to_eight.clone()),
+                "`env.memory` with a minimum of 2 pages and a maximum of 8",
+                "no memory",
+            ),
+            (
+                Some(two_to_eight.clone()),
+                None,
+                "no memory",
+                "`env.memory` with a minimum of 2 pages and a maximum of 8",
+            ),
+            (
+                Some(two_to_eight.clone()),
+                Some(memory_import("env", "memory", 3, Some(8))),
+                "`env.memory` with a minimum of 3 pages and a maximum of 8",
+                "`env.memory` with a minimum of 2 pages and a maximum of 8",
+            ),
+            (
+                Some(two_to_eight.clone()),
+                Some(memory_import("env", "memory", 2, Some(4))),
+                "`env.memory` with a minimum of 2 pages and a maximum of 4",
+                "`env.memory` with a minimum of 2 pages and a maximum of 8",
+            ),
+            (
+                Some(two_to_eight.clone()),
+                Some(memory_import("env", "memory", 2, None)),
+                "`env.memory` with a minimum of 2 pages and no maximum",
+                "`env.memory` with a minimum of 2 pages and a maximum of 8",
+            ),
+            (
+                Some(memory_import("env", "memory", 1, None)),
+                Some(memory_import("env", "memory", 1, Some(1))),
+                "`env.memory` with a minimum of 1 page and a maximum of 1",
+                "`env.memory` with a minimum of 1 page and no maximum",
+            ),
+            (
+                Some(two_to_eight.clone()),
+                Some(memory_import("host", "memory", 2, Some(8))),
+                "`host.memory` with a minimum of 2 pages and a maximum of 8",
+                "`env.memory` with a minimum of 2 pages and a maximum of 8",
+            ),
+            (
+                Some(two_to_eight),
+                Some(memory_import("env", "heap", 2, Some(8))),
+                "`env.heap` with a minimum of 2 pages and a maximum of 8",
+                "`env.memory` with a minimum of 2 pages and a maximum of 8",
+            ),
+        ];
+        let original = Path::new("out").join("main.wasm");
+        for (compiled, landed, landed_phrase, compiled_phrase) in rows {
+            let refusal =
+                ensure_memory_import_unchanged(compiled.as_ref(), landed.as_ref(), &original)
+                    .expect_err("a changed memory import must be refused")
+                    .to_string();
+            assert_eq!(
+                refusal,
+                format!(
+                    "`[build.wasm-opt]` produced an artifact that imports {landed_phrase}, where \
+                     the artifact it was given imports {compiled_phrase}. The optimizer may not \
+                     change the memory import, so the optimized output is discarded and {} is \
+                     left as the compiler wrote it; try `--no-wasm-opt`, or a different \
+                     Binaryen version.",
+                    original.display()
+                ),
+                "from {compiled:?} to {landed:?}"
+            );
+        }
+    }
+
     // Spawns a real executable stub, so it is gated to unix (mirroring the
     // stub-based tests in `project_build.rs`); executing a script through
     // `Command` is not portable to Windows.
@@ -1705,7 +1949,15 @@ mod tests {
 
         let fake = write_failing_wasm_opt(&dir);
         let err = crate::testing::retry_while_exec_busy(|| {
-            optimize_in_place(&fake, "z", &wasm_path, false, &[], &[], TargetName::DEFAULT)
+            optimize_in_place(
+                &fake,
+                "z",
+                &wasm_path,
+                false,
+                &[],
+                &CompiledImports::default(),
+                TargetName::DEFAULT,
+            )
         })
         .unwrap_err();
         assert!(

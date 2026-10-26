@@ -42,6 +42,7 @@
 //! pages = 1               # 64 KiB pages; fixed at this size unless max-pages is set
 //! max-pages = 1           # optional: the most pages it may grow to; defaults to pages
 //! stack-size = 65536      # shadow stack bytes, at the bottom of that memory
+//! import = false          # true: the host supplies it as env.memory (wasm32 only)
 //!
 //! [verification]
 //! output-dir = "proofs/"  # honored only in proof mode
@@ -991,7 +992,8 @@ impl WasmOptConfig {
 }
 
 /// The `[memory]` table: the linear memory the emitted module declares, how far
-/// it may grow, and the share of it the shadow stack occupies.
+/// it may grow, the share of it the shadow stack occupies, and whether the
+/// module defines that memory or imports it from its host.
 ///
 /// Every key is optional and an absent table is identical to a table with no
 /// keys — there is no state where declaring `[memory]` means something on its
@@ -1000,7 +1002,7 @@ impl WasmOptConfig {
 /// `Option`: "the user said nothing" and "the user said nothing in particular"
 /// must resolve to the same memory.
 ///
-/// The keys are kept as raw `Option`s rather than eagerly resolved into a
+/// The numeric keys are kept as raw `Option`s rather than eagerly resolved into a
 /// [`MemoryLayout`] because which keys were *set* is information the resolved
 /// layout no longer carries, and forwarding needs it: an `infs` that forwarded a
 /// resolved layout would send `--memory-pages 1 --stack-size 65536` for a project
@@ -1029,14 +1031,33 @@ pub struct MemoryConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub stack_size: Option<u32>,
+
+    /// Whether the module imports its memory from the host, as `env.memory`
+    /// with the size as its minimum and the maximum as its maximum, instead of
+    /// defining it. Absent means false: the module defines its memory.
+    ///
+    /// A plain `bool`, unlike the keys above: they are `Option`s because
+    /// forwarding has to know which of them were set, and here there is
+    /// nothing to tell apart — an absent key and `import = false` both define
+    /// the memory, and neither is forwarded nor gates the build.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub import: bool,
 }
 
 impl MemoryConfig {
     /// Returns true when the project asked for no particular memory, which is
     /// both the serialization skip condition and the "forward nothing" test.
+    ///
+    /// A table holding only `import = true` is not default: its numbers are
+    /// the defaults, but it asks for a memory the module imports rather than
+    /// defines, a request that has to be forwarded — and so the compiler
+    /// probed for it — like any other.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.pages.is_none() && self.max_pages.is_none() && self.stack_size.is_none()
+        self.pages.is_none()
+            && self.max_pages.is_none()
+            && self.stack_size.is_none()
+            && !self.import
     }
 
     /// The declared keys resolved into the shared compiler vocabulary, with every
@@ -1059,7 +1080,7 @@ impl MemoryConfig {
             pages: self.pages,
             max_pages: self.max_pages,
             stack_size: self.stack_size,
-            import: false,
+            import: self.import,
         };
         MemoryLayout::resolve(request, MemoryLayoutSource::Manifest).map_err(Into::into)
     }
@@ -3472,6 +3493,7 @@ max-pages = 2
             pages: Some(2),
             max_pages: Some(8),
             stack_size: Some(32_768),
+            import: false,
         };
 
         let serialized = manifest.to_toml().expect("serializes");
@@ -3493,6 +3515,204 @@ max-pages = 2
             "the memory keys must survive the round trip rather than reparenting:\n{serialized}"
         );
         assert_eq!(reparsed, manifest);
+    }
+
+    /// `import = true` asks for a memory the module imports, alone or beside the
+    /// numeric keys, and the layout it resolves to keeps every number the table
+    /// declares, or the default for one it leaves out.
+    ///
+    /// The import-only row is the one that pins `is_default`: its numbers are
+    /// all the defaults, so a predicate that read only the numbers would call
+    /// the table empty, skip it on serialize, and forward nothing — and the
+    /// build would define the memory the manifest asked to import.
+    #[test]
+    fn an_imported_memory_parses_and_resolves_alone_or_beside_the_numbers() {
+        use inference_compiler_interface::MemoryImport;
+
+        let default = MemoryLayout::default();
+        let rows = [
+            ("import = true\n", (1, 1, default.stack_size())),
+            (
+                "pages = 2\nstack-size = 32768\nimport = true\n",
+                (2, 2, 32_768),
+            ),
+            (
+                "pages = 2\nmax-pages = 8\nstack-size = 32768\nimport = true\n",
+                (2, 8, 32_768),
+            ),
+            (
+                "max-pages = 4\nimport = true\n",
+                (1, 4, default.stack_size()),
+            ),
+        ];
+        for (table, (pages, max_pages, stack_size)) in rows {
+            let manifest = InferenceToml::from_toml(&manifest_with_memory(table)).expect("parses");
+            assert!(manifest.memory.import, "{table}");
+            assert!(
+                !manifest.memory.is_default(),
+                "a table asking to import its memory is a request, whatever its numbers:\n{table}"
+            );
+            let layout = manifest.memory.resolved_layout().unwrap();
+            assert!(layout.is_imported(), "{table}");
+            assert_eq!(
+                (layout.pages(), layout.max_pages(), layout.stack_size()),
+                (pages, max_pages, stack_size),
+                "{table}"
+            );
+            assert_eq!(
+                layout.memory_import(),
+                Some(MemoryImport {
+                    minimum: pages,
+                    maximum: max_pages,
+                }),
+                "{table}"
+            );
+        }
+
+        let alone =
+            InferenceToml::from_toml(&manifest_with_memory("import = true\n")).expect("parses");
+        assert_eq!(
+            (
+                alone.memory.pages,
+                alone.memory.max_pages,
+                alone.memory.stack_size
+            ),
+            (None, None, None),
+            "an import-only table declares no number, so none is forwarded"
+        );
+    }
+
+    /// `import = false` is the absent key spelled out: the table is the default,
+    /// it resolves to the default layout, and serialization writes neither the
+    /// key nor, when nothing else is declared, the table.
+    ///
+    /// Beside a declared number the table is written, and the `false` still is
+    /// not: it is no request, so a round trip that wrote it would put a key in
+    /// the user's file they never asked for.
+    #[test]
+    fn a_false_import_is_the_default_and_is_never_written() {
+        let alone =
+            InferenceToml::from_toml(&manifest_with_memory("import = false\n")).expect("parses");
+        assert!(!alone.memory.import);
+        assert!(alone.memory.is_default());
+        assert_eq!(
+            alone.memory.resolved_layout().unwrap(),
+            MemoryLayout::default()
+        );
+        let serialized = alone.to_toml().unwrap();
+        assert!(
+            !serialized.contains("[memory]") && !serialized.contains("import"),
+            "a table holding only `import = false` must not round-trip into the file:\n\
+             {serialized}"
+        );
+
+        let beside = InferenceToml::from_toml(&manifest_with_memory("pages = 2\nimport = false\n"))
+            .expect("parses");
+        assert!(!beside.memory.is_default());
+        assert!(!beside.memory.resolved_layout().unwrap().is_imported());
+        let serialized = beside.to_toml().unwrap();
+        assert!(
+            serialized.contains("[memory]") && serialized.contains("pages = 2"),
+            "the declared size must be written:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("import"),
+            "a false import must not be written beside it:\n{serialized}"
+        );
+        assert_eq!(
+            InferenceToml::from_toml(&serialized).expect("round-trips"),
+            beside
+        );
+    }
+
+    /// `import` is a boolean and nothing else: an integer, a string — `"true"`
+    /// included — or an array is refused as the manifest loads, rather than
+    /// read as either answer. Reading `1` or `"yes"` as false would define the
+    /// memory a manifest asked to import, and reading them as true would import
+    /// one it may not have meant to.
+    ///
+    /// The plural is a typo, not an alias, and the refusal names the key the
+    /// user meant.
+    #[test]
+    fn a_non_boolean_import_is_refused_on_load() {
+        for (value, kind) in [
+            ("1", "integer"),
+            ("0", "integer"),
+            ("\"yes\"", "string"),
+            ("\"true\"", "string"),
+            ("[true]", "sequence"),
+        ] {
+            let table = format!("pages = 2\nimport = {value}\n");
+            let msg = rejection_of(&manifest_with_memory(&table));
+            assert!(
+                msg.contains("invalid type") && msg.contains(kind),
+                "`import = {value}` must be diagnosed as a {kind}, got: {msg}"
+            );
+            assert!(
+                msg.contains("expected a boolean"),
+                "`import = {value}` must say what the key takes, got: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("import = {value}")),
+                "`import = {value}` must be located at its line, got: {msg}"
+            );
+        }
+
+        let msg = rejection_of(&manifest_with_memory("imports = true\n"));
+        assert!(
+            msg.contains("unknown field") && msg.contains("imports"),
+            "the plural must be diagnosed as an unknown field, got: {msg}"
+        );
+        assert!(
+            msg.contains("`import`"),
+            "the error must name the key the user meant, got: {msg}"
+        );
+    }
+
+    /// A table that imports its memory survives serialization and reparses to
+    /// an equal manifest, with `import = true` written inside `[memory]` — after
+    /// its header, rather than before it where it would belong to another table
+    /// — both beside every number and as the table's only key.
+    #[test]
+    fn an_imported_memory_round_trips() {
+        for memory in [
+            MemoryConfig {
+                pages: Some(2),
+                max_pages: Some(8),
+                stack_size: Some(32_768),
+                import: true,
+            },
+            MemoryConfig {
+                pages: None,
+                max_pages: None,
+                stack_size: None,
+                import: true,
+            },
+        ] {
+            let mut manifest = InferenceToml::new("demo");
+            manifest.memory = memory;
+
+            let serialized = manifest.to_toml().expect("serializes");
+            let memory_at = serialized
+                .find("[memory]")
+                .unwrap_or_else(|| panic!("the memory table must be emitted:\n{serialized}"));
+            let import_at = serialized
+                .find("import = true")
+                .unwrap_or_else(|| panic!("the import must be emitted:\n{serialized}"));
+            assert!(
+                memory_at < import_at,
+                "the import must be written inside `[memory]`:\n{serialized}"
+            );
+            assert_eq!(
+                serialized.matches("import").count(),
+                1,
+                "the key is written once:\n{serialized}"
+            );
+
+            let reparsed = InferenceToml::from_toml(&serialized).expect("round-trips");
+            assert_eq!(reparsed.memory, memory, "{serialized}");
+            assert_eq!(reparsed, manifest);
+        }
     }
 
     /// The rendered cause chain of a rejected manifest.
