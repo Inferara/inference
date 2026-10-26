@@ -21,21 +21,31 @@ every index reference into a unified index space, and removes the import section
 entirely. The output has no dangling imports, no relocation step, and no runtime
 loader. Verification then covers the actual deployed artifact, not a stand-in.
 
-One kind of import does survive, and it gets there by skipping the link rather
+Two kinds of import do survive, and they get there by skipping the link rather
 than by passing through it. A `use { f } from host::<module>;` clause binds a
 *host import*: a function the embedder supplies at instantiation, with no
 `.wasm` in the build for the merge to fold in (see
-[Host Imports](external-functions-and-wasm-linking.md#host-imports)). For a
-program whose externs are all host imports, `inference::link_resolved` never
-calls the merge. It ships the code-generation bytes verbatim, after proving that
-the artifact's imports are exactly the declared host functions — see
+[Host Imports](external-functions-and-wasm-linking.md#host-imports)). A build
+whose memory layout asks to import its memory (`[memory] import = true`) leaves
+the other: the module's linear memory, imported as `env.memory` for the
+embedder to supply (see [Importing the
+memory](memory-allocation-in-wasm-codegen.md#importing-the-memory)). For a
+program that links no module and either binds only host imports or imports its
+memory, `inference::link_resolved` never calls the merge. It ships the
+code-generation bytes verbatim, after proving that the artifact's imports are
+exactly the declared host functions and, when the layout asks to import its
+memory, that `env.memory` import, by name and limits — see
 [The Host-Only Pass-Through](#the-host-only-pass-through). The merge itself is
 unchanged, and every module it produces still has no import section. A program
 that binds host imports and linked modules together is refused at external
 resolution, before any `.wasm` is searched for; a merge that lets a host import
 survive beside the modules it links is not built. A host import is also exactly
 the dangling import this section calls unverifiable, which is why a program that
-binds one is refused any build that writes a `.v`.
+binds one is refused any build that writes a `.v`. A program that imports its
+memory is refused every such build for the same reason, and is refused beside a
+linked module too, by `infc` before external resolution, because the merge
+models only a memory its modules define, not one a host supplies (tracked under
+issue #546).
 
 ## Where the Linker Fits in the Pipeline
 
@@ -267,9 +277,14 @@ first global and, the types agreeing, passing post-merge validation with a wrong
 value. A leaked *table* operator names a table the output does not have, since
 no table section is emitted, and validation rejects it as unknown.
 
-Clearing the tier gate is not the same as linking. A stock artifact also declares
-a multi-page memory that the merge will not reconcile against an Inference main's
-fixed one-page `(memory 1 1)`; see the memory reconciliation rules below.
+Clearing the tier gate is not the same as linking, and reconciling the memory is
+one gate among several. A stock artifact also declares a multi-page memory, which
+the merge adopts only for a closure that addresses memory: it widens the main
+module's minimum to cover it but keeps the main module's maximum. A closure that
+addresses memory, merged into a main whose memory is the default, a fixed
+one-page `(memory 1 1)`, therefore clears the tier gate and fails at memory
+reconciliation with `LinkError::IncompatibleMemory`; a main whose `[memory]`
+maximum reaches the artifact's minimum reconciles.
 
 A Tier-A function carries no shared-memory surface at all: it reads its parameters,
 does arithmetic, and returns. Merge cost is a body copy, a type dedup, and an
@@ -562,18 +577,36 @@ scheme removes the common cases rather than every possible one.
 
 A program whose externs are all host imports has nothing to merge: there is no
 `.wasm` to fold in, and its imports are meant to survive for an embedder to
-satisfy. `inference::link_resolved` — the one place the choice between the two
-paths is made, and the path `infc` ships through — therefore returns the
-code-generation bytes unchanged. The language surface that produces such a
-program is described under
+satisfy. So does a program that links no module and imports its memory: the
+memory is meant to survive for the embedder to supply.
+`inference::link_resolved` — the one place the choice between the two paths is
+made, and the path `infc` ships through — therefore returns the code-generation
+bytes unchanged whenever no module was resolved and there is something to keep,
+a host import, an imported memory or both. The memory is not part of
+resolution's answer: it is the `memory: Option<MemoryImport>` argument, which
+`infc` fills from the build's layout and which is `None` for a build that
+defines its memory. The language surface that produces a host import is
+described under
 [Host Imports](external-functions-and-wasm-linking.md#host-imports).
 
 What stands in for the merge's guarantee is one check: the artifact's import
 section must equal the declared host set, compared on module, field, parameters
-and results, in both directions. An import no declaration covers, a declaration
-no import covers, a signature that differs, one two-level name imported twice,
-and any import that is not a function — a memory, table, global or tag — are
-each refused. Bytes that do not decode are a refusal too, never an empty import
+and results, in both directions, and must carry the memory import the layout
+asked for and no other. An import no declaration covers (`Undeclared`), a
+declaration no import covers (`Missing`), a signature that differs
+(`SignatureMismatch`), and one two-level name imported twice (`Duplicated`) are
+each refused, as is any import of a table, a global or a tag, or of a memory
+when the layout asked for none (`NonFunctionImport`). When the layout does ask
+for one, the memory import is accepted once, and only if it is named
+`env.memory` and has the type the layout declares: 32-bit, unshared, at the
+default page size, with `pages` as its minimum and `max-pages` as its maximum,
+which is always present. A memory under another name or at another type —
+other limits, no maximum, shared, 64-bit or a custom page size — is a
+`MemoryImportMismatch`, whether it stands in place of the expected import or
+beside it; a second memory under the memory's name, or a function imported
+under that name beside the memory, is `Duplicated`; and an artifact that
+imports no memory when the layout asked for one is a `MissingMemoryImport`.
+Bytes that do not decode are a refusal too, never an empty import
 list: an empty list compares equal to an empty declared set, so bytes that do
 not parse would otherwise pass as a module that imports nothing. The declared
 set comes from the external-module driver's walk over the type checker's extern
@@ -581,16 +614,26 @@ provenance, and the import section from code generation's own walk over the
 same declarations. A disagreement between the two is the compiler contradicting
 itself rather than anything an author wrote, so each of these refusals
 (`inference::wasm_link::HostImportError`, reported by `infc` as `Link step
-failed: …`) ends by asking for a compiler-bug report.
+failed: …`) ends by asking for a compiler-bug report. The memory import is held
+to the layout instead, the value code generation wrote it from, and a
+disagreement there is the same contradiction.
+
+The memory is held to the layout, and not merely to being a memory, because the
+program was laid out in it: the stack and the static data sit within the
+minimum, and the headroom the stack-overflow trap relies on is measured against
+the maximum (see [Configuring the
+layout](memory-allocation-in-wasm-codegen.md#configuring-the-layout)). An
+import that drifted from the layout would hand the embedder a contract the
+program was not laid out for.
 
 What is not checked is everything the merge's main-side gate exists for. That
 gate lets the merge assume a module it can rewrite — index spaces it can
 renumber, sections it can concatenate — and no rewrite happens here. So the
 pass-through accepts what the linker would refuse in a main module: a data
 segment of a shape the merge does not carry (passive, over another memory, or
-at a computed offset), an element segment, a start function, a table, a second
-memory, a float or `v128` in one of the module's own signatures, and a
-duplicated or malformed
+at a computed offset), an element segment, a start function, a table, a memory
+of the module's own (a second one, or one beside the imported memory), a float
+or `v128` in one of the module's own signatures, and a duplicated or malformed
 `inference.spec_funcs` or `inference.hspecs` custom section. No body is
 re-encoded through the [operator allow-list](#floating-point-exclusion), no
 tier is classified, and no write set is derived, since there is no foreign body
@@ -599,8 +642,8 @@ rather than a checked contract (see
 [`mut` on a host parameter](external-functions-and-wasm-linking.md#mut-on-a-host-parameter-is-an-assertion-not-a-contract)).
 The shapes that pass are ones this compiler's code generation does not emit;
 what cannot be taken on trust about bytes nobody rewrote is that their surviving
-imports are the ones the author asked for, and that is what the check
-establishes.
+imports are the ones the build asked for, the author's host bindings and the
+memory its configuration imports, and that is what the check establishes.
 
 Nor does `validate_extern` run: there is no library to hold a declared signature
 against, and the consistency check among the declarations at resolution stands
@@ -615,7 +658,7 @@ in for it (see
 | `LinkError::UnsatisfiedImport { field }` | No external module tagged with the right logical module name exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists each signal (e.g. "defines or initializes its own static data segments") |
-| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (with the exact mnemonic), a proof-only non-det or uzumaki opcode in an external body, a tail call (`return_call` / `return_call_indirect`), a segment-indexed table op (`table.init` / `elem.drop` / `table.copy`), a float or `v128` value type in a merged signature or local, multi-memory access, or a main module section the merge cannot preserve (start function, table section, non-function imports, element segments, and data segments other than active ones over memory 0 at a lone `i32.const` offset — see [The Main Module's Data Segments](#the-main-modules-data-segments)), or a main body naming a data segment through `memory.init` / `data.drop` |
+| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (with the exact mnemonic), a proof-only non-det or uzumaki opcode in an external body, a tail call (`return_call` / `return_call_indirect`), a segment-indexed table op (`table.init` / `elem.drop` / `table.copy`), a float or `v128` value type in a merged signature or local, multi-memory access, or a main module section the merge cannot preserve (start function, table section, non-function imports — an imported memory among them, though `infc` refuses a linked binding beside one before the merge is reached, tracked under issue #546 — element segments, and data segments other than active ones over memory 0 at a lone `i32.const` offset — see [The Main Module's Data Segments](#the-main-modules-data-segments)), or a main body naming a data segment through `memory.init` / `data.drop` |
 | `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature beyond the supported subset (floats, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls); `details` carries the validator's feature-named diagnostic |
 | `LinkError::AmbiguousImport { module, field }` | More than one supplied external exports a function of the same field name the import requests under the same logical module; the body to merge is ambiguous |
 | `LinkError::IncompatibleMemory { field, reason }` | The linear memory requirements of the main module and the Tier-B external cannot be reconciled into one shared output memory |

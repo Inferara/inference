@@ -79,9 +79,12 @@ mode = "compile"
 # [memory]
 # Linear memory of the emitted module; any key may be given alone. The memory
 # is fixed at `pages` unless `max-pages` lets a linked module or the host grow it.
+# `import = true` imports it from the host as `env.memory` instead of defining
+# it, for the `wasm32` target only, and not in a proof build.
 # pages = 1
 # max-pages = 1
 # stack-size = 65536
+# import = false
 
 [verification]
 # Output directory for proof artifacts (honored only in proof mode).
@@ -116,6 +119,7 @@ The fields:
 | `pages` | `[memory]` | integer | `1` | Linear memory size in 64 KiB pages. See [Configuring the layout](memory-allocation-in-wasm-codegen.md#configuring-the-layout) |
 | `max-pages` | `[memory]` | integer | `pages` | The most pages the memory may grow to; the memory is fixed unless this exceeds `pages`. Refused at the `spacewasm` target when it does |
 | `stack-size` | `[memory]` | integer | `65536` | Shadow stack size in bytes, a multiple of 16 that fits in `pages`; also the budget A036 measures call chains against |
+| `import` | `[memory]` | boolean | `false` | `true` has the module import its memory from the host as `env.memory` instead of defining it, with `pages` as the import's minimum and `max-pages` as its maximum, and the embedder supplies a memory that fits. `false` is the same as leaving the key out. Builds for `wasm32` only, and has no proof artifact. See [Importing the memory](memory-allocation-in-wasm-codegen.md#importing-the-memory) |
 | `output-dir` | `[verification]` | path string | `"proofs/"` | Proof artifact directory; proof mode only |
 | `<name>` | `[wasm-dependencies]` | `{ path = "…" }` | — | External `.wasm` module dependency |
 | `<module>` | `[host-imports]` | array of field names | table absent: no policy | The host functions of import module `<module>` the program may bind; a table with no keys admits none. See [The allowlist](external-functions-and-wasm-linking.md#the-allowlist) |
@@ -138,7 +142,11 @@ no `wasm-features`, `mode = "proof"` is a load error too, and `infs run`
 refuses the project outright, since a contract is invoked by a Soroban host
 and not by a plain WebAssembly runtime.
 What an exported function may declare is narrowed too; see
-[Compilation Targets](compilation_targets.md).
+[Compilation Targets](compilation_targets.md). A `[memory]` that imports its
+memory (`import = true`) is not narrowed on load, here or at `"spacewasm"`: the
+manifest loads, and the compiler refuses the build, naming the setting to
+remove (see [Importing the
+memory](memory-allocation-in-wasm-codegen.md#importing-the-memory)).
 
 `target = "spacewasm"` narrows it less, and the difference is instructive. It
 admits no `wasm-features` and no `mode = "proof"`, on load, for the same reason
@@ -280,6 +288,19 @@ single source of truth. If `infs` also forwarded `--mode compile` it would
 suppress that implication for users who pass only `-v`, turning a spec-aware
 proof build into a spec-stripped one.
 
+A manifest with `[memory] import = true` has no proof artifact, so `infc`
+refuses every build of it that writes a `.v`: `-v`, `--mode proof`, and the
+`--mode proof` that `infs` passes for a project whose manifest sets `[build]
+mode = "proof"`. Build the imported-memory module with `infs build --mode
+compile`, which overrides the manifest's proof mode. `infs` has no per-build
+override for `[memory] import`, so a project builds the proof of the same
+program with `import` set to `false` or removed. That proof is about the
+defined-memory module. It carries over to the imported-memory one only under
+premises that are documented rather than proved, and only for a program that
+binds no host import, since `infc` refuses a `.v` for every host-import program
+whichever way its memory is built (see [An Imported Memory Has No Proof
+Artifact](memory-allocation-in-wasm-codegen.md#an-imported-memory-has-no-proof-artifact)).
+
 **`--out-dir` and `[verification] output-dir`**: in effective proof mode (CLI
 `--mode proof` or manifest `mode = "proof"`), `infs` reads `[verification]
 output-dir` (defaulting to `proofs/`), normalizes it to a project-relative
@@ -378,10 +399,10 @@ In **project mode** (no path given):
   is absent, `run` errors before executing anything.
 - Judges the imports of the artifact it built — after `[build.wasm-opt]`, so
   the bytes it asks about are the ones that would run — before anything runs.
-  A `wasm32` artifact that imports any function is refused: wasmtime runs it
-  with no host function registered, and `run` does not let wasmtime stand in
-  for the embedder a program binding `use { … } from host::…` is written for —
-  not even for the WASI functions the wasmtime CLI provides on its own. The
+  A `wasm32` artifact that imports any function is refused: `run` registers no
+  host function under wasmtime, and does not let wasmtime stand in for the
+  embedder a program binding `use { … } from host::…` is written for — not
+  even for the WASI functions the wasmtime CLI provides on its own. The
   refusal names each import and, when every one is an F´ reference host at its
   reference signature, the `spacewasm` target that provides them. The wasmtime
   check above still comes first, so a machine without the runtime is told to
@@ -390,6 +411,35 @@ In **project mode** (no path given):
   one that imports anything else is refused before the interpreter decodes a
   byte of it. Single-file `run` refuses the same way, naming
   `out/<stem>.wasm`.
+- Supplies the memory a `wasm32` artifact imports, the one import it does
+  supply under wasmtime. A project built with `[memory] import = true`
+  produces a module that imports `env.memory`, and the `wasmtime` command line
+  provides no such memory, so the module would not instantiate. `run` reads
+  the limits of the import off the artifact itself — after linking and
+  `[build.wasm-opt]`, so they are the limits of the bytes that run, not the
+  manifest's — writes a small module that defines and exports one memory at
+  exactly those limits beside the artifact as `out/main.wasm.memory`, and
+  invokes wasmtime with `--preload env=out/main.wasm.memory` ahead of
+  `--invoke`. The file is removed when wasmtime returns, whether the run
+  succeeded or failed. An artifact that imports a function as well as its
+  memory is still refused, for the function. Single-file `run` supplies the
+  memory the same way, beside `out/<stem>.wasm`. Nothing else touches that
+  memory and no other module shares it, and a project's `main` takes no
+  argument and returns no struct or array, so a project's run meets the
+  [embedder contract](memory-allocation-in-wasm-codegen.md#the-embedder-contract)
+  by construction. A single-file run of an entry point that takes or returns
+  a struct or array does not: the supplied memory has no pages above the
+  module's, so the addresses typed on its command line, which `run` passes on
+  unchecked, can only point into the module's own pages.
+- As in `infs build`, which shares this step, holds `[build.wasm-opt]` to the
+  memory import the compiler wrote. Binaryen output that adds, removes, renames
+  or re-limits it is refused, as output importing a function the compiler's
+  artifact did not already import is: the build fails, the optimized output is
+  discarded, and the artifact `infc` wrote stays in place. The import is a
+  contract with the host, not an interface the optimizer may narrow. `infs`
+  never passes Binaryen's `--zero-filled-memory`, because a memory the host
+  supplies is not zero-filled and the flag would let the optimizer drop the
+  zero bytes of the constants segment the module writes into it.
 
 In **single-file mode** (path given), `--entry-point` (default `main`) selects
 which exported function to invoke, and that function receives the trailing
@@ -503,6 +553,8 @@ infs build / infs run (project mode)
             arg: --max-memory-pages <n> (if [memory] declares `max-pages`;
                                          ABI ≥ 1.10)
             arg: --stack-size <n>       (if [memory] declares `stack-size`; ABI ≥ 1.3)
+            arg: --import-memory        (if [memory] sets `import = true`;
+                                         ABI ≥ 1.11)
             arg: --adopt-external-specs (if [verification] asks for it on a
                                          proof-artifact build; ABI ≥ 1.4; `run`
                                          never requests it)
@@ -556,6 +608,7 @@ infs build <path> (single-file mode)
             arg: --memory-pages <n>     (as the project route sends them)
             arg: --max-memory-pages <n>
             arg: --stack-size <n>
+            arg: --import-memory
             arg: --host-imports=<list>  (if the enclosing manifest declares a
                                          [host-imports] table; one argument;
                                          requires infc ABI ≥ 1.8)
@@ -596,6 +649,7 @@ infs run <path> (single-file mode)
             arg: --memory-pages <n>     (as the project route sends them)
             arg: --max-memory-pages <n>
             arg: --stack-size <n>
+            arg: --import-memory
             arg: --host-imports=<list>  (if the enclosing manifest declares a
                                          [host-imports] table; one argument;
                                          requires infc ABI ≥ 1.8)
@@ -606,9 +660,11 @@ infs run <path> (single-file mode)
 `RunArgs` struct (`apps/infs/src/commands/run.rs`) carries no such flags. Once
 `infc` exits, both `run` routes read the imports off the artifact they are about
 to execute before anything runs: a `wasm32` artifact that imports any function
-is refused before wasmtime is invoked, and a `spacewasm` artifact importing
-anything but the F´ reference hosts at their reference signatures before the
-interpreter decodes it — see [`infs run`](#infs-run).
+is refused before wasmtime is invoked, since `run` registers no host function
+there, while one that imports only its memory has that memory supplied; and a
+`spacewasm` artifact importing anything but the F´ reference hosts at their
+reference signatures is refused before the interpreter decodes it — see
+[`infs run`](#infs-run).
 
 **`infc` flags** confirmed against `core/cli/src/parser.rs`:
 
@@ -628,12 +684,13 @@ interpreter decodes it — see [`infs run`](#infs-run).
 | `--memory-pages <n>` | Linear memory size of the emitted module, in 64 KiB pages |
 | `--max-memory-pages <n>` | The most pages that memory may grow to; omitted, the memory is fixed at its size. Refused at the `spacewasm` target when it exceeds the size |
 | `--stack-size <bytes>` | Shadow stack size, and the budget A036 measures call-chain frame usage against |
+| `--import-memory` | Import the linear memory from the host as `env.memory` instead of defining it, with `--memory-pages` as the import's minimum and `--max-memory-pages` (default: the same) as its maximum, which is always declared. Builds for `wasm32` only; refused at `stellar` and `spacewasm`, with `-v` or `--mode proof`, beside a linked module, and beside a host import bound as `env.memory`. See [Importing the memory](memory-allocation-in-wasm-codegen.md#importing-the-memory) |
 | `--adopt-external-specs` | Carry a linked library's universal proof obligations into the program's proof artifact; proof mode only |
 | `--host-imports=<list>` | Allowlist the host functions the program may bind, as comma-separated `module.field` pairs; the `=` is required, and `--host-imports=` is an explicit empty allowlist that admits none. Omitted applies no policy |
 | `--commit-hash` | Print the build commit hash and exit; used by the `infs` handshake |
 | `--abi-version` | Print `<major>.<minor>` ABI version and exit; used by the `infs` handshake |
 
-> **Note:** The current ABI version is `1.10`.
+> **Note:** The current ABI version is `1.11`.
 
 The default behavior when no phase flag is supplied is full compilation with
 WASM output written to disk — equivalent to `--codegen -o`.
@@ -651,13 +708,14 @@ is parsed as `<major>.<minor>`:
 - **Unknown/old** (`infc` exits non-zero or prints `unknown`): silent; treated
   as graceful skip, equivalent to ABI unknown.
 
-The current ABI is `1.10` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 10` in
+The current ABI is `1.11` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 11` in
 `core/compiler-interface/src/lib.rs`). Each additive flag is gated at the minor
 it was introduced at, independently: `--out-dir` landed at minor 1,
 `--wasm-features` at minor 2, `--memory-pages` and `--stack-size` at minor 3,
 `--adopt-external-specs` at minor 4, `--target` at minor 5,
-`--host-imports` at minor 8, `--bounds-checks` at minor 9, and
-`--max-memory-pages` at minor 10. `infs` forwards each only to an `infc` that
+`--host-imports` at minor 8, `--bounds-checks` at minor 9,
+`--max-memory-pages` at minor 10, and `--import-memory` at minor 11.
+`infs` forwards each only to an `infc` that
 reports an ABI minor at or above the flag's own (or matches by commit hash) —
 an `infc` that reports minor 1, for instance, supports `--out-dir` but not
 `--wasm-features`. `--host-imports` is forwarded from the `[host-imports]`
@@ -677,7 +735,14 @@ project that names none puts no floor under its compiler. `[memory]` is gated
 per key for the same reason: `pages` and `stack-size` need minor 3 and
 `max-pages` minor 10, so a project that declares no maximum puts no minor-10
 floor under its compiler, and one that does is refused against an older `infc`
-rather than built with a fixed memory. Pairing a manifest
+rather than built with a fixed memory. `import = true` needs minor 11 on its
+own, and its gate is the one that matters most: built without the flag, the
+module defines its own memory, and an embedder that resolves imports by name,
+as the JavaScript API and wasmtime's `Linker` do, ignores the `env.memory` it
+supplies and the module never asks for. The module instantiates, and the host
+then reads and writes a memory the module never touches, with nothing to say
+so. `import = false` forwards nothing and gates nothing, so a project that sets
+only the numbers builds against minor 3 or 10 as before. Pairing a manifest
 with a non-default `[verification] output-dir` against an older `infc` is a
 hard error:
 

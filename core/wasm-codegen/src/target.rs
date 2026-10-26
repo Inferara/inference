@@ -162,10 +162,11 @@ pub enum Target {
     /// operand-stack depths -- which nothing in this crate checks: emission is
     /// target-blind, and every one of those maxima is a property of the finished
     /// module rather than of any instruction. About the bytes, therefore, this
-    /// target answers the *instruction set* question alone; the two questions
-    /// it answers that are not about them are whether a host import may be
-    /// bound (see [`Target::supports_host_imports`], which this target admits)
-    /// and whether the memory may be imported (see
+    /// target answers the *instruction set* question and, through
+    /// [`Target::permits_memory_growth`], whether the memory may grow; the two
+    /// questions it answers that are not about them are whether a host import
+    /// may be bound (see [`Target::supports_host_imports`], which this target
+    /// admits) and whether the memory may be imported (see
     /// [`Target::supports_imported_memory`], which it refuses for now), and
     /// neither is about what the decoder reads: the first asks what a call out
     /// of the artifact means, the second what the embedder supplies.
