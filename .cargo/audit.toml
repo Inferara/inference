@@ -1,0 +1,21 @@
+# cargo-audit configuration, read by the `cargo audit` step in CI.
+#
+# Every entry below names why the advisory cannot be fixed by an upgrade and
+# why it does not reach anything this repository ships. Remove an entry as
+# soon as an upgrade clears it.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0387: timing variability in `crypto-bigint` 0.5.5 operations
+    # meant to be constant-time. The fix is `crypto-bigint` >= 0.7.6, and no
+    # patched 0.5.x exists.
+    #
+    # It reaches the lockfile only through `soroban-env-host = "=28.0.2"`, a
+    # dev-dependency of `inference-tests` that runs compiled contracts in a real
+    # Soroban host for the Stellar tests (k256 / p256 / ecdsa ->
+    # elliptic-curve 0.13 -> crypto-bigint 0.5). No published crate, binary or
+    # compiled module links it; it runs only inside the test suite. No
+    # `soroban-env-host` release moves off it: 29.0.2 and 30.0.0 still require
+    # `elliptic-curve ^0.13.5`.
+    "RUSTSEC-2026-0387",
+]
