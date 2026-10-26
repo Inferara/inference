@@ -250,7 +250,28 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// growth failed. So the gate is on this constant, as it is for every flag
 /// minor, and it is on this minor alone: a project that sets only `pages` or
 /// `stack-size` still needs no more than minor 3.
-pub const COMPILER_ABI_MINOR: u32 = 10;
+///
+/// Minor 11 adds the additive `--import-memory` flag to `infc`, having the
+/// emitted module import its linear memory from the host as `env.memory`
+/// rather than define it ([`MemoryLayout::is_imported`], [`MemoryImport`]). It
+/// is backward compatible in the same sense as the minors above: omitting the
+/// flag defines the memory, as every earlier minor did, so a minor-10 `infs`
+/// still pairs with a minor-11 `infc` and loses nothing by it — a minor-10
+/// `infs` predates the `Inference.toml [memory] import` key, so it holds no
+/// import to drop. The pairing callers must gate on is an `infs` holding
+/// `import = true` talking to a minor-10 `infc`. A forward that reaches one
+/// fails loudly on a flag it does not parse; a dropped forward is the first of
+/// the eleven whose module runs against the host it was built for while
+/// computing on a different memory. The build succeeds with a module that
+/// defines its own memory, and an embedder that resolves imports by name, as
+/// the JavaScript API and Wasmtime's `Linker` do, ignores the `env.memory` it
+/// provides and the module does not ask for, so instantiation succeeds too;
+/// the host then reads and writes a memory the module never touches. Nothing
+/// fails: the two simply disagree. The bytes do record it, as a memory section
+/// in place of the import, but only for a reader who knows to look. So the
+/// gate is on this constant, and on this minor alone: `import = false`
+/// forwards nothing and needs no floor.
+pub const COMPILER_ABI_MINOR: u32 = 11;
 
 /// The first segment of a `use … from` clause that names the embedder rather
 /// than a linked module: `use { clock_ms } from host::env;` binds a host import
@@ -1629,9 +1650,9 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one_dot_ten() {
+    fn abi_version_is_one_dot_eleven() {
         assert_eq!(COMPILER_ABI_MAJOR, 1);
-        assert_eq!(COMPILER_ABI_MINOR, 10);
+        assert_eq!(COMPILER_ABI_MINOR, 11);
     }
 
     #[test]

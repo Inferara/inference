@@ -194,7 +194,9 @@ use inference::{
     AnalysisOptions, ExternKind, ExternalSpecPolicy, HOST_SEGMENT, LinkOptions,
     analyze_with_options, link_resolved, parse_project, type_check, wasm_to_v,
 };
-use inference_wasm_codegen::{EmitFeatures, MemoryLayout, MemoryLayoutSource, MemoryRequest};
+use inference_wasm_codegen::{
+    EmitFeatures, MemoryImport, MemoryLayout, MemoryLayoutSource, MemoryRequest,
+};
 use parser::{Cli, CliMode};
 use std::{
     fs,
@@ -488,7 +490,7 @@ fn memory_request(args: &Cli) -> MemoryRequest {
         pages: args.memory_pages,
         max_pages: args.max_memory_pages,
         stack_size: args.stack_size,
-        import: false,
+        import: args.import_memory,
     }
 }
 
@@ -900,6 +902,51 @@ fn host_import_proof_refusal(host: &[String]) -> Option<String> {
          passed; `infs build` passes `--mode proof` on a project's behalf when its \
          Inference.toml sets `[build] mode = \"proof\"`, and there the request to drop is that \
          setting: make it `\"compile\"`."
+    ))
+}
+
+/// The refusal owed to a build that writes a proof artifact and imports its
+/// linear memory, or `None` when the module defines its memory.
+///
+/// The proof contract builds a `module_runtime` by instantiating a module on
+/// its own, with an empty import list, so no runtime exists for a module that
+/// imports its memory. Every obligation that needs one — over memory, globals,
+/// calls, `exists` or `unique` — would be stated in the `.v` as a theorem
+/// nothing can discharge, and an artifact full of those is worse than none.
+///
+/// Code generation refuses `proof` mode with an imported memory for the same
+/// reason, and the first two sentences here are its own. This refusal is asked
+/// on a different predicate, though: "this build writes a `.v`" rather than
+/// the mode, so it also catches `--mode compile -v`, which code generation lets
+/// through. Compile mode emits no verification section for code generation to
+/// refuse, but the `.v` translated from its bytes is a record of the same
+/// module, with the same import no runtime can be built for.
+///
+/// Asked before any phase runs, because the layout alone decides it: it needs
+/// no typed context, and a refusal of the build's own flags is owed before the
+/// parse and type check it would make the reader discard.
+///
+/// The remedy differs from [`host_import_proof_refusal`]'s, which tells a
+/// project to make its mode `"compile"`: a program binding a host import has
+/// no proof artifact left to keep, so the setting serves nothing. A program
+/// that imports its memory still has one, built with a defined memory, so a
+/// project's proof mode is worth keeping for that build, and the import-mode
+/// build overrides it for itself with `infs build --mode compile`.
+fn imported_memory_proof_refusal(layout: MemoryLayout) -> Option<String> {
+    if !layout.is_imported() {
+        return None;
+    }
+    let memory = format!("{}.{}", MemoryImport::MODULE, MemoryImport::FIELD);
+    Some(format!(
+        "Error: An imported linear memory is outside the proof contract. The contract \
+         instantiates a module on its own, with an empty import list, so a module importing \
+         `{memory}` cannot be instantiated the way an obligation over memory, globals, calls, \
+         `exists` or `unique` requires, and such an obligation would be a theorem no proof can \
+         discharge. Build the proof without `[memory] import` / `--import-memory`, and build \
+         the imported-memory module without a `.v`: `-v` and `--mode proof` each request one \
+         on their own, so drop every one of them this build passed; `infs build` passes \
+         `--mode proof` on a project's behalf when its Inference.toml sets \
+         `[build] mode = \"proof\"`, and `infs build --mode compile` overrides that setting."
     ))
 }
 
@@ -1574,6 +1621,39 @@ fn run() {
         }
     };
 
+    // Refuse a layout the target cannot carry, a growable memory where its
+    // runtime grows none or an imported memory where nothing supplies one, as
+    // soon as both are known, for the reason the resolutions above run here:
+    // the flags alone decide it. Ahead of the imported memory's proof refusal
+    // below and of its binding refusal after analysis, as code generation
+    // orders its own, so a build at such a target is not first told to drop a
+    // `.v` or a binding when the import or the maximum has to go whatever else
+    // it drops. (`proof_artifact_refusal` above still answers first for a
+    // `stellar` `--mode compile -v`, which is refused whatever the layout.)
+    // Only under `--codegen`, since a parse or an analysis builds no memory for
+    // a target to refuse; code generation still asks the same question as its
+    // backstop.
+    if args.codegen
+        && let Err(refusal) = inference_wasm_codegen::check_layout_target_support(layout, target)
+    {
+        eprintln!("Error: {refusal}");
+        process::exit(1);
+    }
+
+    // Refuse a proof artifact for a module that imports its memory, as soon as
+    // the layout is known: the layout alone decides it. The predicate is the
+    // `.v` request, written only under `--codegen`, rather than the mode, so
+    // `--mode compile -v` is refused with `--mode proof`; see
+    // `imported_memory_proof_refusal` for why code generation's own refusal of
+    // the mode cannot stand in for this one.
+    if args.codegen
+        && args.generate_v_output
+        && let Some(message) = imported_memory_proof_refusal(layout)
+    {
+        eprintln!("{message}");
+        process::exit(1);
+    }
+
     // Read the host-import policy here for the reason the three resolutions
     // above are here: a malformed entry is a mistake about the build, not about
     // the program, and a policy reported after the parse and type check it was
@@ -1747,6 +1827,20 @@ fn run() {
         process::exit(1);
     }
 
+    // The imported memory's refusal of a binding, asked before resolution for
+    // the reason the target's is: a linked binding whose library is missing
+    // would first read "External module resolution failed", and a host binding
+    // named `env.memory` would be told by the `--host-imports` allowlist to
+    // admit `env.memory`, and each remedy only leads into this refusal. Code
+    // generation still asks it as its own backstop, in the same words.
+    if need_codegen
+        && let Some(tctx) = &typed_context
+        && let Err(refusal) = inference_wasm_codegen::check_imported_memory_bindings(tctx, layout)
+    {
+        eprintln!("Error: {refusal}");
+        process::exit(1);
+    }
+
     // Resolve every external `.wasm` the program binds, ahead of codegen, so a
     // resolution or validation failure aborts before any output is produced.
     let manifest_deps = match parse_manifest_deps(&args.wasm_deps) {
@@ -1880,7 +1974,9 @@ fn run() {
         // because resolution's answer decides which of two paths the artifact
         // takes: a program whose externs are host imports has nothing to merge
         // and must keep the imports it emitted, checked against the declarations
-        // that asked for them.
+        // that asked for them. The memory configuration is the second input: an
+        // artifact that imports its memory has nothing to merge either, and
+        // keeps that import, checked against the layout that asked for it.
         //
         // The warning-carrying entry point, not the discarding `link`: the merge
         // reports where its own guarantee stops short of what a reader would
@@ -1898,7 +1994,7 @@ fn run() {
         let linked = match link_resolved(
             codegen_output.wasm(),
             &externals,
-            None,
+            layout.memory_import(),
             &LinkOptions { external_specs },
         ) {
             Ok(linked) => linked,
@@ -2104,6 +2200,7 @@ mod tests {
             memory_pages: None,
             max_memory_pages: None,
             stack_size: None,
+            import_memory: false,
             bounds_checks: None,
             adopt_external_specs: false,
             commit_hash: false,
@@ -2410,6 +2507,133 @@ mod tests {
                 "a build passing both requests must not be told to drop one: {refusal}"
             );
         }
+    }
+
+    /// The imported-memory proof refusal is owed to a layout that imports its
+    /// memory and to no other, and it carries the whole remedy.
+    ///
+    /// The growable row is the one that keeps the predicate on the import: it is
+    /// the other non-default memory a build reaches this refusal with, and a
+    /// predicate keyed on "not the default layout" would refuse it too. The two
+    /// imported rows are a fixed and a growable import, so the predicate cannot
+    /// be reading the maximum instead.
+    ///
+    /// The remedy is asserted fragment by fragment, for the reason the host-import
+    /// refusal's is: it asks for every request for a `.v` to go, since a build
+    /// passing both `-v` and `--mode proof` that drops one is refused again, and
+    /// it names the manifest setting a project build's `--mode proof` comes from.
+    /// Unlike that refusal it must not ask for the setting to be made
+    /// `"compile"`: the proof built with a defined memory still needs it, so the
+    /// remedy is the per-build override instead.
+    #[test]
+    fn imported_memory_proof_refusal_is_owed_to_an_imported_memory_alone() {
+        assert_eq!(
+            imported_memory_proof_refusal(MemoryLayout::default()),
+            None,
+            "a module that defines its memory has a proof artifact"
+        );
+        let growable = layout_from(&["--max-memory-pages", "8"]).expect("a growable memory");
+        assert!(growable.is_growable() && !growable.is_imported());
+        assert_eq!(
+            imported_memory_proof_refusal(growable),
+            None,
+            "a growable memory the module defines is no reason to refuse a proof"
+        );
+
+        for argv in [
+            &["--import-memory"][..],
+            &["--import-memory", "--memory-pages", "2", "--max-memory-pages", "8"][..],
+        ] {
+            let layout = layout_from(argv).expect("an imported memory resolves");
+            let refusal = imported_memory_proof_refusal(layout)
+                .unwrap_or_else(|| panic!("{argv:?}: an imported memory has no proof artifact"));
+            assert!(
+                refusal.starts_with("Error: An imported linear memory is outside the proof \
+                                     contract."),
+                "{argv:?}: the refusal is a driver error opening on its reason: {refusal}"
+            );
+            assert!(
+                refusal.contains("a module importing `env.memory` cannot be instantiated"),
+                "{argv:?}: the refusal names the import it is about: {refusal}"
+            );
+            for fragment in [
+                "Build the proof without `[memory] import` / `--import-memory`, and build the \
+                 imported-memory module without a `.v`:",
+                "`-v` and `--mode proof` each request one on their own, so drop every one of \
+                 them this build passed;",
+                "`infs build` passes `--mode proof` on a project's behalf when its \
+                 Inference.toml sets `[build] mode = \"proof\"`,",
+            ] {
+                assert!(
+                    refusal.contains(fragment),
+                    "{argv:?}: the remedy must carry `{fragment}`: {refusal}"
+                );
+            }
+            assert!(
+                refusal.ends_with("`infs build --mode compile` overrides that setting."),
+                "{argv:?}: a project build is told the override, not a manifest edit: {refusal}"
+            );
+            assert!(
+                !refusal.contains("make it `\"compile\"`") && !refusal.contains("whichever"),
+                "{argv:?}: the project's proof setting is worth keeping, and a build passing \
+                 both requests must not be told to drop one: {refusal}"
+            );
+        }
+    }
+
+    /// `infc`'s proof refusal of an imported memory states code generation's own
+    /// reason, word for word, so the two copies of it cannot drift apart.
+    ///
+    /// `infc` refuses before any phase runs and code generation refuses the same
+    /// build as its backstop, so a reader meets one copy or the other depending
+    /// on the driver, and the reason no proof can be built is the same for both.
+    /// Only the remedy is the driver's own, because only the driver knows its
+    /// flags; the cut is therefore taken at the end of the reason, and what
+    /// follows it is asserted to differ, since the backstop's remedy names a mode
+    /// where `infc`'s names every request for a `.v`.
+    ///
+    /// The defined-memory build of the same program is the control: it passes
+    /// code generation in proof mode, so the error read off the imported build
+    /// is the import's and not some other refusal of the fixture.
+    #[test]
+    fn imported_memory_proof_refusal_states_code_generations_reason() {
+        let imported = layout_from(&["--import-memory"]).expect("an imported memory resolves");
+        let options = |layout| inference_wasm_codegen::CodegenOptions {
+            mode: inference_wasm_codegen::CompilationMode::Proof,
+            layout,
+            ..inference_wasm_codegen::CodegenOptions::default()
+        };
+        let arena =
+            inference::parse("pub fn f() -> i32 { return 1; }").expect("the fixture parses");
+        let typed = type_check(arena).expect("the fixture type-checks");
+
+        assert!(
+            inference_wasm_codegen::codegen(&typed, "m", options(MemoryLayout::default())).is_ok(),
+            "the fixture builds in proof mode with a defined memory"
+        );
+        let backstop = inference_wasm_codegen::codegen(&typed, "m", options(imported))
+            .expect_err("code generation refuses a proof build that imports its memory")
+            .to_string();
+        let end_of_reason = "no proof can discharge.";
+        let Some(at) = backstop.find(end_of_reason) else {
+            panic!("the backstop states the reason: {backstop}");
+        };
+        let (reason, backstop_remedy) = backstop.split_at(at + end_of_reason.len());
+
+        let refusal = imported_memory_proof_refusal(imported).expect("an imported memory");
+        let body = refusal
+            .strip_prefix("Error: ")
+            .unwrap_or_else(|| panic!("the driver's refusal is an error line: {refusal}"));
+        assert!(
+            body.starts_with(reason),
+            "infc's refusal must open with code generation's reason, word for word\n\
+             codegen: {reason}\n   infc: {body}"
+        );
+        assert_ne!(
+            &body[reason.len()..],
+            backstop_remedy,
+            "the remedy is the driver's own, naming its flags"
+        );
     }
 
     /// Asserts that `rendered` names the `[host-imports]` table `infs` fills the
@@ -3138,6 +3362,119 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("`--max-memory-pages`"), "{rendered}");
         assert!(rendered.contains("is below its size"), "{rendered}");
+    }
+
+    /// `--import-memory` is off unless given, and reaches the layout as an import
+    /// whose limits are the memory's own size and maximum.
+    ///
+    /// The default row is what keeps every existing build defining its memory: a
+    /// flag that defaulted on would turn each one into a module no embedder
+    /// without an `env.memory` can instantiate. The limit rows pin that the import
+    /// takes its numbers from `--memory-pages` and `--max-memory-pages` and not
+    /// from defaults of its own, including the maximum's fallback to the size
+    /// when it is left unset, and each is held to the same flags without the
+    /// import: the import changes where the memory comes from, never its size or
+    /// the stack.
+    ///
+    /// The clap rows pin the flag's shape. It is a switch and takes no value, so
+    /// `--import-memory=false` is refused rather than read as a request to turn
+    /// it on, or ignored; it swallows no following argument, so a source path
+    /// after it stays the path; and a repeated switch is refused rather than
+    /// counted.
+    #[test]
+    fn import_memory_flag_defaults_off() {
+        let absent = Cli::try_parse_from(["infc", "x.inf"]).expect("no flag parses");
+        assert!(!absent.import_memory, "no flag defines the memory");
+        let present =
+            Cli::try_parse_from(["infc", "x.inf", "--import-memory"]).expect("the switch parses");
+        assert!(present.import_memory, "the switch imports the memory");
+        let before_path =
+            Cli::try_parse_from(["infc", "--import-memory", "x.inf"]).expect("the switch parses");
+        assert!(before_path.import_memory);
+        assert_eq!(
+            before_path.path,
+            Some(PathBuf::from("x.inf")),
+            "the switch must not swallow the source path after it"
+        );
+
+        let defined = layout_from(&[]).expect("the default layout");
+        assert!(!defined.is_imported(), "the default layout defines its memory");
+        assert_eq!(defined.memory_import(), None);
+
+        for (argv, expected) in [
+            (
+                &["--import-memory"][..],
+                MemoryImport {
+                    minimum: 1,
+                    maximum: 1,
+                },
+            ),
+            (
+                &["--import-memory", "--memory-pages", "2", "--max-memory-pages", "8"][..],
+                MemoryImport {
+                    minimum: 2,
+                    maximum: 8,
+                },
+            ),
+            (
+                &["--import-memory", "--memory-pages", "3"][..],
+                MemoryImport {
+                    minimum: 3,
+                    maximum: 3,
+                },
+            ),
+            (
+                &["--import-memory", "--max-memory-pages", "4"][..],
+                MemoryImport {
+                    minimum: 1,
+                    maximum: 4,
+                },
+            ),
+            (
+                &["--memory-pages", "2", "--stack-size", "32768", "--import-memory"][..],
+                MemoryImport {
+                    minimum: 2,
+                    maximum: 2,
+                },
+            ),
+        ] {
+            let imported = layout_from(argv).expect("an imported memory resolves");
+            assert!(imported.is_imported(), "{argv:?}: the layout imports its memory");
+            assert_eq!(imported.memory_import(), Some(expected), "{argv:?}");
+
+            let without = argv
+                .iter()
+                .copied()
+                .filter(|arg| *arg != "--import-memory")
+                .collect::<Vec<_>>();
+            let defined = layout_from(&without).expect("the same memory, defined");
+            assert_eq!(
+                (imported.pages(), imported.max_pages(), imported.stack_size()),
+                (defined.pages(), defined.max_pages(), defined.stack_size()),
+                "{argv:?}: the import must not change the memory's size or the stack"
+            );
+            assert_eq!(defined.memory_import(), None, "{without:?}");
+        }
+
+        for spelled in ["--import-memory=false", "--import-memory=true", "--import-memory="] {
+            let Err(err) = Cli::try_parse_from(["infc", "x.inf", spelled]) else {
+                panic!("`{spelled}`: a switch given a value must not parse");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::TooManyValues,
+                "`{spelled}`: {err}"
+            );
+        }
+        let Err(err) = Cli::try_parse_from(["infc", "x.inf", "--import-memory", "--import-memory"])
+        else {
+            panic!("a repeated switch must not parse");
+        };
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{err}"
+        );
     }
 
     /// A non-numeric or negative value is refused by the parser rather than

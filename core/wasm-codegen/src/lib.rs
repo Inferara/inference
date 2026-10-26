@@ -360,11 +360,21 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
 /// the artifact is handed to supplies one (see
 /// [`Target::supports_imported_memory`]).
 ///
+/// Public, like [`check_host_import_target_support`], for a driver that
+/// resolves the layout before it parses the program. The answer depends on the
+/// build's settings alone, so such a driver can give it before a parse and type
+/// check the reader would have to discard, and before the refusals whose
+/// remedies lead into this one: its own of a proof artifact, told to drop the
+/// artifact, and this crate's [`check_imported_memory_bindings`], told to drop
+/// a binding, each beside an imported memory the target cannot carry whatever
+/// the build does about either. [`codegen`] still asks it, so a caller that
+/// does not is refused all the same, in the same words.
+///
 /// # Errors
 ///
 /// Returns the first refusal that applies, naming the target and the setting
 /// to change.
-fn check_layout_target_support(layout: MemoryLayout, target: Target) -> anyhow::Result<()> {
+pub fn check_layout_target_support(layout: MemoryLayout, target: Target) -> anyhow::Result<()> {
     // A growable memory is refused where the runtime cannot grow one, for the
     // reason a feature is: the maximum is written into the memory section, and a
     // capacity the runtime will never provide is better refused here, naming the
@@ -617,7 +627,10 @@ fn first_host_import(typed_context: &TypedContext) -> Option<ExternOrigin> {
 /// admit `env.memory` to the policy — each advice this refusal then makes
 /// void. Asked first, the reader hears the refusal that governs the build.
 /// [`codegen`] still asks it, so a caller that does not is refused all the
-/// same, in the same words.
+/// same, in the same words. Such a driver asks [`check_layout_target_support`]
+/// before it, as [`codegen`] does: at a target that cannot carry an imported
+/// memory at all, removing the binding this names would only lead into that
+/// refusal.
 ///
 /// Which binding is named is stable across runs, since
 /// [`TypedContext::extern_origins`] is already ordered, though by module and

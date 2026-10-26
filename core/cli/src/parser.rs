@@ -78,6 +78,10 @@ impl From<CliMode> for inference_wasm_codegen::CompilationMode {
 /// - `--max-memory-pages <N>`: The most pages the memory may grow to (default:
 ///   the memory's size, so it is fixed).
 /// - `--stack-size <BYTES>`: Shadow stack size in bytes (default 65536).
+/// - `--import-memory`: Import the memory from the host as `env.memory` rather
+///   than define it (default: the module defines it). The host must supply a
+///   memory of at least `--memory-pages` and at most `--max-memory-pages` pages
+///   that declares a maximum. `wasm32` only.
 ///
 /// Any may be given alone; the others keep their defaults. They are checked
 /// together, so a value that is legal on its own can still be refused by the
@@ -377,6 +381,25 @@ pub(crate) struct Cli {
     /// callers pass it by hand.
     #[clap(long = "stack-size", value_name = "BYTES")]
     pub(crate) stack_size: Option<u32>,
+
+    /// Import the linear memory from the host instead of defining it.
+    ///
+    /// The module imports its memory as `(import "env" "memory" (memory N M))`,
+    /// `N` being `--memory-pages` and `M` `--max-memory-pages`, which defaults to
+    /// `N`. The maximum is always declared, so the host must supply a memory of
+    /// at least `N` pages that itself declares a maximum of at most `M`; one with
+    /// no maximum, or a shared one, does not match the import. The module still
+    /// exports the memory as `memory`.
+    ///
+    /// Builds for `wasm32` only, and is refused at `stellar` and `spacewasm`. A
+    /// module that imports its memory has no proof artifact, so the flag is
+    /// refused with `-v` and `--mode proof`, and it cannot be combined with a
+    /// linked module.
+    ///
+    /// `infs build` forwards the project's `[memory] import`; direct `infc`
+    /// callers pass it by hand.
+    #[clap(long = "import-memory", action = clap::ArgAction::SetTrue)]
+    pub(crate) import_memory: bool,
 
     /// Which array accesses keep their runtime bounds guard: `all` or
     /// `omit-proven`.

@@ -364,15 +364,15 @@ fn abi_version_flag_prints_and_exits() {
     assert_eq!(version, expected);
 }
 
-/// Pins the ABI version string to the literal value `--max-memory-pages` became
+/// Pins the ABI version string to the literal value `--import-memory` became
 /// requestable at. The `abi_version_flag_prints_and_exits` test above checks the
 /// binary against the shared constant; this one additionally asserts the
-/// concrete `1.10` so an accidental constant change is caught here too.
+/// concrete `1.11` so an accidental constant change is caught here too.
 ///
 /// Uses an exact trimmed equality (not `contains`) so a near-miss such as
-/// "11.10" or "1.100" — which would satisfy a substring match — cannot pass.
+/// "11.11" or "1.110" — which would satisfy a substring match — cannot pass.
 #[test]
-fn abi_version_is_one_dot_ten() {
+fn abi_version_is_one_dot_eleven() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.arg("--abi-version");
     let assert = cmd.assert().success();
@@ -380,8 +380,8 @@ fn abi_version_is_one_dot_ten() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.trim(),
-        "1.10",
-        "ABI version must be exactly 1.10, not merely contain it"
+        "1.11",
+        "ABI version must be exactly 1.11, not merely contain it"
     );
 }
 
@@ -2299,6 +2299,845 @@ fn a036_measures_against_the_requested_stack_size() {
         !temp.child("out").child("prog.wasm").path().exists(),
         "a rejected build must leave no artifact"
     );
+}
+
+// Imported memory ---
+
+/// A program the type checker refuses, for the refusals that must be raised
+/// before the parse: one that reached the type check would read as a type
+/// error instead.
+const TYPE_ERROR_SOURCE: &str = "pub fn f() -> i32 { return true; }\n";
+
+/// The smallest program, which needs no memory of its own.
+const MEMORYLESS_SOURCE: &str = "pub fn f() -> i32 { return 1; }\n";
+
+/// A program binding one function of a linked module, `mylib`.
+const LINKED_ADD_SOURCE: &str = "\
+external fn add(a: i32, b: i32) -> i32;
+use { add } from mylib;
+
+pub fn sum() -> i32 {
+    return add(1, 2);
+}
+";
+
+/// The library `LINKED_ADD_SOURCE` binds: one export with the declared
+/// signature and no memory, so it links into any module.
+const LINKED_ADD_LIBRARY: &str = r#"(module
+  (func (export "add") (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.add))
+"#;
+
+/// A program binding a host function the module imports as `env.memory`, the
+/// name an imported memory takes.
+const HOST_ENV_MEMORY_SOURCE: &str = "\
+external fn memory() -> i32;
+use { memory } from host::env;
+
+pub fn peek() -> i32 {
+    return memory();
+}
+";
+
+// Each opening below is a refusal as the driver prints it, an `Error: ` line.
+// Code generation's backstop prints the same words prefixed `Codegen failed: `,
+// so matching the opening tells the two apart.
+
+/// The opening of `spacewasm`'s refusal of an imported memory.
+const IMPORTED_MEMORY_AT_SPACEWASM: &str =
+    "Error: The `spacewasm` target does not support an imported linear memory yet. ";
+/// The opening of `stellar`'s refusal of an imported memory.
+const IMPORTED_MEMORY_AT_STELLAR: &str =
+    "Error: The `stellar` target does not support an imported linear memory. ";
+/// The opening of `spacewasm`'s refusal of a growable memory.
+const GROWABLE_MEMORY_AT_SPACEWASM: &str =
+    "Error: The `spacewasm` target does not support a growable linear memory. ";
+/// The opening of the refusal of a proof artifact for an imported memory.
+const IMPORTED_MEMORY_PROOF_REFUSAL: &str =
+    "Error: An imported linear memory is outside the proof contract. ";
+/// The opening of the refusal of a linked binding beside an imported memory.
+const IMPORTED_MEMORY_LINK_REFUSAL: &str =
+    "Error: An imported linear memory cannot yet be combined with a linked module. ";
+
+/// Runs `infc` on `source` with `args`, requiring exit status 1, and returns the
+/// temp dir with both streams.
+///
+/// The exact status rather than `.failure()`, which a panic's 101 satisfies.
+fn refused_build(source: &str, args: &[&str]) -> (assert_fs::TempDir, String, String) {
+    let (temp, assert) = run_host_build(source, args);
+    let assert = assert.code(1);
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    (temp, stdout, stderr)
+}
+
+/// Asserts a refusal of the build's flags was the only thing the build said:
+/// one line on stderr, raised before the parse, so stdout carries no `Parsed:`
+/// line, and not by code generation's backstop.
+fn assert_one_refusal_before_the_parse(stdout: &str, stderr: &str) {
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "a refusal of the flags is one line and nothing else:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Parsed:"),
+        "the flags alone decide the refusal, so it is owed before the parse:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("Codegen failed") && !stderr.contains("Type checking failed"),
+        "the driver refuses, not a later phase:\n{stderr}"
+    );
+}
+
+/// Asserts the build created no output directory at all, which is stronger
+/// than [`assert_no_artifacts`]: neither a refusal raised before any phase runs
+/// nor a run that writes nothing may even prepare the place an artifact goes.
+fn assert_no_output_dir(root: &std::path::Path) {
+    assert!(
+        !root.join("out").exists(),
+        "the build must leave no `out` directory"
+    );
+}
+
+/// The `(import …)` lines of a module's WAT, in order.
+fn import_lines(wat: &str) -> Vec<&str> {
+    wat.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("(import "))
+        .collect()
+}
+
+/// `wat` with every line equal, once trimmed, to `drop` removed, for comparing
+/// two builds that should differ in that one line alone.
+fn without_line(wat: &str, drop: &str) -> Vec<String> {
+    wat.lines()
+        .filter(|line| line.trim() != drop)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The import line of a memory imported at the default layout: one fixed page.
+const DEFAULT_MEMORY_IMPORT: &str = "(import \"env\" \"memory\" (memory (;0;) 1 1))";
+
+/// Whether `wat` defines a memory of its own. A defined memory prints as a line
+/// that opens with `(memory`, whatever its index, while an imported one prints
+/// inside its `(import …)` line.
+fn defines_a_memory(wat: &str) -> bool {
+    wat.lines()
+        .any(|line| line.trim_start().starts_with("(memory"))
+}
+
+/// Asserts a `--parse` and an `--analyze` run of `source` under `flags` both
+/// pass and write nothing: neither builds a memory, so neither is owed a
+/// refusal of the layout.
+fn assert_phase_only_runs_pass(source: &str, flags: &[&str]) {
+    for phase in ["--parse", "--analyze"] {
+        let args = [flags, &[phase][..]].concat();
+        let (temp, assert) = run_host_build(source, &args);
+        let assert = assert.success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+        assert!(
+            stdout.contains("Parsed:"),
+            "{args:?}: a {phase} run builds no memory, so it is not refused:\n{stdout}"
+        );
+        assert_no_output_dir(temp.path());
+    }
+}
+
+/// `--import-memory` reaches the emitted module: the memory is imported as
+/// `env.memory`, first among the imports, with the layout's limits, and is
+/// defined nowhere, while the module still exports it and keeps its stack
+/// pointer.
+///
+/// "Defined nowhere" is a structural check, not a validation: a stray memory
+/// section beside the import is valid and runs under multi-memory, so only the
+/// module's shape shows it. A defined memory prints as a line of its own that
+/// opens with `(memory`, and a stray one would be memory 1, so a count of
+/// `(memory (;0;)` alone would miss it; the import line carries
+/// `(memory (;0;) …)` too, but inside the import, so it opens no such line.
+///
+/// The defined build of the same program is the control and the stronger half:
+/// the two modules differ in exactly the one line that says where memory 0
+/// comes from, so the flag reaches nothing but the memory's provenance, and the
+/// function bodies, the stack pointer and the exports are the defined build's.
+///
+/// The limit rows hold the two numbers the import carries to their flags,
+/// including the maximum's fallback to the size, and a stack size that is not
+/// the page size, which is what separates the stack pointer from the memory's
+/// size. A memoryless program still imports one under the flag, with both
+/// exports, while its defined build declares no memory at all: the import is a
+/// statement about the module's interface, which the embedder supplies whether
+/// or not the code touches it.
+#[test]
+fn the_import_memory_flag_reaches_the_emitted_module() {
+    let imported = wat_of(&compile_source_with(&["--import-memory"], FRAME_ALLOCATING_SOURCE));
+    let imports = import_lines(&imported);
+    assert_eq!(
+        imports.first().copied(),
+        Some(DEFAULT_MEMORY_IMPORT),
+        "the memory is the first import:\n{imported}"
+    );
+    assert_eq!(
+        imported.matches("(memory (;0;)").count(),
+        1,
+        "memory 0 is declared once, by the import:\n{imported}"
+    );
+    assert!(
+        !defines_a_memory(&imported),
+        "an imported memory is not also defined:\n{imported}"
+    );
+    for kept in [
+        "(export \"memory\" (memory 0))",
+        "(export \"__stack_pointer\" (global 0))",
+        "(global (;0;) (mut i32) i32.const 65536)",
+    ] {
+        assert!(
+            imported.contains(kept),
+            "the imported build keeps `{kept}`:\n{imported}"
+        );
+    }
+
+    let defined = wat_of(&compile_source_with(&[], FRAME_ALLOCATING_SOURCE));
+    assert!(
+        defined.contains("(memory (;0;) 1 1)") && import_lines(&defined).is_empty(),
+        "the control defines its memory and imports nothing:\n{defined}"
+    );
+    assert_eq!(
+        without_line(&imported, DEFAULT_MEMORY_IMPORT),
+        without_line(&defined, "(memory (;0;) 1 1)"),
+        "the two builds differ only in where memory 0 comes from"
+    );
+
+    for (flags, expected_import, expected_stack) in [
+        (
+            &["--memory-pages", "2", "--max-memory-pages", "8"][..],
+            "(import \"env\" \"memory\" (memory (;0;) 2 8))",
+            "(global (;0;) (mut i32) i32.const 65536)",
+        ),
+        (
+            &["--memory-pages", "3"][..],
+            "(import \"env\" \"memory\" (memory (;0;) 3 3))",
+            "(global (;0;) (mut i32) i32.const 65536)",
+        ),
+        (
+            &["--memory-pages", "2", "--stack-size", "32768"][..],
+            "(import \"env\" \"memory\" (memory (;0;) 2 2))",
+            "(global (;0;) (mut i32) i32.const 32768)",
+        ),
+    ] {
+        let args = [flags, &["--import-memory"][..]].concat();
+        let wat = wat_of(&compile_source_with(&args, FRAME_ALLOCATING_SOURCE));
+        assert_eq!(
+            import_lines(&wat),
+            vec![expected_import],
+            "{flags:?}: the import carries the layout's limits:\n{wat}"
+        );
+        assert!(
+            wat.contains(expected_stack),
+            "{flags:?}: the stack pointer is the layout's:\n{wat}"
+        );
+        assert!(
+            !defines_a_memory(&wat),
+            "{flags:?}: an imported memory is not also defined:\n{wat}"
+        );
+    }
+
+    let memoryless = wat_of(&compile_source_with(&["--import-memory"], MEMORYLESS_SOURCE));
+    assert_eq!(
+        import_lines(&memoryless),
+        vec![DEFAULT_MEMORY_IMPORT],
+        "a program that needs no memory still imports one under the flag:\n{memoryless}"
+    );
+    assert!(
+        memoryless.contains("(export \"memory\" (memory 0))")
+            && memoryless.contains("(export \"__stack_pointer\" (global 0))"),
+        "and still exports it with the stack pointer:\n{memoryless}"
+    );
+    let memoryless_defined = wat_of(&compile_source_with(&[], MEMORYLESS_SOURCE));
+    assert!(
+        !memoryless_defined.contains("(memory") && !memoryless_defined.contains("__stack_pointer"),
+        "the control: the same program defines no memory without the flag:\n{memoryless_defined}"
+    );
+}
+
+/// The growable-memory refusal at `spacewasm` is the driver's, raised before
+/// the parse, not code generation's after it.
+///
+/// The flags alone decide it, so a program that would fail its type check is
+/// told about the layout and nothing else: no `Parsed:` line, no type error, and
+/// no `Codegen failed:` prefix, which is how the same words read when only code
+/// generation's backstop asks. The type-error control without the maximum is
+/// what makes the absence of the type error mean something. A `--parse` or
+/// `--analyze` run builds no memory, so the same flags pass there, and a maximum
+/// equal to the page count is a fixed memory, which the target admits.
+#[test]
+fn a_growable_memory_is_refused_at_spacewasm_before_the_parse() {
+    let growable = ["--target", "spacewasm", "--max-memory-pages", "4"];
+    for source in [FRAME_ALLOCATING_SOURCE, TYPE_ERROR_SOURCE] {
+        let (temp, stdout, stderr) = refused_build(source, &growable);
+        assert!(
+            stderr.starts_with(GROWABLE_MEMORY_AT_SPACEWASM)
+                && stderr.contains("a maximum of 4 pages above the memory's 1 could never be \
+                                    reached"),
+            "the driver states the growable refusal with its numbers:\n{stderr}"
+        );
+        assert_one_refusal_before_the_parse(&stdout, &stderr);
+        assert_no_output_dir(temp.path());
+    }
+
+    let (_temp, stdout, stderr) = refused_build(TYPE_ERROR_SOURCE, &["--target", "spacewasm"]);
+    assert!(
+        stderr.contains("Type checking failed") && stdout.contains("Parsed:"),
+        "the control must reach the type check, so the fixture really is ill-typed:\n{stderr}"
+    );
+
+    assert_phase_only_runs_pass(FRAME_ALLOCATING_SOURCE, &growable);
+
+    let fixed = wat_of(&compile_source_with(
+        &["--target", "spacewasm", "--memory-pages", "4", "--max-memory-pages", "4"],
+        FRAME_ALLOCATING_SOURCE,
+    ));
+    assert!(
+        fixed.contains("(memory (;0;) 4 4)"),
+        "a maximum equal to the page count is a fixed memory, which the target admits:\n{fixed}"
+    );
+}
+
+/// An imported memory at `spacewasm` is refused by the driver before the parse,
+/// in the target's own words, and leaves nothing behind.
+///
+/// The type-error rows are what place the refusal before the parse: that
+/// program would otherwise be refused by the type check, and its `Parsed:` line
+/// would be printed first. The `-v` rows place it before the proof-artifact
+/// refusal, which an imported memory also earns: code generation asks the
+/// target before the mode, and dropping the `.v` alone never lets an imported
+/// memory through at this target, so the target's refusal is the one owed. The
+/// bindings rows place it before the refusals of a linked binding and of a host
+/// binding named `env.memory`, whose remedies are edits of the program's
+/// bindings that lift nothing here, and before code generation's backstop,
+/// which a host binding would otherwise reach. The growable row pins that the
+/// same check's first question is the maximum, as code generation asks it.
+///
+/// The controls: a `--parse` or `--analyze` run with the same flags builds no
+/// memory and is not refused, and the same program without the flag builds at
+/// this target, so the refusal is the import's.
+#[test]
+fn an_imported_memory_is_refused_at_spacewasm() {
+    for (source, extra) in [
+        (FRAME_ALLOCATING_SOURCE, &[][..]),
+        (TYPE_ERROR_SOURCE, &[][..]),
+        (FRAME_ALLOCATING_SOURCE, &["-v"][..]),
+        (FRAME_ALLOCATING_SOURCE, &["--mode", "compile", "-v"][..]),
+        (TYPE_ERROR_SOURCE, &["--mode", "proof"][..]),
+        (HOST_CLOCK_SOURCE, &[][..]),
+        (HOST_ENV_MEMORY_SOURCE, &[][..]),
+        (HOST_ENV_MEMORY_SOURCE, &["--host-imports="][..]),
+        (LINKED_ADD_SOURCE, &[][..]),
+    ] {
+        let args = [&["--target", "spacewasm", "--import-memory"][..], extra].concat();
+        let (temp, stdout, stderr) = refused_build(source, &args);
+        assert!(
+            stderr.starts_with(IMPORTED_MEMORY_AT_SPACEWASM),
+            "{args:?}: the target's refusal is read first:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "remove `[memory] import` / `--import-memory` to build for `spacewasm`. Building \
+                 for an imported memory at this target is tracked under issue #547."
+            ),
+            "{args:?}: the refusal names the setting to change and the issue:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("outside the proof contract")
+                && !stderr.contains("External module resolution failed")
+                && !stderr.contains("issue #546")
+                && !stderr.contains("imports a function as")
+                && !stderr.contains("host-import allowlist"),
+            "{args:?}: no refusal whose remedy leads into this one is read:\n{stderr}"
+        );
+        assert_one_refusal_before_the_parse(&stdout, &stderr);
+        assert_no_output_dir(temp.path());
+    }
+
+    let (temp, _stdout, stderr) = refused_build(
+        FRAME_ALLOCATING_SOURCE,
+        &["--target", "spacewasm", "--import-memory", "--max-memory-pages", "4"],
+    );
+    assert!(
+        stderr.starts_with(GROWABLE_MEMORY_AT_SPACEWASM),
+        "a growable imported memory hears the maximum's refusal first:\n{stderr}"
+    );
+    assert_no_output_dir(temp.path());
+
+    assert_phase_only_runs_pass(
+        FRAME_ALLOCATING_SOURCE,
+        &["--target", "spacewasm", "--import-memory"],
+    );
+
+    let control = compile_source_with(&["--target", "spacewasm"], FRAME_ALLOCATING_SOURCE);
+    assert!(
+        control.starts_with(b"\0asm"),
+        "the same program builds at this target with a defined memory"
+    );
+}
+
+/// An imported memory at `stellar` is refused by the driver before the parse,
+/// in the target's own words, and leaves nothing behind.
+///
+/// The bindings rows are the ones the early placement is for. Asked after
+/// analysis instead, a linked binding would read the #546 refusal, and a host
+/// binding, `env.memory` among them, the target's refusal of host imports; each
+/// remedy is an edit of the program's bindings, and no such edit lifts this
+/// refusal. The `-v` row is read in the target's words, not the proof
+/// contract's, for the reason the `spacewasm` test gives. `--mode compile -v`
+/// is the one spelling refused before the layout is even resolved, by the
+/// driver's refusal of a Stellar `.v`, which no layout lifts; its row pins that
+/// it is still read first.
+///
+/// The controls: `--parse` and `--analyze` with the same flags are not refused,
+/// and the contract builds at this target without the flag.
+#[test]
+fn an_imported_memory_is_refused_at_stellar() {
+    for (source, extra) in [
+        (STELLAR_CONTRACT_SOURCE, &[][..]),
+        (TYPE_ERROR_SOURCE, &[][..]),
+        (STELLAR_CONTRACT_SOURCE, &["-v"][..]),
+        (LINKED_ADD_SOURCE, &[][..]),
+        (HOST_CLOCK_SOURCE, &[][..]),
+        (HOST_ENV_MEMORY_SOURCE, &[][..]),
+    ] {
+        let args = [&["--target", "stellar", "--import-memory"][..], extra].concat();
+        let (temp, stdout, stderr) = refused_build(source, &args);
+        assert!(
+            stderr.starts_with(IMPORTED_MEMORY_AT_STELLAR),
+            "{args:?}: the target's refusal is read first:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "so a contract importing `env.memory` could not be deployed; remove \
+                 `[memory] import` / `--import-memory` to build for `stellar`."
+            ),
+            "{args:?}: the refusal names the import and the setting to change:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("issue #546")
+                && !stderr.contains("External module resolution failed")
+                && !stderr.contains("does not support host imports")
+                && !stderr.contains("outside the proof contract"),
+            "{args:?}: no refusal whose remedy leads into this one is read:\n{stderr}"
+        );
+        assert_one_refusal_before_the_parse(&stdout, &stderr);
+        assert_no_output_dir(temp.path());
+    }
+
+    let (temp, _stdout, stderr) = refused_build(
+        STELLAR_CONTRACT_SOURCE,
+        &["--target", "stellar", "--import-memory", "--mode", "compile", "-v"],
+    );
+    assert!(
+        stderr.starts_with("Error: -v cannot be combined with --target stellar. ")
+            && !stderr.contains("imported linear memory"),
+        "a Stellar `.v` is refused first, whatever the layout:\n{stderr}"
+    );
+    assert_no_output_dir(temp.path());
+
+    assert_phase_only_runs_pass(
+        STELLAR_CONTRACT_SOURCE,
+        &["--target", "stellar", "--import-memory"],
+    );
+
+    let (control, _stdout) = compile_stellar(STELLAR_CONTRACT_SOURCE);
+    assert!(
+        control.starts_with(b"\0asm"),
+        "the contract builds at this target with a defined memory"
+    );
+}
+
+/// A build that would write a `.v` for a module importing its memory is refused
+/// before any phase, in every spelling that requests one, and writes nothing.
+///
+/// `--mode compile -v` is the row only the driver can refuse: code generation
+/// refuses proof mode and lets compile mode through, but the `.v` translated
+/// from a compile-mode module still describes a module no runtime can be built
+/// for. `--codegen -v` is the spelling that writes the `.v` alone. The
+/// type-error rows place the refusal before the parse, and no `out` directory
+/// is created.
+///
+/// The not-refused rows are the runs that write no `.v`: `--analyze` and
+/// `--parse` ignore `-v` and `--mode proof`, and a `--codegen` dry run writes
+/// nothing, so none of them is owed this refusal. The defined-memory controls
+/// are the same proof spellings without the flag, each writing its `.v`, so the
+/// refusal is the import's and not the fixture's.
+#[test]
+fn an_imported_memory_writes_no_proof_artifact() {
+    let spellings = [
+        &["--mode", "proof"][..],
+        &["-v"][..],
+        &["--mode", "compile", "-v"][..],
+        &["--mode", "proof", "-v"][..],
+        &["--codegen", "-v"][..],
+    ];
+    for spelling in spellings {
+        for source in [FRAME_ALLOCATING_SOURCE, TYPE_ERROR_SOURCE] {
+            let args = [spelling, &["--import-memory"][..]].concat();
+            let (temp, stdout, stderr) = refused_build(source, &args);
+            assert!(
+                stderr.starts_with(IMPORTED_MEMORY_PROOF_REFUSAL),
+                "{args:?}: the proof-artifact refusal is read:\n{stderr}"
+            );
+            assert!(
+                stderr.trim_end().ends_with(
+                    "so drop every one of them this build passed; `infs build` passes `--mode \
+                     proof` on a project's behalf when its Inference.toml sets `[build] mode = \
+                     \"proof\"`, and `infs build --mode compile` overrides that setting."
+                ),
+                "{args:?}: the refusal carries the whole remedy:\n{stderr}"
+            );
+            assert_one_refusal_before_the_parse(&stdout, &stderr);
+            assert_no_output_dir(temp.path());
+        }
+
+        let (temp, assert) = run_host_build(FRAME_ALLOCATING_SOURCE, spelling);
+        assert.success();
+        assert!(
+            temp.child("out").child("prog.v").path().exists(),
+            "{spelling:?}: the control writes a .v with a defined memory"
+        );
+    }
+
+    for args in [
+        &["--analyze", "-v"][..],
+        &["--analyze", "--mode", "proof"][..],
+        &["--parse", "-v"][..],
+        &["--codegen"][..],
+    ] {
+        let args = [args, &["--import-memory"][..]].concat();
+        let (temp, assert) = run_host_build(FRAME_ALLOCATING_SOURCE, &args);
+        let assert = assert.success();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            !stderr.contains("outside the proof contract"),
+            "{args:?}: a run that writes no .v is not refused:\n{stderr}"
+        );
+        assert_no_output_dir(temp.path());
+    }
+}
+
+/// Stages `LINKED_ADD_LIBRARY` as `lib/mylib.wasm` beside a program binding it,
+/// returning the temp dir, the entry, the `-L` directory and the library path.
+fn linked_add_project() -> (
+    assert_fs::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", LINKED_ADD_SOURCE);
+    let lib = temp.child("lib");
+    std::fs::create_dir_all(lib.path()).unwrap();
+    let bytes = wat::parse_str(LINKED_ADD_LIBRARY).expect("the library fixture is valid WAT");
+    let library = lib.child("mylib.wasm").path().to_path_buf();
+    std::fs::write(&library, bytes).unwrap();
+    let dir = lib.path().to_path_buf();
+    (temp, entry, dir, library)
+}
+
+/// A linked binding beside an imported memory is refused after analysis and
+/// before external resolution, naming the binding and the issue that tracks
+/// the combination, whether or not its library can be found.
+///
+/// Both spellings of a present library are run, `-L` and `--wasm-dep`, because
+/// each is a separate route to the same resolved module; the control is the
+/// same program and library without the flag, which links. The missing-library
+/// rows are the ones the placement before resolution is for: without the flag
+/// the build reads the resolver's refusal, whose remedy is to supply the
+/// library, and with it the reader must hear the refusal no library can lift.
+/// A program binding both kinds of extern hears this one too, not the
+/// resolver's mixed-program refusal, whose remedy is to rebind every extern to
+/// the host.
+#[test]
+fn a_linked_binding_is_refused_with_an_imported_memory() {
+    let named = "`external fn add` is bound to `mylib`, which this build links in from a `.wasm` \
+                 module";
+    let tracked = "linking with an imported memory is tracked under issue #546.";
+
+    let (temp, entry, dir, library) = linked_add_project();
+    let dep = format!("mylib={}", library.display());
+    let spellings = [
+        vec!["-L".to_string(), dir.display().to_string()],
+        vec!["--wasm-dep".to_string(), dep],
+    ];
+    let run = |spelling: &[String], extra: &[&str]| {
+        Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+            .current_dir(temp.path())
+            .arg(&entry)
+            .args(spelling)
+            .args(extra)
+            .assert()
+    };
+    for spelling in &spellings {
+        let assert = run(spelling, &["--import-memory"]).code(1);
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.starts_with(IMPORTED_MEMORY_LINK_REFUSAL)
+                && stderr.contains(named)
+                && stderr.trim_end().ends_with(tracked),
+            "{spelling:?}: the binding is refused naming itself and the issue:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("Analyzed:") && !stdout.contains("Linked"),
+            "{spelling:?}: refused after analysis, before the merge:\n{stdout}"
+        );
+        assert!(
+            !stderr.contains("Codegen failed"),
+            "{spelling:?}: the driver refuses, not code generation's backstop:\n{stderr}"
+        );
+        assert_no_artifacts(temp.path(), "prog");
+
+        let assert = run(spelling, &[]).success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+        assert!(
+            stdout.contains("Linked 1 external module(s)"),
+            "{spelling:?}: the control links the same library:\n{stdout}"
+        );
+        assert!(
+            temp.child("out").child("prog.wasm").path().exists(),
+            "{spelling:?}: the control writes its artifact"
+        );
+        std::fs::remove_dir_all(temp.child("out").path()).unwrap();
+    }
+
+    let (temp, _stdout, stderr) = refused_build(LINKED_ADD_SOURCE, &["--import-memory"]);
+    assert!(
+        stderr.starts_with(IMPORTED_MEMORY_LINK_REFUSAL)
+            && stderr.contains(named)
+            && stderr.trim_end().ends_with(tracked),
+        "a missing library hears the refusal no library can lift:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("External module resolution failed"),
+        "a missing library must not be reported, since supplying it lifts nothing:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    let (temp, _stdout, stderr) = refused_build(LINKED_ADD_SOURCE, &[]);
+    assert!(
+        stderr.contains("External module resolution failed")
+            && stderr.contains("could not resolve module `mylib`"),
+        "the control without the flag reaches resolution:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+
+    let (temp, _stdout, stderr) = refused_build(HOST_AND_LINKED_SOURCE, &["--import-memory"]);
+    assert!(
+        stderr.starts_with(IMPORTED_MEMORY_LINK_REFUSAL)
+            && stderr.contains("`external fn add` is bound to `no_such_module`"),
+        "a mixed program hears the linked binding's refusal:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("host imports and statically linked modules cannot be combined")
+            && !stderr.contains("env.memory"),
+        "neither the mixed-program refusal nor the host-name one is read:\n{stderr}"
+    );
+    assert_no_artifacts(temp.path(), "prog");
+}
+
+/// A host binding the module would import as `env.memory` is refused beside an
+/// imported memory, whatever the host-import allowlist says.
+///
+/// An embedder resolving imports by name cannot supply a function and a memory
+/// under one name, so the module would fail only at instantiation. The
+/// allowlist rows are the ones the placement before the policy is for: an empty
+/// allowlist would otherwise tell the reader to admit `env.memory`, and
+/// admitting it lifts nothing, so the collision is read under no policy, an
+/// empty one, and one that admits the name alike.
+///
+/// The controls without the flag: the program builds with no policy and with
+/// one admitting it, and an empty policy reads the allowlist's own refusal, so
+/// the collision is the flag's. The near-miss rows, a field named `memory` of
+/// another module and a field of `env` with another name, build beside the
+/// import: the collision is of the two-level name, not of either half.
+#[test]
+fn a_host_binding_named_env_memory_is_refused_with_an_imported_memory() {
+    for policy in [&[][..], &["--host-imports="][..], &["--host-imports=env.memory"][..]] {
+        let args = [policy, &["--import-memory"][..]].concat();
+        let (temp, stdout, stderr) = refused_build(HOST_ENV_MEMORY_SOURCE, &args);
+        assert!(
+            stderr.starts_with(
+                "Error: `external fn memory` is bound to `host::env`, so the module imports a \
+                 function as `env.memory`, and `[memory] import` / `--import-memory` imports its \
+                 linear memory under that same name."
+            ),
+            "{args:?}: the collision is read:\n{stderr}"
+        );
+        assert!(
+            stderr.trim_end().ends_with(
+                "bind the function from another host module, or remove `[memory] import` / \
+                 `--import-memory`."
+            ),
+            "{args:?}: the refusal ends on its remedy:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("host-import allowlist") && !stderr.contains("Codegen failed"),
+            "{args:?}: neither the allowlist nor the backstop is read:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("Analyzed:") && !stdout.contains("host imports"),
+            "{args:?}: refused after analysis, before the inventory:\n{stdout}"
+        );
+        assert_no_artifacts(temp.path(), "prog");
+    }
+
+    for policy in [&[][..], &["--host-imports=env.memory"][..]] {
+        let (temp, assert) = run_host_build(HOST_ENV_MEMORY_SOURCE, policy);
+        assert.success();
+        assert!(
+            temp.child("out").child("prog.wasm").path().exists(),
+            "{policy:?}: without the flag the binding builds"
+        );
+    }
+    let (_temp, _stdout, stderr) = refused_build(HOST_ENV_MEMORY_SOURCE, &["--host-imports="]);
+    assert!(
+        stderr.contains("host import `env`.`memory` is not in this build's host-import allowlist"),
+        "the control: without the flag an empty policy reads its own refusal:\n{stderr}"
+    );
+
+    for (source, import) in [
+        (
+            "external fn memory() -> i32;\n\
+             use { memory } from host::other;\n\
+             pub fn peek() -> i32 { return memory(); }\n",
+            "(import \"other\" \"memory\"",
+        ),
+        (
+            "external fn mem() -> i32;\n\
+             use { mem } from host::env;\n\
+             pub fn peek() -> i32 { return mem(); }\n",
+            "(import \"env\" \"mem\"",
+        ),
+    ] {
+        let wat = wat_of(&compile_source_with(&["--import-memory"], source));
+        let imports = import_lines(&wat);
+        assert_eq!(
+            imports.first().copied(),
+            Some(DEFAULT_MEMORY_IMPORT),
+            "the memory is imported first:\n{wat}"
+        );
+        assert!(
+            imports.len() == 2 && imports[1].starts_with(import),
+            "a near-miss of the name builds beside the memory import:\n{wat}"
+        );
+    }
+}
+
+/// A host-import program builds with an imported memory, and the memory import
+/// leads the import section while the function imports keep the order and
+/// numbering they have without it.
+///
+/// The function imports are compared with the defined build's whole, lines and
+/// order, so neither a reordering nor a renumbering of them can pass. The
+/// inventory line is still printed, and still lists the host functions alone:
+/// `env.memory` is an import the layout asked for, not a host function the
+/// program bound, so it is not listed and not held to the allowlist, which is
+/// why a policy admitting only the functions builds. The link step is part of
+/// this: an artifact keeping host imports and a memory import has nothing to
+/// merge, and is checked against both the declarations and the layout.
+#[test]
+fn a_host_import_program_keeps_its_imports_beside_an_imported_memory() {
+    for (source, listed, policy) in [
+        (HOST_CLOCK_SOURCE, "env.clock_ms", "--host-imports=env.clock_ms"),
+        (HOST_TWO_SOURCE, "env.clock_ms, env.sleep_ms", "--host-imports=env.clock_ms,env.sleep_ms"),
+    ] {
+        let defined = wat_of(&compile_source_with(&[], source));
+        let defined_imports = import_lines(&defined);
+        assert!(
+            !defined_imports.is_empty()
+                && defined_imports.iter().all(|line| line.contains("(func")),
+            "the control imports its host functions alone:\n{defined}"
+        );
+
+        for (args, inventory) in [
+            (vec!["--import-memory"], format!("host imports (no allowlist): {listed}\n")),
+            (vec!["--import-memory", policy], format!("host imports: {listed}\n")),
+        ] {
+            let (temp, assert) = run_host_build(source, &args);
+            let assert = assert.success();
+            let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+            assert!(
+                stdout.contains(&inventory),
+                "{args:?}: the inventory names the host functions alone:\n{stdout}"
+            );
+            assert!(
+                !stdout.contains("env.memory"),
+                "{args:?}: the memory is not a host function the program bound:\n{stdout}"
+            );
+
+            let wasm = std::fs::read(temp.child("out").child("prog.wasm").path())
+                .expect("the build writes its artifact");
+            let wat = wat_of(&wasm);
+            let imports = import_lines(&wat);
+            assert_eq!(
+                imports.first().copied(),
+                Some(DEFAULT_MEMORY_IMPORT),
+                "{args:?}: the memory is the first import:\n{wat}"
+            );
+            assert_eq!(
+                imports[1..],
+                defined_imports[..],
+                "{args:?}: the function imports follow, as the defined build has them:\n{wat}"
+            );
+            assert!(
+                !defines_a_memory(&wat),
+                "{args:?}: an imported memory is not also defined:\n{wat}"
+            );
+        }
+    }
+}
+
+/// `--help` documents `--import-memory` in its reader's terms: what the module
+/// imports, the limits the host's memory must meet, where the flag is refused,
+/// and where `infs build` fills it from.
+///
+/// clap prints the field's doc comment as the help text, so a maintainer note
+/// in it ships to every `infc --help`; the field's Rust name and the clap
+/// action behind the switch are asserted absent for that reason. The text
+/// is whitespace-normalized because clap rewraps it to the terminal width.
+#[test]
+fn help_documents_the_import_memory_flag() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    let flowed = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    for fragment in [
+        "--import-memory Import the linear memory from the host instead of defining it.",
+        "The module imports its memory as `(import \"env\" \"memory\" (memory N M))`, `N` being \
+         `--memory-pages` and `M` `--max-memory-pages`, which defaults to `N`.",
+        "one with no maximum, or a shared one, does not match the import.",
+        "The module still exports the memory as `memory`.",
+        "Builds for `wasm32` only, and is refused at `stellar` and `spacewasm`.",
+        "the flag is refused with `-v` and `--mode proof`, and it cannot be combined with a \
+         linked module.",
+        "`infs build` forwards the project's `[memory] import`; direct `infc` callers pass it \
+         by hand.",
+    ] {
+        assert!(
+            flowed.contains(fragment),
+            "--help must carry `{fragment}`, got:\n{stdout}"
+        );
+    }
+    for internal in ["import_memory", "SetTrue", "ArgAction"] {
+        assert!(
+            !flowed.contains(internal),
+            "a maintainer note must not ship as help text: `{internal}` in\n{stdout}"
+        );
+    }
 }
 
 /// Verifies that `--out-dir <path>` redirects the `.wasm` artifact to the given
