@@ -1038,12 +1038,12 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 ///   the path a build has always taken.
 /// - Resolved modules together with host imports: refused, as resolution never
 ///   produces both.
-/// - Resolved modules together with a memory import: [`link_with_options`]
-///   too, the merge. Code generation refuses every linked binding in a build
-///   that imports its memory, so only a hand-assembled call arrives here, and
-///   the merge refuses a main module that imports its memory in turn, since it
-///   models function imports only. Nothing on this path compares the bytes
-///   with `memory`; that refusal keys on the import itself.
+/// - Resolved modules together with a memory import: refused, whatever the
+///   bytes hold. Code generation refuses every linked binding in a build that
+///   imports its memory, so only a hand-assembled call arrives here, and the
+///   merge models only a memory its modules define. Handed on, it would refuse
+///   an artifact that imports its memory but link one that imports none, and
+///   that module would ship with the memory the layout asked for unread.
 /// - Host imports, the memory import or both, with no resolved modules: a
 ///   **host-embedder artifact**. The codegen output **is** the artifact:
 ///   nothing was resolved, so there is nothing to merge, and the imports are
@@ -1106,11 +1106,14 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 ///
 /// Whatever `memory` is, a [`wasm_link::HostImportError::MixedResolution`] if
 /// `externals` carries resolved modules together with host imports, which
-/// resolution refuses to produce. This is checked first.
+/// resolution refuses to produce. This is checked first. Then, whatever the
+/// bytes hold, a [`wasm_link::HostImportError::ModulesWithImportedMemory`] if
+/// `externals` carries resolved modules and `memory` describes an import,
+/// which code generation refuses to produce.
 ///
-/// With no host imports and no memory import, the same conditions as [`link`].
-/// With resolved modules and a memory import, the same, which for a main
-/// module that imports its memory is a [`LinkError::UnsupportedConstruct`].
+/// With no host imports and no memory import, the same conditions as [`link`],
+/// which for a main module that imports its memory anyway is a
+/// [`LinkError::UnsupportedConstruct`].
 ///
 /// For a host-embedder artifact, a [`wasm_link::HostImportError`] if
 /// `main_wasm` does not decode; imports a table, a global or a tag, or a
@@ -1132,6 +1135,12 @@ pub fn link_resolved(
         return Err(wasm_link::HostImportError::MixedResolution {
             modules: externals.modules.len(),
             host_imports: externals.host_imports.len(),
+        }
+        .into());
+    }
+    if has_modules && memory.is_some() {
+        return Err(wasm_link::HostImportError::ModulesWithImportedMemory {
+            modules: externals.modules.len(),
         }
         .into());
     }

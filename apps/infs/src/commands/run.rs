@@ -2355,6 +2355,33 @@ mod tests {
         );
     }
 
+    /// A symlink already under the first name is skipped like any other file:
+    /// creating the provider never follows it, so its target is not written,
+    /// and the link itself is not removed when the run ends.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_under_the_provider_name_is_neither_followed_nor_removed() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        let target = dir.path().join("user-file");
+        std::fs::write(&target, b"the user's bytes").unwrap();
+        let link = memory_provider_path(&wasm, 0);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let import = scanned_memory("env", "memory", 1, Some(1));
+
+        with_supplied_memory(&wasm, Some(&import), |preload| {
+            let (_, path) = preload.expect("the run is handed a provider");
+            assert_eq!(path, memory_provider_path(&wasm, 1).as_path());
+            Ok(())
+        })
+        .expect("the run succeeded");
+        assert_eq!(std::fs::read(&target).unwrap(), b"the user's bytes");
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "the symlink must be left in place"
+        );
+    }
+
     /// When every name is taken, the run is refused before wasmtime is called,
     /// naming the artifact and the first name tried, and nothing that was there
     /// is touched.

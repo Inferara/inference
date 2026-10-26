@@ -55,7 +55,8 @@ pub(crate) enum ImportShape {
 
 /// Why an artifact's imports could not be reconciled with a program's host
 /// declarations and the memory import its build's layout asked for, or why the
-/// two halves of a resolution could not be linked.
+/// parts a caller assembled — the two halves of a resolution, or resolved
+/// modules and a layout that imports its memory — could not be linked.
 #[derive(Debug)]
 pub enum HostImportError {
     /// The module's bytes do not decode.
@@ -125,10 +126,18 @@ pub enum HostImportError {
         modules: usize,
         host_imports: usize,
     },
+    /// Resolution produced merged modules for a build whose layout imports its
+    /// memory. Code generation refuses every linked binding in such a build, so
+    /// reaching here means the two were assembled by something other than one
+    /// build. The static merge models only a memory its modules define, so
+    /// linking would leave the memory the layout asked for unread: an artifact
+    /// that imports none would ship a module the host's memory never reaches.
+    ModulesWithImportedMemory { modules: usize },
 }
 
-/// What every arm below but [`HostImportError::MixedResolution`] adds after the
-/// detail it carries.
+/// What every arm below but [`HostImportError::MixedResolution`] and
+/// [`HostImportError::ModulesWithImportedMemory`] adds after the detail it
+/// carries.
 ///
 /// Every arm here reaches a terminal through `infc`'s `Link step failed: {e}`,
 /// and none of the eight can be caused by anything an author wrote.
@@ -146,10 +155,12 @@ pub enum HostImportError {
 /// The detail stays where it was, ahead of this: it is the only description of
 /// the disagreement that exists, so it is what a report has to carry.
 ///
-/// [`HostImportError::MixedResolution`] is left without it because it is the one
-/// arm about the *value* a caller assembled rather than about the bytes, and its
-/// own body already says so — that the two were not produced by one resolution
-/// is both the diagnosis and the place to look.
+/// [`HostImportError::MixedResolution`] and
+/// [`HostImportError::ModulesWithImportedMemory`] are left without it because
+/// they are the two arms about the *value* a caller assembled rather than about
+/// the bytes, and each body already says so — that the parts were not produced
+/// by one resolution, or by one build, is both the diagnosis and the place to
+/// look.
 const COMPILER_BUG: &str = "This is a compiler bug; please report it, quoting the detail above";
 
 impl std::fmt::Display for HostImportError {
@@ -244,6 +255,14 @@ impl std::fmt::Display for HostImportError {
                 "internal error: {modules} resolved external module(s) arrived together with \
                  {host_imports} host import(s); resolution refuses that combination, so these \
                  were not produced by one resolution"
+            ),
+            HostImportError::ModulesWithImportedMemory { modules } => write!(
+                f,
+                "internal error: {modules} resolved external module(s) arrived with a memory \
+                 layout that imports its memory as {}; code generation refuses a linked module \
+                 in a build that imports its memory, so these were not produced by one build, \
+                 and the static merge cannot carry a memory a host supplies",
+                host_import_label(MemoryImport::MODULE, MemoryImport::FIELD)
             ),
         }
     }

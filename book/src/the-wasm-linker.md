@@ -45,7 +45,10 @@ binds one is refused any build that writes a `.v`. A program that imports its
 memory is refused every such build for the same reason, and is refused beside a
 linked module too, by `infc` before external resolution, because the merge
 models only a memory its modules define, not one a host supplies (tracked under
-issue #546).
+issue #546). `inference::link_resolved` refuses the combination itself as well
+(`ModulesWithImportedMemory`), whatever the artifact imports, so a library
+caller that hands it resolved modules and an expected memory import cannot link
+a module that would leave the host's memory unread.
 
 ## Where the Linker Fits in the Pipeline
 

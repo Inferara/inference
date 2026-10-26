@@ -2650,19 +2650,21 @@ fn link_resolved_refuses_a_table_import_whether_or_not_a_memory_is_expected() {
     }
 }
 
-/// A memory expectation beside resolved modules is the merge's, which refuses
-/// a main module that imports its memory; beside host imports as well, it is
-/// still a mixed resolution.
+/// A memory expectation beside resolved modules is refused before anything
+/// is merged, whatever the artifact imports; beside host imports as well, it
+/// is still a mixed resolution, which is checked first.
 ///
 /// Code generation refuses every linked binding in a build that imports its
-/// memory, so only a hand-assembled call reaches here, and the backstop is the
-/// merge's own refusal of a non-function import. A router that sent this
-/// artifact to the host-embedder path instead would report the linked binding
-/// as a host import nobody declared, which misdescribes it entirely. The
-/// control links the binding alone, so the refusal is shown to be about the
+/// memory, so only a hand-assembled call reaches here. Handing it to the merge
+/// would be no refusal at all for an artifact that imports no memory: the
+/// merge links it, and the module ships with the memory the layout asked for
+/// unread. The rows pin both artifacts, with and without the memory import.
+/// With no expectation, the merge's own refusal of a non-function import is
+/// still the backstop for an artifact that imports its memory anyway. The
+/// control links the binding alone, so each refusal is shown to be about the
 /// memory and not the module.
 #[test]
-fn link_resolved_leaves_an_expected_memory_beside_linked_modules_to_the_merge() {
+fn link_resolved_refuses_an_expected_memory_beside_linked_modules() {
     use inference::wasm_link::ResolvedExternalModule;
 
     fn call() -> (&'static str, &'static str, Imported) {
@@ -2694,11 +2696,28 @@ fn link_resolved_leaves_an_expected_memory_beside_linked_modules_to_the_merge() 
     );
 
     let artifact = module_importing(&[expected_memory_entry(ONE_FIXED_PAGE), call()]);
-    let error = merge_refusal(&artifact, &linked, Some(ONE_FIXED_PAGE));
+    for (label, bytes) in [
+        ("an artifact importing the memory", artifact.clone()),
+        ("an artifact importing no memory", module_importing(&[call()])),
+    ] {
+        let refused = refusal_with(&bytes, &linked, Some(ONE_FIXED_PAGE));
+        assert!(
+            matches!(refused, HostImportError::ModulesWithImportedMemory { modules: 1 }),
+            "{label}: resolved modules and a layout that imports its memory are not one \
+             build's, whatever the bytes hold: {refused:?}"
+        );
+        let rendered = refused.to_string();
+        assert!(
+            rendered.contains("`env`.`memory`") && rendered.contains("not produced by one build"),
+            "{label}: the refusal names the memory and says the parts were assembled: {rendered}"
+        );
+    }
+
+    let error = merge_refusal(&artifact, &linked, None);
     assert!(
         refuses_a_non_function_import(&error),
-        "the merge models function imports only, and refuses the memory import as one it \
-         cannot carry: {error}"
+        "with no expectation the merge is the backstop: it models function imports only, and \
+         refuses the memory import as one it cannot carry: {error}"
     );
 
     let mut mixed = declared_host_imports();
