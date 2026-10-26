@@ -104,6 +104,8 @@ No `(memory …)` is defined. The data segment is the ordinary active segment of
 
 One program is the exception. A program that touches no memory, at the default layout, has a defined build with no memory, no stack pointer and neither export. In import mode it still imports `env.memory` and defines and exports the stack pointer and `memory`, because a layout that imports its memory is never the default; the type, function, code and custom sections are still the defined build's.
 
+**A runnable example.** [inference-host-memory-demo](https://github.com/Inference-Global-Software/inference-host-memory-demo) is a small project built with `import = true`. Its host, a Node.js script or a browser page, creates the memory, feeds an Inference program sensor readings through a host function, and reads the two arrays the program reports in place, at addresses inside that memory. It then offers the module the memories its import does not admit, and the engine refuses each one. Both views animate the run, so the stack frame and the constants can be watched changing in the host's memory.
+
 #### The embedder contract
 
 WebAssembly import matching checks the memory's type — its limits, and that it is unshared, 32-bit and of the default page size — and nothing about its contents or how the host uses it. The first rule below is enforced by that check; the others are rules the embedder keeps, because the module cannot check them when it is instantiated.
