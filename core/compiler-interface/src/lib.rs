@@ -675,14 +675,15 @@ impl TargetName {
     /// The same mirror rule as [`Self::supports_proof_mode`]: the emission-side
     /// target decides, this copy exists for a front end that has only the name.
     ///
-    /// Named after `Target::supports_host_imports` in `inference-wasm-codegen`,
-    /// the predicate there that asks what the embedder links rather than what
-    /// the decoder reads. `Stellar` answers `false` because the value-ABI
-    /// rewrite accepts no import, and a contract that has a memory defines and
-    /// exports it. `SpaceWasm` answers `false` for now: the interpreter decodes
-    /// a memory import and can bind one its embedder registers, but this
-    /// toolchain does not build for such an embedder and the F´ reference hosts
-    /// register functions only. Issue #547 tracks lifting it.
+    /// Named `supports_*` after `Target::supports_host_imports` in
+    /// `inference-wasm-codegen`: like that predicate, and unlike the
+    /// `permits_*` ones, it is not a claim about what the decoder reads.
+    /// `Stellar` answers `false` because the value-ABI rewrite accepts no
+    /// import, and a contract that has a memory defines and exports it.
+    /// `SpaceWasm` answers `false` for now: the interpreter decodes a memory
+    /// import and can bind one its embedder registers, but this toolchain does
+    /// not build for such an embedder and the F´ reference hosts register
+    /// functions only. Issue #547 tracks lifting it.
     #[must_use]
     pub fn supports_imported_memory(self) -> bool {
         match self {
@@ -1070,9 +1071,9 @@ pub struct MemoryRequest {
 ///
 /// This is shared vocabulary rather than a code-generation detail: a project's
 /// manifest, the compiler flags that override it, and the emitter that turns the
-/// three numbers into a memory section and a `__stack_pointer` initializer all
-/// read this one type. A layout a build accepts is therefore exactly a layout that can
-/// be emitted.
+/// three numbers into a memory section, or a memory import, and a
+/// `__stack_pointer` initializer all read this one type. A layout a build
+/// accepts is therefore exactly a layout that can be emitted.
 ///
 /// It is deliberately not mirrored by a code-generation twin the way
 /// [`WasmFeatureName`] is by `EmitFeatures`. That mirror earns its place because
@@ -1083,13 +1084,14 @@ pub struct MemoryRequest {
 /// nothing but a second place for the invariants below to drift apart.
 ///
 /// The memory is fixed unless a build asks otherwise: the maximum defaults to
-/// the size, so the memory section declares `min == max` and `memory.grow` can
-/// never move the end of memory. A build may raise the maximum above the size,
-/// which lets a linked module or the host grow the memory up to it; nothing this
-/// compiler emits grows memory itself. The size is what the stack must fit in,
-/// since it is all a module is guaranteed at instantiation, and the maximum is
-/// what the overflow trap's headroom is measured against, since it is how far
-/// growth can move the end of memory.
+/// the size, so the memory section (or the memory import) declares
+/// `min == max` and `memory.grow` can never move the end of memory. A build
+/// may raise the maximum above the size, which lets a linked module or the
+/// host grow the memory up to it; nothing this compiler emits grows memory
+/// itself. The size is what the stack must fit in, since it is all a module is
+/// guaranteed at instantiation, and the maximum is what the overflow trap's
+/// headroom is measured against, since it is how far growth can move the end
+/// of memory.
 ///
 /// Code generation places the shadow stack at the bottom of memory: it spans
 /// `[0, stack_size)` and `__stack_pointer` grows downward from `stack_size`
@@ -1130,12 +1132,13 @@ pub struct MemoryRequest {
 /// emitter would have to refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MemoryLayout {
-    /// Linear memory size in 64 KiB pages: the memory section's minimum, and
-    /// every page a module is guaranteed at instantiation.
+    /// Linear memory size in 64 KiB pages: the memory section's minimum, or
+    /// the memory import's, and every page a module is guaranteed at
+    /// instantiation.
     pages: u32,
-    /// The most pages the memory may grow to: the memory section's maximum.
-    /// Equal to `pages` unless the build asked for more, so by default the
-    /// memory is fixed rather than growable.
+    /// The most pages the memory may grow to: the memory section's maximum,
+    /// or the memory import's. Equal to `pages` unless the build asked for
+    /// more, so by default the memory is fixed rather than growable.
     max_pages: u32,
     /// Size of the shadow-stack region in bytes, occupying `[0, stack_size)`.
     stack_size: u32,
@@ -1236,14 +1239,16 @@ impl MemoryLayout {
         Ok(layout)
     }
 
-    /// Linear memory size in 64 KiB pages: the memory section's minimum.
+    /// Linear memory size in 64 KiB pages: the memory section's minimum, or
+    /// the memory import's.
     #[must_use]
     pub fn pages(self) -> u32 {
         self.pages
     }
 
-    /// The most pages the memory may grow to: the memory section's maximum.
-    /// Equal to [`Self::pages()`] unless the build asked for more.
+    /// The most pages the memory may grow to: the memory section's maximum,
+    /// or the memory import's. Equal to [`Self::pages()`] unless the build
+    /// asked for more.
     #[must_use]
     pub fn max_pages(self) -> u32 {
         self.max_pages

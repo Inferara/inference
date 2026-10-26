@@ -178,8 +178,9 @@ pub enum AbiReturn {
 ///
 /// A position in the descriptor is no substitute either. Entries follow the
 /// order of the *function* exports in the export section, and a module with
-/// memory exports `memory` and `__stack_pointer` there as well, so entry `k` is
-/// not export `k`.
+/// memory exports `memory` and `__stack_pointer` there as well — an imported
+/// memory is re-exported as `memory` all the same — so entry `k` is not export
+/// `k`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportSignature {
     /// The exported name, as it appears in the export section.
@@ -300,7 +301,8 @@ pub struct CodegenOutput {
     /// the function exports in the export section.
     ///
     /// Not the order of the export section itself: a module with memory also
-    /// exports `memory` and `__stack_pointer` there, after every function, so
+    /// exports `memory` and `__stack_pointer` there, after every function, and
+    /// does so when it imports the memory too, re-exporting it as `memory`, so
     /// entry `k` here is generally not export `k` of the emitted module.
     ///
     /// Pure observation: recorded while a function is registered, read by
@@ -376,7 +378,8 @@ impl CodegenOutput {
     /// The source-level signature of every exported function, in the order of
     /// the function exports in the export section — which is not the order of
     /// the export section, since a module with memory also exports `memory` and
-    /// `__stack_pointer` there.
+    /// `__stack_pointer` there, an imported memory re-exported as `memory` all
+    /// the same.
     ///
     /// Empty for a module that exports no function. The order is a convenience
     /// for a reader; an entry is identified by its

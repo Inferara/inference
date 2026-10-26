@@ -1224,7 +1224,11 @@ The module record changes shape too, in one place. Code generation always
 emits its linear memory with a maximum — by default equal to the minimum, or
 the larger bound a build declares with `[memory] max-pages` — so a module it
 produced alone reads `Mm {|lim_min := N%N; lim_max := Some(M%N)|}` with
-`M >= N`, and `M = N` unless the build asked for growth.
+`M >= N`, and `M = N` unless the build asked for growth. (A build that
+imports its memory carries those limits on an import instead and never
+reaches this translator from the toolchain; see [Obligations only an
+import-free module can
+discharge](#obligations-only-an-import-free-module-can-discharge).)
 A memoryless main that adopts a Tier-B external's memory takes that
 external's limits verbatim, and a `wasm32-unknown-unknown` artifact
 declares no maximum — so `lim_max := None` is a shape only a link
@@ -1433,7 +1437,8 @@ elaborated by the `coqc` gate and are not discharged.
 
 `ValidExistsSpec`/`ValidUniqueSpec` existentially quantify a module
 *runtime* whose construction requires typing and allocating the module
-with an **empty import list**. `ValidSpec` needs no runtime, so this
+with an **empty import list**. `ValidSpec`'s universal branch needs no
+runtime (a body with a stack frame cannot take it; see below), so this
 constraint is new with reachability: a module that still carries
 imports and one `exists`/`unique` obligation gets a well-formed but
 undischargeable theorem. The linked pipeline's always-link invariant
@@ -1448,6 +1453,20 @@ list is empty because the merge emptied it. A reachability fixture that
 compiles on its own can never reach this shape, and a linked fixture
 whose obligations are all universal never needs the runtime, so the
 constraint has a witness only where the two meet.
+
+An imported linear memory is an import no link removes, which is why a
+module carrying one never reaches this translator from the toolchain:
+code generation refuses a layout that imports its memory in `proof`
+mode, and `infc` writes no `.v` for one. Such a module emits `(import
+"env" "memory" (memory N M))` in place of a memory section, so a direct
+`wasm_to_v` caller holding one would get a record whose `mod_imports`
+carries `Mi "env" "memory" (MID_mem {|lim_min := N%N; lim_max :=
+Some(M%N)|})` and whose `mod_mems := nil`. No `module_runtime` exists
+for that record, so every obligation that needs one — a reachability
+obligation, or a `ValidSpec` over a body whose result depends on memory,
+globals or a call (every frame-bearing body among them), which must take
+the `ValidSpec_at` branch (see below) — is a well-formed theorem no
+proof can discharge.
 
 ### The name section is load-bearing for reachability
 

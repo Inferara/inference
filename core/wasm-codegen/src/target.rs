@@ -107,7 +107,9 @@ pub enum Target {
     /// [`Target::permits_bulk_memory`]), an exported function outside the scalar
     /// set the contract calling convention can encode is refused, a host import
     /// is refused because the Soroban host-call convention is unbound here (see
-    /// [`Target::supports_host_imports`]), and [`OptLevel::Oz`] is this target's
+    /// [`Target::supports_host_imports`]), an imported memory is refused because
+    /// the value-ABI rewrite accepts no import (see
+    /// [`Target::supports_imported_memory`]), and [`OptLevel::Oz`] is this target's
     /// [`default_opt_level`](Target::default_opt_level), for a post-build tool
     /// to act on. The level actually recorded on the output is whatever the
     /// caller passes: the `Debug` build profile resolves this target to
@@ -143,6 +145,12 @@ pub enum Target {
     ///   saturating-truncation proposals are open upstream beside it
     ///   (nasa/spacewasm#55 and #56) and cost this target nothing, because code
     ///   generation emits no instruction from either family at any target.
+    /// - A growable memory is refused: the interpreter is loaded with
+    ///   `memory.grow` disallowed, so room above the memory's size could never
+    ///   be reached (see [`Target::permits_memory_growth`]).
+    /// - An imported memory is refused for now: the interpreter can bind a
+    ///   memory its embedder registers, but this toolchain does not build for
+    ///   one yet (see [`Target::supports_imported_memory`]; issue #547).
     /// - [`OptLevel::Os`] is this target's
     ///   [`default_opt_level`](Target::default_opt_level), size being the scarce
     ///   resource on a flight computer. As everywhere, the level is recorded for
@@ -154,11 +162,14 @@ pub enum Target {
     /// operand-stack depths -- which nothing in this crate checks: emission is
     /// target-blind, and every one of those maxima is a property of the finished
     /// module rather than of any instruction. About the bytes, therefore, this
-    /// target answers the *instruction set* question alone; the one question it
-    /// answers that is not about them is whether a host import may be bound
-    /// (see [`Target::supports_host_imports`], which this target admits), and
-    /// that asks what a call out of the artifact means rather than what the
-    /// decoder reads. `infc` asks the rest of
+    /// target answers the *instruction set* question alone; the two questions
+    /// it answers that are not about them are whether a host import may be
+    /// bound (see [`Target::supports_host_imports`], which this target admits)
+    /// and whether the memory may be imported (see
+    /// [`Target::supports_imported_memory`], which it refuses for now), and
+    /// neither is about what the decoder reads: the first asks what a call out
+    /// of the artifact means, the second what the embedder supplies.
+    /// `infc` asks the rest of
     /// `inference-target-conformance`, of the linked artifact and before it
     /// writes it, so a module a `spacewasm` build leaves on disk is one the
     /// interpreter loads. One of those maxima is asked of the source first:
@@ -568,9 +579,10 @@ impl Target {
     /// fn` to a host import -- `use { f } from host::<module>;`, whose body no
     /// `.wasm` in the build supplies and an embedder registers at run time.
     ///
-    /// The one predicate here that is not a claim about the instruction set.
-    /// The others ask what a runtime will *decode*; this one asks what a call
-    /// out of the artifact *means*, which is a property of the target's calling
+    /// One of the two predicates here that are not a claim about the
+    /// instruction set; [`Self::supports_imported_memory`] is the other. The
+    /// rest ask what a runtime will *decode*; this one asks what a call out of
+    /// the artifact *means*, which is a property of the target's calling
     /// convention. The two come apart: a runtime can decode an import perfectly
     /// and still be the wrong thing to hand it to.
     ///
@@ -600,6 +612,43 @@ impl Target {
         match self {
             Self::Wasm32 | Self::SpaceWasm => true,
             Self::Stellar => false,
+        }
+    }
+
+    /// Returns whether a build for this target may import its linear memory
+    /// from the host as `env.memory` rather than define it -- a layout for
+    /// which [`MemoryLayout::is_imported`] is true.
+    ///
+    /// Named with [`Self::supports_host_imports`] because it is the other
+    /// predicate here that is not a claim about the instruction set: a runtime
+    /// can decode a memory import and still have no embedder that supplies
+    /// one, and what this asks is whether the embedder the artifact is handed
+    /// to links one.
+    ///
+    /// `Stellar` answers `false` because the value-ABI rewrite every `stellar`
+    /// artifact goes through accepts no import, and a Soroban contract defines
+    /// and exports the memory it uses, so a contract importing one could not
+    /// be deployed. `SpaceWasm` answers `false` for now: the interpreter can
+    /// bind a memory its embedder registers, but this toolchain does not build
+    /// for such an embedder yet, and the F´ reference hosts `infs run` provides
+    /// register functions only; building for one is tracked under issue #547.
+    /// `Wasm32` answers `true`, its embedders resolving a memory import by its
+    /// two-level name as they resolve a function.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use inference_wasm_codegen::Target;
+    ///
+    /// assert!(Target::Wasm32.supports_imported_memory());
+    /// assert!(!Target::Stellar.supports_imported_memory());
+    /// assert!(!Target::SpaceWasm.supports_imported_memory());
+    /// ```
+    #[must_use]
+    pub fn supports_imported_memory(self) -> bool {
+        match self {
+            Self::Wasm32 => true,
+            Self::Stellar | Self::SpaceWasm => false,
         }
     }
 
@@ -697,7 +746,7 @@ mod tests {
     /// or a narrowing of it" and the callers reading these predicates need
     /// re-examining.
     ///
-    /// A fifth predicate now exists and is deliberately not here.
+    /// Three more predicates exist and are deliberately not here.
     /// `supports_host_imports` splits `Target::ALL` neither way -- `SpaceWasm`
     /// admits a host import and `Stellar` does not -- and that is a different
     /// claim rather than a counterexample to this one. The four below are about
@@ -707,7 +756,13 @@ mod tests {
     /// another leave unbound with nothing following from it about what either
     /// decodes. Added to this loop it would fail, and relaxing an assertion to
     /// admit it would throw away what the loop proves. It is pinned next door,
-    /// against its own split.
+    /// against its own split. `permits_memory_growth` splits the set neither way
+    /// either, `Stellar` growing a memory and `SpaceWasm` not.
+    /// `supports_imported_memory` happens to split it the default-only way
+    /// today, but it asks what the embedder supplies rather than what the
+    /// decoder reads, and admitting an imported memory at `SpaceWasm` (issue
+    /// #547) would change nothing this loop is about; asserted here, that change
+    /// would read as a breach of the envelope.
     #[test]
     fn only_the_default_target_admits_the_compiler_s_own_extensions() {
         for target in Target::ALL {
@@ -894,6 +949,12 @@ mod tests {
                 name.permits_memory_growth(),
                 emitted.permits_memory_growth(),
                 "`{}` disagrees with its emission target about memory growth",
+                name.as_str()
+            );
+            assert_eq!(
+                name.supports_imported_memory(),
+                emitted.supports_imported_memory(),
+                "`{}` disagrees with its emission target about an imported memory",
                 name.as_str()
             );
         }
