@@ -16,7 +16,8 @@
 //!
 //! One module here runs after those phases rather than before: [`imports`] reads
 //! a *compiled* module's import section and holds it to the host bindings the
-//! driver collected. A program whose imports are meant to survive never reaches
+//! driver collected, and to the memory import the build's layout asked for when
+//! it asked for one. A program whose imports are meant to survive never reaches
 //! the merge, so it never gets the linker's guarantee that nothing is left
 //! unsatisfied, and that check is what stands in its place.
 

@@ -1898,6 +1898,7 @@ fn run() {
         let linked = match link_resolved(
             codegen_output.wasm(),
             &externals,
+            None,
             &LinkOptions { external_specs },
         ) {
             Ok(linked) => linked,

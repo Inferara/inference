@@ -356,9 +356,10 @@ pub use inference_wasm_linker::LinkError;
 ///
 /// [`LinkOutput::wasm`] is self-contained for every value a merge produces, and
 /// says so. The one value in this crate that is not is [`link_resolved`]'s
-/// host-import pass-through: nothing was merged, and the module still declares
-/// the imports an embedder is asked to satisfy, which is that path's whole
-/// purpose. A caller must not read self-containment off the type.
+/// host-embedder pass-through: nothing was merged, and the module still
+/// declares the imports an embedder is asked to satisfy, host functions, its
+/// memory or both, which is that path's whole purpose. A caller must not read
+/// self-containment off the type.
 pub use inference_wasm_linker::{LinkOutput, LinkWarning};
 
 /// Re-export of the static-merge linker's policy inputs, so a caller of
@@ -366,6 +367,13 @@ pub use inference_wasm_linker::{LinkOutput, LinkWarning};
 /// sections a linked library ships without taking a direct dependency on
 /// `inference-wasm-linker`.
 pub use inference_wasm_linker::{ExternalSpecPolicy, LinkOptions};
+
+/// Re-export of the memory import a build's layout asks its host for, so a
+/// caller of [`link_resolved`] that holds one — such as the value the layout
+/// it handed code generation returns from `memory_import` — can name the type
+/// of the `memory` parameter without taking a direct dependency on
+/// `inference-wasm-codegen` or `inference-compiler-interface`.
+pub use inference_wasm_codegen::MemoryImport;
 
 /// Re-export of the linker's write-set contract, which
 /// [`wasm_link::resolve_external_modules`] produces and [`link`] consumes, so a
@@ -917,12 +925,17 @@ pub fn link_with_warnings(
 ///
 /// This is the merge over **linked** externals alone. A caller holding a
 /// [`wasm_link::ResolvedExternals`] must go through [`link_resolved`], which
-/// decides between this merge and the host-import pass-through: handing a host
-/// program's [`wasm_link::ResolvedExternals::module_bytes`] to this entry point
-/// drops the declared host set entirely, and the module's surviving imports are
-/// then reported as [`inference_wasm_linker::LinkError::UnsatisfiedImport`] —
-/// which names the import and never the wrong entry point, so the author debugs
-/// the program rather than the call.
+/// decides between this merge and the host-embedder pass-through: handing a
+/// host-embedder artifact to this entry point with its
+/// [`wasm_link::ResolvedExternals::module_bytes`] drops the declared host set
+/// and the expected memory import entirely, and the merge then fails closed on
+/// the imports that survive. A surviving function import is
+/// reported as [`inference_wasm_linker::LinkError::UnsatisfiedImport`], which
+/// names the import and never the wrong entry point, so the author debugs the
+/// program rather than the call. An imported memory is refused first, as a
+/// [`inference_wasm_linker::LinkError::UnsupportedConstruct`] for a main
+/// module with a non-function import, which names neither the import nor the
+/// entry point.
 ///
 /// # Errors
 ///
@@ -993,8 +1006,8 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 }
 
 /// Links the output of [`wasm_link::resolve_external_modules`] into the shipped
-/// artifact, taking whichever of the two paths that resolution's answer calls
-/// for.
+/// artifact, taking whichever of the two paths that resolution's answer and the
+/// build's memory configuration call for.
 ///
 /// This is the single place the choice is made, and the rule for a caller that
 /// **ships** an artifact: reach the linker through here. A rule rather than an
@@ -1003,24 +1016,46 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 /// [`link_with_options`] directly, which is right for them, since a test
 /// exercising the merge over linked externals alone is asking for exactly that
 /// merge and that is verbatim the call this makes for it. `infc` is the only
-/// in-tree caller that ships. A host program handed to a merge entry point fails
-/// closed rather than shipping unchecked: its imports have no external to
-/// satisfy them, so the linker reports
-/// [`inference_wasm_linker::LinkError::UnsatisfiedImport`] instead of producing
-/// a module.
+/// in-tree caller that ships. A host-embedder artifact handed to a merge entry
+/// point fails closed rather than shipping unchecked, since its imports have no
+/// external to satisfy them: the linker reports
+/// [`inference_wasm_linker::LinkError::UnsatisfiedImport`] for a surviving
+/// function import, or, for an imported memory, which the merge refuses first,
+/// [`inference_wasm_linker::LinkError::UnsupportedConstruct`], instead of
+/// producing a module.
 ///
-/// With no host imports, exactly [`link_with_options`] over the resolved bytes
-/// and contracts — byte for byte the path a build has always taken.
+/// `memory` is the memory import the build's layout asked for, its
+/// [`MemoryLayout::memory_import`](inference_wasm_codegen::MemoryLayout::memory_import),
+/// and `None` for a build that defines its memory. It is a parameter rather
+/// than part of `externals` because it is the caller's configuration and not
+/// resolution's answer: it comes from the build's memory layout, not from the
+/// program's `use` bindings.
 ///
-/// With host imports, the codegen output **is** the artifact: nothing was
-/// resolved, so there is nothing to merge, and the imports are meant to survive
-/// into the shipped module for an embedder to satisfy. The bytes are returned
-/// unchanged, after the check below.
+/// The paths, by what the artifact is left needing from its environment:
+///
+/// - Nothing, with no host imports and no memory import: exactly
+///   [`link_with_options`] over the resolved bytes and contracts, byte for byte
+///   the path a build has always taken.
+/// - Resolved modules together with host imports: refused, as resolution never
+///   produces both.
+/// - Resolved modules together with a memory import: [`link_with_options`]
+///   too, the merge. Code generation refuses every linked binding in a build
+///   that imports its memory, so only a hand-assembled call arrives here, and
+///   the merge refuses a main module that imports its memory in turn, since it
+///   models function imports only. Nothing on this path compares the bytes
+///   with `memory`; that refusal keys on the import itself.
+/// - Host imports, the memory import or both, with no resolved modules: a
+///   **host-embedder artifact**. The codegen output **is** the artifact:
+///   nothing was resolved, so there is nothing to merge, and the imports are
+///   meant to survive into the shipped module for an embedder to satisfy. The
+///   bytes are returned unchanged, with no warnings, after the check below.
 ///
 /// # What the check is for
 ///
 /// The pass-through is only sound because `main_wasm`'s import section is held
-/// to equal the declared host set, on `(module, field, params, results)`.
+/// to equal the declared host set, on `(module, field, params, results)`, and
+/// to carry exactly the memory import `memory` describes, on its name and its
+/// type, and none when `memory` is `None`.
 ///
 /// That equality is what makes the `--host-imports` allowlist a control rather
 /// than documentation. `infc` checks that allowlist against the *driver's* set
@@ -1034,17 +1069,28 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 /// before this function) counts on — a cap measured against the declaration
 /// means nothing unless the artifact declares the same arity.
 ///
+/// The memory half is held to `memory` rather than to anything resolution
+/// produced, because code generation wrote the import from that same value,
+/// so a name or a limit that differs is code generation disagreeing with the
+/// layout it was given. An embedder provides the memory the import describes,
+/// and the layout placed the stack and the static data within the minimum and
+/// measured the overflow trap's headroom against the maximum, so an import
+/// that drifted from the layout would ship a host contract the program was not
+/// laid out for.
+///
 /// # The divergence it stands in for
 ///
 /// [`link_with_warnings`] records that this crate's no-op path accepts main-side
 /// shapes the linker rejects, and argues the divergence is benign because a
-/// program with no import to satisfy has no declaration to contract. The host
-/// path breaks that premise outright: it has imports and it has declarations,
-/// and it still does not run the linker. So the same list of accepted shapes
+/// program with no import to satisfy has no declaration to contract. The
+/// host-embedder path breaks that premise outright: it has imports and
+/// something that asked for them — declarations, the layout, or both — and it
+/// still does not run the linker. So the same list of accepted shapes
 /// applies here with nothing to excuse it — a data or element segment, a start
-/// function, a table, a second memory, a float or `v128` in one of main's own
-/// signatures, and a duplicated or malformed `inference.spec_funcs` or
-/// `inference.hspecs` custom section all pass through unexamined.
+/// function, a table, a second defined memory or a defined one beside the
+/// imported memory, a float or `v128` in one of main's own signatures, and a
+/// duplicated or malformed `inference.spec_funcs` or `inference.hspecs` custom
+/// section all pass through unexamined.
 ///
 /// What makes that safe is the scope of what the linker's main-side gate is for.
 /// It exists so the *merge* can assume a shape it can rewrite: index spaces it
@@ -1052,25 +1098,45 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 /// merge happens here, and the bytes that ship are the bytes codegen wrote — so
 /// a shape the merge could not have handled is not a shape this path mishandled.
 /// The one property that genuinely must hold of a module nobody rewrote is that
-/// its unsatisfied imports are the ones the author asked for, and that is
-/// precisely what the equality check establishes.
+/// its unsatisfied imports are the ones the build asked for, the author's host
+/// bindings and the memory its configuration imports, and that is precisely
+/// what the equality check establishes.
 ///
 /// # Errors
 ///
-/// With no host imports, the same conditions as [`link`].
+/// Whatever `memory` is, a [`wasm_link::HostImportError::MixedResolution`] if
+/// `externals` carries resolved modules together with host imports, which
+/// resolution refuses to produce. This is checked first.
 ///
-/// With host imports, a [`wasm_link::HostImportError`] if `main_wasm` does not
-/// decode, imports anything that is not a function, imports a function the
-/// program declared no host binding for, omits one it did declare, carries one
-/// at a different signature, or imports a two-level name twice — and if
-/// `externals` somehow carries resolved modules as well, which resolution
-/// refuses to produce.
+/// With no host imports and no memory import, the same conditions as [`link`].
+/// With resolved modules and a memory import, the same, which for a main
+/// module that imports its memory is a [`LinkError::UnsupportedConstruct`].
+///
+/// For a host-embedder artifact, a [`wasm_link::HostImportError`] if
+/// `main_wasm` does not decode; imports a table, a global or a tag, or a
+/// memory when `memory` is `None`; imports a function the program declared no
+/// host binding for, omits one it did declare, or carries one at a different
+/// signature; imports a two-level name twice, which includes a second memory
+/// under the memory's name, or a function under it beside that memory;
+/// imports a memory under another name or at another type than `memory`
+/// describes; or imports no memory when `memory` describes one.
 pub fn link_resolved(
     main_wasm: &[u8],
     externals: &wasm_link::ResolvedExternals,
+    memory: Option<MemoryImport>,
     options: &LinkOptions,
 ) -> anyhow::Result<LinkOutput> {
-    if externals.host_imports.is_empty() {
+    let has_modules = !externals.modules.is_empty();
+    let has_host_imports = !externals.host_imports.is_empty();
+    if has_modules && has_host_imports {
+        return Err(wasm_link::HostImportError::MixedResolution {
+            modules: externals.modules.len(),
+            host_imports: externals.host_imports.len(),
+        }
+        .into());
+    }
+    let host_embedder = !has_modules && (has_host_imports || memory.is_some());
+    if !host_embedder {
         return link_with_options(
             main_wasm,
             &externals.module_bytes(),
@@ -1078,14 +1144,7 @@ pub fn link_resolved(
             options,
         );
     }
-    if !externals.modules.is_empty() {
-        return Err(wasm_link::HostImportError::MixedResolution {
-            modules: externals.modules.len(),
-            host_imports: externals.host_imports.len(),
-        }
-        .into());
-    }
-    wasm_link::imports::check_declared_host_imports(main_wasm, &externals.host_imports)?;
+    wasm_link::imports::check_declared_host_imports(main_wasm, &externals.host_imports, memory)?;
     Ok(LinkOutput {
         wasm: main_wasm.to_vec(),
         warnings: Vec::new(),
