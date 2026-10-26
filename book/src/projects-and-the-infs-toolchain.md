@@ -418,10 +418,12 @@ In **project mode** (no path given):
   the limits of the import off the artifact itself — after linking and
   `[build.wasm-opt]`, so they are the limits of the bytes that run, not the
   manifest's — writes a small module that defines and exports one memory at
-  exactly those limits beside the artifact as `out/main.wasm.memory`, and
-  invokes wasmtime with `--preload env=out/main.wasm.memory` ahead of
-  `--invoke`. The file is removed when wasmtime returns, whether the run
-  succeeded or failed. An artifact that imports a function as well as its
+  exactly those limits beside the artifact, under a name that is this run's
+  own (`out/main.wasm.<pid>-0.memory`), and invokes wasmtime with
+  `--preload env=out/main.wasm.<pid>-0.memory` ahead of `--invoke`. The file
+  is removed when wasmtime returns, whether the run succeeded or failed, and
+  because each run creates its own, two runs of one artifact that overlap
+  never share or remove each other's. An artifact that imports a function as well as its
   memory is still refused, for the function. Single-file `run` supplies the
   memory the same way, beside `out/<stem>.wasm`. Nothing else touches that
   memory and no other module shares it, and a project's `main` takes no

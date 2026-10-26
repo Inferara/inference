@@ -689,10 +689,11 @@ A memory import is a different matter from a function import. At `wasm32`
 `infs run` still registers no host function, but it supplies an imported memory
 (see [`[memory]`](#memory)): the wasmtime CLI supplies none, so `infs run` writes
 a small module that exports one memory at exactly the limits the built
-artifact's own import declares, beside the artifact as `<artifact>.memory`
-(`out/main.wasm.memory` in a project), runs wasmtime with that module preloaded
-under the import's module name, and removes the file once the run ends, whether
-it succeeded or not. A `wasm32` program that imports its memory and no function
+artifact's own import declares, beside the artifact under a name of its own
+run's (`out/main.wasm.<pid>-0.memory` in a project, so two runs of one artifact
+that overlap never share or remove each other's), runs wasmtime with that module
+preloaded under the import's module name, and removes the file once the run
+ends, whether it succeeded or not. A `wasm32` program that imports its memory and no function
 therefore runs; one that imports a function as well is refused for the
 function, and when every one is an F´ reference host the memory import does not
 stop the refusal from naming the `spacewasm` target. Where the manifest sets

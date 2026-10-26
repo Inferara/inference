@@ -1363,10 +1363,13 @@ fn wasmtime_argv(
 /// declares — and `run` receives the module name and the path the provider was
 /// written to, for [`wasmtime_argv`]'s `--preload`.
 ///
-/// The provider is written as `<artifact>.memory`, a sibling of the artifact,
-/// because the CLI takes a module by path and the artifact's directory is one
-/// the build has just written to; and it is removed when `run` returns, whether
-/// it returned `Ok` or `Err`, by a guard that holds it across the call. Removal
+/// The provider is written as a sibling of the artifact, because the CLI takes
+/// a module by path and the artifact's directory is one the build has just
+/// written to, under a name no other run holds (see
+/// [`write_memory_provider`]): two `infs run`s of one artifact that overlap
+/// each supply their own memory, and neither removes the file the other's
+/// wasmtime has yet to open. It is removed when `run` returns, whether it
+/// returned `Ok` or `Err`, by a guard that holds it across the call. Removal
 /// is best effort: a provider that cannot be removed is left behind rather than
 /// turned into a failure of a run that has already happened.
 ///
@@ -1382,22 +1385,73 @@ fn with_supplied_memory(
     let Some(memory) = memory else {
         return run(None);
     };
-    let provider = RemovedOnDrop(memory_provider_path(wasm_path));
-    std::fs::write(&provider.0, memory_provider(memory)).with_context(|| {
-        format!(
-            "Failed to write the module supplying the imported memory to {}",
-            provider.0.display()
-        )
-    })?;
+    let provider = write_memory_provider(wasm_path, &memory_provider(memory))?;
     run(Some((memory.module.as_str(), provider.0.as_path())))
 }
 
-/// The path [`with_supplied_memory`] writes the memory provider to: the
-/// artifact path with `.memory` appended (`out/main.wasm` →
-/// `out/main.wasm.memory`).
-fn memory_provider_path(wasm_path: &Path) -> PathBuf {
+/// How many names [`write_memory_provider`] tries before it gives up.
+const MEMORY_PROVIDER_ATTEMPTS: u32 = 64;
+
+/// Writes `bytes` to a provider beside `wasm_path` that this call created, and
+/// returns the guard that removes it.
+///
+/// Each name is created with `create_new`, so an existing file is never
+/// opened: a provider another run is still using is neither overwritten nor
+/// removed, and a stale one a killed run left behind is never trusted, since
+/// its limits may be another build's. A name that is taken moves the call on
+/// to the next one, for [`MEMORY_PROVIDER_ATTEMPTS`] names in all.
+///
+/// # Errors
+///
+/// An error naming the provider when it cannot be created or written, or when
+/// every name tried is taken.
+fn write_memory_provider(wasm_path: &Path, bytes: &[u8]) -> Result<RemovedOnDrop> {
+    use std::io::Write as _;
+
+    for attempt in 0..MEMORY_PROVIDER_ATTEMPTS {
+        let path = memory_provider_path(wasm_path, attempt);
+        let created = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path);
+        let mut file = match created {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| provider_write_failure(&path));
+            }
+        };
+        let provider = RemovedOnDrop(path);
+        file.write_all(bytes)
+            .with_context(|| provider_write_failure(&provider.0))?;
+        return Ok(provider);
+    }
+    bail!(
+        "Failed to write the module supplying the imported memory beside {}: the {} names \
+         tried, from {}, are all taken",
+        wasm_path.display(),
+        MEMORY_PROVIDER_ATTEMPTS,
+        memory_provider_path(wasm_path, 0).display()
+    )
+}
+
+/// The error a provider that could not be written at `path` is reported with.
+fn provider_write_failure(path: &Path) -> String {
+    format!(
+        "Failed to write the module supplying the imported memory to {}",
+        path.display()
+    )
+}
+
+/// The `attempt`-th path [`write_memory_provider`] tries: the artifact path
+/// with `.<pid>-<attempt>.memory` appended (`out/main.wasm` →
+/// `out/main.wasm.4242-0.memory`).
+///
+/// The process id keeps two overlapping `infs run`s apart, and the attempt
+/// number moves past a name a stale provider still holds.
+fn memory_provider_path(wasm_path: &Path, attempt: u32) -> PathBuf {
     let mut provider = wasm_path.as_os_str().to_os_string();
-    provider.push(".memory");
+    provider.push(format!(".{}-{attempt}.memory", std::process::id()));
     PathBuf::from(provider)
 }
 
@@ -2025,43 +2079,55 @@ mod tests {
     }
 
     /// The provider sits beside the artifact under the artifact's own file name
-    /// with `.memory` appended, whatever the artifact is called and wherever it
-    /// lies: a relative project artifact, a single-file one, an absolute path,
-    /// a directory with a space in its name, and a file without an extension.
+    /// with `.<pid>-<attempt>.memory` appended, whatever the artifact is called
+    /// and wherever it lies: a relative project artifact, a single-file one, an
+    /// absolute path, a directory with a space in its name, and a file without
+    /// an extension. Each attempt names a different file.
     ///
     /// The full name is kept, as `[build.wasm-opt]` keeps it for its `.opt`
     /// sibling, so the provider reads as that artifact's and no other's.
     ///
     /// Fails if the provider replaces the artifact's extension rather than
-    /// appending to it, or lands anywhere but the artifact's directory.
+    /// appending to it, lands anywhere but the artifact's directory, or leaves
+    /// out the process id that keeps two overlapping runs apart.
     #[test]
     fn the_memory_provider_is_the_artifacts_sibling_with_memory_appended() {
+        let pid = std::process::id();
         let rows = [
-            (Path::new("out").join("main.wasm"), "main.wasm.memory"),
-            (Path::new("out").join("sensor.wasm"), "sensor.wasm.memory"),
+            (Path::new("out").join("main.wasm"), "main.wasm"),
+            (Path::new("out").join("sensor.wasm"), "sensor.wasm"),
             (
                 std::env::temp_dir()
                     .join("project")
                     .join("out")
                     .join("main.wasm"),
-                "main.wasm.memory",
+                "main.wasm",
             ),
             (
                 Path::new("my project").join("out").join("main.wasm"),
-                "main.wasm.memory",
+                "main.wasm",
             ),
-            (Path::new("out").join("main"), "main.memory"),
+            (Path::new("out").join("main"), "main"),
         ];
-        for (wasm, provider) in rows {
-            let path = memory_provider_path(&wasm);
-            assert_eq!(path.parent(), wasm.parent(), "{}", wasm.display());
-            assert_eq!(
-                path.file_name(),
-                Some(std::ffi::OsStr::new(provider)),
-                "{}",
+        for (wasm, stem) in rows {
+            for attempt in [0, 1, MEMORY_PROVIDER_ATTEMPTS - 1] {
+                let path = memory_provider_path(&wasm, attempt);
+                let expected = format!("{stem}.{pid}-{attempt}.memory");
+                assert_eq!(path.parent(), wasm.parent(), "{}", wasm.display());
+                assert_eq!(
+                    path.file_name(),
+                    Some(std::ffi::OsStr::new(&expected)),
+                    "{}",
+                    wasm.display()
+                );
+                assert_eq!(path.is_absolute(), wasm.is_absolute(), "{}", wasm.display());
+            }
+            assert_ne!(
+                memory_provider_path(&wasm, 0),
+                memory_provider_path(&wasm, 1),
+                "{}: each attempt must name its own file",
                 wasm.display()
             );
-            assert_eq!(path.is_absolute(), wasm.is_absolute(), "{}", wasm.display());
         }
     }
 
@@ -2077,17 +2143,17 @@ mod tests {
     fn a_preloaded_memory_opens_the_command_line_ahead_of_the_invocation() {
         let wasm = Path::new("out").join("main.wasm");
         let rows: [(&str, PathBuf, &str, &[&str]); 4] = [
-            ("env", memory_provider_path(&wasm), DEFAULT_ENTRY_POINT, &[]),
-            ("env", memory_provider_path(&wasm), "div", &["7", "0"]),
+            ("env", memory_provider_path(&wasm, 0), DEFAULT_ENTRY_POINT, &[]),
+            ("env", memory_provider_path(&wasm, 1), "div", &["7", "0"]),
             (
                 "host",
-                memory_provider_path(&wasm),
+                memory_provider_path(&wasm, 0),
                 "add",
                 &["--", "-1", "--preload"],
             ),
             (
                 "env",
-                Path::new("my project").join("out").join("main.wasm.memory"),
+                Path::new("my project").join("out").join("main.wasm.4242-0.memory"),
                 DEFAULT_ENTRY_POINT,
                 &["1 2"],
             ),
@@ -2135,7 +2201,7 @@ mod tests {
 
         let directory = std::ffi::OsStr::from_bytes(b"out\xff");
         let wasm = Path::new(directory).join("main.wasm");
-        let provider = memory_provider_path(&wasm);
+        let provider = memory_provider_path(&wasm, 0);
         let argv = wasmtime_argv(&wasm, DEFAULT_ENTRY_POINT, &[], Some(("env", &provider)));
         let mut expected = b"env=".to_vec();
         expected.extend_from_slice(provider.as_os_str().as_bytes());
@@ -2158,7 +2224,7 @@ mod tests {
         })
         .expect("the run succeeded");
         assert_eq!(calls, 1);
-        assert!(!memory_provider_path(&wasm).exists());
+        assert!(!memory_provider_path(&wasm, 0).exists());
 
         let err = with_supplied_memory(&wasm, None, |_| Err(anyhow!("wasmtime failed")))
             .expect_err("the run's failure is the call's");
@@ -2175,17 +2241,13 @@ mod tests {
     /// for the import, and is handed the import's module name and that path.
     /// The provider is gone once `run` returns, whether it succeeded or failed,
     /// and a failure is returned as `run` gave it.
-    ///
-    /// A stale provider a killed run left behind is overwritten rather than
-    /// trusted, since its limits may be another build's.
     #[test]
     fn a_supplied_memory_is_on_disk_for_the_run_and_gone_after_it() {
         for import in scanned_memories() {
             for succeeds in [true, false] {
                 let dir = assert_fs::TempDir::new().unwrap();
                 let wasm = dir.path().join("main.wasm");
-                let provider = memory_provider_path(&wasm);
-                std::fs::write(&provider, b"stale").unwrap();
+                let provider = memory_provider_path(&wasm, 0);
 
                 let mut calls = 0;
                 let outcome = with_supplied_memory(&wasm, Some(&import), |preload| {
@@ -2224,6 +2286,111 @@ mod tests {
         }
     }
 
+    /// Two runs of one artifact that overlap each supply their own memory: the
+    /// second is written under another name while the first is still on disk,
+    /// and the second run's ending removes only its own provider, so the first
+    /// run's wasmtime still finds the memory it was told to preload.
+    ///
+    /// Fails if both runs share a provider path, if the second overwrites the
+    /// first's bytes, or if one run's cleanup removes the other's file.
+    #[test]
+    fn overlapping_runs_of_one_artifact_keep_their_own_providers() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        let first = scanned_memory("env", "memory", 1, Some(1));
+        let second = scanned_memory("env", "memory", 2, Some(8));
+
+        with_supplied_memory(&wasm, Some(&first), |outer| {
+            let (_, outer_path) = outer.expect("the first run is handed a provider");
+            let outer_path = outer_path.to_path_buf();
+            with_supplied_memory(&wasm, Some(&second), |inner| {
+                let (_, inner_path) = inner.expect("the second run is handed a provider");
+                assert_ne!(inner_path, outer_path, "two live runs need two providers");
+                assert_eq!(std::fs::read(inner_path).unwrap(), memory_provider(&second));
+                assert_eq!(
+                    std::fs::read(&outer_path).unwrap(),
+                    memory_provider(&first),
+                    "the second run must not touch the first run's provider"
+                );
+                Ok(())
+            })?;
+            assert_eq!(
+                std::fs::read(&outer_path).expect("the second run's cleanup kept it"),
+                memory_provider(&first),
+                "the first run's provider must outlive the second run"
+            );
+            Ok(())
+        })
+        .expect("both runs succeeded");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "each run removes its own provider and only its own"
+        );
+    }
+
+    /// A file already under the first name, which a killed run may have left,
+    /// is neither trusted nor overwritten nor removed: the provider is written
+    /// under the next name, and the stale file is exactly as it was afterwards.
+    #[test]
+    fn a_stale_provider_is_skipped_rather_than_reused() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        let stale = memory_provider_path(&wasm, 0);
+        std::fs::write(&stale, b"stale").unwrap();
+        let import = scanned_memory("env", "memory", 1, Some(1));
+
+        with_supplied_memory(&wasm, Some(&import), |preload| {
+            let (_, path) = preload.expect("the run is handed a provider");
+            assert_eq!(path, memory_provider_path(&wasm, 1).as_path());
+            assert_eq!(std::fs::read(path).unwrap(), memory_provider(&import));
+            Ok(())
+        })
+        .expect("the run succeeded");
+        assert_eq!(std::fs::read(&stale).unwrap(), b"stale");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "only the stale file is left"
+        );
+    }
+
+    /// When every name is taken, the run is refused before wasmtime is called,
+    /// naming the artifact and the first name tried, and nothing that was there
+    /// is touched.
+    #[test]
+    fn every_provider_name_taken_fails_before_the_run() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        for attempt in 0..MEMORY_PROVIDER_ATTEMPTS {
+            std::fs::write(memory_provider_path(&wasm, attempt), b"taken").unwrap();
+        }
+        let import = scanned_memory("env", "memory", 1, Some(1));
+        let mut calls = 0;
+        let err = with_supplied_memory(&wasm, Some(&import), |_| {
+            calls += 1;
+            Ok(())
+        })
+        .expect_err("no name is free");
+        assert_eq!(calls, 0);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Failed to write the module supplying the imported memory beside {}: the {} \
+                 names tried, from {}, are all taken",
+                wasm.display(),
+                MEMORY_PROVIDER_ATTEMPTS,
+                memory_provider_path(&wasm, 0).display()
+            )
+        );
+        for attempt in 0..MEMORY_PROVIDER_ATTEMPTS {
+            assert_eq!(
+                std::fs::read(memory_provider_path(&wasm, attempt)).unwrap(),
+                b"taken"
+            );
+        }
+    }
+
     /// A provider that cannot be written is an error naming it, and `run` is
     /// never called: the artifact would fail to instantiate without it, in
     /// wasmtime's words about an unknown import rather than these.
@@ -2244,7 +2411,7 @@ mod tests {
             msg,
             format!(
                 "Failed to write the module supplying the imported memory to {}",
-                memory_provider_path(&wasm).display()
+                memory_provider_path(&wasm, 0).display()
             )
         );
     }
