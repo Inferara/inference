@@ -460,6 +460,7 @@ pub fn indexed(i: i32) -> i32 { if i >= 0 && i < N { return TABLE[i]; } return -
                 pages: Some(2),
                 max_pages: None,
                 stack_size: Some(65_536),
+                import: false,
             },
             MemoryLayoutSource::Flag,
         )
@@ -481,6 +482,7 @@ pub fn indexed(i: i32) -> i32 { if i >= 0 && i < N { return TABLE[i]; } return -
                 pages: None,
                 max_pages: None,
                 stack_size: Some(65_536),
+                import: false,
             },
             MemoryLayoutSource::Flag,
         )

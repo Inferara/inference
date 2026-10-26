@@ -58,8 +58,10 @@
 /// [`MemoryLayout`]'s fields are private and [`MemoryLayout::resolve`] is the
 /// only way to name a non-default one, so the constructor's vocabulary comes
 /// along: a caller that can set the field must be able to build the value.
+/// [`MemoryImport`] comes with it as what [`MemoryLayout::memory_import`]
+/// returns, the one spelling of an imported memory's name and limits.
 pub use inference_compiler_interface::{
-    MemoryLayout, MemoryLayoutError, MemoryLayoutSource, MemoryRequest,
+    MemoryImport, MemoryLayout, MemoryLayoutError, MemoryLayoutSource, MemoryRequest,
 };
 
 /// The bounds-check policy, re-exported so [`CodegenOptions`] and every caller
@@ -886,6 +888,12 @@ mod tests {
                 name.permits_bulk_memory(),
                 emitted.permits_bulk_memory(),
                 "`{}` disagrees with its emission target about bulk memory",
+                name.as_str()
+            );
+            assert_eq!(
+                name.permits_memory_growth(),
+                emitted.permits_memory_growth(),
+                "`{}` disagrees with its emission target about memory growth",
                 name.as_str()
             );
         }

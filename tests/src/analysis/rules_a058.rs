@@ -33,6 +33,7 @@ mod rules_a058_tests {
                 pages,
                 max_pages: None,
                 stack_size,
+                import: false,
             },
             MemoryLayoutSource::Flag,
         )
@@ -66,6 +67,7 @@ mod rules_a058_tests {
                 stack_size: request
                     .stack_size
                     .or(layout.is_stack_requested().then_some(layout.stack_size())),
+                import: layout.is_imported(),
             },
             MemoryLayoutSource::Flag,
         )

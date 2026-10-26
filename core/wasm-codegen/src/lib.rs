@@ -83,8 +83,8 @@ pub mod target;
 pub use output::{AbiParam, AbiReturn, AbiType, CodegenOutput, ExportSignature};
 pub use stellar_cli::{stellar_cli_flag_alias, stellar_flag_collision};
 pub use target::{
-    BoundsChecks, CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, MemoryLayoutError,
-    MemoryLayoutSource, MemoryRequest, OptLevel, Target,
+    BoundsChecks, CodegenOptions, CompilationMode, EmitFeatures, MemoryImport, MemoryLayout,
+    MemoryLayoutError, MemoryLayoutSource, MemoryRequest, OptLevel, Target,
 };
 
 /// Re-exports of the `hassert` obligation IR, so a consumer of
@@ -1923,6 +1923,7 @@ mod memory_layout_tests {
                     pages: Some(pages),
                     max_pages: None,
                     stack_size: Some(stack_size),
+                    import: false,
                 },
                 MemoryLayoutSource::Flag,
             )
@@ -2831,6 +2832,7 @@ mod growable_memory_tests {
                 pages: Some(pages),
                 max_pages: Some(max_pages),
                 stack_size: None,
+                import: false,
             },
             MemoryLayoutSource::Flag,
         )

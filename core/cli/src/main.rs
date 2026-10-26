@@ -488,6 +488,7 @@ fn memory_request(args: &Cli) -> MemoryRequest {
         pages: args.memory_pages,
         max_pages: args.max_memory_pages,
         stack_size: args.stack_size,
+        import: false,
     }
 }
 

@@ -167,6 +167,7 @@ mod analysis_rules_tests {
                 pages: Some(pages),
                 max_pages: None,
                 stack_size: Some(stack_size),
+                import: false,
             },
             inference_wasm_codegen::MemoryLayoutSource::Flag,
         )

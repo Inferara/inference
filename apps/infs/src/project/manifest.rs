@@ -1059,6 +1059,7 @@ impl MemoryConfig {
             pages: self.pages,
             max_pages: self.max_pages,
             stack_size: self.stack_size,
+            import: false,
         };
         MemoryLayout::resolve(request, MemoryLayoutSource::Manifest).map_err(Into::into)
     }

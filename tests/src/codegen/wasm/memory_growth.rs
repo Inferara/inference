@@ -65,6 +65,7 @@ pub fn run() -> i32 {
                 pages: Some(1),
                 max_pages: Some(max_pages),
                 stack_size: None,
+                import: false,
             },
             MemoryLayoutSource::Flag,
         )

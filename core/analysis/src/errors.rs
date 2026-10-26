@@ -1911,6 +1911,7 @@ mod tests {
                 pages,
                 max_pages,
                 stack_size,
+                import: false,
             },
             inference_compiler_interface::MemoryLayoutSource::Flag,
         )

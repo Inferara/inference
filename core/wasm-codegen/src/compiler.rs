@@ -9154,6 +9154,7 @@ mod tests {
                     pages: Some(1),
                     max_pages: Some(3),
                     stack_size: None,
+                    import: false,
                 },
                 crate::MemoryLayoutSource::Flag,
             )
@@ -9247,6 +9248,7 @@ mod tests {
                     pages: Some(2),
                     max_pages: None,
                     stack_size: Some(32_768),
+                    import: false,
                 },
                 crate::MemoryLayoutSource::Flag,
             )
@@ -9282,6 +9284,7 @@ mod tests {
                     pages: Some(2),
                     max_pages: Some(8),
                     stack_size: None,
+                    import: false,
                 },
                 crate::MemoryLayoutSource::Flag,
             )

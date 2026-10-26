@@ -276,6 +276,7 @@ fn manifest_layout(memory: Option<MemoryKeys>) -> MemoryLayout {
                 pages: keys.pages,
                 max_pages: keys.max_pages,
                 stack_size: keys.stack_size,
+                import: false,
             };
             MemoryLayout::resolve(request, MemoryLayoutSource::Manifest).ok()
         })
