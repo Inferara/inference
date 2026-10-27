@@ -1777,4 +1777,49 @@ fn touch_array(a: [i32; 2]) -> i32 {
              them agree and neither is wrong on its own; got: {rendered}"
         );
     }
+
+    /// The proof artifact describes the same machine whichever order a program
+    /// declares its externals in. A memoryless program links `b`, which grows
+    /// memory under a two-page cap, and `e`, which only reads a memory declared
+    /// up to ten pages; the shared memory takes `b`'s cap. The first declaration
+    /// used to decide instead, and the `.v` said `Some(10%N)` or `Some(2%N)`
+    /// with it.
+    #[test]
+    fn the_linked_memory_in_the_v_does_not_depend_on_declaration_order() {
+        let lib_dir = TempLibDir::new("declaration-order");
+        for (module, field, limits, op) in [
+            ("b", "growB", "1 2", "memory.grow"),
+            ("e", "peekE", "1 10", "i32.load"),
+        ] {
+            let wat = format!(
+                r#"
+                (module
+                  (type (;0;) (func (param i32) (result i32)))
+                  (memory (;0;) {limits})
+                  (func (;0;) (type 0) (param i32) (result i32)
+                    local.get 0
+                    {op})
+                  (export "{field}" (func 0)))
+                "#
+            );
+            let wasm = wat::parse_str(&wat).expect("the library WAT assembles");
+            lib_dir.write_module(Path::new(&format!("{module}.wasm")), &wasm);
+        }
+
+        for (first, second) in [("growB", "peekE"), ("peekE", "growB")] {
+            let main_source = format!(
+                "external fn {first}(n: i32) -> i32;\n\
+                 external fn {second}(n: i32) -> i32;\n\
+                 use {{ growB }} from b;\n\
+                 use {{ peekE }} from e;\n\
+                 pub fn run() -> i32 {{ return growB(2) + peekE(0); }}\n"
+            );
+            let (_unified, rocq) =
+                compile_and_link(&main_source, lib_dir.path(), "declaration_order");
+            assert!(
+                rocq.contains("Mm {|lim_min := 1%N; lim_max := Some(2%N)|}"),
+                "declared `{first}` first, the .v must describe b's two-page cap:\n{rocq}"
+            );
+        }
+    }
 }

@@ -1229,11 +1229,15 @@ imports its memory carries those limits on an import instead and never
 reaches this translator from the toolchain; see [Obligations only an
 import-free module can
 discharge](#obligations-only-an-import-free-module-can-discharge).)
-A memoryless main that adopts a Tier-B external's memory takes that
-external's limits verbatim, and a `wasm32-unknown-unknown` artifact
-declares no maximum — so `lim_max := None` is a shape only a link
+A memoryless main takes its memory from the Tier-B externals'
+declarations: one external's limits verbatim, several externals' tightest
+fit — the largest declared minimum and the smallest declared maximum,
+unbounded only when none declares one. A `wasm32-unknown-unknown`
+artifact declares no maximum, so `lim_max := None` is a shape only a link
 produces, and `spec_linked_toolchain.inf` is the first corpus module to
-put it in front of `coqc`.
+put it in front of `coqc`. Either way the limits the record carries are a
+function of the linked modules' declarations, never of the order the
+program wrote its `external fn` declarations in.
 
 `WasmParseData::resolve_app_symbols` (`src/translator.rs`) resolves every
 symbol any obligation applies, up front, before any output is built:

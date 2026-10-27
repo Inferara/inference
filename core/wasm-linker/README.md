@@ -64,6 +64,53 @@ entries as more external closures are merged in. Only **type-section entries**
 deduplicated or dropped by this step. Unreachable functions are excluded earlier
 by the transitive closure walk, before any output index is committed.
 
+### Linear-Memory Reconciliation
+
+The output has one linear memory, shared by the main module and every merged
+external whose closure addresses memory. An external whose closure touches no
+memory contributes nothing, whatever its module declares. The memory is computed
+once, from every contributing import together, so it does not depend on the order
+the main module lists its imports in — which is the order the program wrote its
+`external fn` declarations in:
+
+- **The main module declares a memory.** Its maximum is kept and governs every
+  linked module, whatever their own caps; the minimum widens to the largest any
+  module declares. An external whose minimum exceeds main's maximum is refused,
+  and so is one that grows memory when the result is pinned (`max == min`), since
+  its every `memory.grow` would fail.
+- **The main module is memoryless.** The memory is the tightest fit to the
+  externals' own declarations: the largest declared minimum and the smallest
+  declared maximum, unbounded only when none declares one. That is the memory
+  WebAssembly import matching would accept for every one of them, so no module's
+  bound is relaxed, and a lone external's memory is adopted as declared. Two
+  outcomes are refused rather than settled by picking one module's bound over
+  another's: declarations no memory satisfies (one module's minimum above
+  another's maximum), and a module that grows memory under a cap other than the
+  shared one, whose `memory.grow` would stop somewhere its own module never
+  declared:
+
+  ```text
+  error: cannot reconcile linear memory for `growA`: the external grows linear
+         memory up to 10 pages, but the module providing `b::growB`, which shares
+         that memory, declares a maximum of 2 pages, so `memory.grow` in `growA`
+         would stop at 2 pages instead of 10; the linker does not choose one
+         module's bound over another's. Give the main module its own memory, whose
+         maximum then governs `memory.grow` in every linked module: `max-pages` in
+         the `[memory]` table of `Inference.toml`, or `infc --max-memory-pages <N>`
+  ```
+
+  A module whose cap is lowered but that never grows memory is not refused:
+  nothing can observe the maximum except `memory.grow`, and a memoryless main
+  exports no memory for a host to grow.
+
+Every refusal names the remedy on the main module's side. A configured `[memory]`
+table makes the program declare a memory of its own even when its code touches
+none, and that memory's maximum is then the one bound. One page that may grow to
+one page is the default layout, though, so `max-pages = 1` alone leaves the
+program memoryless. Contributions are counted per satisfied import, not per call:
+an `external fn` the program declares but never calls still contributes its
+module's memory.
+
 ### Main-Module Data Segments
 
 Inference codegen places module-scope compound constants (arrays and structs) in
@@ -764,7 +811,7 @@ their original addresses are mutually exclusive, see the module documentation of
 
 Clearing the tier gate is necessary for linking stock toolchain output, not
 sufficient. A `wasm32-unknown-unknown` artifact also declares a multi-page linear
-memory, and reconciliation never relaxes the anchor module's declared bound — so
+memory, and reconciliation never relaxes the main module's declared bound — so
 against an Inference main whose memory is the default, a fixed one-page
 `(memory 1 1)`, such an artifact now passes tier classification and fails at
 memory reconciliation instead:
@@ -867,6 +914,7 @@ to a same-named `sum` exported by a different module.
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
 | `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, an element segment, or a data segment that is passive, targets a memory other than 0, or has an offset other than a lone `i32.const` (an active memory-0 `i32.const` segment is carried; see [Main-Module Data Segments](#main-module-data-segments)), and when a main body names a data segment with `memory.init`/`data.drop`. The message names the specific construct. |
 | `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature outside the supported subset: any floating-point type or instruction, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls. The `details` field carries the validator's feature-named diagnostic. |
+| `LinkError::IncompatibleMemory { field, reason }` | No single linear memory satisfies the main module and the merged externals that address memory: an unsupported memory shape (`memory64`, `shared`, a custom page size), an external minimum above the main module's maximum, declarations no one memory satisfies onto a memoryless main, a growing external whose cap the shared memory would move, or growth against a pinned result. `field` is the import concerned; `reason` names the other module where one is involved, and the `[memory]` setting that resolves it. See [Linear-Memory Reconciliation](#linear-memory-reconciliation). |
 | `LinkError::UndeclaredExternWrite { module, field, param_index, param_name }` | Checked mode only: a Tier-B closure's attributed write set is not covered by its `external fn` declaration's `mut` parameters. Names the offending parameter by index and, when the declaration used a named form, by name; when it used an unnamed form, the message says to name it first. See [Declared Write-Set Check](#declared-write-set-check). |
 | `LinkError::UnresolvedObligationSymbol { symbol, merged_roots }` | A function symbol the main module's `inference.hspecs` obligations apply is carried by no function of the merged output. `merged_roots` lists every `<module>::<field>` the merge did satisfy, so the message can say what was on offer. |
 | `LinkError::AmbiguousObligationSymbol { symbol, carriers }` | Two or more functions of the merged output carry one applied obligation symbol. `carriers` says where each came from — the program's own code, a satisfied import, or a linked module's private function. |
@@ -997,6 +1045,7 @@ Test coverage includes:
 - **Diamond closure** — two roots sharing one internal callee; merged exactly once
 - **Main globals** — main module globals and global exports survive the merge
 - **Environment import** — external module importing its host environment is rejected
+- **Memory reconciliation in either import order** — two memory-declaring providers linked behind a main importing them in both orders give the same memory, or the same refusal: the tightest fit onto a memoryless main, refusals for declarations no memory satisfies and for a growing provider whose cap would move, growth checked against a memory a later provider pins, and main's own maximum governing both. The unit tests in `src/merge.rs` check the same property over every ordering of two and three imports drawn from a pool of limits
 - **Adversarial robustness** — a hand-seeded corpus of malformed/adversarial
   externals (one per confirmed Issue #9 robustness-audit defect) plus a
   deterministic byte-mutation sweep is fed through `link` by

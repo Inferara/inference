@@ -265,4 +265,233 @@ pub fn run() -> i32 {
             "the translation must describe one page growable to eight:\n{v}"
         );
     }
+
+    // -- The order of `external fn` declarations ------------------------------
+    //
+    // A program's imports are its `external fn` declarations, in the order they
+    // were written, and the linker used to settle a memoryless program's shared
+    // memory by that order: whichever memory-using library came first set the
+    // maximum. Each case below compiles one program twice, with only its two
+    // `external fn` lines swapped, links both against the same libraries, runs
+    // both, and asserts the two programs are indistinguishable — the same memory,
+    // the same result, or the same refusal.
+
+    /// Libraries for the declaration-order cases, each exporting one function of
+    /// `(i32) -> i32` over a memory of its own: `grow*` grows memory by its
+    /// argument (returning the page count before, or -1), `peek*` loads at its
+    /// argument.
+    const PROVIDERS: [(&str, &str, &str, &str); 4] = [
+        ("a", "growA", "1 10", "memory.grow"),
+        ("b", "growB", "1 2", "memory.grow"),
+        ("d", "peekD", "10 10", "i32.load"),
+        ("e", "peekE", "1 10", "i32.load"),
+    ];
+
+    /// A library directory holding every [`PROVIDERS`] module as `<module>.wasm`.
+    fn provider_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create a library search directory");
+        for (module, field, limits, op) in PROVIDERS {
+            let wat = format!(
+                r#"
+                (module
+                  (type (;0;) (func (param i32) (result i32)))
+                  (memory (;0;) {limits})
+                  (func (;0;) (type 0) (param i32) (result i32)
+                    local.get 0
+                    {op})
+                  (export "{field}" (func 0)))
+                "#
+            );
+            let wasm = wat::parse_str(&wat).expect("the library WAT assembles");
+            std::fs::write(dir.path().join(format!("{module}.wasm")), wasm)
+                .expect("write the library");
+        }
+        dir
+    }
+
+    /// The `(initial, maximum)` limits of the module's memory section, or `None`
+    /// when it defines no memory.
+    fn memory_limits(wasm: &[u8]) -> Option<(u64, Option<u64>)> {
+        for payload in inf_wasmparser::Parser::new(0).parse_all(wasm) {
+            if let inf_wasmparser::Payload::MemorySection(reader) = payload.expect("valid payload")
+            {
+                let memory = reader.into_iter().next()?.expect("a memory type");
+                return Some((memory.initial, memory.maximum));
+            }
+        }
+        None
+    }
+
+    /// What one compiled-and-linked program is observably: its memory's limits
+    /// and what `run` returns, or the linker's refusal.
+    type Linked = Result<(Option<(u64, Option<u64>)>, i32), String>;
+
+    fn build_link_and_run(source: &str, layout: MemoryLayout) -> Linked {
+        let lib_dir = provider_dir();
+        let linked = link_in(source, lib_dir.path(), layout, CompilationMode::Compile)?;
+        inf_wasmparser::validate(&linked).expect("the merged module is valid");
+        let (mut store, instance) = instantiate(&linked);
+        let run: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "run")
+            .expect("the merged module exports `run`");
+        let result = run.call(&mut store, ()).expect("run executes");
+        Ok((memory_limits(&linked), result))
+    }
+
+    /// Builds the program declaring `externs` in both orders — its `use` lines
+    /// and body unchanged — asserts the two programs agree, and returns what
+    /// they agree on.
+    fn in_both_declaration_orders(
+        externs: [&str; 2],
+        uses: &str,
+        body: &str,
+        layout: MemoryLayout,
+    ) -> Linked {
+        let program = |first: &str, second: &str| {
+            format!(
+                "external fn {first}(n: i32) -> i32;\nexternal fn {second}(n: i32) -> i32;\n{uses}\n\
+                 pub fn run() -> i32 {{\n    return {body};\n}}\n"
+            )
+        };
+        let forward = build_link_and_run(&program(externs[0], externs[1]), layout);
+        let reverse = build_link_and_run(&program(externs[1], externs[0]), layout);
+        assert_eq!(
+            forward, reverse,
+            "swapping the `external fn {}` and `external fn {}` declarations changed the program",
+            externs[0], externs[1]
+        );
+        forward
+    }
+
+    /// What `growB(2)` returns in `b` on its own: the behaviour the linked
+    /// program is held to.
+    fn grow_b_standalone(pages: i32) -> i32 {
+        let lib_dir = provider_dir();
+        let wasm = std::fs::read(lib_dir.path().join("b.wasm")).expect("read the library");
+        let (mut store, instance) = instantiate(&wasm);
+        let grow: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "growB")
+            .expect("the library exports `growB`");
+        grow.call(&mut store, pages).expect("growB executes")
+    }
+
+    /// A memoryless program calling `growB` and `peekE`: the shared memory takes
+    /// `b`'s two-page cap, so `growB(2)` fails exactly as it does in `b` alone,
+    /// in either order. Declared first, `peekE` used to hand `growB` its own
+    /// ten pages, and the growth succeeded.
+    #[test]
+    fn a_growing_library_keeps_its_own_cap_in_either_declaration_order() {
+        let linked = in_both_declaration_orders(
+            ["growB", "peekE"],
+            "use { growB } from b;\nuse { peekE } from e;",
+            "growB(2) + peekE(0)",
+            MemoryLayout::default(),
+        );
+        assert_eq!(
+            grow_b_standalone(2),
+            -1,
+            "two pages of growth exceed b's cap"
+        );
+        assert_eq!(
+            linked,
+            Ok((Some((1, Some(2))), -1)),
+            "growB(2) must fail as it does in b alone, and peekE(0) reads 0"
+        );
+    }
+
+    /// Two libraries that grow memory under different caps cannot share one
+    /// memory without one of them stopping somewhere its module never declared,
+    /// so a memoryless program linking both is refused, in either order, and
+    /// told to give itself a memory. `run` never calls `growA`: a declared
+    /// external contributes its memory whether or not anything calls it.
+    #[test]
+    fn two_growing_libraries_with_different_caps_are_refused_in_either_order() {
+        let err = in_both_declaration_orders(
+            ["growA", "growB"],
+            "use { growA } from a;\nuse { growB } from b;",
+            "growB(2)",
+            MemoryLayout::default(),
+        )
+        .expect_err("the two caps cannot both hold");
+        assert!(
+            err.contains("for `growA`") && err.contains("`b::growB`"),
+            "the refusal names both libraries: {err}"
+        );
+        assert!(
+            err.contains("`max-pages` in the `[memory]` table")
+                && err.contains("--max-memory-pages"),
+            "the refusal names the setting that resolves it: {err}"
+        );
+    }
+
+    /// The remedy the refusal names: a program with its own growable memory.
+    /// Its maximum governs both libraries — `b`'s two-page cap included, by the
+    /// author's choice — so either order links to that memory and `growB(2)`
+    /// succeeds within it.
+    #[test]
+    fn a_configured_maximum_governs_both_libraries_in_either_order() {
+        let linked = in_both_declaration_orders(
+            ["growA", "growB"],
+            "use { growA } from a;\nuse { growB } from b;",
+            "growB(2)",
+            layout_growable_to(10),
+        );
+        assert_eq!(
+            linked,
+            Ok((Some((1, Some(10))), 1)),
+            "growth from one page returns 1"
+        );
+    }
+
+    /// One page that may grow to one page is the default layout, so a program
+    /// built with `max-pages = 1` stays memoryless and meets the same refusal
+    /// as one built with no setting at all.
+    #[test]
+    fn a_maximum_of_one_page_is_the_default_and_does_not_resolve_the_refusal() {
+        let one_page = MemoryLayout::resolve(
+            MemoryRequest {
+                pages: Some(1),
+                max_pages: Some(1),
+                stack_size: None,
+                import: false,
+            },
+            MemoryLayoutSource::Flag,
+        )
+        .expect("one fixed page is admissible");
+        assert!(
+            one_page.is_default_memory(),
+            "one fixed page is the default memory"
+        );
+        let refused = |layout| {
+            in_both_declaration_orders(
+                ["growA", "growB"],
+                "use { growA } from a;\nuse { growB } from b;",
+                "growB(2)",
+                layout,
+            )
+        };
+        let with_setting = refused(one_page).expect_err("the program stays memoryless");
+        let without = refused(MemoryLayout::default()).expect_err("a memoryless program");
+        assert_eq!(with_setting, without);
+    }
+
+    /// Under a program's own growable memory, a library that raises the shared
+    /// minimum to the shared maximum pins it, so `growA` could never grow. The
+    /// check runs against the final memory: declared before `peekD`, `growA`
+    /// used to pass it and ship a `memory.grow` that always returns -1.
+    #[test]
+    fn growth_a_later_library_makes_impossible_is_refused_in_either_order() {
+        let err = in_both_declaration_orders(
+            ["growA", "peekD"],
+            "use { growA } from a;\nuse { peekD } from d;",
+            "growA(1) + peekD(0)",
+            layout_growable_to(10),
+        )
+        .expect_err("a pinned memory cannot admit growth");
+        assert!(
+            err.contains("for `growA`")
+                && err.contains("maximum (10 pages) does not exceed its minimum (10 pages)"),
+            "{err}"
+        );
+    }
 }

@@ -547,9 +547,9 @@ impl Plan {
         //    - **No offset moves.** Main's memory stays memory 0 of the output,
         //      so a constant offset names the same byte before and after.
         //    - **The segment still fits.** The reconciled memory's minimum only
-        //      ever widens from main's (`reconcile_pair` takes the larger of the
-        //      two), so a segment instantiation could place in main's memory it
-        //      can place in the output's.
+        //      ever widens from main's (`MemoryReconciler::finish` takes the
+        //      largest of every module's), so a segment instantiation could place
+        //      in main's memory it can place in the output's.
         //
         //    Anything else is refused in [`main_data_offset`] rather than
         //    carried: a passive segment exists only to be named by a
@@ -750,19 +750,20 @@ impl Plan {
             }
             external_contributes_globals[ext_idx] |= cl.effects.uses_globals;
 
-            // Reconcile this external's memory into the shared output memory:
-            // fold in its declared limits (widening minimum/maximum) and check
-            // its memory effects against the reconciled result. This folds an
-            // external memory onto a memoryless main (H24), keeps the merged
-            // minimum large enough for every module's static range (H15), and
-            // rejects growth the reconciled maximum cannot satisfy. Incompatible
-            // fundamental shapes (`memory64`/`shared`/page size) are rejected.
-            // Only a closure that actually addresses memory contributes limits —
-            // the tier verdict above is the same distinction, Tier B versus A.
+            // Record this external's memory for the shared output memory: its
+            // declared limits and its closure's memory effects. Nothing is
+            // decided against the other imports yet — the memory is computed
+            // and checked once, after this loop, so the result cannot depend on
+            // the order the imports are listed in. Incompatible fundamental
+            // shapes (`memory64`/`shared`/page size) are rejected here, per
+            // memory. Only a closure that actually addresses memory contributes
+            // limits — the tier verdict above is the same distinction, Tier B
+            // versus A.
             memory.fold(
                 external.memory.as_ref(),
                 cl.effects.uses_memory,
                 cl.effects.uses_memory_grow,
+                logical_module,
                 field,
             )?;
 
@@ -851,6 +852,10 @@ impl Plan {
                 root_output,
             );
         }
+
+        // Every import has contributed its memory, so the shared memory can be
+        // computed and checked against all of them at once.
+        let reconciled_memory = memory.finish()?;
 
         // Name every closure root after an import field it satisfies, under its
         // external's logical module (`mathlib::sum`), so the merged function
@@ -1052,7 +1057,10 @@ impl Plan {
             }
         }
 
-        let reconciled_memory = memory.finish();
+        // The warning names the Tier-B fields in sorted order rather than in
+        // the order the main module lists its imports in, as the memory it
+        // reports on is computed.
+        tier_b_fields.sort();
 
         Ok(Plan {
             out_types,
@@ -2932,34 +2940,78 @@ fn map_val_type(ty: &inf_wasmparser::ValType) -> Result<EncValType, LinkError> {
 /// merged external into one shared output memory.
 ///
 /// The merge folds every body onto a *single* memory, so the output's memory
-/// must satisfy all of them at once. This accumulator folds each module's
-/// memory in turn:
+/// must satisfy all of them at once. [`MemoryReconciler::fold`] only records
+/// what each satisfied import contributes, and [`MemoryReconciler::finish`]
+/// computes the memory and runs every limit check once, over the whole set.
+/// Nothing may depend on the order the contributions arrive in: it is the order
+/// the main module lists its imports in, which is the order its `external fn`
+/// declarations were written in, so a result that depended on it would change
+/// when two source lines swap — in the emitted `.wasm`, in the machine the
+/// paired `.v` describes, and in what `memory.grow` returns at runtime.
 ///
-/// - **Fundamental shape** (`memory64`, `shared`, page size) must match across
-///   every memory: a memory64 body addresses with i64, a shared body needs an
-///   atomic memory, and a custom page size changes the address-to-page mapping —
-///   none can be folded onto a differently-shaped memory. A mismatch is a clean
-///   [`LinkError::IncompatibleMemory`].
-/// - **Minimum** is widened to the maximum of every module's minimum, so the
+/// - **Fundamental shape** (`memory64`, `shared`, page size) is checked per
+///   memory by [`reject_unsupported_memory_shape`], so every memory that reaches
+///   the computation has the one shape the output models.
+/// - **Minimum** is the largest of every contributing module's minimum, so the
 ///   output reserves enough pages for every module's static range (closing the
 ///   out-of-bounds miscompile, H15).
-/// - **Maximum** is widened (a larger or unbounded maximum is the
-///   least-restrictive choice), and a module that grows memory forces the
-///   maximum to admit growth or the merge rejects it (H15).
-/// - A **memoryless main** with a memory-using external synthesizes an output
-///   memory from the external's declaration (H24); a memory-using external with
-///   *no* memory declaration of its own and a memoryless main is irreconcilable
-///   (there is nothing to address), so it is rejected (the guard, part C).
+/// - **Maximum** depends on whether the main module declares a memory:
+///   - When it does, main's maximum is kept whatever the externals declare. It
+///     is the bound the program was built with, and it governs every linked
+///     module, so an external's own cap is overridden in either direction; a
+///     reserved minimum above it is rejected.
+///   - When main is memoryless (H24), there is no such bound, and the output is
+///     the tightest fit to the externals' own declarations: the smallest
+///     declared maximum. That is the memory WebAssembly import matching would
+///     accept for every one of them (at least each minimum, at most each
+///     maximum), so no module's bound is relaxed. The merge is rejected when no
+///     memory fits every declaration, and when the shared maximum differs from a
+///     growing module's own, since its `memory.grow` would then stop somewhere
+///     its module did not declare. The linker does not choose one module's bound
+///     over another's; the main module's own memory can.
+/// - A closure that **grows** memory needs a maximum above the minimum, checked
+///   against the final memory: a later module raising the minimum to the
+///   maximum pins it just as surely as an earlier one.
 /// - An external whose closure **never touches memory** contributes nothing,
 ///   whatever its module declares. Its memory section describes the machine it
 ///   was compiled for, not one the merged output has to provide; see
 ///   [`MemoryReconciler::fold`] for why dropping it is unobservable.
+/// - A closure that addresses memory when neither its module nor main declares
+///   one has nothing to address, and is rejected (the guard, part C).
 struct MemoryReconciler {
-    /// The reconciled memory so far, or `None` if no module has contributed one.
-    current: Option<EncMemoryType>,
-    /// Whether the reconciled memory is required (some closure uses memory),
-    /// even if no module declared one — which is then an error.
-    required: bool,
+    /// The main module's memory. When present, its maximum governs the output.
+    main: Option<EncMemoryType>,
+    /// The declared memory of every external whose closure addresses memory, one
+    /// record per satisfied import.
+    contributions: Vec<Contribution>,
+    /// The `(field, module, grows)` of every import whose closure addresses
+    /// memory although its module declares none. Ordered, so the one the guard
+    /// names is the same whatever order the imports arrived in.
+    unbacked: BTreeSet<(String, String, bool)>,
+}
+
+/// One satisfied import's contribution to the reconciled memory: the limits its
+/// external declares, and whether its closure grows memory.
+///
+/// The derived order — field, then module, then the limits — is what
+/// [`MemoryReconciler::finish`] sorts by before it names a contributor in a
+/// diagnostic, so the name depends on the set of imports and not on their order.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct Contribution {
+    field: String,
+    module: String,
+    minimum: u64,
+    maximum: Option<u64>,
+    grows: bool,
+}
+
+impl Contribution {
+    /// How a diagnostic names this contributor beside the one it reports:
+    /// `module::field`, the same producer that names the merged root, so two
+    /// modules exporting one field name stay distinguishable.
+    fn display_name(&self) -> String {
+        inference_fn_key::merged_name::root(&self.module, &self.field)
+    }
 }
 
 impl MemoryReconciler {
@@ -2975,235 +3027,331 @@ impl MemoryReconciler {
     ///
     /// Main's memory is the anchor and, unlike an external's, is never dropped:
     /// it is what the main module's own data segments initialize, and `emit`
-    /// re-emits those at their original offsets. That is sound only because no
-    /// later fold shrinks it — [`reconcile_pair`] widens the minimum and keeps
-    /// the anchor's maximum — so every segment main's memory could hold, the
-    /// output's can.
+    /// re-emits those at their original offsets. That is sound only because the
+    /// output never shrinks it — [`MemoryReconciler::finish`] widens main's
+    /// minimum and keeps its maximum — so every segment main's memory could
+    /// hold, the output's can.
     fn new(main_mem: Option<&inf_wasmparser::MemoryType>) -> Result<Self, LinkError> {
         if let Some(main_mem) = main_mem {
             reject_unsupported_memory_shape(main_mem, "<main module>")?;
         }
         Ok(MemoryReconciler {
-            current: main_mem.map(to_enc_memory),
-            required: false,
+            main: main_mem.map(to_enc_memory),
+            contributions: Vec::new(),
+            unbacked: BTreeSet::new(),
         })
     }
 
-    /// Folds one external's memory and memory effects into the reconciliation.
+    /// Records one satisfied import's memory and memory effects.
     ///
-    /// `uses_memory`/`uses_memory_grow` are the external closure's effects.
-    /// `uses_memory` decides both whether a memory is required at all and
-    /// whether this external's own declaration contributes to the reconciled
-    /// result; `uses_memory_grow` decides whether growth must be admitted. The
-    /// two are not independent: every operator that grows memory also uses it,
-    /// so the growth check never runs on an external whose limits were dropped.
+    /// `uses_memory`/`uses_memory_grow` are the import closure's effects.
+    /// `uses_memory` decides whether this external's own declaration contributes
+    /// to the reconciled result at all; `uses_memory_grow` decides whether the
+    /// result must admit growth. The two are not independent: every operator
+    /// that grows memory also uses it, so no growing closure goes unrecorded.
+    ///
+    /// Nothing is checked against the other imports here; that waits for
+    /// [`MemoryReconciler::finish`], which sees them all.
     fn fold(
         &mut self,
         ext_mem: Option<&inf_wasmparser::MemoryType>,
         uses_memory: bool,
         uses_memory_grow: bool,
+        module: &str,
         field: &str,
     ) -> Result<(), LinkError> {
-        if uses_memory {
-            self.required = true;
-        }
-
         if let Some(ext_mem) = ext_mem {
             // Reject an unsupported memory shape for *every* declared external
-            // memory, adopted or not, including the `None => ext` adopt path onto
-            // a memoryless main — otherwise a memory64/shared/custom-page external
-            // would be adopted verbatim and wasm-to-v would silently re-encode it
-            // as a 32-bit memory (audit C-4/L-1). The check stays outside the
-            // adoption gate below: it costs nothing on the dropped path and keeps
-            // the rejection absolute rather than conditional on an effect flag.
+            // memory, recorded or not, including onto a memoryless main —
+            // otherwise a memory64/shared/custom-page external would reach the
+            // output and wasm-to-v would silently re-encode it as a 32-bit memory
+            // (audit C-4/L-1). The check stays outside the recording gate below:
+            // it costs nothing on the dropped path and keeps the rejection
+            // absolute rather than conditional on an effect flag.
             reject_unsupported_memory_shape(ext_mem, field)?;
+        }
 
-            // Adopt the external's declared limits only when its closure actually
-            // addresses memory. A module's memory section describes the machine
-            // *that module* was built for; it becomes a fact about the merged
-            // output only if some merged body reads it. Folding it in
-            // unconditionally let a pure function impose its module's page count
-            // on the output — visible in the emitted `.wasm` and restated in the
-            // paired `.v` as the machine the proof is about — and, against a main
-            // that pins its own bound, rejected the link outright over a memory
-            // nothing would have touched.
-            //
-            // Dropping it is unobservable, on three facts that must hold together:
-            //
-            // - `uses_memory` is *closure-scoped*. `closure::compute` accumulates
-            //   it in `scan_body` over exactly the functions it returns in
-            //   `local_func_indices` — the same set the merge copies below — so
-            //   `false` means no body that reaches the output contains a memory
-            //   operator. This is the argument `tier` already relies on to drop an
-            //   external's globals and tables.
-            // - Every operator family that reaches linear memory sets it:
-            //   integer load/store, `memory.copy`, `memory.fill`, `memory.init`,
-            //   and `memory.size`/`memory.grow`. The last two are the ones worth
-            //   spelling out — they yield or extend a *page count* rather than
-            //   addressing a byte, so they read as unrelated to a memory's limits
-            //   when they are in fact the operators that observe them most
-            //   directly: `memory.size` returns the reconciled minimum, and
-            //   `memory.grow` is answered by the reconciled maximum. Both count as
-            //   use, and both are excluded here when `uses_memory` is false.
-            //   Anything outside the allow-list is rejected before it could reach
-            //   a body, so no unlisted operator can address memory silently.
-            // - No dropped memory is written behind the closure's back at
-            //   instantiation: `tier::classify` runs before this fold and rejects
-            //   any external declaring a data segment, so an external reaching
-            //   here has none to initialize the memory being dropped.
-            if uses_memory {
-                let ext = to_enc_memory(ext_mem);
-                self.current = Some(match self.current {
-                    None => ext,
-                    Some(cur) => reconcile_pair(cur, ext, field)?,
-                });
+        // Record the external's declared limits only when its closure actually
+        // addresses memory. A module's memory section describes the machine
+        // *that module* was built for; it becomes a fact about the merged
+        // output only if some merged body reads it. Folding it in
+        // unconditionally let a pure function impose its module's page count
+        // on the output — visible in the emitted `.wasm` and restated in the
+        // paired `.v` as the machine the proof is about — and, against a main
+        // that pins its own bound, rejected the link outright over a memory
+        // nothing would have touched.
+        //
+        // Dropping it is unobservable, on three facts that must hold together:
+        //
+        // - `uses_memory` is *closure-scoped*. `closure::compute` accumulates
+        //   it in `scan_body` over exactly the functions it returns in
+        //   `local_func_indices` — the same set the merge copies below — so
+        //   `false` means no body that reaches the output contains a memory
+        //   operator. This is the argument `tier` already relies on to drop an
+        //   external's globals and tables.
+        // - Every operator family that reaches linear memory sets it:
+        //   integer load/store, `memory.copy`, `memory.fill`, `memory.init`,
+        //   and `memory.size`/`memory.grow`. The last two are the ones worth
+        //   spelling out — they yield or extend a *page count* rather than
+        //   addressing a byte, so they read as unrelated to a memory's limits
+        //   when they are in fact the operators that observe them most
+        //   directly: `memory.size` returns the reconciled minimum, and
+        //   `memory.grow` is answered by the reconciled maximum. Both count as
+        //   use, and both are excluded here when `uses_memory` is false.
+        //   Anything outside the allow-list is rejected before it could reach
+        //   a body, so no unlisted operator can address memory silently.
+        // - No dropped memory is written behind the closure's back at
+        //   instantiation: `tier::classify` runs before this fold and rejects
+        //   any external declaring a data segment, so an external reaching
+        //   here has none to initialize the memory being dropped.
+        if !uses_memory {
+            return Ok(());
+        }
+        match ext_mem {
+            Some(ext_mem) => self.contributions.push(Contribution {
+                field: field.to_string(),
+                module: module.to_string(),
+                minimum: ext_mem.initial,
+                maximum: ext_mem.maximum,
+                grows: uses_memory_grow,
+            }),
+            None => {
+                self.unbacked
+                    .insert((field.to_string(), module.to_string(), uses_memory_grow));
             }
         }
-
-        if uses_memory_grow {
-            self.admit_growth(field)?;
-        }
-
-        // A closure that uses memory but no module supplies one to address has
-        // no valid shared memory to fold onto — reject rather than emit a body
-        // that references a memory the output lacks (the guard, part C).
-        if self.required && self.current.is_none() {
-            return Err(LinkError::IncompatibleMemory {
-                field: field.to_string(),
-                reason: "the external accesses linear memory, but neither it nor the main module \
-                         declares a memory to share"
-                    .to_string(),
-            });
-        }
-
         Ok(())
     }
 
-    /// Verifies the reconciled memory can actually grow: its maximum must
-    /// exceed its minimum (or be unbounded). When the reconciled memory is
-    /// pinned (`max == min`), a `memory.grow` always fails at runtime (returning
-    /// -1), so the merge rejects it with a clear diagnostic rather than emit a
-    /// module that silently mis-grows. Widening main's fixed maximum is avoided
-    /// deliberately: an external must not silently relax the host program's own
-    /// memory bound. A memoryless reconciliation that needs to grow is rejected
-    /// by the caller's required-memory guard before reaching here.
+    /// Returns the reconciled memory to emit, or `None` when no module needs
+    /// one, after checking it against every recorded contribution.
     ///
-    /// The rejection names the maximum knob, as [`reconcile_pair`]'s names the
-    /// page-count one: the fix is on the main module's side — declaring a
-    /// maximum above its size — which a diagnostic reporting only the two
-    /// numbers would leave the author to guess.
-    fn admit_growth(&self, field: &str) -> Result<(), LinkError> {
-        let Some(mem) = self.current.as_ref() else {
-            return Ok(());
+    /// The contributions are sorted first, so which one a diagnostic names is
+    /// decided by the set of imports rather than by the order they arrived in.
+    fn finish(mut self) -> Result<Option<EncMemoryType>, LinkError> {
+        self.contributions.sort();
+        let memory = match self.main {
+            Some(main) => Some(self.anchor_on_main(main)?),
+            None => self.fit_externals()?,
         };
-        if let Some(max) = mem.maximum
-            && max <= mem.minimum
+        let Some(memory) = memory else {
+            // A closure that uses memory but no module supplies one to address
+            // has no valid shared memory to fold onto — reject rather than emit a
+            // body that references a memory the output lacks (the guard, part C).
+            if let Some((field, _, _)) = self.unbacked.first() {
+                return Err(LinkError::IncompatibleMemory {
+                    field: field.clone(),
+                    reason: "the external accesses linear memory, but neither it nor the main \
+                             module declares a memory to share"
+                        .to_string(),
+                });
+            }
+            return Ok(None);
+        };
+        self.admit_growth(&memory)?;
+        Ok(Some(memory))
+    }
+
+    /// The output memory when the main module declares one: main's maximum,
+    /// kept unchanged, over the largest of every module's minimum.
+    ///
+    /// Main's maximum is *authoritative* and is never relaxed by an external:
+    /// widening the output maximum to the larger bound or to unbounded (an
+    /// earlier behavior) silently relaxed a main that declared `(memory 1 1)` to
+    /// admit an external's looser cap, and removed the runtime backstop that
+    /// would otherwise trap an over-long fill early. An external declaring a
+    /// larger or unbounded maximum is not rejected for it: main's bound is the
+    /// one the program was built with, so it governs every linked module, and
+    /// a closure that actually grows memory is held to it by
+    /// [`MemoryReconciler::admit_growth`].
+    ///
+    /// The one requirement that *cannot* be honored is a reserved minimum above
+    /// main's maximum — an external's static footprint that does not fit under
+    /// the program's declared cap — which is rejected rather than emitting an
+    /// invalid `min > max` memory. That rejection names the page-count knob: the
+    /// fix lies on the main module's side, which the author is unlikely to guess
+    /// from a diagnostic that only reports the two numbers.
+    fn anchor_on_main(&self, main: EncMemoryType) -> Result<EncMemoryType, LinkError> {
+        let widest = self.widest();
+        let minimum = widest.map_or(main.minimum, |c| c.minimum.max(main.minimum));
+        if let Some(main_max) = main.maximum
+            && minimum > main_max
         {
+            // Main's own memory is valid, so only a contribution can exceed it.
+            let field = widest.map_or("<main module>", |c| c.field.as_str());
             return Err(LinkError::IncompatibleMemory {
                 field: field.to_string(),
+                reason: format!(
+                    "the reconciled minimum ({minimum} pages) exceeds the declared maximum \
+                     ({main_max} pages) of the memory it is merged into; the kept memory bound \
+                     is not relaxed. Give the main module a memory large enough to hold the \
+                     external: `pages` in the `[memory]` table of `Inference.toml`, or \
+                     `infc --memory-pages <N>`"
+                ),
+            });
+        }
+        Ok(EncMemoryType { minimum, ..main })
+    }
+
+    /// The output memory when the main module is memoryless: the tightest fit
+    /// to every contributing external's declaration, or `None` when nothing
+    /// contributes one.
+    ///
+    /// Its minimum is the largest declared minimum and its maximum the smallest
+    /// declared maximum, unbounded only when no contributor declares one. That
+    /// is the meet of the declarations under WebAssembly import matching, so it
+    /// is the same memory whatever order they arrive in, and a lone contribution
+    /// is adopted exactly as its module declared it.
+    ///
+    /// Two outcomes are rejected rather than resolved by picking one module's
+    /// bound over another's. A minimum above the maximum means no memory
+    /// satisfies every declaration, whether or not anything grows. And a
+    /// growing contributor whose own maximum differs from the shared one would
+    /// see `memory.grow` stop somewhere its module never declared — the only
+    /// place a shared maximum is observable, since `memory.grow` is the operator
+    /// it answers, only a growing closure changes the size, and a memoryless
+    /// main exports no memory for a host to grow. Both rejections
+    /// point at the main module's own memory, whose maximum would then govern
+    /// every module explicitly.
+    fn fit_externals(&self) -> Result<Option<EncMemoryType>, LinkError> {
+        let Some(widest) = self.widest() else {
+            return Ok(None);
+        };
+        let minimum = widest.minimum;
+        let tightest = self.tightest();
+        let maximum = tightest.and_then(|c| c.maximum);
+
+        if let Some(tightest) = tightest
+            && let Some(max) = maximum
+            && minimum > max
+        {
+            let other = tightest.display_name();
+            return Err(LinkError::IncompatibleMemory {
+                field: widest.field.clone(),
+                reason: format!(
+                    "the external needs at least {minimum} pages of linear memory, but the \
+                     module providing `{other}`, which shares that memory, declares a maximum \
+                     of {max} pages, and no memory satisfies both declarations. Give the main \
+                     module its own memory with a maximum of at least {minimum} pages, which \
+                     then governs every linked module, `{other}`'s included: `max-pages` in the \
+                     `[memory]` table of `Inference.toml`, or `infc --max-memory-pages <N>`"
+                ),
+            });
+        }
+
+        if let Some(tightest) = tightest
+            && let Some(max) = maximum
+            && let Some(grower) = self
+                .contributions
+                .iter()
+                .find(|c| c.grows && c.maximum != Some(max))
+        {
+            let field = &grower.field;
+            let other = tightest.display_name();
+            let (declared, stop) = match grower.maximum {
+                Some(own) => (
+                    format!("grows linear memory up to {own} pages"),
+                    format!("would stop at {max} pages instead of {own}"),
+                ),
+                None => (
+                    "grows linear memory and its module declares no maximum".to_string(),
+                    format!("would stop at {max} pages instead of growing without bound"),
+                ),
+            };
+            return Err(LinkError::IncompatibleMemory {
+                field: field.clone(),
+                reason: format!(
+                    "the external {declared}, but the module providing `{other}`, which shares \
+                     that memory, declares a maximum of {max} pages, so `memory.grow` in \
+                     `{field}` {stop}; the linker does not choose one module's bound over \
+                     another's. Give the main module its own memory, whose maximum then governs \
+                     `memory.grow` in every linked module: `max-pages` in the `[memory]` table \
+                     of `Inference.toml`, or `infc --max-memory-pages <N>`"
+                ),
+            });
+        }
+
+        // Every contribution passed `reject_unsupported_memory_shape`, so the
+        // output takes the one shape the merge models.
+        Ok(Some(EncMemoryType {
+            minimum,
+            maximum,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        }))
+    }
+
+    /// The contribution with the largest minimum; of several, the first in
+    /// sorted order.
+    fn widest(&self) -> Option<&Contribution> {
+        self.contributions
+            .iter()
+            .reduce(|kept, c| if c.minimum > kept.minimum { c } else { kept })
+    }
+
+    /// The contribution with the smallest declared maximum; of several, the
+    /// first in sorted order. `None` when no contribution declares one.
+    ///
+    /// Only declared maxima are compared: `Option`'s order puts `None` first,
+    /// so comparing the options would read an unbounded declaration as the
+    /// tightest one.
+    fn tightest(&self) -> Option<&Contribution> {
+        self.contributions
+            .iter()
+            .filter(|c| c.maximum.is_some())
+            .reduce(|kept, c| if c.maximum < kept.maximum { c } else { kept })
+    }
+
+    /// Verifies the reconciled memory can actually grow when some merged
+    /// closure grows it: its maximum must exceed its minimum (or be unbounded).
+    /// When the reconciled memory is pinned (`max == min`), a `memory.grow`
+    /// always fails at runtime (returning -1), so the merge rejects it with a
+    /// clear diagnostic rather than emit a module that silently mis-grows.
+    /// Widening main's fixed maximum is avoided deliberately: an external must
+    /// not silently relax the host program's own memory bound.
+    ///
+    /// The check reads the final memory, after every contribution has widened
+    /// its minimum, so a module recorded after the growing one cannot pin the
+    /// memory behind its back.
+    ///
+    /// The rejection names the maximum knob, as [`Self::anchor_on_main`]'s
+    /// names the page-count one: the fix is on the main module's side —
+    /// declaring a maximum above its size — which a diagnostic reporting only
+    /// the two numbers would leave the author to guess.
+    fn admit_growth(&self, memory: &EncMemoryType) -> Result<(), LinkError> {
+        let grower = self
+            .contributions
+            .iter()
+            .filter(|c| c.grows)
+            .map(|c| &c.field)
+            .chain(
+                self.unbacked
+                    .iter()
+                    .filter(|(_, _, grows)| *grows)
+                    .map(|(field, _, _)| field),
+            )
+            .min();
+        let Some(field) = grower else {
+            return Ok(());
+        };
+        if let Some(max) = memory.maximum
+            && max <= memory.minimum
+        {
+            return Err(LinkError::IncompatibleMemory {
+                field: field.clone(),
                 reason: format!(
                     "the external grows linear memory, but the reconciled memory's maximum \
                      ({max} pages) does not exceed its minimum ({} pages); the kept memory \
                      bound is not relaxed. Give the main module a memory that may grow: \
                      `max-pages` in the `[memory]` table of `Inference.toml`, or \
                      `infc --max-memory-pages <N>`",
-                    mem.minimum
+                    memory.minimum
                 ),
             });
         }
         Ok(())
     }
-
-    /// Returns the reconciled memory to emit, or `None` when no module needs one.
-    fn finish(self) -> Option<EncMemoryType> {
-        self.current
-    }
-}
-
-/// Reconciles the **anchor** memory `a` (the main module's declared memory, or
-/// the accumulator already reconciled with it) with a contributing external
-/// memory `b`, or returns a clean [`LinkError::IncompatibleMemory`].
-///
-/// `a`'s declared maximum is *authoritative* and is **never relaxed upward** by
-/// `b`: the output keeps `a`'s maximum unchanged. Widening the output maximum to
-/// the larger bound or to unbounded (the prior behavior) silently relaxed a main
-/// that declared `(memory 1 1)` to admit an external's looser cap —
-/// contradicting [`MemoryReconciler::admit_growth`]'s own refusal to relax the
-/// host's memory bound, and removing the runtime backstop that would otherwise
-/// trap an over-long fill early. An external declaring a larger or unbounded
-/// maximum is *clamped* to the anchor's bound, not rejected: the external's
-/// declared maximum only caps growth, and folding it under main's stricter cap is
-/// a more-restrictive (sound) runtime. (A closure that actually grows memory is
-/// gated separately by [`MemoryReconciler::admit_growth`] against the kept
-/// maximum.)
-///
-/// The minimum is widened to `max(a.min, b.min)` to reserve enough pages for
-/// every module's static range. The one reconciliation that *cannot* be honored
-/// is a reserved minimum that exceeds the anchor's maximum — the external's
-/// static footprint does not fit under the host's declared cap — which is
-/// rejected rather than emitting an invalid `min > max` memory. That rejection
-/// names the page-count knob: the fix lies on the main module's side, which the
-/// author is unlikely to guess from a diagnostic that only reports the two
-/// numbers.
-fn reconcile_pair(
-    a: EncMemoryType,
-    b: EncMemoryType,
-    field: &str,
-) -> Result<EncMemoryType, LinkError> {
-    if a.memory64 != b.memory64 {
-        return Err(LinkError::IncompatibleMemory {
-            field: field.to_string(),
-            reason: format!(
-                "memory64 mismatch (one memory is memory64={}, the other memory64={})",
-                a.memory64, b.memory64
-            ),
-        });
-    }
-    if a.shared != b.shared {
-        return Err(LinkError::IncompatibleMemory {
-            field: field.to_string(),
-            reason: format!(
-                "shared mismatch (one memory is shared={}, the other shared={})",
-                a.shared, b.shared
-            ),
-        });
-    }
-    if a.page_size_log2 != b.page_size_log2 {
-        return Err(LinkError::IncompatibleMemory {
-            field: field.to_string(),
-            reason: "custom page sizes differ between the two memories".to_string(),
-        });
-    }
-
-    // Widen the minimum to satisfy both modules' static ranges, but keep the
-    // anchor's maximum: the main module's declared cap is never relaxed upward.
-    let minimum = a.minimum.max(b.minimum);
-    let maximum = a.maximum;
-
-    // The external's static footprint must fit under the host's declared cap; a
-    // reserved minimum above it cannot be honored without relaxing the cap.
-    if let Some(anchor_max) = maximum
-        && minimum > anchor_max
-    {
-        return Err(LinkError::IncompatibleMemory {
-            field: field.to_string(),
-            reason: format!(
-                "the reconciled minimum ({minimum} pages) exceeds the declared maximum \
-                 ({anchor_max} pages) of the memory it is merged into; the kept memory bound \
-                 is not relaxed. Give the main module a memory large enough to hold the \
-                 external: `pages` in the `[memory]` table of `Inference.toml`, or \
-                 `infc --memory-pages <N>`"
-            ),
-        });
-    }
-
-    Ok(EncMemoryType {
-        minimum,
-        maximum,
-        memory64: a.memory64,
-        shared: a.shared,
-        page_size_log2: a.page_size_log2,
-    })
 }
 
 /// Rejects a memory whose fundamental shape the static merge and the Rocq
@@ -3216,8 +3364,10 @@ fn reconcile_pair(
 /// produce a `.wasm` whose machine the paired `.v` silently misdescribes — the
 /// worst failure class for a verification-first toolchain. Every contributed
 /// memory (the main module's and each external's) is checked, so the rejection
-/// is absolute rather than reachable only on the two-memory reconcile path
-/// (audit C-4/L-1).
+/// is absolute rather than reachable only when two memories meet (audit
+/// C-4/L-1). It is also what lets [`MemoryReconciler`] reconcile limits alone:
+/// every memory that reaches it has this one shape, so no two can disagree on
+/// anything else.
 fn reject_unsupported_memory_shape(
     mem: &inf_wasmparser::MemoryType,
     field: &str,
@@ -3265,10 +3415,12 @@ fn map_global_init(init: GlobalInit) -> ConstExpr {
 
 #[cfg(test)]
 mod tests {
-    //! Direct unit tests for memory reconciliation paths the public `link` API
-    //! cannot reach through valid WAT — notably the guard for a memory-using
-    //! closure with no memory to address, which would require a structurally
-    //! invalid external the `wat` assembler refuses to build.
+    //! Direct unit tests for memory reconciliation: its independence from the
+    //! order imports arrive in, checked over every order at once, and the paths
+    //! the public `link` API cannot reach through valid WAT — notably the guard
+    //! for a memory-using closure with no memory to address, which would
+    //! require a structurally invalid external the `wat` assembler refuses to
+    //! build.
 
     use super::*;
     use inf_wasmparser::MemoryType;
@@ -3283,44 +3435,483 @@ mod tests {
         }
     }
 
+    /// One satisfied import as the reconciler sees it: the arguments of one
+    /// [`MemoryReconciler::fold`] call.
+    #[derive(Clone, Copy, Debug)]
+    struct Import {
+        module: &'static str,
+        field: &'static str,
+        memory: Option<MemoryType>,
+        uses_memory: bool,
+        grows: bool,
+    }
+
+    /// An import whose closure addresses the memory its module declares.
+    fn user(module: &'static str, field: &'static str, memory: MemoryType) -> Import {
+        Import {
+            module,
+            field,
+            memory: Some(memory),
+            uses_memory: true,
+            grows: false,
+        }
+    }
+
+    /// An import whose closure also grows that memory.
+    fn grower(module: &'static str, field: &'static str, memory: MemoryType) -> Import {
+        Import {
+            grows: true,
+            ..user(module, field, memory)
+        }
+    }
+
+    /// The reconciler's verdict, reduced to what the output carries: the
+    /// emitted limits, or the rendered diagnostic.
+    type Outcome = Result<Option<(u64, Option<u64>)>, String>;
+
+    /// Folds `imports` in the order given onto a reconciler seeded with `main`.
+    fn reconcile(main: Option<MemoryType>, imports: &[&Import]) -> Outcome {
+        let mut r = MemoryReconciler::new(main.as_ref()).map_err(|e| e.to_string())?;
+        for import in imports {
+            r.fold(
+                import.memory.as_ref(),
+                import.uses_memory,
+                import.grows,
+                import.module,
+                import.field,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        r.finish()
+            .map(|memory| memory.map(|m| (m.minimum, m.maximum)))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Every ordering of `0..n`.
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![Vec::new()];
+        }
+        let mut all = Vec::new();
+        for rest in permutations(n - 1) {
+            for at in 0..=rest.len() {
+                let mut order = rest.clone();
+                order.insert(at, n - 1);
+                all.push(order);
+            }
+        }
+        all
+    }
+
+    /// Reconciles `imports` in every order, asserts that every order gives the
+    /// same outcome, and returns it.
+    fn reconcile_in_every_order(main: Option<MemoryType>, imports: &[Import]) -> Outcome {
+        let orders = permutations(imports.len());
+        let outcomes: Vec<Outcome> = orders
+            .iter()
+            .map(|order| {
+                let ordered: Vec<&Import> = order.iter().map(|&i| &imports[i]).collect();
+                reconcile(main, &ordered)
+            })
+            .collect();
+        for (order, outcome) in orders.iter().zip(&outcomes) {
+            assert_eq!(
+                outcome, &outcomes[0],
+                "import order {order:?} changed the reconciled memory of {imports:?}"
+            );
+        }
+        outcomes[0].clone()
+    }
+
+    /// Asserts `outcome` is a rejection for `field` whose text contains every
+    /// one of `parts`.
+    fn assert_rejected(outcome: &Outcome, field: &str, parts: &[&str]) {
+        let Err(message) = outcome else {
+            panic!("expected a rejection for `{field}`, got {outcome:?}");
+        };
+        let prefix = format!("cannot reconcile linear memory for `{field}`: ");
+        assert!(
+            message.starts_with(&prefix),
+            "the rejection names `{field}`: {message}"
+        );
+        for part in parts {
+            assert!(message.contains(part), "missing {part:?} in: {message}");
+        }
+    }
+
+    #[test]
+    fn the_reconciled_memory_is_the_same_in_every_import_order() {
+        // Every ordered sequence of two and three imports drawn with
+        // replacement from the pool — a repeat is one external satisfying
+        // several imports — onto each kind of main, compared with the same
+        // imports in one fixed order. The pool spans the limits that interact:
+        // unbounded and bounded maxima, a pinned memory, minimums above other
+        // maxima, each as a closure that only uses memory and as one that grows
+        // it; a field two modules both export, with different memories; a
+        // declared memory no closure uses; and an import touching no memory at
+        // all. Rejections are compared too, so the field a diagnostic names
+        // cannot depend on the order either.
+        const LIMITS: [(u64, Option<u64>); 6] = [
+            (1, None),
+            (1, Some(2)),
+            (1, Some(10)),
+            (2, None),
+            (5, Some(5)),
+            (10, Some(10)),
+        ];
+        const MODULES: [&str; 6] = ["m0", "m1", "m2", "m3", "m4", "m5"];
+        const USERS: [&str; 6] = ["use0", "use1", "use2", "use3", "use4", "use5"];
+        const GROWERS: [&str; 6] = ["grow0", "grow1", "grow2", "grow3", "grow4", "grow5"];
+
+        let mut pool = Vec::new();
+        for (i, &(initial, maximum)) in LIMITS.iter().enumerate() {
+            pool.push(user(MODULES[i], USERS[i], mem(initial, maximum)));
+            pool.push(grower(MODULES[i], GROWERS[i], mem(initial, maximum)));
+        }
+        pool.push(user("x", "dup", mem(1, Some(3))));
+        pool.push(grower("y", "dup", mem(2, Some(4))));
+        pool.push(Import {
+            module: "z",
+            field: "idle",
+            memory: Some(mem(7, Some(7))),
+            uses_memory: false,
+            grows: false,
+        });
+        pool.push(Import {
+            module: "p",
+            field: "pure",
+            memory: None,
+            uses_memory: false,
+            grows: false,
+        });
+
+        let n = pool.len();
+        let mains = [None, Some(mem(1, Some(1))), Some(mem(1, Some(10)))];
+        let (mut runs, mut linked, mut rejected) = (0, 0, 0);
+        for main in mains {
+            for len in 2..=3u32 {
+                for code in 0..n.pow(len) {
+                    let mut seq: Vec<usize> =
+                        (0..len).map(|digit| code / n.pow(digit) % n).collect();
+                    let ordered: Vec<&Import> = seq.iter().map(|&i| &pool[i]).collect();
+                    let outcome = reconcile(main, &ordered);
+                    seq.sort_unstable();
+                    let canonical: Vec<&Import> = seq.iter().map(|&i| &pool[i]).collect();
+                    assert_eq!(
+                        outcome,
+                        reconcile(main, &canonical),
+                        "main {main:?}: {ordered:?} and {canonical:?} reconcile differently"
+                    );
+                    runs += 1;
+                    match outcome {
+                        Ok(_) => linked += 1,
+                        Err(_) => rejected += 1,
+                    }
+                }
+            }
+        }
+        assert_eq!(runs, 3 * (n.pow(2) + n.pow(3)), "every sequence ran");
+        assert!(
+            linked > 0 && rejected > 0,
+            "the matrix exercises both verdicts ({linked} linked, {rejected} rejected)"
+        );
+    }
+
+    #[test]
+    fn a_memoryless_main_takes_the_smallest_declared_maximum() {
+        let outcome = reconcile_in_every_order(
+            None,
+            &[
+                user("a", "wide", mem(1, Some(10))),
+                user("b", "narrow", mem(1, Some(2))),
+            ],
+        );
+        assert_eq!(
+            outcome,
+            Ok(Some((1, Some(2)))),
+            "no module's declared cap is relaxed"
+        );
+    }
+
+    #[test]
+    fn a_memoryless_main_takes_the_largest_declared_minimum() {
+        let outcome = reconcile_in_every_order(
+            None,
+            &[
+                user("a", "small", mem(1, Some(9))),
+                user("b", "large", mem(3, Some(9))),
+            ],
+        );
+        assert_eq!(outcome, Ok(Some((3, Some(9)))));
+    }
+
+    #[test]
+    fn unbounded_declarations_stay_unbounded() {
+        let outcome = reconcile_in_every_order(
+            None,
+            &[user("a", "f", mem(1, None)), user("b", "g", mem(2, None))],
+        );
+        assert_eq!(outcome, Ok(Some((2, None))));
+    }
+
+    #[test]
+    fn one_bounded_declaration_bounds_the_unbounded_ones() {
+        // An unbounded declaration is the loosest, not the tightest: the bound
+        // one decides the maximum however the two arrive.
+        let outcome = reconcile_in_every_order(
+            None,
+            &[
+                user("a", "f", mem(1, None)),
+                user("b", "g", mem(1, Some(5))),
+            ],
+        );
+        assert_eq!(outcome, Ok(Some((1, Some(5)))));
+    }
+
+    #[test]
+    fn a_single_contribution_is_adopted_as_declared() {
+        assert_eq!(
+            reconcile_in_every_order(None, &[user("a", "f", mem(4, None))]),
+            Ok(Some((4, None)))
+        );
+        assert_eq!(
+            reconcile_in_every_order(None, &[grower("a", "f", mem(3, Some(7)))]),
+            Ok(Some((3, Some(7))))
+        );
+    }
+
+    #[test]
+    fn declarations_no_memory_satisfies_are_rejected_without_a_grower() {
+        // One module needs five pages, the other caps its memory at two. No
+        // memory matches both declarations, so the link is refused even though
+        // nothing grows — whichever was listed first used to win.
+        let outcome = reconcile_in_every_order(
+            None,
+            &[
+                user("c", "peek", mem(5, Some(5))),
+                user("q", "peekQ", mem(1, Some(2))),
+            ],
+        );
+        assert_rejected(
+            &outcome,
+            "peek",
+            &[
+                "at least 5 pages",
+                "`q::peekQ`",
+                "maximum of 2 pages",
+                "no memory satisfies both declarations",
+                "at least 5 pages, which then governs every linked module",
+                "`max-pages` in the `[memory]` table of `Inference.toml`",
+                "--max-memory-pages",
+            ],
+        );
+    }
+
+    #[test]
+    fn a_grower_whose_cap_the_shared_maximum_lowers_is_rejected() {
+        // The issue's case: `growA` may grow to ten pages and `growB` to two.
+        // Sharing one memory moves where one of them stops, so the link is
+        // refused rather than settled by declaration order.
+        let outcome = reconcile_in_every_order(
+            None,
+            &[
+                grower("a", "growA", mem(1, Some(10))),
+                grower("b", "growB", mem(1, Some(2))),
+            ],
+        );
+        assert_rejected(
+            &outcome,
+            "growA",
+            &[
+                "grows linear memory up to 10 pages",
+                "`b::growB`",
+                "`memory.grow` in `growA` would stop at 2 pages instead of 10",
+                "does not choose one module's bound over another's",
+                "`max-pages` in the `[memory]` table of `Inference.toml`",
+                "--max-memory-pages",
+            ],
+        );
+    }
+
+    #[test]
+    fn an_unbounded_grower_capped_by_another_module_is_rejected() {
+        let outcome = reconcile_in_every_order(
+            None,
+            &[
+                grower("g", "expand", mem(1, None)),
+                user("n", "read", mem(1, Some(4))),
+            ],
+        );
+        assert_rejected(
+            &outcome,
+            "expand",
+            &[
+                "its module declares no maximum",
+                "`n::read`",
+                "would stop at 4 pages instead of growing without bound",
+            ],
+        );
+    }
+
+    #[test]
+    fn a_grower_whose_cap_is_the_shared_maximum_links() {
+        // Only the non-growing module's cap is lowered, from ten pages to two,
+        // and nothing can observe that: `growB` stops where it always did.
+        let outcome = reconcile_in_every_order(
+            None,
+            &[
+                grower("b", "growB", mem(1, Some(2))),
+                user("e", "peekE", mem(1, Some(10))),
+            ],
+        );
+        assert_eq!(outcome, Ok(Some((1, Some(2)))));
+    }
+
+    #[test]
+    fn growth_is_checked_against_the_final_memory_of_a_memoryless_main() {
+        // `growA`'s own memory can grow, but `peekD` raises the shared minimum
+        // to the shared maximum. Checked mid-fold, the order decided whether
+        // that pinned memory slipped through.
+        let outcome = reconcile_in_every_order(
+            None,
+            &[
+                grower("a", "growA", mem(1, Some(10))),
+                user("d", "peekD", mem(10, Some(10))),
+            ],
+        );
+        assert_rejected(
+            &outcome,
+            "growA",
+            &[
+                "maximum (10 pages) does not exceed its minimum (10 pages)",
+                "`max-pages`",
+            ],
+        );
+    }
+
+    #[test]
+    fn growth_is_checked_against_the_final_memory_of_a_main_with_its_own() {
+        let outcome = reconcile_in_every_order(
+            Some(mem(1, Some(10))),
+            &[
+                grower("a", "growA", mem(1, Some(10))),
+                user("d", "peekD", mem(10, Some(10))),
+            ],
+        );
+        assert_rejected(
+            &outcome,
+            "growA",
+            &["maximum (10 pages) does not exceed its minimum (10 pages)"],
+        );
+    }
+
+    #[test]
+    fn a_declared_memory_no_closure_uses_contributes_nothing() {
+        let idle = Import {
+            module: "z",
+            field: "idle",
+            memory: Some(mem(7, Some(7))),
+            uses_memory: false,
+            grows: false,
+        };
+        assert_eq!(
+            reconcile_in_every_order(None, &[idle, user("b", "f", mem(1, Some(2)))]),
+            Ok(Some((1, Some(2))))
+        );
+        assert_eq!(reconcile_in_every_order(None, &[idle]), Ok(None));
+    }
+
+    #[test]
+    fn two_modules_exporting_one_field_are_told_apart() {
+        let outcome = reconcile_in_every_order(
+            None,
+            &[
+                user("x", "dup", mem(1, Some(3))),
+                grower("y", "dup", mem(2, Some(4))),
+            ],
+        );
+        assert_rejected(&outcome, "dup", &["up to 4 pages", "`x::dup`"]);
+    }
+
+    #[test]
+    fn the_main_minimum_check_names_the_widest_external() {
+        let outcome = reconcile_in_every_order(
+            Some(mem(1, Some(5))),
+            &[
+                user("a", "six", mem(6, None)),
+                user("b", "nine", mem(9, None)),
+            ],
+        );
+        assert_rejected(
+            &outcome,
+            "nine",
+            &["reconciled minimum (9 pages)", "declared maximum (5 pages)"],
+        );
+    }
+
+    /// A closure that uses memory although its module declares none. The `wat`
+    /// assembler refuses to build one, so only these unit tests reach it.
+    fn unbacked(field: &'static str, grows: bool) -> Import {
+        Import {
+            module: "m",
+            field,
+            memory: None,
+            uses_memory: true,
+            grows,
+        }
+    }
+
     #[test]
     fn memory_using_closure_without_any_memory_is_rejected() {
         // The guard (part C): a closure that touches memory while no module —
         // neither main nor the external — declares one has nothing to address.
-        let mut r = MemoryReconciler::new(None).expect("a memoryless main is supported");
-        let err = r
-            .fold(None, true, false, "f")
-            .expect_err("a memory-using closure with no memory must be rejected");
-        assert!(
-            matches!(err, LinkError::IncompatibleMemory { .. }),
-            "got {err:?}"
+        // Of two such imports, the same one is named in either order.
+        let outcome =
+            reconcile_in_every_order(None, &[unbacked("f2", false), unbacked("f1", false)]);
+        assert_rejected(
+            &outcome,
+            "f1",
+            &["neither it nor the main module declares a memory to share"],
+        );
+    }
+
+    #[test]
+    fn a_memory_using_closure_without_its_own_memory_addresses_mains() {
+        assert_eq!(
+            reconcile_in_every_order(Some(mem(1, Some(10))), &[unbacked("f", true)]),
+            Ok(Some((1, Some(10))))
+        );
+        assert_rejected(
+            &reconcile_in_every_order(Some(mem(1, Some(1))), &[unbacked("f", true)]),
+            "f",
+            &["does not exceed its minimum"],
         );
     }
 
     #[test]
     fn pure_closure_without_memory_is_fine() {
         // No memory effect, no memory declared: a pure merge needs no memory.
-        let mut r = MemoryReconciler::new(None).expect("a memoryless main is supported");
-        r.fold(None, false, false, "f")
-            .expect("pure closure needs no memory");
-        assert!(
-            r.finish().is_none(),
+        let pure = Import {
+            module: "m",
+            field: "f",
+            memory: None,
+            uses_memory: false,
+            grows: false,
+        };
+        assert_eq!(
+            reconcile_in_every_order(None, &[pure]),
+            Ok(None),
             "no memory is emitted for a pure merge"
         );
     }
 
     #[test]
     fn minimum_is_widened_to_the_larger_of_two_memories() {
-        let mut r =
-            MemoryReconciler::new(Some(&mem(1, Some(20)))).expect("a 32-bit main is supported");
-        r.fold(Some(&mem(10, Some(20))), true, false, "f")
-            .expect("compatible memories reconcile");
-        let out = r.finish().expect("a memory is emitted");
         assert_eq!(
-            out.minimum, 10,
+            reconcile_in_every_order(Some(mem(1, Some(20))), &[user("m", "f", mem(10, Some(20)))]),
+            Ok(Some((10, Some(20)))),
             "reconciled minimum is the larger of 1 and 10"
         );
-        assert_eq!(out.maximum, Some(20));
     }
 
     #[test]
@@ -3328,38 +3919,23 @@ mod tests {
         // S4: a main that declared `(memory 1 5)` must NOT be relaxed to unbounded
         // by an external with no maximum. The external's static footprint (min 2)
         // fits under the cap, so the merge succeeds — but the output maximum stays
-        // the main's declared 5, never silently unbounded.
-        let mut r =
-            MemoryReconciler::new(Some(&mem(1, Some(5)))).expect("a 32-bit main is supported");
-        r.fold(Some(&mem(2, None)), true, false, "f")
-            .expect("an unbounded external fits under the main's cap and clamps to it");
-        let out = r.finish().expect("a memory is emitted");
+        // the main's declared 5, never silently unbounded, and the minimum widens
+        // to the external's larger footprint.
         assert_eq!(
-            out.maximum,
-            Some(5),
-            "the output maximum stays the main's declared cap, not unbounded"
-        );
-        assert_eq!(
-            out.minimum, 2,
-            "the minimum widens to the external's larger footprint"
+            reconcile_in_every_order(Some(mem(1, Some(5))), &[user("m", "f", mem(2, None))]),
+            Ok(Some((2, Some(5))))
         );
     }
 
     #[test]
     fn a_larger_external_maximum_is_clamped_to_the_main_cap() {
         // S4: an external declaring a larger maximum (9) than the main's cap (5)
-        // is clamped down to the main's bound, not widened up to the external's.
-        // The external's static minimum (1) fits, so the merge succeeds with the
+        // is held to the main's bound, not widened up to the external's. The
+        // external's static minimum (1) fits, so the merge succeeds with the
         // main's maximum preserved.
-        let mut r =
-            MemoryReconciler::new(Some(&mem(1, Some(5)))).expect("a 32-bit main is supported");
-        r.fold(Some(&mem(1, Some(9))), true, false, "f")
-            .expect("a larger external maximum is clamped to the main's cap");
-        let out = r.finish().expect("a memory is emitted");
         assert_eq!(
-            out.maximum,
-            Some(5),
-            "the output maximum stays the main's declared cap"
+            reconcile_in_every_order(Some(mem(1, Some(5))), &[user("m", "f", mem(1, Some(9)))]),
+            Ok(Some((1, Some(5))))
         );
     }
 
@@ -3368,27 +3944,19 @@ mod tests {
         // S4: when the external's static footprint (min 9) exceeds the main's cap
         // (5), the reservation cannot be honored without relaxing the host's
         // declared maximum — reject rather than emit an invalid `min > max`.
-        let mut r =
-            MemoryReconciler::new(Some(&mem(1, Some(5)))).expect("a 32-bit main is supported");
-        let err = r
-            .fold(Some(&mem(9, None)), true, false, "f")
-            .expect_err("an external footprint above the main's cap must be rejected");
-        assert!(
-            matches!(err, LinkError::IncompatibleMemory { .. }),
-            "got {err:?}"
+        assert_rejected(
+            &reconcile_in_every_order(Some(mem(1, Some(5))), &[user("m", "f", mem(9, None))]),
+            "f",
+            &["exceeds the declared maximum (5 pages)", "`pages`"],
         );
     }
 
     #[test]
     fn grow_against_a_fixed_reconciled_memory_is_rejected() {
-        let mut r =
-            MemoryReconciler::new(Some(&mem(1, Some(1)))).expect("a 32-bit main is supported");
-        let err = r
-            .fold(Some(&mem(1, Some(1))), true, true, "f")
-            .expect_err("growth against a pinned memory must reject");
-        assert!(
-            matches!(err, LinkError::IncompatibleMemory { .. }),
-            "got {err:?}"
+        assert_rejected(
+            &reconcile_in_every_order(Some(mem(1, Some(1))), &[grower("m", "f", mem(1, Some(1)))]),
+            "f",
+            &["does not exceed its minimum (1 pages)"],
         );
     }
 
@@ -3396,17 +3964,11 @@ mod tests {
     fn a_smaller_bounded_external_keeps_the_main_maximum() {
         // Reconciling a `(memory 10 10)` main with a `(memory 1 3)` external: the
         // minimum widens to 10 (the larger), and the maximum stays the main's
-        // declared 10 (the external's smaller 3 fits under it), so the result is a
-        // valid `10..10` memory, not an invalid `min > max` and not a relaxed cap.
-        let mut r =
-            MemoryReconciler::new(Some(&mem(10, Some(10)))).expect("a 32-bit main is supported");
-        r.fold(Some(&mem(1, Some(3))), true, false, "f")
-            .expect("a smaller external maximum keeps the memory valid");
-        let out = r.finish().expect("a memory is emitted");
-        assert_eq!(out.minimum, 10);
+        // declared 10 — the main's bound governs every linked module — so the
+        // result is a valid `10..10` memory, not an invalid `min > max`.
         assert_eq!(
-            out.maximum,
-            Some(10),
+            reconcile_in_every_order(Some(mem(10, Some(10))), &[user("m", "f", mem(1, Some(3)))]),
+            Ok(Some((10, Some(10)))),
             "the main's declared maximum is preserved"
         );
     }
@@ -3417,15 +3979,9 @@ mod tests {
         // (no maximum). The external's static footprint (min 1) fits under the
         // pinned cap, so the merge succeeds — and the output maximum stays the
         // main's pinned 1, never silently unbounded.
-        let mut r =
-            MemoryReconciler::new(Some(&mem(1, Some(1)))).expect("a 32-bit main is supported");
-        r.fold(Some(&mem(1, None)), true, false, "f")
-            .expect("a no-max external fits under the pinned cap");
-        let out = r.finish().expect("a memory is emitted");
         assert_eq!(
-            out.maximum,
-            Some(1),
-            "the output maximum stays the main's pinned cap, NOT silently unbounded"
+            reconcile_in_every_order(Some(mem(1, Some(1))), &[user("m", "f", mem(1, None))]),
+            Ok(Some((1, Some(1))))
         );
     }
 
@@ -3480,58 +4036,43 @@ mod tests {
         assert_new_rejects(&custom_page(1, Some(1)));
     }
 
+    /// Asserts folding `ext_mem` as a memory-using external onto `main` is
+    /// rejected by its shape, at the fold itself.
+    fn assert_fold_rejects(main: Option<MemoryType>, ext_mem: MemoryType) -> String {
+        let mut r = MemoryReconciler::new(main.as_ref()).expect("a 32-bit main is supported");
+        let err = r
+            .fold(Some(&ext_mem), true, false, "m", "f")
+            .expect_err("an unsupported external memory shape must be rejected");
+        let LinkError::IncompatibleMemory { reason, .. } = err else {
+            panic!("got {err:?}");
+        };
+        reason
+    }
+
     #[test]
     fn a_memory64_external_on_a_memoryless_main_is_rejected_on_the_adopt_path() {
-        // C-4: the `None => ext` adopt path must reject too, so a 64-bit external
-        // forwarded by a memoryless main is never silently adopted as 32-bit.
-        let mut r = MemoryReconciler::new(None).expect("a memoryless main is supported");
-        let err = r
-            .fold(Some(&memory64(1, Some(1))), true, false, "f")
-            .expect_err("a memory64 external must be rejected on adoption");
-        assert!(
-            matches!(err, LinkError::IncompatibleMemory { .. }),
-            "got {err:?}"
-        );
+        // C-4: a memoryless main adopts its only external's memory, so that path
+        // must reject too, and a 64-bit external is never adopted as 32-bit.
+        assert_fold_rejects(None, memory64(1, Some(1)));
     }
 
     #[test]
     fn a_shared_external_on_a_memoryless_main_is_rejected_on_the_adopt_path() {
         // L-1: a bare `shared` external (non-atomic body) onto a memoryless main
-        // is rejected by shape on the adopt path, not just on reconcile.
-        let mut r = MemoryReconciler::new(None).expect("a memoryless main is supported");
-        let err = r
-            .fold(Some(&shared(1, Some(1))), true, false, "f")
-            .expect_err("a shared external must be rejected on adoption");
-        assert!(
-            matches!(err, LinkError::IncompatibleMemory { .. }),
-            "got {err:?}"
-        );
+        // is rejected by shape on the adopt path, not just beside main's memory.
+        assert_fold_rejects(None, shared(1, Some(1)));
     }
 
     #[test]
     fn a_custom_page_external_on_a_memoryless_main_is_rejected_on_the_adopt_path() {
-        let mut r = MemoryReconciler::new(None).expect("a memoryless main is supported");
-        let err = r
-            .fold(Some(&custom_page(1, Some(1))), true, false, "f")
-            .expect_err("a custom-page external must be rejected on adoption");
-        assert!(
-            matches!(err, LinkError::IncompatibleMemory { .. }),
-            "got {err:?}"
-        );
+        assert_fold_rejects(None, custom_page(1, Some(1)));
     }
 
     #[test]
     fn a_memory64_external_against_a_32_bit_main_is_rejected_before_reconcile() {
-        // The fold-path shape guard runs before `reconcile_pair`, so the
-        // rejection reason names the unsupported shape, not a `memory64` mismatch.
-        let mut r =
-            MemoryReconciler::new(Some(&mem(1, Some(1)))).expect("a 32-bit main is supported");
-        let err = r
-            .fold(Some(&memory64(1, Some(1))), true, false, "f")
-            .expect_err("a memory64 external must be rejected");
-        let LinkError::IncompatibleMemory { reason, .. } = &err else {
-            panic!("got {err:?}");
-        };
+        // The fold-path shape guard runs before anything is reconciled, so the
+        // rejection reason names the unsupported shape itself.
+        let reason = assert_fold_rejects(Some(mem(1, Some(1))), memory64(1, Some(1)));
         assert!(
             reason.contains("memory64"),
             "reason names the unsupported shape: {reason}"
