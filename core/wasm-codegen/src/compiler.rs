@@ -74,7 +74,7 @@ use crate::output::{AbiParam, AbiReturn, AbiType, ExportSignature};
 use crate::overflow_guard::{
     self, GuardKind, GuardScratchDemand, GuardScratchPool, GuardedOp, ModeSource, guard_kind,
 };
-use crate::target::{EmitFeatures, MemoryLayout};
+use crate::target::{EmitFeatures, MemoryImport, MemoryLayout};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use inference_ast::arena::AstArena;
@@ -8763,6 +8763,10 @@ impl Compiler {
     /// module declares, an unbounded maximum included. The default layout is
     /// left to the program's use, which keeps a default build of a memoryless
     /// program byte-identical to what it always was.
+    ///
+    /// An imported layout always declares its memory, by importing it, even for
+    /// a program that touches none: it is never the default layout, so what its
+    /// host has to supply does not depend on what the program happens to use.
     fn declares_memory(&self) -> bool {
         self.has_memory || !self.memory_layout.is_default_memory()
     }
@@ -8775,6 +8779,9 @@ impl Compiler {
     /// `memory.init` and `data.drop`, which nothing emits, and the `SpaceWasm`
     /// interpreter cannot decode one. Data is section 11, so this runs after
     /// the Code section and before the custom sections.
+    ///
+    /// In import mode memory 0 is the host's, so the segment writes the region
+    /// into the host's memory when the module is instantiated.
     fn emit_data_section(&self, module: &mut Module) {
         if self.static_data.is_empty() {
             return;
@@ -8787,6 +8794,41 @@ impl Compiler {
             self.static_data.iter().copied(),
         );
         module.section(&data_section);
+    }
+
+    /// Writes the import section: the memory import first when the layout
+    /// imports its memory, named and bounded by the layout's
+    /// [`MemoryImport`], then every function import in the order it was
+    /// interned. Nothing for a module that imports neither.
+    ///
+    /// Imported functions occupy the lowest function indices, so emitting them
+    /// here is what makes the local `func_idx` base reservation correct. An
+    /// imported memory occupies memory index 0, since imported memories
+    /// precede defined ones, and shifts no function index: the function index
+    /// space counts function imports only.
+    fn emit_import_section(&self, module: &mut Module) {
+        let memory_import = self.memory_layout.memory_import();
+        if self.imports.is_empty() && memory_import.is_none() {
+            return;
+        }
+        cov_mark::hit!(wasm_codegen_emit_import_section);
+        let mut import_section = ImportSection::new();
+        if let Some(MemoryImport { minimum, maximum }) = memory_import {
+            cov_mark::hit!(wasm_codegen_emit_memory_import);
+            import_section.import(
+                MemoryImport::MODULE,
+                MemoryImport::FIELD,
+                EntityType::Memory(bounded_memory_type(minimum, maximum)),
+            );
+        }
+        for import in &self.imports {
+            import_section.import(
+                &import.module,
+                &import.field,
+                EntityType::Function(import.type_idx),
+            );
+        }
+        module.section(&import_section);
     }
 
     /// Assembles the complete WASM binary from accumulated sections AND
@@ -8814,21 +8856,10 @@ impl Compiler {
         }
         module.section(&type_section);
 
+        let declares_memory = self.declares_memory();
+
         // Import section sits between Type and Function (WASM section order).
-        // Imported functions occupy the lowest function indices, so emitting it
-        // here is what makes the local `func_idx` base reservation correct.
-        if !self.imports.is_empty() {
-            cov_mark::hit!(wasm_codegen_emit_import_section);
-            let mut import_section = ImportSection::new();
-            for import in &self.imports {
-                import_section.import(
-                    &import.module,
-                    &import.field,
-                    EntityType::Function(import.type_idx),
-                );
-            }
-            module.section(&import_section);
-        }
+        self.emit_import_section(&mut module);
 
         let mut function_section = FunctionSection::new();
         for &type_idx in &self.functions {
@@ -8836,24 +8867,13 @@ impl Compiler {
         }
         module.section(&function_section);
 
-        let declares_memory = self.declares_memory();
-        if declares_memory {
+        if declares_memory && !self.memory_layout.is_imported() {
             cov_mark::hit!(wasm_codegen_emit_memory_section);
             let mut memory_section = MemorySection::new();
-            // The maximum is the layout's own, which is the page count unless the
-            // build asked for more: by default the memory is fixed, so
-            // `memory.grow` can never move the end of memory. A larger maximum is
-            // room for a linked module or the host to grow into. Either way it is
-            // always bounded, and the layout's overflow-trap headroom is measured
-            // against it, so growth cannot carry the end of memory under a
-            // wrapped stack pointer.
-            memory_section.memory(MemoryType {
-                minimum: u64::from(self.memory_layout.pages()),
-                maximum: Some(u64::from(self.memory_layout.max_pages())),
-                memory64: false,
-                shared: false,
-                page_size_log2: None,
-            });
+            memory_section.memory(bounded_memory_type(
+                self.memory_layout.pages(),
+                self.memory_layout.max_pages(),
+            ));
             module.section(&memory_section);
         }
 
@@ -8877,6 +8897,8 @@ impl Compiler {
                 export_section.export(name, *kind, *idx);
             }
             if declares_memory {
+                // In import mode memory 0 is the imported memory, so this
+                // re-exports it under the name every module's memory has.
                 export_section.export("memory", ExportKind::Memory, 0);
                 export_section.export("__stack_pointer", ExportKind::Global, 0);
             }
@@ -8959,6 +8981,26 @@ impl Compiler {
                 &self.elided_bounds_func_indices,
             ));
         }
+    }
+}
+
+/// The type of the module's linear memory, defined or imported: `minimum`
+/// pages, bounded by `maximum`.
+///
+/// The maximum is the layout's own, which is the page count unless the build
+/// asked for more: by default the memory is fixed, so `memory.grow` can never
+/// move the end of memory. A larger maximum is room for a linked module or the
+/// host to grow into. Either way it is always bounded, and the layout's
+/// overflow-trap headroom is measured against it, so growth cannot carry the
+/// end of memory under a wrapped stack pointer. An imported memory declares
+/// the same limits, and import matching holds the host's memory to them.
+fn bounded_memory_type(minimum: u32, maximum: u32) -> MemoryType {
+    MemoryType {
+        minimum: u64::from(minimum),
+        maximum: Some(u64::from(maximum)),
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
     }
 }
 
@@ -9154,6 +9196,7 @@ mod tests {
                     pages: Some(1),
                     max_pages: Some(3),
                     stack_size: None,
+                    import: false,
                 },
                 crate::MemoryLayoutSource::Flag,
             )
@@ -9179,6 +9222,151 @@ mod tests {
         assert!(
             !has_memory_section(&wasm),
             "the default layout is declared only when something uses it"
+        );
+    }
+
+    /// A layout of `pages` pages that may grow to `max_pages`, imported from
+    /// the host.
+    fn imported_layout(pages: u32, max_pages: u32) -> MemoryLayout {
+        MemoryLayout::resolve(
+            crate::MemoryRequest {
+                pages: Some(pages),
+                max_pages: Some(max_pages),
+                stack_size: None,
+                import: true,
+            },
+            crate::MemoryLayoutSource::Flag,
+        )
+        .expect("the imported layout is admissible")
+    }
+
+    /// The lines of `wat` that declare an import, in order.
+    fn import_lines(wat: &str) -> Vec<&str> {
+        wat.lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("(import "))
+            .collect()
+    }
+
+    /// An imported layout emits no Memory section: memory 0 is the import,
+    /// declared with the layout's limits, ahead of every function import, and
+    /// re-exported with the stack pointer as a defined memory would be. A
+    /// function import keeps function index 0, since memory imports occupy a
+    /// different index space.
+    #[test]
+    fn an_imported_layout_replaces_the_memory_section_with_an_import() {
+        cov_mark::check!(wasm_codegen_emit_memory_import);
+        cov_mark::check!(wasm_codegen_emit_import_section);
+        cov_mark::check_count!(wasm_codegen_emit_memory_section, 0);
+        let mut compiler = Compiler::new("test");
+        compiler.set_memory_layout(imported_layout(2, 8));
+        compiler.enable_memory();
+        let type_idx = compiler.intern_type(Vec::new(), vec![ValType::I64]);
+        let import_idx = compiler.intern_import(ImportEntry {
+            module: "env".to_string(),
+            field: "clock_ms".to_string(),
+            type_idx,
+        });
+        assert_eq!(import_idx, 0, "the function import is function 0");
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
+        inf_wasmparser::validate(&wasm).expect("the module is valid");
+        assert!(
+            !has_memory_section(&wasm),
+            "an imported memory is not also defined"
+        );
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert_eq!(
+            import_lines(&wat),
+            vec![
+                "(import \"env\" \"memory\" (memory (;0;) 2 8))",
+                "(import \"env\" \"clock_ms\" (func (;0;) (type 0)))",
+            ],
+            "the memory import comes first, then the function import:\n{wat}"
+        );
+        assert!(
+            wat.contains("(export \"memory\" (memory 0))")
+                && wat.contains("(export \"__stack_pointer\" (global 0))"),
+            "the imported memory is re-exported with the stack pointer:\n{wat}"
+        );
+        assert!(
+            wat.contains("(global (;0;) (mut i32) i32.const 65536)"),
+            "the stack pointer starts at the layout's stack size:\n{wat}"
+        );
+    }
+
+    /// The control for the import: the same compiler with the defined twin of
+    /// the layout declares the memory in a Memory section and imports only the
+    /// function.
+    #[test]
+    fn a_defined_layout_keeps_its_memory_section_beside_a_function_import() {
+        cov_mark::check_count!(wasm_codegen_emit_memory_import, 0);
+        let mut compiler = Compiler::new("test");
+        compiler.set_memory_layout(
+            MemoryLayout::resolve(
+                crate::MemoryRequest {
+                    pages: Some(2),
+                    max_pages: Some(8),
+                    stack_size: None,
+                    import: false,
+                },
+                crate::MemoryLayoutSource::Flag,
+            )
+            .expect("two pages growable to eight is admissible"),
+        );
+        compiler.enable_memory();
+        let type_idx = compiler.intern_type(Vec::new(), vec![ValType::I64]);
+        compiler.intern_import(ImportEntry {
+            module: "env".to_string(),
+            field: "clock_ms".to_string(),
+            type_idx,
+        });
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
+        assert!(has_memory_section(&wasm));
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert_eq!(
+            import_lines(&wat),
+            vec!["(import \"env\" \"clock_ms\" (func (;0;) (type 0)))"],
+            "only the function is imported:\n{wat}"
+        );
+        assert!(wat.contains("(memory (;0;) 2 8)"), "{wat}");
+    }
+
+    /// A program that touches no memory still imports one, with the stack
+    /// pointer and both exports, so what the host has to supply does not
+    /// depend on what the program uses. At the default numbers that is the
+    /// difference from a defined build, which declares nothing of the kind.
+    #[test]
+    fn a_memoryless_program_still_imports_its_memory() {
+        cov_mark::check!(wasm_codegen_emit_memory_import);
+        cov_mark::check_count!(wasm_codegen_emit_memory_section, 0);
+        let mut compiler = Compiler::new("test");
+        compiler.set_memory_layout(imported_layout(1, 1));
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
+        inf_wasmparser::validate(&wasm).expect("the module is valid");
+        assert!(!has_memory_section(&wasm));
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert_eq!(
+            import_lines(&wat),
+            vec!["(import \"env\" \"memory\" (memory (;0;) 1 1))"],
+            "a memoryless program imports its memory all the same:\n{wat}"
+        );
+        assert!(
+            wat.contains("(global (;0;) (mut i32) i32.const 65536)")
+                && wat.contains("(export \"memory\" (memory 0))")
+                && wat.contains("(export \"__stack_pointer\" (global 0))"),
+            "the stack pointer and both exports accompany the import:\n{wat}"
+        );
+
+        let defined = Compiler::new("test");
+        let (wasm, _spec_map, _frame_sizes) = defined.finish_and_take(&HSpecMap::default());
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert!(
+            !wat.contains("(import ") && !wat.contains("(global ") && !wat.contains("(export "),
+            "the default defined build of the same program declares no memory:\n{wat}"
         );
     }
 
@@ -9247,6 +9435,7 @@ mod tests {
                     pages: Some(2),
                     max_pages: None,
                     stack_size: Some(32_768),
+                    import: false,
                 },
                 crate::MemoryLayoutSource::Flag,
             )
@@ -9282,6 +9471,7 @@ mod tests {
                     pages: Some(2),
                     max_pages: Some(8),
                     stack_size: None,
+                    import: false,
                 },
                 crate::MemoryLayoutSource::Flag,
             )

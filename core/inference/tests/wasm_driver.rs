@@ -12,7 +12,10 @@ use inference::wasm_link::{
     resolve_external_modules, DeclaredSignature, ExternalResolutionError, HostImport,
     HostImportError, ManifestDeps, ResolvedExternals, SearchPath, WasmValType,
 };
-use inference::{codegen, link_resolved, parse, type_check, LinkOptions, TypedContext};
+use inference::{
+    codegen, link_resolved, parse, type_check, LinkError, LinkOptions, MemoryImport, TypedContext,
+};
+use inference_wasm_codegen::{CodegenOptions, MemoryLayout, MemoryLayoutSource, MemoryRequest};
 
 /// A self-cleaning temporary directory rooted under the OS temp dir.
 struct TempTree {
@@ -289,7 +292,7 @@ fn a_bound_but_uncalled_host_extern_is_still_declared_and_still_ships() {
     );
 
     let artifact = codegen(&typed, "uncalled").expect("codegen succeeds");
-    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+    let linked = link_resolved(artifact.wasm(), &externals, None, &LinkOptions::default())
         .expect("the emitted imports match the declared set");
     assert_eq!(
         linked.wasm,
@@ -316,7 +319,7 @@ fn a_host_program_ships_the_codegen_bytes_unchanged() {
         .expect("a host binding resolves with no search path at all");
 
     let artifact = codegen(&typed, "clock").expect("codegen succeeds");
-    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+    let linked = link_resolved(artifact.wasm(), &externals, None, &LinkOptions::default())
         .expect("the emitted imports match the declared set");
     assert_eq!(
         linked.wasm,
@@ -517,7 +520,7 @@ fn two_files_agreeing_on_a_host_import_declare_it_once() {
     );
 
     let artifact = codegen(&typed, "agreeing").expect("codegen succeeds");
-    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+    let linked = link_resolved(artifact.wasm(), &externals, None, &LinkOptions::default())
         .expect("the emitted imports match the declared set");
     assert_eq!(
         linked.wasm,
@@ -703,7 +706,7 @@ fn a_host_extern_returning_unit_builds_end_to_end() {
     );
 
     let artifact = codegen(&typed, "tick").expect("codegen succeeds");
-    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+    let linked = link_resolved(artifact.wasm(), &externals, None, &LinkOptions::default())
         .unwrap_or_else(|e| panic!("the declaration and the emitted import agree: {e}"));
     assert_eq!(
         linked.wasm,
@@ -790,7 +793,7 @@ fn two_host_modules_resolve_sorted_and_link_against_the_real_artifact() {
          cannot also be collected that way"
     );
 
-    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+    let linked = link_resolved(artifact.wasm(), &externals, None, &LinkOptions::default())
         .expect("the emitted imports are exactly the declared set, in whatever order each lists");
     assert_eq!(
         linked.wasm,
@@ -843,7 +846,7 @@ fn a_host_import_naming_imported_types_builds_end_to_end() {
     );
 
     let artifact = codegen(&typed, "main").expect("codegen succeeds");
-    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+    let linked = link_resolved(artifact.wasm(), &externals, None, &LinkOptions::default())
         .unwrap_or_else(|e| panic!("the declaration and the emitted import agree: {e}"));
     assert_eq!(
         linked.wasm,
@@ -892,7 +895,7 @@ fn a_linked_extern_naming_an_imported_struct_is_validated_as_an_address() {
     assert_eq!(externals.modules[0].bytes, address_lib);
 
     let artifact = codegen(&typed, "main").expect("codegen succeeds");
-    let linked = link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+    let linked = link_resolved(artifact.wasm(), &externals, None, &LinkOptions::default())
         .unwrap_or_else(|e| panic!("the validated library links: {e}"));
     assert!(
         function_imports(&linked.wasm).is_empty(),
@@ -956,7 +959,7 @@ fn an_extern_is_lowered_from_the_file_that_declares_it() {
     );
 
     let artifact = codegen(&typed, "main").expect("codegen succeeds");
-    link_resolved(artifact.wasm(), &externals, &LinkOptions::default())
+    link_resolved(artifact.wasm(), &externals, None, &LinkOptions::default())
         .unwrap_or_else(|e| panic!("the declaration and the emitted import agree: {e}"));
 }
 
@@ -1502,6 +1505,18 @@ enum Imported {
     UnmodelledFunc,
     /// A memory import — the shape no `external fn` declaration can describe.
     Memory,
+    /// A memory import of the given type, for the rows that hold an artifact
+    /// to the memory its build's layout asked to import.
+    ///
+    /// Separate from [`Imported::Memory`], which stays the fixed `(1, None)`
+    /// entry the no-expectation row has always been measured against: these
+    /// rows need every field of the type to move on its own, the limits, the
+    /// sharing, the index type and the page size, because each is a different
+    /// way for an import to drift from the layout it was written from.
+    MemoryOf(wasm_encoder::MemoryType),
+    /// A `funcref` table import of one element: a non-function import that is
+    /// not a memory, so no layout's expectation can account for it either.
+    Table,
 }
 
 /// Builds a module whose import section is exactly `entries`.
@@ -1532,7 +1547,8 @@ fn module_importing_behind_array_types(
 
 fn encode_module(leading_array_types: usize, entries: &[(&str, &str, Imported)]) -> Vec<u8> {
     use wasm_encoder::{
-        EntityType, ImportSection, MemoryType, Module, StorageType, TypeSection, ValType,
+        EntityType, ImportSection, MemoryType, Module, RefType, StorageType, TableType,
+        TypeSection, ValType,
     };
 
     fn encode(val: WasmValType) -> ValType {
@@ -1574,6 +1590,22 @@ fn encode_module(leading_array_types: usize, entries: &[(&str, &str, Imported)])
                         memory64: false,
                         shared: false,
                         page_size_log2: None,
+                    }),
+                );
+            }
+            Imported::MemoryOf(ty) => {
+                imports.import(module, field, EntityType::Memory(*ty));
+            }
+            Imported::Table => {
+                imports.import(
+                    module,
+                    field,
+                    EntityType::Table(TableType {
+                        element_type: RefType::FUNCREF,
+                        table64: false,
+                        minimum: 1,
+                        maximum: None,
+                        shared: false,
                     }),
                 );
             }
@@ -1676,7 +1708,18 @@ fn entries_with(field: &str, shape: Imported) -> Vec<(&'static str, &'static str
 /// Runs `link_resolved` over [`declared_host_imports`] and returns the
 /// refusal it produced, failing the test if the bytes were accepted.
 fn refusal(artifact: &[u8]) -> HostImportError {
-    let error = link_resolved(artifact, &declared_host_imports(), &LinkOptions::default())
+    refusal_with(artifact, &declared_host_imports(), None)
+}
+
+/// Runs `link_resolved` over `externals` with the memory expectation `memory`
+/// and returns the refusal it produced, failing the test if the bytes were
+/// accepted or refused by anything but the import check.
+fn refusal_with(
+    artifact: &[u8],
+    externals: &ResolvedExternals,
+    memory: Option<MemoryImport>,
+) -> HostImportError {
+    let error = link_resolved(artifact, externals, memory, &LinkOptions::default())
         .expect_err("the artifact must not be shipped");
     error
         .downcast::<HostImportError>()
@@ -1690,8 +1733,13 @@ fn refusal(artifact: &[u8]) -> HostImportError {
 #[test]
 fn link_resolved_accepts_an_artifact_whose_imports_are_the_declared_set() {
     let artifact = module_importing(&declared_entries());
-    let linked = link_resolved(&artifact, &declared_host_imports(), &LinkOptions::default())
-        .expect("the declared set and the import section agree");
+    let linked = link_resolved(
+        &artifact,
+        &declared_host_imports(),
+        None,
+        &LinkOptions::default(),
+    )
+    .expect("the declared set and the import section agree");
     assert_eq!(linked.wasm, artifact);
 }
 
@@ -1711,8 +1759,13 @@ fn link_resolved_pairs_imports_with_declarations_by_name_and_not_by_position() {
     let mut reversed = declared_entries();
     reversed.reverse();
     let artifact = module_importing(&reversed);
-    let linked = link_resolved(&artifact, &declared_host_imports(), &LinkOptions::default())
-        .expect("the set is the same set whichever order the section lists it in");
+    let linked = link_resolved(
+        &artifact,
+        &declared_host_imports(),
+        None,
+        &LinkOptions::default(),
+    )
+    .expect("the set is the same set whichever order the section lists it in");
     assert_eq!(linked.wasm, artifact);
 }
 
@@ -1867,8 +1920,13 @@ fn link_resolved_refuses_a_declared_import_emitted_at_a_signature_that_cannot_be
 #[test]
 fn link_resolved_reads_a_type_index_past_a_type_that_is_not_a_function() {
     let artifact = module_importing_behind_array_types(1, &declared_entries());
-    let linked = link_resolved(&artifact, &declared_host_imports(), &LinkOptions::default())
-        .expect("a type index counts every composite type, not only the function ones");
+    let linked = link_resolved(
+        &artifact,
+        &declared_host_imports(),
+        None,
+        &LinkOptions::default(),
+    )
+    .expect("a type index counts every composite type, not only the function ones");
     assert_eq!(linked.wasm, artifact);
 }
 
@@ -1922,10 +1980,972 @@ fn link_resolved_reports_a_mixed_resolution_as_an_internal_inconsistency() {
         "clock_ms",
         Imported::Func(Vec::new(), vec![WasmValType::I64]),
     )]);
-    let error = link_resolved(&artifact, &externals, &LinkOptions::default())
+    let error = link_resolved(&artifact, &externals, None, &LinkOptions::default())
         .expect_err("the two halves cannot both be present");
     assert!(
         error.to_string().contains("internal error"),
         "the message must not read as something the author wrote wrong: {error}"
+    );
+}
+
+/// The memory a build at the default layout imports: one page, fixed.
+const ONE_FIXED_PAGE: MemoryImport = MemoryImport {
+    minimum: 1,
+    maximum: 1,
+};
+
+/// What every refusal of the import check but a mixed resolution ends with: none
+/// of them can be caused by anything an author wrote, so each says so.
+const COMPILER_BUG_MARKER: &str = "This is a compiler bug";
+
+/// A 32-bit, unshared memory type at the default page size with the given
+/// limits: the shape code generation emits a layout's memory import at, before a
+/// row below moves one field of it.
+fn plain_memory(minimum: u64, maximum: Option<u64>) -> wasm_encoder::MemoryType {
+    wasm_encoder::MemoryType {
+        minimum,
+        maximum,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    }
+}
+
+/// A memory import entry named `(module, field)` at `ty`.
+fn memory_entry(
+    module: &'static str,
+    field: &'static str,
+    ty: wasm_encoder::MemoryType,
+) -> (&'static str, &'static str, Imported) {
+    (module, field, Imported::MemoryOf(ty))
+}
+
+/// The artifact entry code generation writes for `expected`: `env.memory` at
+/// `expected`'s limits.
+///
+/// Spelled with the literal name rather than with [`MemoryImport::MODULE`] and
+/// [`MemoryImport::FIELD`], because the name is the contract an embedder is
+/// written against: a row built from the constants would follow a rename the
+/// embedder never heard about.
+fn expected_memory_entry(expected: MemoryImport) -> (&'static str, &'static str, Imported) {
+    let ty = plain_memory(
+        u64::from(expected.minimum),
+        Some(u64::from(expected.maximum)),
+    );
+    memory_entry("env", "memory", ty)
+}
+
+/// [`declared_entries`] with `entry` inserted at `position`.
+fn declared_entries_inserting(
+    position: usize,
+    entry: (&'static str, &'static str, Imported),
+) -> Vec<(&'static str, &'static str, Imported)> {
+    let mut entries = declared_entries();
+    entries.insert(position, entry);
+    entries
+}
+
+/// A memory import named `(module, field)` at `ty` in the two artifacts every
+/// memory row below is read in: as the only import of a program with no host
+/// bindings, and as the first import, where code generation puts the memory,
+/// ahead of the declared host functions.
+///
+/// Both, so that no row passes only because the functions were or were not
+/// there: the first reaches the import check through the memory expectation
+/// alone, the second through the declared set as well.
+fn memory_contexts(
+    module: &'static str,
+    field: &'static str,
+    ty: wasm_encoder::MemoryType,
+) -> Vec<(ResolvedExternals, Vec<u8>)> {
+    vec![
+        (
+            ResolvedExternals::default(),
+            module_importing(&[memory_entry(module, field, ty)]),
+        ),
+        (
+            declared_host_imports(),
+            module_importing(&declared_entries_inserting(
+                0,
+                memory_entry(module, field, ty),
+            )),
+        ),
+    ]
+}
+
+/// A host function under the memory's two-level name, `env.memory` at
+/// `() -> (i32)`.
+fn function_named_memory() -> (&'static str, &'static str, Imported) {
+    (
+        "env",
+        "memory",
+        Imported::Func(Vec::new(), vec![WasmValType::I32]),
+    )
+}
+
+/// [`declared_host_imports`] with [`function_named_memory`] declared too, in its
+/// sorted place between `env.log` and `env.random`.
+fn declared_host_imports_naming_the_memory() -> ResolvedExternals {
+    let mut externals = declared_host_imports();
+    externals.host_imports.insert(
+        2,
+        HostImport {
+            module: "env".into(),
+            field: "memory".into(),
+            signature: DeclaredSignature {
+                params: Vec::new(),
+                results: vec![WasmValType::I32],
+            },
+        },
+    );
+    externals
+}
+
+/// Runs `link_resolved` over `externals` with the memory expectation `memory`
+/// and requires it to ship `artifact` exactly as given, owing nothing.
+///
+/// Byte identity is the whole claim of the host-embedder path: nothing was
+/// resolved, so nothing is merged, and the codegen output is the artifact.
+fn assert_ships_unchanged(
+    artifact: &[u8],
+    externals: &ResolvedExternals,
+    memory: Option<MemoryImport>,
+) {
+    let linked = link_resolved(artifact, externals, memory, &LinkOptions::default())
+        .unwrap_or_else(|e| panic!("the imports are the ones this build asked for: {e}"));
+    assert_eq!(
+        linked.wasm, artifact,
+        "a host-embedder artifact is the codegen output, byte for byte"
+    );
+    assert!(
+        linked.warnings.is_empty(),
+        "nothing was merged, so nothing is owed: {:?}",
+        linked.warnings
+    );
+}
+
+/// Runs `link_resolved` and returns the static linker's refusal, failing the
+/// test if the bytes were accepted or refused by anything but the merge.
+fn merge_refusal(
+    artifact: &[u8],
+    externals: &ResolvedExternals,
+    memory: Option<MemoryImport>,
+) -> LinkError {
+    let error = link_resolved(artifact, externals, memory, &LinkOptions::default())
+        .expect_err("the artifact must not be shipped");
+    error
+        .downcast::<LinkError>()
+        .expect("a refusal by the merge surfaces as a `LinkError`")
+}
+
+/// Whether `error` is the merge refusing a main module that imports something
+/// other than a function, which it cannot carry through a merge.
+fn refuses_a_non_function_import(error: &LinkError) -> bool {
+    matches!(error, LinkError::UnsupportedConstruct(message) if message.contains("non-function"))
+}
+
+/// An artifact importing nothing but the memory its build's layout asked for,
+/// in a program with no host bindings at all, ships unchanged.
+///
+/// The row the routing exists for. A router that chose the host-embedder path
+/// on the declared host set alone sends this artifact to the merge, and the
+/// merge refuses a main module that imports a memory: a build that asked only
+/// to import its memory, the most ordinary embedding there is, could never
+/// ship. The pass-through has to key on the caller's expectation as well.
+#[test]
+fn link_resolved_ships_an_artifact_importing_only_the_expected_memory() {
+    let artifact = module_importing(&[expected_memory_entry(ONE_FIXED_PAGE)]);
+    assert_ships_unchanged(
+        &artifact,
+        &ResolvedExternals::default(),
+        Some(ONE_FIXED_PAGE),
+    );
+}
+
+/// The expected memory beside the declared host functions ships unchanged,
+/// wherever in the section the memory stands.
+///
+/// Code generation emits the memory ahead of every function import, but the
+/// check is about which imports ship and not about their order, exactly as it
+/// pairs functions with declarations by name and not by position. A check that
+/// read the memory only in the slot codegen gives it would refuse correct bytes
+/// from any other emitter order, so every slot is a row.
+#[test]
+fn link_resolved_ships_the_expected_memory_beside_the_declared_host_imports() {
+    for position in 0..=declared_entries().len() {
+        let artifact = module_importing(&declared_entries_inserting(
+            position,
+            expected_memory_entry(ONE_FIXED_PAGE),
+        ));
+        assert_ships_unchanged(&artifact, &declared_host_imports(), Some(ONE_FIXED_PAGE));
+    }
+}
+
+/// A growable layout's memory, two pages that may grow to eight, ships
+/// unchanged, alone and beside the declared host functions.
+///
+/// The default memory has `minimum == maximum`, so on it alone a check that
+/// compared the emitted maximum against the expected minimum, or built both
+/// limits from one number, agrees with the real one on every row. Distinct
+/// limits are what pin that each is read from its own field.
+#[test]
+fn link_resolved_ships_a_growable_expected_memory() {
+    let growable = MemoryImport {
+        minimum: 2,
+        maximum: 8,
+    };
+    let alone = module_importing(&[expected_memory_entry(growable)]);
+    assert_ships_unchanged(&alone, &ResolvedExternals::default(), Some(growable));
+    let beside = module_importing(&declared_entries_inserting(
+        0,
+        expected_memory_entry(growable),
+    ));
+    assert_ships_unchanged(&beside, &declared_host_imports(), Some(growable));
+}
+
+/// A memory import no layout asked for, in a program with no host bindings, is
+/// still refused: by the merge, which is where such an artifact goes.
+///
+/// With no expectation and no host imports there is nothing for the
+/// host-embedder path to check, so the route stays exactly the one such a build
+/// always took, `link_with_options`, and the memory import is refused by the
+/// merge, which models function imports only, rather than by the import check.
+/// The row pins that routing: the pass-through keys on the caller's expectation
+/// and never on the bytes. A router that took "the module imports a memory" as
+/// its cue would still refuse this artifact, since the import check holds a
+/// memory nobody asked for to be a non-function import, but with the import
+/// check's error instead of the merge's, so the row fails on which refusal
+/// comes back.
+#[test]
+fn link_resolved_hands_an_unexpected_memory_import_to_the_merge_which_refuses_it() {
+    for memory in [
+        Imported::Memory,
+        Imported::MemoryOf(plain_memory(1, Some(1))),
+    ] {
+        let artifact = module_importing(&[("env", "memory", memory)]);
+        let error = merge_refusal(&artifact, &ResolvedExternals::default(), None);
+        assert!(
+            refuses_a_non_function_import(&error),
+            "the merge cannot carry a main module's memory import, and has to say that is \
+             why: {error}"
+        );
+    }
+}
+
+/// A build whose layout asked to import its memory, with an artifact that
+/// imports none, is refused, whether or not the program binds host functions.
+///
+/// With no host bindings it is the row a lax router accepts in silence: an
+/// artifact importing nothing is import-free, so the merge's fast path hands it
+/// back unchanged, and an embedder is left providing a memory the program never
+/// uses while the program runs in one it defined itself. With the declared
+/// functions all present it pins that a complete set of functions does not
+/// stand in for the memory, and with the functions dropped as well it pins
+/// which absence is reported: the memory's, which codegen emits first.
+#[test]
+fn link_resolved_refuses_an_expected_memory_the_artifact_does_not_import() {
+    let rows = [
+        ("no host binding", ResolvedExternals::default(), Vec::new()),
+        (
+            "every declared host import",
+            declared_host_imports(),
+            declared_entries(),
+        ),
+        (
+            "none of the declared host imports",
+            declared_host_imports(),
+            Vec::new(),
+        ),
+    ];
+    for (label, externals, entries) in rows {
+        let artifact = module_importing(&entries);
+        let refused = refusal_with(&artifact, &externals, Some(ONE_FIXED_PAGE));
+        assert!(
+            matches!(
+                &refused,
+                HostImportError::MissingMemoryImport { module, field }
+                    if module == "env" && field == "memory"
+            ),
+            "{label}: an artifact importing no memory is missing the one its layout asked \
+             for: {refused:?}"
+        );
+        let rendered = refused.to_string();
+        assert!(
+            rendered.contains("`env`.`memory`")
+                && rendered.contains("does not import")
+                && rendered.contains(COMPILER_BUG_MARKER),
+            "the refusal has to name the memory the layout asked for and say the artifact \
+             lacks it, as a compiler bug: {rendered}"
+        );
+    }
+}
+
+/// One way an emitted memory import can disagree with its layout's, for the
+/// mismatch rows below.
+struct TypeDrift {
+    /// What the row moves.
+    label: &'static str,
+    /// The type the artifact imports `env.memory` at.
+    emitted: wasm_encoder::MemoryType,
+    /// The import the layout asked for.
+    expected: MemoryImport,
+    /// The emitted type as the refusal spells it.
+    emitted_text: &'static str,
+    /// The expected type as the refusal spells it.
+    expected_text: &'static str,
+}
+
+/// Every field of an import's memory type moved on its own, against the layout
+/// it was written from.
+fn type_drifts() -> Vec<TypeDrift> {
+    vec![
+        TypeDrift {
+            label: "a larger maximum",
+            emitted: plain_memory(1, Some(2)),
+            expected: ONE_FIXED_PAGE,
+            emitted_text: "(memory 1 2)",
+            expected_text: "(memory 1 1)",
+        },
+        TypeDrift {
+            label: "no maximum",
+            emitted: plain_memory(1, None),
+            expected: ONE_FIXED_PAGE,
+            emitted_text: "(memory 1)",
+            expected_text: "(memory 1 1)",
+        },
+        TypeDrift {
+            label: "a larger minimum",
+            emitted: plain_memory(2, Some(2)),
+            expected: MemoryImport {
+                minimum: 1,
+                maximum: 2,
+            },
+            emitted_text: "(memory 2 2)",
+            expected_text: "(memory 1 2)",
+        },
+        TypeDrift {
+            label: "smaller limits",
+            emitted: plain_memory(1, Some(1)),
+            expected: MemoryImport {
+                minimum: 2,
+                maximum: 8,
+            },
+            emitted_text: "(memory 1 1)",
+            expected_text: "(memory 2 8)",
+        },
+        TypeDrift {
+            label: "a shared memory",
+            emitted: wasm_encoder::MemoryType {
+                shared: true,
+                ..plain_memory(1, Some(1))
+            },
+            expected: ONE_FIXED_PAGE,
+            emitted_text: "(memory 1 1 shared)",
+            expected_text: "(memory 1 1)",
+        },
+        TypeDrift {
+            label: "a 64-bit memory",
+            emitted: wasm_encoder::MemoryType {
+                memory64: true,
+                ..plain_memory(1, Some(1))
+            },
+            expected: ONE_FIXED_PAGE,
+            emitted_text: "(memory i64 1 1)",
+            expected_text: "(memory 1 1)",
+        },
+        TypeDrift {
+            label: "a one-byte page",
+            emitted: wasm_encoder::MemoryType {
+                page_size_log2: Some(0),
+                ..plain_memory(1, Some(1))
+            },
+            expected: ONE_FIXED_PAGE,
+            emitted_text: "(memory 1 1 (pagesize 1))",
+            expected_text: "(memory 1 1)",
+        },
+        TypeDrift {
+            label: "a page too large to count in bytes",
+            emitted: wasm_encoder::MemoryType {
+                page_size_log2: Some(64),
+                ..plain_memory(1, Some(1))
+            },
+            expected: ONE_FIXED_PAGE,
+            emitted_text: "(memory 1 1 (pagesize 2^64))",
+            expected_text: "(memory 1 1)",
+        },
+    ]
+}
+
+/// `env.memory` imported at a type other than the one its layout describes is
+/// refused, for every field of the type, showing both types.
+///
+/// An embedder provides the memory the build's configuration describes, and the
+/// stack and the static data were laid out in it. Limits wider than the
+/// layout's admit a memory the program was not laid out for: no maximum, or a
+/// larger one, lets growth move the end of memory past the headroom the
+/// overflow trap was measured against. Narrower ones ask for a memory the
+/// embedder was not told to provide. Sharing, a 64-bit index and a custom page
+/// size each change what every load and store means. A check comparing only
+/// the limits, or only the minimum, passes rows here that are each a host
+/// contract the program cannot keep.
+#[test]
+fn link_resolved_refuses_an_expected_memory_imported_at_another_type() {
+    for drift in type_drifts() {
+        for (externals, artifact) in memory_contexts("env", "memory", drift.emitted) {
+            let refused = refusal_with(&artifact, &externals, Some(drift.expected));
+            assert!(
+                matches!(
+                    &refused,
+                    HostImportError::MemoryImportMismatch { module, field, expected, emitted }
+                        if module == "env"
+                            && field == "memory"
+                            && *expected == drift.expected
+                            && emitted == drift.emitted_text
+                ),
+                "{}: an import that drifted from its layout is refused as that drift, carrying \
+                 the type it was emitted at: {refused:?}",
+                drift.label
+            );
+            let rendered = refused.to_string();
+            let expected = format!("as `env`.`memory` with type `{}`", drift.expected_text);
+            let emitted = format!(
+                "imports a memory as `env`.`memory` with type `{}`",
+                drift.emitted_text
+            );
+            assert!(
+                rendered.contains(&expected)
+                    && rendered.contains(&emitted)
+                    && rendered.contains(COMPILER_BUG_MARKER),
+                "{}: the two types are what the reader has to compare, so both are shown: \
+                 {rendered}",
+                drift.label
+            );
+        }
+    }
+}
+
+/// A memory imported under a name other than `env.memory` is refused, alone
+/// and beside the memory its layout asked for, naming both names.
+///
+/// The name is the other half of the host contract: an embedder supplies
+/// `env.memory`, and a module asking for `env.mem` will not instantiate against
+/// it. Each row moves one half of the name, and the last swaps the halves, so a
+/// check reading only the module, only the field, or the two as an unordered
+/// pair accepts one of them. Beside the expected memory the row pins that the
+/// right memory does not excuse a second one under any other name.
+#[test]
+fn link_resolved_refuses_an_expected_memory_imported_under_another_name() {
+    let ty = plain_memory(1, Some(1));
+    for (module, field) in [("env", "mem"), ("wasi", "memory"), ("memory", "env")] {
+        let mut cases = memory_contexts(module, field, ty);
+        cases.push((
+            ResolvedExternals::default(),
+            module_importing(&[
+                expected_memory_entry(ONE_FIXED_PAGE),
+                memory_entry(module, field, ty),
+            ]),
+        ));
+        for (externals, artifact) in cases {
+            let refused = refusal_with(&artifact, &externals, Some(ONE_FIXED_PAGE));
+            assert!(
+                matches!(
+                    &refused,
+                    HostImportError::MemoryImportMismatch {
+                        module: emitted_module,
+                        field: emitted_field,
+                        expected,
+                        emitted,
+                    } if emitted_module == module
+                        && emitted_field == field
+                        && *expected == ONE_FIXED_PAGE
+                        && emitted == "(memory 1 1)"
+                ),
+                "a memory under `{module}`.`{field}` is not the memory the layout asked for, \
+                 and the refusal carries the name it was emitted under: {refused:?}"
+            );
+            let rendered = refused.to_string();
+            let emitted = format!("imports a memory as `{module}`.`{field}` with type");
+            assert!(
+                rendered.contains("as `env`.`memory` with type `(memory 1 1)`")
+                    && rendered.contains(&emitted)
+                    && rendered.contains(COMPILER_BUG_MARKER),
+                "both names are shown, since the name is all that differs: {rendered}"
+            );
+        }
+    }
+}
+
+/// Two memories imported under `env.memory` are refused as one name imported
+/// twice, whatever the second one's type.
+///
+/// Nothing downstream would catch it. One layout describes one memory, and the
+/// validator admits the second import, since multi-memory is enabled; every
+/// load and store addresses the first, so the second is a memory an embedder is
+/// asked for and the program never touches. Reporting it as a repetition rather
+/// than as a type mismatch is the honest diagnosis whatever its type: at the
+/// expected type a mismatch would show two identical types and nothing to fix.
+#[test]
+fn link_resolved_refuses_two_memories_under_the_memory_s_name() {
+    for second in [plain_memory(1, Some(1)), plain_memory(1, Some(2))] {
+        let mut with_functions =
+            declared_entries_inserting(0, expected_memory_entry(ONE_FIXED_PAGE));
+        with_functions.push(memory_entry("env", "memory", second));
+        let cases = [
+            (
+                ResolvedExternals::default(),
+                module_importing(&[
+                    expected_memory_entry(ONE_FIXED_PAGE),
+                    memory_entry("env", "memory", second),
+                ]),
+            ),
+            (declared_host_imports(), module_importing(&with_functions)),
+        ];
+        for (externals, artifact) in cases {
+            let refused = refusal_with(&artifact, &externals, Some(ONE_FIXED_PAGE));
+            assert!(
+                matches!(
+                    &refused,
+                    HostImportError::Duplicated { module, field }
+                        if module == "env" && field == "memory"
+                ),
+                "a second `env.memory` is a repetition of the first: {refused:?}"
+            );
+            let rendered = refused.to_string();
+            assert!(
+                rendered.contains("`env`.`memory`") && rendered.contains("twice"),
+                "the repeated name is the whole diagnosis: {rendered}"
+            );
+        }
+    }
+}
+
+/// A function imported under the memory's name, in an artifact that imports
+/// the memory, is refused as a repetition of it, before or after the memory and
+/// whether or not the program declares that function.
+///
+/// The declared row is the one with teeth for acceptance. Read entry by entry,
+/// the function matches its declaration and the memory matches its layout, so
+/// a check with no memory of the name it already accounted for ships a module
+/// asking an embedder for `env.memory` as two different things, which no
+/// embedder can supply. Code generation refuses a host binding of that name in
+/// an import-mode build, and this is the check that does not take its word for
+/// it. The undeclared row pins the diagnosis: the name repeated, not a
+/// function nobody declared.
+#[test]
+fn link_resolved_refuses_a_function_under_the_memory_s_name_beside_the_memory() {
+    let declared_sets = [
+        ("undeclared", declared_host_imports()),
+        ("declared", declared_host_imports_naming_the_memory()),
+    ];
+    for (declaration, externals) in declared_sets {
+        for function_first in [true, false] {
+            let mut entries = declared_entries_inserting(0, expected_memory_entry(ONE_FIXED_PAGE));
+            let function_at = if function_first { 0 } else { entries.len() };
+            entries.insert(function_at, function_named_memory());
+            let artifact = module_importing(&entries);
+            let refused = refusal_with(&artifact, &externals, Some(ONE_FIXED_PAGE));
+            let order = if function_first { "before" } else { "after" };
+            assert!(
+                matches!(
+                    &refused,
+                    HostImportError::Duplicated { module, field }
+                        if module == "env" && field == "memory"
+                ),
+                "an {declaration} function {order} the memory under its name is the name \
+                 imported twice: {refused:?}"
+            );
+            let rendered = refused.to_string();
+            assert!(
+                rendered.contains("`env`.`memory`") && rendered.contains("twice"),
+                "the repeated name is the whole diagnosis: {rendered}"
+            );
+        }
+    }
+}
+
+/// A function under the memory's name, in an artifact that imports no memory,
+/// is checked like any other function, and the absent memory is reported after
+/// it; neither refusal says the name was imported twice.
+///
+/// There is one entry under that name, so a refusal claiming two sends the
+/// reader looking for a second that is not there. Undeclared, the function is
+/// the first disagreement in artifact order and is reported as one. Declared,
+/// it matches its declaration, and what remains wrong is the memory the layout
+/// asked for and the artifact lacks.
+#[test]
+fn link_resolved_checks_a_lone_function_under_the_memory_s_name_like_any_function() {
+    let artifact = module_importing(&declared_entries_inserting(0, function_named_memory()));
+
+    let refused = refusal_with(&artifact, &declared_host_imports(), Some(ONE_FIXED_PAGE));
+    assert!(
+        matches!(
+            &refused,
+            HostImportError::Undeclared { module, field }
+                if module == "env" && field == "memory"
+        ),
+        "an undeclared function is an undeclared function, whatever its name: {refused:?}"
+    );
+    let rendered = refused.to_string();
+    assert!(
+        rendered.contains("`env`.`memory`")
+            && rendered.contains("declares no host binding")
+            && !rendered.contains("twice"),
+        "one entry under the name is not a repetition: {rendered}"
+    );
+
+    let refused = refusal_with(
+        &artifact,
+        &declared_host_imports_naming_the_memory(),
+        Some(ONE_FIXED_PAGE),
+    );
+    assert!(
+        matches!(
+            &refused,
+            HostImportError::MissingMemoryImport { module, field }
+                if module == "env" && field == "memory"
+        ),
+        "a declared function under the memory's name accounts for itself, not for the \
+         memory: {refused:?}"
+    );
+    assert!(
+        !refused.to_string().contains("twice"),
+        "one entry under the name is not a repetition: {refused}"
+    );
+}
+
+/// A table import is refused whether or not the layout asked to import a
+/// memory.
+///
+/// The expectation accounts for one memory and for nothing else: an
+/// implementation that, once a memory is expected, waved through every
+/// non-function import would ship a table no declaration and no layout
+/// describes. The row without an expectation is the control, so the refusal
+/// is shown not to depend on it.
+#[test]
+fn link_resolved_refuses_a_table_import_whether_or_not_a_memory_is_expected() {
+    let mut without_memory = declared_entries();
+    without_memory.push(("env", "table", Imported::Table));
+    let mut with_memory = declared_entries_inserting(0, expected_memory_entry(ONE_FIXED_PAGE));
+    with_memory.push(("env", "table", Imported::Table));
+    let rows = [
+        ("no memory expected", without_memory, None),
+        ("a memory expected", with_memory, Some(ONE_FIXED_PAGE)),
+    ];
+    for (label, entries, memory) in rows {
+        let artifact = module_importing(&entries);
+        let refused = refusal_with(&artifact, &declared_host_imports(), memory);
+        assert!(
+            matches!(
+                &refused,
+                HostImportError::NonFunctionImport { module, field, kind: "table" }
+                    if module == "env" && field == "table"
+            ),
+            "{label}: a table is a non-function import nothing accounts for: {refused:?}"
+        );
+        let rendered = refused.to_string();
+        assert!(
+            rendered.contains("imports a table") && rendered.contains("`env`.`table`"),
+            "{label}: the refusal names the table it found: {rendered}"
+        );
+    }
+}
+
+/// A memory expectation beside resolved modules is refused before anything
+/// is merged, whatever the artifact imports; beside host imports as well, it
+/// is still a mixed resolution, which is checked first.
+///
+/// Code generation refuses every linked binding in a build that imports its
+/// memory, so only a hand-assembled call reaches here. Handing it to the merge
+/// would be no refusal at all for an artifact that imports no memory: the
+/// merge links it, and the module ships with the memory the layout asked for
+/// unread. The rows pin both artifacts, with and without the memory import.
+/// With no expectation, the merge's own refusal of a non-function import is
+/// still the backstop for an artifact that imports its memory anyway. The
+/// control links the binding alone, so each refusal is shown to be about the
+/// memory and not the module.
+#[test]
+fn link_resolved_refuses_an_expected_memory_beside_linked_modules() {
+    use inference::wasm_link::ResolvedExternalModule;
+
+    fn call() -> (&'static str, &'static str, Imported) {
+        (
+            "lib",
+            "f",
+            Imported::Func(vec![WasmValType::I32], vec![WasmValType::I32]),
+        )
+    }
+
+    let linked = ResolvedExternals {
+        modules: vec![ResolvedExternalModule {
+            logical_module: "lib".into(),
+            path: PathBuf::from("lib.wasm"),
+            bytes: compile("pub fn f(a: i32) -> i32 { return a; }", "lib"),
+        }],
+        ..ResolvedExternals::default()
+    };
+    let control = link_resolved(
+        &module_importing(&[call()]),
+        &linked,
+        None,
+        &LinkOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("the binding alone links: {e}"));
+    assert!(
+        function_imports(&control.wasm).is_empty(),
+        "the control merges its one import away"
+    );
+
+    let artifact = module_importing(&[expected_memory_entry(ONE_FIXED_PAGE), call()]);
+    for (label, bytes) in [
+        ("an artifact importing the memory", artifact.clone()),
+        ("an artifact importing no memory", module_importing(&[call()])),
+    ] {
+        let refused = refusal_with(&bytes, &linked, Some(ONE_FIXED_PAGE));
+        assert!(
+            matches!(refused, HostImportError::ModulesWithImportedMemory { modules: 1 }),
+            "{label}: resolved modules and a layout that imports its memory are not one \
+             build's, whatever the bytes hold: {refused:?}"
+        );
+        let rendered = refused.to_string();
+        assert!(
+            rendered.contains("`env`.`memory`") && rendered.contains("not produced by one build"),
+            "{label}: the refusal names the memory and says the parts were assembled: {rendered}"
+        );
+    }
+
+    let error = merge_refusal(&artifact, &linked, None);
+    assert!(
+        refuses_a_non_function_import(&error),
+        "with no expectation the merge is the backstop: it models function imports only, and \
+         refuses the memory import as one it cannot carry: {error}"
+    );
+
+    let mut mixed = declared_host_imports();
+    mixed.modules = linked.modules;
+    let refused = refusal_with(&artifact, &mixed, Some(ONE_FIXED_PAGE));
+    assert!(
+        matches!(
+            refused,
+            HostImportError::MixedResolution {
+                modules: 1,
+                host_imports: 3,
+            }
+        ),
+        "a memory expectation does not make a mixed resolution any less mixed: {refused:?}"
+    );
+}
+
+/// A program that touches no memory, for which an import-mode build still
+/// imports one.
+const NO_MEMORY_SOURCE: &str = "pub fn answer() -> i32 { return 42; }";
+
+/// A program whose function allocates a stack frame in the imported memory.
+const FRAME_SOURCE: &str = "pub fn sum() -> i32 { let arr: [i32; 4] = [1, 2, 3, 4]; \
+                            return arr[0] + arr[3]; }";
+
+/// A host binding from `env`, the module the memory is imported from as well.
+const HOST_CLOCK_SOURCE: &str = "external fn clock_ms() -> i64; \
+                                 use { clock_ms } from host::env; \
+                                 pub fn now() -> i64 { return clock_ms(); }";
+
+/// Compiles `source` with its memory imported at `pages` and `max_pages`, and
+/// resolves its externs as a build resolves them.
+///
+/// Through `inference_wasm_codegen::codegen` rather than this crate's
+/// [`codegen`], which takes the default layout and so never imports a memory.
+fn import_mode_build(
+    source: &str,
+    pages: Option<u32>,
+    max_pages: Option<u32>,
+) -> (Vec<u8>, ResolvedExternals, MemoryLayout) {
+    let layout = MemoryLayout::resolve(
+        MemoryRequest {
+            pages,
+            max_pages,
+            import: true,
+            ..MemoryRequest::default()
+        },
+        MemoryLayoutSource::Flag,
+    )
+    .expect("the layout is admissible");
+    let typed = typed_of(source);
+    let externals = resolve_external_modules(&typed, &SearchPath::new(), None)
+        .expect("a program with no linked binding resolves with no search path");
+    let options = CodegenOptions {
+        layout,
+        ..CodegenOptions::default()
+    };
+    let artifact = inference_wasm_codegen::codegen(&typed, "embedded", options)
+        .unwrap_or_else(|e| panic!("an import-mode build of the program succeeds: {e:#}"))
+        .wasm()
+        .to_vec();
+    (artifact, externals, layout)
+}
+
+/// The `(module, field, type)` of every memory import in `wasm`, in section
+/// order.
+fn memory_imports(wasm: &[u8]) -> Vec<(String, String, inf_wasmparser::MemoryType)> {
+    let mut imports = Vec::new();
+    for payload in inf_wasmparser::Parser::new(0).parse_all(wasm) {
+        if let inf_wasmparser::Payload::ImportSection(reader) = payload.expect("valid payload") {
+            for import in reader {
+                let import = import.expect("valid import");
+                if let inf_wasmparser::TypeRef::Memory(ty) = import.ty {
+                    imports.push((import.module.to_string(), import.name.to_string(), ty));
+                }
+            }
+        }
+    }
+    imports
+}
+
+/// What [`memory_imports`] reads for the import a layout's `expected` asks for.
+fn parsed_memory_import(expected: MemoryImport) -> (String, String, inf_wasmparser::MemoryType) {
+    let ty = inf_wasmparser::MemoryType {
+        memory64: false,
+        shared: false,
+        initial: u64::from(expected.minimum),
+        maximum: Some(u64::from(expected.maximum)),
+        page_size_log2: None,
+    };
+    ("env".to_string(), "memory".to_string(), ty)
+}
+
+/// An import-mode build of a program with no externs ships its codegen bytes
+/// unchanged, against the expectation its own layout produces.
+///
+/// The end-to-end form of the memory-only row: resolution finds nothing to
+/// merge and no host import, so the expectation is the only thing that sends
+/// the artifact to the host-embedder path rather than to the merge, which
+/// refuses the memory import. One program has a frame in the memory and one
+/// never touches it, and both are checked to import it, or the row would pass
+/// on an artifact that imports nothing.
+#[test]
+fn an_import_mode_build_without_externs_ships_the_codegen_bytes_unchanged() {
+    for source in [NO_MEMORY_SOURCE, FRAME_SOURCE] {
+        let (artifact, externals, layout) = import_mode_build(source, None, None);
+        assert!(
+            externals.modules.is_empty() && externals.host_imports.is_empty(),
+            "the row is about a build with nothing resolved: {externals:?}"
+        );
+        assert_eq!(
+            layout.memory_import(),
+            Some(ONE_FIXED_PAGE),
+            "the default import-mode layout asks for one fixed page"
+        );
+        assert_eq!(
+            memory_imports(&artifact),
+            vec![parsed_memory_import(ONE_FIXED_PAGE)],
+            "an import-mode build imports exactly its layout's memory: {source}"
+        );
+        assert_ships_unchanged(&artifact, &externals, layout.memory_import());
+    }
+}
+
+/// An import-mode build of a host program ships its codegen bytes unchanged,
+/// the memory import beside the host function import, both from `env`.
+///
+/// Both imports come from the same host module, so a check that matched the
+/// memory on the module string alone, or held the function to the memory's
+/// expectation, would refuse real codegen output. With the growable row below,
+/// it is one of the two rows that run codegen's own import order, the memory
+/// first, beside a host import, and the one at the default layout, where the
+/// hand-assembled rows above place the memory wherever they choose.
+#[test]
+fn an_import_mode_host_program_ships_the_memory_beside_its_host_import() {
+    let (artifact, externals, layout) = import_mode_build(HOST_CLOCK_SOURCE, None, None);
+    assert_eq!(
+        externals.host_imports,
+        vec![HostImport {
+            module: "env".into(),
+            field: "clock_ms".into(),
+            signature: DeclaredSignature {
+                params: Vec::new(),
+                results: vec![WasmValType::I64],
+            },
+        }],
+        "resolution binds the program's one host function"
+    );
+    assert_eq!(
+        function_imports(&artifact),
+        vec![("env".to_string(), "clock_ms".to_string())],
+        "the host binding is the artifact's only function import"
+    );
+    assert_eq!(
+        memory_imports(&artifact),
+        vec![parsed_memory_import(ONE_FIXED_PAGE)],
+        "the memory is imported beside the host function, at the layout's limits"
+    );
+    assert_ships_unchanged(&artifact, &externals, layout.memory_import());
+}
+
+/// A growable import-mode build ships against its own layout's expectation and
+/// is refused against another's.
+///
+/// The refusal half pins that the check reads the expectation it is handed: a
+/// check comparing against the default memory, or against nothing but the
+/// name, would ship these bytes under a caller that asked for one fixed page,
+/// and the embedder would provide a memory the program was not laid out for.
+#[test]
+fn a_growable_import_mode_build_is_held_to_its_own_layout() {
+    let growable = MemoryImport {
+        minimum: 2,
+        maximum: 8,
+    };
+    for source in [FRAME_SOURCE, HOST_CLOCK_SOURCE] {
+        let (artifact, externals, layout) = import_mode_build(source, Some(2), Some(8));
+        assert_eq!(
+            layout.memory_import(),
+            Some(growable),
+            "a two-page layout growable to eight asks for exactly those limits"
+        );
+        assert_eq!(
+            memory_imports(&artifact),
+            vec![parsed_memory_import(growable)],
+            "the growable build imports the memory at its own layout's limits: {source}"
+        );
+        assert_ships_unchanged(&artifact, &externals, layout.memory_import());
+
+        let refused = refusal_with(&artifact, &externals, Some(ONE_FIXED_PAGE));
+        assert!(
+            matches!(
+                &refused,
+                HostImportError::MemoryImportMismatch { expected, emitted, .. }
+                    if *expected == ONE_FIXED_PAGE && emitted == "(memory 2 8)"
+            ),
+            "a growable build's bytes are not the fixed page another layout asked for: \
+             {refused:?}"
+        );
+    }
+}
+
+/// An import-mode artifact handed to the link step without its layout's
+/// expectation is refused, whichever path it takes.
+///
+/// The layout and the call have to agree, which is why the expectation is a
+/// parameter of `link_resolved` and why the build that ships has to forward its
+/// own: a caller that compiled with the memory imported and linked as though it
+/// were defined gets no artifact, never one whose memory import nothing checked.
+/// With no host imports the bytes go to the merge, which refuses the memory
+/// import; with one, the host-embedder check refuses it as a memory no layout
+/// asked for.
+#[test]
+fn an_import_mode_artifact_linked_without_its_layout_is_refused() {
+    let (artifact, externals, _) = import_mode_build(FRAME_SOURCE, None, None);
+    let error = merge_refusal(&artifact, &externals, None);
+    assert!(
+        refuses_a_non_function_import(&error),
+        "without an expectation the merge sees a memory import it cannot carry: {error}"
+    );
+
+    let (artifact, externals, _) = import_mode_build(HOST_CLOCK_SOURCE, None, None);
+    let refused = refusal_with(&artifact, &externals, None);
+    assert!(
+        matches!(
+            &refused,
+            HostImportError::NonFunctionImport { module, field, kind: "memory" }
+                if module == "env" && field == "memory"
+        ),
+        "without an expectation the memory import is one nothing asked for: {refused:?}"
     );
 }

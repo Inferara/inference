@@ -37,11 +37,19 @@
 //!   exports a `main` returning 0 — what Binaryen makes of a program whose only
 //!   host import is never called. It is the role that shows the build log
 //!   reporting the removal, and `infs run` executing a program the compiler's
-//!   module would have been refused for.
+//!   module would have been refused for. For a program that imports its
+//!   memory, it is also the output that drops the memory import.
 //! - `FAKE_WASM_OPT_VERIFICATION_CONSTRUCT=1`: write a valid module whose one
 //!   function carries `i32.uzumaki`. The validator the optimized bytes are
 //!   re-checked with decodes the verification opcodes, so this is the role that
 //!   reaches the scan of the bytes about to land.
+//! - `FAKE_WASM_OPT_MEMORY_IMPORT=1`: write a module that imports `env.memory`
+//!   at three pages, at most five, and exports a `main` returning
+//!   `memory.size`. No manifest in the tests declares those limits, so for any
+//!   program the role changes the memory import — its limits, when the
+//!   compiler's module imports one, or its presence, when that module defines
+//!   its memory — which is what reaches the refusal of optimized bytes whose
+//!   memory import is not the compiler's.
 //! - otherwise: copy the positional input file to the `-o` target byte-for-byte
 //!   and exit 0 (the success path).
 //!
@@ -113,6 +121,12 @@ fn main() {
     if std::env::var("FAKE_WASM_OPT_VERIFICATION_CONSTRUCT").as_deref() == Ok("1") {
         std::fs::write(&output, verification_construct_module())
             .expect("fake wasm-opt: failed to write the verification-construct module");
+        return;
+    }
+
+    if std::env::var("FAKE_WASM_OPT_MEMORY_IMPORT").as_deref() == Ok("1") {
+        std::fs::write(&output, memory_import_module())
+            .expect("fake wasm-opt: failed to write the memory-import module");
         return;
     }
 
@@ -279,6 +293,37 @@ fn verification_construct_module() -> Vec<u8> {
     section(&mut module, 0x03, &[0x01, 0x00]);
     // One body: no locals, `i32.uzumaki`, `drop`, `end`.
     section(&mut module, 0x0A, &[0x01, 0x05, 0x00, 0xFC, 0x31, 0x1A, 0x0B]);
+    module
+}
+
+/// A module importing `env.memory` with a minimum of 3 pages and a maximum of
+/// 5 (limits flag `0x01`), and exporting `main`, of type `[] -> [i32]`, as the
+/// function of index 0, whose body declares no locals and returns
+/// `memory.size 0`.
+///
+/// Valid WebAssembly 1.0, so it passes the re-validation step and reaches the
+/// comparison of its memory import with that of the module it replaces; were it
+/// let through, its `main` would report how many pages it was handed.
+///
+/// Assembled by hand for the same reason: this fixture takes no dependencies.
+fn memory_import_module() -> Vec<u8> {
+    let mut module = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+    section(&mut module, 0x01, &[0x01, 0x60, 0x00, 0x01, 0x7F]);
+    section(
+        &mut module,
+        0x02,
+        &[
+            0x01, 0x03, b'e', b'n', b'v', 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x01,
+            0x03, 0x05,
+        ],
+    );
+    section(&mut module, 0x03, &[0x01, 0x00]);
+    section(
+        &mut module,
+        0x07,
+        &[0x01, 0x04, b'm', b'a', b'i', b'n', 0x00, 0x00],
+    );
+    section(&mut module, 0x0A, &[0x01, 0x04, 0x00, 0x3F, 0x00, 0x0B]);
     module
 }
 

@@ -111,6 +111,7 @@ fn build_one(
     let Ok(linked) = inference::link_resolved(
         output.wasm(),
         &ResolvedExternals::default(),
+        layout.memory_import(),
         &LinkOptions::default(),
     ) else {
         return;

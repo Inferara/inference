@@ -3,18 +3,20 @@
 //! `SpaceWasm` is a flight interpreter that decodes WebAssembly 1.0 and nothing
 //! else, so unlike the Stellar target it imposes no calling convention and has
 //! no export gate: what it narrows is the *instruction set* a build may reach
-//! for. Three configuration refusals are its whole source-level envelope —
-//! `proof` mode, a post-MVP feature request, and a non-deterministic construct
-//! in a function that ships — and each of the three is refused before a byte is
-//! emitted. The third is the one whose code-generation gate is a backstop rather
-//! than the decision: analysis rules A042 and A006 are what refuse
-//! non-determinism with a source location — A042 the non-deterministic blocks,
-//! A006 the bare `@` A042 leaves to it — and every `infc` build runs both. The
-//! gate reaches the same programs and says nothing about where in them, which is
-//! what "backstop" means here: it is for the caller that drove code generation
-//! without running analysis, and it is a decision rather than an approximation,
-//! because a module carrying instructions this runtime cannot decode is not a
-//! thing to write and then hope somebody notices.
+//! for. Three configuration refusals are its instruction-set envelope — `proof`
+//! mode, a post-MVP feature request, and a non-deterministic construct in a
+//! function that ships — and each of the three is refused before a byte is
+//! emitted. (Two refusals of the memory layout sit beside them, a growable
+//! memory and an imported one; they are pinned with the rest of each layout's
+//! tests rather than here.) The third is the one whose code-generation gate is
+//! a backstop rather than the decision: analysis rules A042 and A006 are what
+//! refuse non-determinism with a source location — A042 the non-deterministic
+//! blocks, A006 the bare `@` A042 leaves to it — and every `infc` build runs
+//! both. The gate reaches the same programs and says nothing about where in
+//! them, which is what "backstop" means here: it is for the caller that drove
+//! code generation without running analysis, and it is a decision rather than
+//! an approximation, because a module carrying instructions this runtime cannot
+//! decode is not a thing to write and then hope somebody notices.
 //!
 //! What is pinned here is the matrix of that envelope: the metadata an accepted
 //! build records, the exact text of each refusal, the slots the walk descends

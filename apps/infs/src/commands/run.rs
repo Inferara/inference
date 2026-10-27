@@ -110,9 +110,12 @@
 //! Both modes judge the imports of the artifact they built, after the build
 //! and before anything runs. A `wasm32` build that imports any function is
 //! refused: wasmtime runs it with no host functions registered (see
-//! `refuse_an_artifact_that_imports_a_function`). A `spacewasm` build may import
-//! the F´ reference hosts at their reference signatures and nothing else, which
-//! the runner checks before it decodes the module.
+//! `refuse_an_artifact_that_imports_a_function`). A `wasm32` build that imports
+//! its memory, as `[memory] import = true` asks, runs: `infs run` supplies the
+//! memory, preloading a module that exports one at the import's own limits
+//! (see `with_supplied_memory`). A `spacewasm` build may import the F´
+//! reference hosts at their reference signatures and nothing else, which the
+//! runner checks before it decodes the module.
 //!
 //! ## Prerequisites
 //!
@@ -129,8 +132,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::artifact::{
-    ArtifactScan, VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS, exported_function_signature,
-    scan_artifact,
+    ArtifactScan, ScannedMemoryImport, VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS,
+    exported_function_signature, scan_artifact,
 };
 use crate::commands::build::{
     EnclosingSettings, enclosing_manifest, format_wasm_dep_arg, manifest_bounds_checks,
@@ -148,8 +151,8 @@ use crate::errors::InfsError;
 use crate::project::manifest::{InferenceToml, MANIFEST_FILE_NAME};
 use crate::project::{self, ProjectContext};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
-use inference_compiler_interface::{BoundsChecks, TargetName};
-use inference_spacewasm_runner::{ExportedFunction, LIMITS_FROM, ValType, fprime};
+use inference_compiler_interface::{BoundsChecks, MemoryLayout, TargetName};
+use inference_spacewasm_runner::{ExportedFunction, ImportProblem, LIMITS_FROM, ValType, fprime};
 
 /// The entry point invoked in project mode and the default for single-file mode.
 const DEFAULT_ENTRY_POINT: &str = "main";
@@ -291,7 +294,9 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 /// Where `infs run` executes a build, decided by the build's target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalRuntime {
-    /// The `wasmtime` CLI, found on PATH, with no host function registered.
+    /// The `wasmtime` CLI, found on PATH, with no host function registered
+    /// and, for an artifact that imports its memory, a preloaded module
+    /// supplying that memory.
     Wasmtime,
     /// The `SpaceWasm` flight interpreter, in process, with the F´ reference
     /// hosts registered.
@@ -357,9 +362,10 @@ enum Scope<'a> {
 /// 6. Compiles source to WASM via infc subprocess, forwarding those settings
 ///    alongside every `-L` the user passed
 /// 7. Under wasmtime: refuses the artifact if it imports a function, executes
-///    it invoking `--entry-point`, and propagates wasmtime's exit code. Under
-///    the `SpaceWasm` interpreter: loads it against the F´ reference hosts and
-///    invokes `--entry-point` in process
+///    it invoking `--entry-point` with the memory it imports supplied, if it
+///    imports one, and propagates wasmtime's exit code. Under the `SpaceWasm`
+///    interpreter: loads it against the F´ reference hosts and invokes
+///    `--entry-point` in process
 ///
 /// The enclosing manifest is honored here for the same reason `infs build
 /// <path>` honors it: one project must not emit modules at two different
@@ -420,7 +426,10 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
             let wasm_path = compile_single_file(path, args, enclosing.as_ref(), target)?;
             let wasm = read_artifact(&wasm_path, &wasm_path)?;
             refuse_an_artifact_that_imports_a_function(&wasm, &wasm_path, target, scope)?;
-            run_wasmtime(&wasm_path, &args.entry_point, &args.args)
+            let memory = imported_memory(&wasm, &wasm_path)?;
+            with_supplied_memory(&wasm_path, memory.as_ref(), |preload| {
+                run_wasmtime(&wasm_path, &args.entry_point, &args.args, preload)
+            })
         }
         LocalRuntime::SpaceWasmInterpreter => {
             let wasm_path = compile_single_file(path, args, enclosing.as_ref(), target)?;
@@ -553,7 +562,10 @@ fn execute_project(args: &RunArgs) -> Result<()> {
             let wasm = read_artifact(&wasm_path, &shown_as)?;
             refuse_an_artifact_that_imports_a_function(&wasm, &shown_as, target, scope)?;
             refuse_a_main_that_takes_arguments(&wasm, &shown_as, &entry_file)?;
-            run_wasmtime(&wasm_path, DEFAULT_ENTRY_POINT, &[])
+            let memory = imported_memory(&wasm, &shown_as)?;
+            with_supplied_memory(&wasm_path, memory.as_ref(), |preload| {
+                run_wasmtime(&wasm_path, DEFAULT_ENTRY_POINT, &[], preload)
+            })
         }
         LocalRuntime::SpaceWasmInterpreter => {
             let wasm_path = build_project(&ctx, args)?;
@@ -750,16 +762,48 @@ fn executable_function_imports(
     runtime: &str,
 ) -> Result<Vec<(String, String)>> {
     match scan_artifact(wasm, shown_as)? {
-        ArtifactScan::VerificationConstruct(construct) => bail!(
-            "`infs run` cannot execute this program: {} contains the verification-only \
-             construct `{construct}`, which {runtime} cannot decode. \
-             {VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS}; move the construct into a `spec` block.",
-            shown_as.display()
-        ),
+        ArtifactScan::VerificationConstruct(construct) => {
+            Err(leaked_construct(construct, shown_as, runtime))
+        }
         ArtifactScan::Executable {
             function_imports, ..
         } => Ok(function_imports),
     }
+}
+
+/// The memory `wasm` imports, which wasmtime has to be handed a module
+/// supplying, or `None` when the artifact defines its own.
+///
+/// Asked of the artifact's own bytes, which in project mode are the bytes
+/// `[build.wasm-opt]` left behind, and never of the manifest: the import the
+/// artifact declares is the one wasmtime matches a supplied memory against, so
+/// a provider built from it matches by construction, while one built from the
+/// manifest's layout would match only for as long as nothing between the
+/// layout and the bytes changes the import.
+///
+/// # Errors
+///
+/// The refusal of a verification construct, in the words
+/// [`executable_function_imports`] uses for it under wasmtime, and an error
+/// when the artifact cannot be parsed.
+fn imported_memory(wasm: &[u8], shown_as: &Path) -> Result<Option<ScannedMemoryImport>> {
+    match scan_artifact(wasm, shown_as)? {
+        ArtifactScan::VerificationConstruct(construct) => {
+            Err(leaked_construct(construct, shown_as, WASMTIME))
+        }
+        ArtifactScan::Executable { memory_import, .. } => Ok(memory_import),
+    }
+}
+
+/// The refusal of a verification-only `construct` found in the artifact named
+/// `shown_as`, which `runtime` could not decode.
+fn leaked_construct(construct: &str, shown_as: &Path, runtime: &str) -> anyhow::Error {
+    anyhow!(
+        "`infs run` cannot execute this program: {} contains the verification-only \
+         construct `{construct}`, which {runtime} cannot decode. \
+         {VERIFICATION_CONSTRUCTS_BELONG_IN_SPECS}; move the construct into a `spec` block.",
+        shown_as.display()
+    )
 }
 
 /// Refuses a `wasm32` artifact that imports a function: wasmtime runs it with
@@ -779,12 +823,13 @@ fn executable_function_imports(
 /// depend on which functions the stand-in provides.
 ///
 /// Which remedy the refusal offers is asked of the runner's own import check,
-/// on the same bytes the `SpaceWasm` route would load: a program whose imports
-/// the reference hosts all provide as declared is told to build for the target
-/// that provides them — through `infs init` first when the file has no project
-/// to name a target in, and removing any `[build]` key the project's manifest
+/// on the same bytes the `SpaceWasm` route would load: a program whose function
+/// imports the reference hosts all provide as declared is told to build for the
+/// target that provides them — through `infs init` first when the file has no
+/// project to name a target in, and removing any key the project's manifest
 /// sets that the target refuses — and any other is told only where it does
-/// run.
+/// run. An imported memory does not decide it, for the reason
+/// [`reference_hosts_provide_every_function`] gives.
 ///
 /// Decided from the artifact, which is why it follows the build rather than
 /// preceding it as [`no_local_runtime`] does. Whether a program binds a host
@@ -846,7 +891,7 @@ fn refuse_an_artifact_that_imports_a_function(
          {functions} that its embedder must supply.\n{listed}\n",
         shown_as.display()
     );
-    if fprime::check_imports(wasm).is_err() {
+    if !reference_hosts_provide_every_function(wasm) {
         let unmatched = if count == 1 {
             "which this program's import does not match"
         } else {
@@ -868,9 +913,12 @@ fn refuse_an_artifact_that_imports_a_function(
     };
     let remedy = match scope {
         Scope::Project { manifest } => {
-            let removed = match build_keys_a_spacewasm_build_refuses(manifest).as_slice() {
+            let removed = match manifest_keys_a_spacewasm_build_refuses(manifest).as_slice() {
                 [] => String::new(),
-                keys => format!(", remove {}, which that target refuses,", keys.join(" and ")),
+                keys => format!(
+                    ", remove {}, which that target refuses,",
+                    english_list(keys)
+                ),
             };
             format!(
                 ": set `target = \"{spacewasm}\"` under `[build]` in {MANIFEST_FILE_NAME}{removed} \
@@ -891,14 +939,53 @@ fn refuse_an_artifact_that_imports_a_function(
     )
 }
 
-/// The `[build]` keys `manifest` sets that the `spacewasm` target refuses —
-/// `mode = "proof"` and a non-empty `wasm-features` list — spelled as the
+/// Whether the F´ reference hosts provide every function `wasm` imports at its
+/// declared signature, which decides whether the import refusal can offer the
+/// `spacewasm` target.
+///
+/// The runner's check refuses a memory import as well, and that refusal is set
+/// aside here. An Inference artifact imports its memory only because its
+/// project sets `[memory] import = true`, a mode a `spacewasm` build refuses
+/// and the remedy names for removal, so the import says nothing about whether
+/// the reference hosts serve the program's functions; counting it would tell a
+/// program whose every function matches that one does not. Any other refusal —
+/// a table, a global or a tag, a function no reference host carries, or one
+/// declared at another signature — still means they do not.
+fn reference_hosts_provide_every_function(wasm: &[u8]) -> bool {
+    let memory = ImportProblem::NotAFunction { kind: "memory" };
+    match fprime::check_imports(wasm) {
+        Ok(()) => true,
+        Err(unsupported) => unsupported
+            .imports()
+            .iter()
+            .all(|import| import.problem == memory),
+    }
+}
+
+/// The keys `manifest` sets that a `spacewasm` build refuses — `mode =
+/// "proof"` and a non-empty `wasm-features` list under `[build]`, a growable
+/// memory's `max-pages` and `import = true` under `[memory]` — spelled as the
 /// remedy that suggests the target names them for removal.
 ///
-/// Asked of the predicates on [`TargetName`] that the manifest's own pairing
-/// check asks, so a remedy cannot promise a run that loading the edited
-/// manifest would refuse.
-fn build_keys_a_spacewasm_build_refuses(manifest: &InferenceToml) -> Vec<&'static str> {
+/// The order is fixed, not the order of the user's file: the `[build]` keys
+/// before the `[memory]` ones, as `mode`, `wasm-features`, `max-pages`,
+/// `import`. The `[memory]` keys are spelled with their table, because the
+/// remedy's sentence names only `[build]`, and a bare `max-pages` would read as
+/// a key of that table; the `[build]` keys are spelled bare.
+///
+/// Every row is asked of a predicate on [`TargetName`], so a remedy cannot
+/// promise a run that the edited manifest would refuse, but the refusals they
+/// mirror live in two places. The `[build]` rows mirror the manifest's own
+/// pairing check, which refuses them as the edited manifest loads. The
+/// `[memory]` rows mirror refusals code generation makes before it emits a
+/// byte — a memory that may grow, and a memory imported from the host — which
+/// the manifest loads without complaint and the build then fails on.
+///
+/// `max-pages` is named only when it makes the memory growable: a maximum
+/// equal to the size is a fixed memory, which the target builds. The manifest
+/// was validated as it loaded, so its layout resolves; one that somehow did not
+/// is treated as fixed rather than named for a removal that may not help.
+fn manifest_keys_a_spacewasm_build_refuses(manifest: &InferenceToml) -> Vec<&'static str> {
     let spacewasm = TargetName::SpaceWasm;
     let mut keys = Vec::new();
     if manifest.build.mode == "proof" && !spacewasm.supports_proof_mode() {
@@ -907,7 +994,26 @@ fn build_keys_a_spacewasm_build_refuses(manifest: &InferenceToml) -> Vec<&'stati
     if !manifest.build.wasm_features.is_empty() && !spacewasm.permits_bulk_memory() {
         keys.push("`wasm-features`");
     }
+    let growable = manifest
+        .memory
+        .resolved_layout()
+        .is_ok_and(MemoryLayout::is_growable);
+    if growable && !spacewasm.permits_memory_growth() {
+        keys.push("`[memory] max-pages`");
+    }
+    if manifest.memory.import && !spacewasm.supports_imported_memory() {
+        keys.push("`[memory] import = true`");
+    }
     keys
+}
+
+/// `items` joined as an English list: `A`, `A and B`, `A, B and C`.
+fn english_list(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
 }
 
 /// `count` spelled as a word, for the counts of reference hosts a program can
@@ -991,7 +1097,8 @@ runs in project mode: discovers `Inference.toml`, builds
 `<root>/out/main.wasm`, and invokes `main` with no arguments.
 
 The build's `[build] target` decides where it runs. A `wasm32` build runs
-under the `wasmtime` CLI, which must be on PATH, and may import no function.
+under the `wasmtime` CLI, which must be on PATH, and may import no function;
+a memory it imports is supplied by `infs run` at the import's own limits.
 A `spacewasm` build runs in process under the SpaceWasm flight interpreter
 ({LIMITS_FROM}) and needs no wasmtime; it may import these F Prime
 reference hosts and no others, each of which but `env.clock_ms` logs its
@@ -1034,7 +1141,7 @@ fn check_wasmtime_availability() -> Result<()> {
 ///     [--wasm-lib-dir <dir>]* [--wasm-dep <name>=<path>]*
 ///     [--target <name>] [--wasm-features <list>] [--bounds-checks <policy>]
 ///     [--memory-pages <n>] [--max-memory-pages <n>] [--stack-size <n>]
-///     [--host-imports=<list>]
+///     [--import-memory] [--host-imports=<list>]
 /// ```
 ///
 /// which is the relative order single-file `infs build` uses, so the two
@@ -1158,7 +1265,9 @@ fn compile_to_wasm(
 /// Runs wasmtime with the given WASM file, invoking a specific function.
 ///
 /// Calls `entry_point` with `args`, on the command line [`wasmtime_argv`]
-/// builds.
+/// builds, with the `preload` module, if any, loaded ahead of the artifact
+/// under its name: [`with_supplied_memory`] passes the module supplying the
+/// memory an artifact imports, and `None` when it imports none.
 ///
 /// Stderr is captured and only displayed if wasmtime fails, to suppress
 /// the experimental feature warnings about `--invoke` that appear on success.
@@ -1166,11 +1275,16 @@ fn compile_to_wasm(
 /// Returns `Ok(())` on success, or `Err(InfsError::ProcessExitCode)` if wasmtime
 /// exits with a non-zero code. This allows the caller to propagate the exit code
 /// without bypassing RAII cleanup.
-fn run_wasmtime(wasm_path: &Path, entry_point: &str, args: &[String]) -> Result<()> {
+fn run_wasmtime(
+    wasm_path: &Path,
+    entry_point: &str,
+    args: &[String],
+    preload: Option<(&str, &Path)>,
+) -> Result<()> {
     println!("Invoking '{entry_point}' with wasmtime...");
 
     let output = Command::new("wasmtime")
-        .args(wasmtime_argv(wasm_path, entry_point, args))
+        .args(wasmtime_argv(wasm_path, entry_point, args, preload))
         .stdin(std::process::Stdio::inherit())
         .output()
         .with_context(|| "Failed to execute wasmtime")?;
@@ -1192,8 +1306,16 @@ fn run_wasmtime(wasm_path: &Path, entry_point: &str, args: &[String]) -> Result<
     }
 }
 
-/// The arguments `run` hands the `wasmtime` CLI: `--invoke <entry_point>
-/// <wasm_path>`, then `args` exactly as the user wrote them.
+/// The arguments `run` hands the `wasmtime` CLI: `--preload <module>=<path>`
+/// when `preload` names a module, then `--invoke <entry_point> <wasm_path>`,
+/// then `args` exactly as the user wrote them.
+///
+/// The preload binding comes first because wasmtime reads everything after the
+/// module path as the invoked function's arguments, so a flag placed there would
+/// be handed to the program. It is one argv entry, `<module>`, `=` and the path
+/// joined as an `OsString`, so a path that is not UTF-8 reaches wasmtime intact.
+/// With `None` the command line is exactly the one an artifact that defines its
+/// memory has always been run with.
 ///
 /// `main` is not special-cased: it takes the trailing arguments as any other
 /// export does, and wasmtime parses each into the type of the matching
@@ -1207,14 +1329,170 @@ fn run_wasmtime(wasm_path: &Path, entry_point: &str, args: &[String]) -> Result<
 /// Nothing is rewritten or dropped, an argument shaped like a flag included:
 /// wasmtime reads everything after the module path as the invoked function's
 /// arguments.
-fn wasmtime_argv(wasm_path: &Path, entry_point: &str, args: &[String]) -> Vec<OsString> {
-    let mut command_line = vec![
+fn wasmtime_argv(
+    wasm_path: &Path,
+    entry_point: &str,
+    args: &[String],
+    preload: Option<(&str, &Path)>,
+) -> Vec<OsString> {
+    let mut command_line = Vec::new();
+    if let Some((module, path)) = preload {
+        let mut binding = OsString::from(module);
+        binding.push("=");
+        binding.push(path);
+        command_line.push(OsString::from("--preload"));
+        command_line.push(binding);
+    }
+    command_line.extend([
         OsString::from("--invoke"),
         OsString::from(entry_point),
         OsString::from(wasm_path),
-    ];
+    ]);
     command_line.extend(args.iter().map(OsString::from));
     command_line
+}
+
+/// Calls `run` once the module that supplies the memory an artifact imports is
+/// written beside the artifact, or with `None` when `memory` is `None` and the
+/// artifact defines its own.
+///
+/// The `wasmtime` CLI supplies no memory an artifact imports, so an artifact
+/// importing `env.memory` fails to instantiate there unless a module exporting
+/// that memory is loaded first, under the import's module name. That module is
+/// [`memory_provider`], built from `memory` — the import the artifact itself
+/// declares — and `run` receives the module name and the path the provider was
+/// written to, for [`wasmtime_argv`]'s `--preload`.
+///
+/// The provider is written as a sibling of the artifact, because the CLI takes
+/// a module by path and the artifact's directory is one the build has just
+/// written to, under a name no other run holds (see
+/// [`write_memory_provider`]): two `infs run`s of one artifact that overlap
+/// each supply their own memory, and neither removes the file the other's
+/// wasmtime has yet to open. It is removed when `run` returns, whether it
+/// returned `Ok` or `Err`, by a guard that holds it across the call. Removal
+/// is best effort: a provider that cannot be removed is left behind rather than
+/// turned into a failure of a run that has already happened.
+///
+/// # Errors
+///
+/// An error naming the provider when it cannot be written, and every error
+/// `run` returns.
+fn with_supplied_memory(
+    wasm_path: &Path,
+    memory: Option<&ScannedMemoryImport>,
+    run: impl FnOnce(Option<(&str, &Path)>) -> Result<()>,
+) -> Result<()> {
+    let Some(memory) = memory else {
+        return run(None);
+    };
+    let provider = write_memory_provider(wasm_path, &memory_provider(memory))?;
+    run(Some((memory.module.as_str(), provider.0.as_path())))
+}
+
+/// How many names [`write_memory_provider`] tries before it gives up.
+const MEMORY_PROVIDER_ATTEMPTS: u32 = 64;
+
+/// Writes `bytes` to a provider beside `wasm_path` that this call created, and
+/// returns the guard that removes it.
+///
+/// Each name is created with `create_new`, so an existing file is never
+/// opened: a provider another run is still using is neither overwritten nor
+/// removed, and a stale one a killed run left behind is never trusted, since
+/// its limits may be another build's. A name that is taken moves the call on
+/// to the next one, for [`MEMORY_PROVIDER_ATTEMPTS`] names in all.
+///
+/// # Errors
+///
+/// An error naming the provider when it cannot be created or written, or when
+/// every name tried is taken.
+fn write_memory_provider(wasm_path: &Path, bytes: &[u8]) -> Result<RemovedOnDrop> {
+    use std::io::Write as _;
+
+    for attempt in 0..MEMORY_PROVIDER_ATTEMPTS {
+        let path = memory_provider_path(wasm_path, attempt);
+        let created = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path);
+        let mut file = match created {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| provider_write_failure(&path));
+            }
+        };
+        let provider = RemovedOnDrop(path);
+        file.write_all(bytes)
+            .with_context(|| provider_write_failure(&provider.0))?;
+        return Ok(provider);
+    }
+    bail!(
+        "Failed to write the module supplying the imported memory beside {}: the {} names \
+         tried, from {}, are all taken",
+        wasm_path.display(),
+        MEMORY_PROVIDER_ATTEMPTS,
+        memory_provider_path(wasm_path, 0).display()
+    )
+}
+
+/// The error a provider that could not be written at `path` is reported with.
+fn provider_write_failure(path: &Path) -> String {
+    format!(
+        "Failed to write the module supplying the imported memory to {}",
+        path.display()
+    )
+}
+
+/// The `attempt`-th path [`write_memory_provider`] tries: the artifact path
+/// with `.<pid>-<attempt>.memory` appended (`out/main.wasm` →
+/// `out/main.wasm.4242-0.memory`).
+///
+/// The process id keeps two overlapping `infs run`s apart, and the attempt
+/// number moves past a name a stale provider still holds.
+fn memory_provider_path(wasm_path: &Path, attempt: u32) -> PathBuf {
+    let mut provider = wasm_path.as_os_str().to_os_string();
+    provider.push(format!(".{}-{attempt}.memory", std::process::id()));
+    PathBuf::from(provider)
+}
+
+/// A module that defines exactly the memory `import` asks for and exports it
+/// under `import`'s field name, and holds nothing else.
+///
+/// The limits are the import's own, so wasmtime's import matching — a supplied
+/// memory needs at least the import's minimum and, when the import declares a
+/// maximum, a maximum no greater than it — admits it whatever they are. That is
+/// why the maximum is copied as well: a provider with none would not match an
+/// import that declares one, as every Inference artifact's import does.
+fn memory_provider(import: &ScannedMemoryImport) -> Vec<u8> {
+    use wasm_encoder::{ExportKind, ExportSection, MemorySection, MemoryType, Module};
+
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: import.minimum,
+        maximum: import.maximum,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    let mut exports = ExportSection::new();
+    exports.export(&import.field, ExportKind::Memory, 0);
+    let mut module = Module::new();
+    module.section(&memories).section(&exports);
+    module.finish()
+}
+
+/// Removes the file at its path when dropped, so a file written for the length
+/// of one call is gone on every way out of it, an early `?` and an unwinding
+/// panic included.
+///
+/// Best effort, deliberately: a drop cannot report an error, and a file that
+/// could not be removed is left behind rather than made a failure.
+struct RemovedOnDrop(PathBuf);
+
+impl Drop for RemovedOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[cfg(test)]
@@ -1587,7 +1865,8 @@ mod tests {
     /// UTF-8.
     fn wasmtime_argv_of(entry_point: &str, args: &[&str]) -> Vec<String> {
         let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-        wasmtime_argv(&Path::new("out").join("main.wasm"), entry_point, &args)
+        let wasm = Path::new("out").join("main.wasm");
+        wasmtime_argv(&wasm, entry_point, &args, None)
             .into_iter()
             .map(|entry| entry.into_string().expect("every entry is UTF-8"))
             .collect()
@@ -1683,7 +1962,7 @@ mod tests {
     #[test]
     fn a_path_or_argument_with_a_space_stays_one_entry() {
         let wasm = Path::new("my project").join("out").join("main.wasm");
-        let argv = wasmtime_argv(&wasm, DEFAULT_ENTRY_POINT, &["1 2".to_string()]);
+        let argv = wasmtime_argv(&wasm, DEFAULT_ENTRY_POINT, &["1 2".to_string()], None);
         assert_eq!(
             argv,
             [
@@ -1692,6 +1971,522 @@ mod tests {
                 OsString::from(&wasm),
                 OsString::from("1 2"),
             ]
+        );
+    }
+
+    /// The memory import `module.field` of `minimum` pages, at most `maximum`.
+    fn scanned_memory(
+        module: &str,
+        field: &str,
+        minimum: u64,
+        maximum: Option<u64>,
+    ) -> ScannedMemoryImport {
+        ScannedMemoryImport {
+            module: module.to_string(),
+            field: field.to_string(),
+            minimum,
+            maximum,
+        }
+    }
+
+    /// The imports an Inference artifact importing its memory is scanned with:
+    /// a fixed memory, a growable one, one with no maximum, the largest 32-bit
+    /// maximum above a zero minimum, and one under a name other than
+    /// `env.memory`.
+    fn scanned_memories() -> [ScannedMemoryImport; 5] {
+        [
+            scanned_memory("env", "memory", 1, Some(1)),
+            scanned_memory("env", "memory", 2, Some(8)),
+            scanned_memory("env", "memory", 1, None),
+            scanned_memory("env", "memory", 0, Some(65_536)),
+            scanned_memory("host", "heap", 3, Some(5)),
+        ]
+    }
+
+    /// The memories a module defines, the `(name, kind, index)` of each export,
+    /// and the id of every other section it carries.
+    type ModuleContents = (
+        Vec<inf_wasmparser::MemoryType>,
+        Vec<(String, inf_wasmparser::ExternalKind, u32)>,
+        Vec<Option<u8>>,
+    );
+
+    /// The [`ModuleContents`] of `module`, read back from its bytes.
+    fn module_contents(module: &[u8]) -> ModuleContents {
+        use inf_wasmparser::{Parser, Payload};
+
+        let mut memories = Vec::new();
+        let mut exports = Vec::new();
+        let mut others = Vec::new();
+        for payload in Parser::new(0).parse_all(module) {
+            match payload.expect("the module parses") {
+                Payload::Version { .. } | Payload::End(_) => {}
+                Payload::MemorySection(reader) => {
+                    memories.extend(reader.into_iter().map(|memory| memory.expect("a memory")));
+                }
+                Payload::ExportSection(reader) => {
+                    exports.extend(reader.into_iter().map(|export| {
+                        let export = export.expect("an export");
+                        (export.name.to_string(), export.kind, export.index)
+                    }));
+                }
+                other => others.push(other.as_section().map(|(id, _)| id)),
+            }
+        }
+        (memories, exports, others)
+    }
+
+    /// The provider is a valid WebAssembly 1.0 module defining exactly the
+    /// memory the import declares — both limits, unshared and 32-bit — and
+    /// exporting it, as memory 0, under the import's own field name, with no
+    /// import, function, table, global, data or custom section beside it.
+    ///
+    /// Fails if a limit is dropped or defaulted (a provider with no maximum does
+    /// not match an import that declares one), if the export takes a fixed name
+    /// rather than the import's, or if anything is added that the preloaded
+    /// instance would need supplied in turn.
+    #[test]
+    fn memory_provider_defines_and_exports_exactly_the_imported_memory() {
+        for import in scanned_memories() {
+            let provider = memory_provider(&import);
+            inf_wasmparser::Validator::new_with_features(inf_wasmparser::WasmFeatures::WASM1)
+                .validate_all(&provider)
+                .unwrap_or_else(|err| panic!("{import:?}: the provider must validate: {err}"));
+
+            let (memories, exports, others) = module_contents(&provider);
+            assert_eq!(memories.len(), 1, "{import:?}: {memories:?}");
+            let memory = memories[0];
+            assert_eq!(
+                (memory.initial, memory.maximum),
+                (import.minimum, import.maximum),
+                "{import:?}: the provider must declare the import's own limits"
+            );
+            assert!(
+                !memory.memory64 && !memory.shared && memory.page_size_log2.is_none(),
+                "{import:?}: a 32-bit, unshared memory of 64 KiB pages: {memory:?}"
+            );
+            assert_eq!(
+                exports,
+                [(
+                    import.field.clone(),
+                    inf_wasmparser::ExternalKind::Memory,
+                    0
+                )],
+                "{import:?}"
+            );
+            assert_eq!(others, Vec::<Option<u8>>::new(), "{import:?}: nothing else");
+        }
+    }
+
+    /// The provider sits beside the artifact under the artifact's own file name
+    /// with `.<pid>-<attempt>.memory` appended, whatever the artifact is called
+    /// and wherever it lies: a relative project artifact, a single-file one, an
+    /// absolute path, a directory with a space in its name, and a file without
+    /// an extension. Each attempt names a different file.
+    ///
+    /// The full name is kept, as `[build.wasm-opt]` keeps it for its `.opt`
+    /// sibling, so the provider reads as that artifact's and no other's.
+    ///
+    /// Fails if the provider replaces the artifact's extension rather than
+    /// appending to it, lands anywhere but the artifact's directory, or leaves
+    /// out the process id that keeps two overlapping runs apart.
+    #[test]
+    fn the_memory_provider_is_the_artifacts_sibling_with_memory_appended() {
+        let pid = std::process::id();
+        let rows = [
+            (Path::new("out").join("main.wasm"), "main.wasm"),
+            (Path::new("out").join("sensor.wasm"), "sensor.wasm"),
+            (
+                std::env::temp_dir()
+                    .join("project")
+                    .join("out")
+                    .join("main.wasm"),
+                "main.wasm",
+            ),
+            (
+                Path::new("my project").join("out").join("main.wasm"),
+                "main.wasm",
+            ),
+            (Path::new("out").join("main"), "main"),
+        ];
+        for (wasm, stem) in rows {
+            for attempt in [0, 1, MEMORY_PROVIDER_ATTEMPTS - 1] {
+                let path = memory_provider_path(&wasm, attempt);
+                let expected = format!("{stem}.{pid}-{attempt}.memory");
+                assert_eq!(path.parent(), wasm.parent(), "{}", wasm.display());
+                assert_eq!(
+                    path.file_name(),
+                    Some(std::ffi::OsStr::new(&expected)),
+                    "{}",
+                    wasm.display()
+                );
+                assert_eq!(path.is_absolute(), wasm.is_absolute(), "{}", wasm.display());
+            }
+            assert_ne!(
+                memory_provider_path(&wasm, 0),
+                memory_provider_path(&wasm, 1),
+                "{}: each attempt must name its own file",
+                wasm.display()
+            );
+        }
+    }
+
+    /// With a module to preload, `--preload <module>=<path>` opens the command
+    /// line, ahead of `--invoke`, as two entries — the binding one entry
+    /// whatever its path holds — and everything after it is exactly the line
+    /// the same call makes with nothing to preload, the arguments included.
+    ///
+    /// Fails if the binding lands after the module path, where wasmtime would
+    /// hand it to the program as an argument, if it is split or re-spelled, or
+    /// if preloading changes anything else on the line.
+    #[test]
+    fn a_preloaded_memory_opens_the_command_line_ahead_of_the_invocation() {
+        let wasm = Path::new("out").join("main.wasm");
+        let rows: [(&str, PathBuf, &str, &[&str]); 4] = [
+            ("env", memory_provider_path(&wasm, 0), DEFAULT_ENTRY_POINT, &[]),
+            ("env", memory_provider_path(&wasm, 1), "div", &["7", "0"]),
+            (
+                "host",
+                memory_provider_path(&wasm, 0),
+                "add",
+                &["--", "-1", "--preload"],
+            ),
+            (
+                "env",
+                Path::new("my project").join("out").join("main.wasm.4242-0.memory"),
+                DEFAULT_ENTRY_POINT,
+                &["1 2"],
+            ),
+        ];
+        for (module, provider, entry_point, args) in rows {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+            let command_line = wasmtime_argv(&wasm, entry_point, &args, Some((module, &provider)));
+            let mut binding = OsString::from(module);
+            binding.push("=");
+            binding.push(&provider);
+            assert_eq!(
+                command_line[..2],
+                [OsString::from("--preload"), binding],
+                "the binding must open the line, got: {command_line:?}"
+            );
+            assert_eq!(
+                command_line[2..],
+                wasmtime_argv(&wasm, entry_point, &args, None),
+                "the rest must be the line nothing preloaded makes, got: {command_line:?}"
+            );
+            assert_eq!(
+                command_line
+                    .iter()
+                    .filter(|entry| *entry == "--preload")
+                    .count(),
+                1 + usize::from(args.iter().any(|arg| arg == "--preload")),
+                "only the program's own `--preload` may follow the binding, got: {command_line:?}"
+            );
+        }
+
+        let unpreloaded = wasmtime_argv(&wasm, DEFAULT_ENTRY_POINT, &[], None);
+        assert!(
+            !unpreloaded.iter().any(|entry| entry == "--preload"),
+            "an artifact that defines its memory is run without a preload, got: {unpreloaded:?}"
+        );
+    }
+
+    /// The binding carries a provider path that is not UTF-8 byte for byte,
+    /// joined to the module name as an `OsString`, never through a lossy
+    /// `String`.
+    #[cfg(unix)]
+    #[test]
+    fn a_preload_binding_keeps_a_non_utf8_path_intact() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = std::ffi::OsStr::from_bytes(b"out\xff");
+        let wasm = Path::new(directory).join("main.wasm");
+        let provider = memory_provider_path(&wasm, 0);
+        let argv = wasmtime_argv(&wasm, DEFAULT_ENTRY_POINT, &[], Some(("env", &provider)));
+        let mut expected = b"env=".to_vec();
+        expected.extend_from_slice(provider.as_os_str().as_bytes());
+        assert_eq!(argv[1].as_bytes(), expected.as_slice());
+        assert_eq!(argv[4].as_os_str(), wasm.as_os_str());
+    }
+
+    /// With no memory to supply, `run` is called with nothing to preload and
+    /// nothing is written: an artifact that defines its memory leaves no file
+    /// beside it, and whatever `run` returns is what the call returns.
+    #[test]
+    fn an_artifact_defining_its_memory_is_run_with_nothing_supplied() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        let mut calls = 0;
+        with_supplied_memory(&wasm, None, |preload| {
+            calls += 1;
+            assert_eq!(preload, None);
+            Ok(())
+        })
+        .expect("the run succeeded");
+        assert_eq!(calls, 1);
+        assert!(!memory_provider_path(&wasm, 0).exists());
+
+        let err = with_supplied_memory(&wasm, None, |_| Err(anyhow!("wasmtime failed")))
+            .expect_err("the run's failure is the call's");
+        assert_eq!(err.to_string(), "wasmtime failed");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "nothing may be written for an artifact that defines its memory"
+        );
+    }
+
+    /// With a memory to supply, `run` is called once the provider is on disk
+    /// beside the artifact, holding exactly the bytes [`memory_provider`] builds
+    /// for the import, and is handed the import's module name and that path.
+    /// The provider is gone once `run` returns, whether it succeeded or failed,
+    /// and a failure is returned as `run` gave it.
+    #[test]
+    fn a_supplied_memory_is_on_disk_for_the_run_and_gone_after_it() {
+        for import in scanned_memories() {
+            for succeeds in [true, false] {
+                let dir = assert_fs::TempDir::new().unwrap();
+                let wasm = dir.path().join("main.wasm");
+                let provider = memory_provider_path(&wasm, 0);
+
+                let mut calls = 0;
+                let outcome = with_supplied_memory(&wasm, Some(&import), |preload| {
+                    calls += 1;
+                    assert_eq!(preload, Some((import.module.as_str(), provider.as_path())));
+                    assert_eq!(
+                        std::fs::read(&provider).expect("the provider is on disk for the run"),
+                        memory_provider(&import),
+                        "{import:?}"
+                    );
+                    if succeeds {
+                        Ok(())
+                    } else {
+                        Err(anyhow!("wasmtime exited with 134"))
+                    }
+                });
+                assert_eq!(calls, 1, "{import:?}");
+                match outcome {
+                    Ok(()) => assert!(succeeds, "{import:?}: a failed run must fail the call"),
+                    Err(err) => {
+                        assert!(!succeeds, "{import:?}: a run that succeeded failed: {err}");
+                        assert_eq!(err.to_string(), "wasmtime exited with 134");
+                    }
+                }
+                assert!(
+                    !provider.exists(),
+                    "{import:?}: the provider must be removed after a run that {}",
+                    if succeeds { "succeeded" } else { "failed" }
+                );
+                assert_eq!(
+                    std::fs::read_dir(dir.path()).unwrap().count(),
+                    0,
+                    "{import:?}: nothing may be left beside the artifact"
+                );
+            }
+        }
+    }
+
+    /// Two runs of one artifact that overlap each supply their own memory: the
+    /// second is written under another name while the first is still on disk,
+    /// and the second run's ending removes only its own provider, so the first
+    /// run's wasmtime still finds the memory it was told to preload.
+    ///
+    /// Fails if both runs share a provider path, if the second overwrites the
+    /// first's bytes, or if one run's cleanup removes the other's file.
+    #[test]
+    fn overlapping_runs_of_one_artifact_keep_their_own_providers() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        let first = scanned_memory("env", "memory", 1, Some(1));
+        let second = scanned_memory("env", "memory", 2, Some(8));
+
+        with_supplied_memory(&wasm, Some(&first), |outer| {
+            let (_, outer_path) = outer.expect("the first run is handed a provider");
+            let outer_path = outer_path.to_path_buf();
+            with_supplied_memory(&wasm, Some(&second), |inner| {
+                let (_, inner_path) = inner.expect("the second run is handed a provider");
+                assert_ne!(inner_path, outer_path, "two live runs need two providers");
+                assert_eq!(std::fs::read(inner_path).unwrap(), memory_provider(&second));
+                assert_eq!(
+                    std::fs::read(&outer_path).unwrap(),
+                    memory_provider(&first),
+                    "the second run must not touch the first run's provider"
+                );
+                Ok(())
+            })?;
+            assert_eq!(
+                std::fs::read(&outer_path).expect("the second run's cleanup kept it"),
+                memory_provider(&first),
+                "the first run's provider must outlive the second run"
+            );
+            Ok(())
+        })
+        .expect("both runs succeeded");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "each run removes its own provider and only its own"
+        );
+    }
+
+    /// A file already under the first name, which a killed run may have left,
+    /// is neither trusted nor overwritten nor removed: the provider is written
+    /// under the next name, and the stale file is exactly as it was afterwards.
+    #[test]
+    fn a_stale_provider_is_skipped_rather_than_reused() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        let stale = memory_provider_path(&wasm, 0);
+        std::fs::write(&stale, b"stale").unwrap();
+        let import = scanned_memory("env", "memory", 1, Some(1));
+
+        with_supplied_memory(&wasm, Some(&import), |preload| {
+            let (_, path) = preload.expect("the run is handed a provider");
+            assert_eq!(path, memory_provider_path(&wasm, 1).as_path());
+            assert_eq!(std::fs::read(path).unwrap(), memory_provider(&import));
+            Ok(())
+        })
+        .expect("the run succeeded");
+        assert_eq!(std::fs::read(&stale).unwrap(), b"stale");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "only the stale file is left"
+        );
+    }
+
+    /// A symlink already under the first name is skipped like any other file:
+    /// creating the provider never follows it, so its target is not written,
+    /// and the link itself is not removed when the run ends.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_under_the_provider_name_is_neither_followed_nor_removed() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        let target = dir.path().join("user-file");
+        std::fs::write(&target, b"the user's bytes").unwrap();
+        let link = memory_provider_path(&wasm, 0);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let import = scanned_memory("env", "memory", 1, Some(1));
+
+        with_supplied_memory(&wasm, Some(&import), |preload| {
+            let (_, path) = preload.expect("the run is handed a provider");
+            assert_eq!(path, memory_provider_path(&wasm, 1).as_path());
+            Ok(())
+        })
+        .expect("the run succeeded");
+        assert_eq!(std::fs::read(&target).unwrap(), b"the user's bytes");
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "the symlink must be left in place"
+        );
+    }
+
+    /// When every name is taken, the run is refused before wasmtime is called,
+    /// naming the artifact and the first name tried, and nothing that was there
+    /// is touched.
+    #[test]
+    fn every_provider_name_taken_fails_before_the_run() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("main.wasm");
+        for attempt in 0..MEMORY_PROVIDER_ATTEMPTS {
+            std::fs::write(memory_provider_path(&wasm, attempt), b"taken").unwrap();
+        }
+        let import = scanned_memory("env", "memory", 1, Some(1));
+        let mut calls = 0;
+        let err = with_supplied_memory(&wasm, Some(&import), |_| {
+            calls += 1;
+            Ok(())
+        })
+        .expect_err("no name is free");
+        assert_eq!(calls, 0);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Failed to write the module supplying the imported memory beside {}: the {} \
+                 names tried, from {}, are all taken",
+                wasm.display(),
+                MEMORY_PROVIDER_ATTEMPTS,
+                memory_provider_path(&wasm, 0).display()
+            )
+        );
+        for attempt in 0..MEMORY_PROVIDER_ATTEMPTS {
+            assert_eq!(
+                std::fs::read(memory_provider_path(&wasm, attempt)).unwrap(),
+                b"taken"
+            );
+        }
+    }
+
+    /// A provider that cannot be written is an error naming it, and `run` is
+    /// never called: the artifact would fail to instantiate without it, in
+    /// wasmtime's words about an unknown import rather than these.
+    #[test]
+    fn a_provider_that_cannot_be_written_fails_before_the_run() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let wasm = dir.path().join("missing").join("main.wasm");
+        let import = scanned_memory("env", "memory", 1, Some(1));
+        let mut calls = 0;
+        let err = with_supplied_memory(&wasm, Some(&import), |_| {
+            calls += 1;
+            Ok(())
+        })
+        .expect_err("the provider's directory does not exist");
+        assert_eq!(calls, 0);
+        let msg = err.to_string();
+        assert_eq!(
+            msg,
+            format!(
+                "Failed to write the module supplying the imported memory to {}",
+                memory_provider_path(&wasm, 0).display()
+            )
+        );
+    }
+
+    /// The memory `run` supplies is the one the artifact's bytes import, read
+    /// through the same scan as its other questions; an artifact that defines
+    /// its memory, or has none, needs nothing supplied; and a leaked
+    /// verification construct is refused in the words the wasmtime route uses
+    /// for it, ahead of any memory question.
+    #[test]
+    fn the_memory_to_supply_is_read_from_the_artifacts_own_import() {
+        use crate::testing::module_with_memory_and_raw_body;
+
+        for import in scanned_memories() {
+            let module = module_with_imports(&[(
+                import.module.as_str(),
+                import.field.as_str(),
+                EntityType::Memory(MemoryType {
+                    minimum: import.minimum,
+                    maximum: import.maximum,
+                    memory64: false,
+                    shared: false,
+                    page_size_log2: None,
+                }),
+            )]);
+            assert_eq!(
+                imported_memory(&module, &out_main()).expect("the module parses"),
+                Some(import)
+            );
+        }
+        for module in [
+            module_with_raw_body(&[0x0b]),
+            module_with_memory_and_raw_body(&[0x0b]),
+        ] {
+            assert_eq!(
+                imported_memory(&module, &out_main()).expect("the module parses"),
+                None
+            );
+        }
+
+        let uzumaki = module_with_raw_body(&[0x00, 0xfc, 0x31, 0x1a, 0x0b]);
+        assert_eq!(
+            imported_memory(&uzumaki, &out_main())
+                .expect_err("a leaked construct is refused")
+                .to_string(),
+            executable_function_imports(&uzumaki, &out_main(), WASMTIME)
+                .expect_err("a leaked construct is refused")
+                .to_string()
         );
     }
 
@@ -2004,6 +2799,339 @@ mod tests {
                 msg.contains(&expected),
                 "mode {mode:?}, wasm-features {features:?} must read:\n{expected}\ngot:\n{msg}"
             );
+        }
+    }
+
+    /// A memory import of `minimum` pages, at most `maximum`, as an entity.
+    fn memory_entity(minimum: u64, maximum: Option<u64>) -> EntityType {
+        EntityType::Memory(MemoryType {
+            minimum,
+            maximum,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        })
+    }
+
+    /// A module importing `other` first — where an Inference artifact puts its
+    /// memory import — and then each of `functions` at its signature, under a
+    /// type of its own.
+    ///
+    /// The module an artifact importing both its memory and its host functions
+    /// is, which [`module_with_function_imports`] cannot build: it imports
+    /// functions only, so a refusal asked about it never sees the memory
+    /// import whose handling is under test.
+    fn module_with_an_import_beside(
+        other: (&str, &str, EntityType),
+        functions: &[TypedImport],
+    ) -> Vec<u8> {
+        use wasm_encoder::{ImportSection, Module, TypeSection};
+
+        let mut types = TypeSection::new();
+        let mut imports = ImportSection::new();
+        let (module_name, field, ty) = other;
+        imports.import(module_name, field, ty);
+        for (index, &(module_name, field, params, results)) in (0_u32..).zip(functions) {
+            types
+                .ty()
+                .function(params.iter().copied(), results.iter().copied());
+            imports.import(module_name, field, EntityType::Function(index));
+        }
+        let mut module = Module::new();
+        module.section(&types).section(&imports);
+        module.finish()
+    }
+
+    /// The `wasm32` import refusal of the module a project builds when it binds
+    /// `env.clock_ms` under a manifest with this `[build] mode`, `wasm-features`
+    /// list and `[memory]` table: one that imports its memory, at the layout's
+    /// limits, when the table sets `import = true`, and one that defines it
+    /// otherwise.
+    fn clock_refusal_under(
+        mode: &str,
+        features: &[&str],
+        memory: crate::project::manifest::MemoryConfig,
+    ) -> String {
+        let clock = reference("env", "clock_ms");
+        let mut manifest = InferenceToml::new("demo");
+        manifest.build.mode = mode.to_string();
+        manifest.build.wasm_features = features
+            .iter()
+            .map(|feature| (*feature).to_string())
+            .collect();
+        manifest.memory = memory;
+        let layout = memory.resolved_layout().expect("a usable layout");
+        let module = if memory.import {
+            let limits = memory_entity(
+                u64::from(layout.pages()),
+                Some(u64::from(layout.max_pages())),
+            );
+            module_with_an_import_beside(("env", "memory", limits), &[clock])
+        } else {
+            module_with_function_imports(&[clock])
+        };
+        refusal_text(
+            &module,
+            Scope::Project {
+                manifest: &manifest,
+            },
+        )
+    }
+
+    /// A project whose memory the `spacewasm` target refuses — growable, or
+    /// imported, or both — binding only F´ reference hosts is told to remove
+    /// those `[memory]` keys as well as to set the target, beside the `[build]`
+    /// keys the target refuses, as one English list in a fixed order, the
+    /// `[build]` keys first: `mode`, `wasm-features`, `max-pages`, `import`. The
+    /// `[memory]` keys are named with their table, since the sentence has just
+    /// named `[build]`, where a bare key would be looked for; the `[build]` keys
+    /// are named bare. Each row asks about the module such a project's build
+    /// emits: one that imports its memory, at the layout's limits, when the
+    /// manifest sets `import = true`, and one that defines it otherwise.
+    ///
+    /// A maximum equal to the size, or absent, is a fixed memory, which the
+    /// target builds, so it is not named.
+    ///
+    /// Fails if a remedy promises a run that the edited manifest's build would
+    /// refuse — the target refuses an imported memory and a growable one as code
+    /// generation begins, though the manifest loads — names a key the manifest
+    /// does not set, drops one it does, or lists them in another order or
+    /// grammar.
+    #[test]
+    fn reference_hosts_beside_a_memory_the_target_refuses_are_told_to_remove_its_keys() {
+        use crate::project::manifest::MemoryConfig;
+
+        let then = "and run it again to execute the program under the SpaceWasm interpreter. \
+                    Otherwise, run it from the embedder that supplies it.";
+        let config = |pages, max_pages, import| MemoryConfig {
+            pages,
+            max_pages,
+            stack_size: None,
+            import,
+        };
+        let removing = |keys: &str| format!(", remove {keys}, which that target refuses,");
+        let (max_pages, import) = ("`[memory] max-pages`", "`[memory] import = true`");
+        let rows: [(&str, &[&str], MemoryConfig, String); 12] = [
+            ("compile", &[], config(None, None, true), removing(import)),
+            (
+                "compile",
+                &[],
+                config(Some(2), Some(2), true),
+                removing(import),
+            ),
+            (
+                "compile",
+                &[],
+                config(Some(1), Some(4), true),
+                removing(&format!("{max_pages} and {import}")),
+            ),
+            (
+                "compile",
+                &[],
+                config(None, Some(4), true),
+                removing(&format!("{max_pages} and {import}")),
+            ),
+            (
+                "compile",
+                &[],
+                config(Some(1), Some(4), false),
+                removing(max_pages),
+            ),
+            (
+                "compile",
+                &[],
+                config(None, Some(4), false),
+                removing(max_pages),
+            ),
+            (
+                "compile",
+                &[],
+                config(Some(2), Some(2), false),
+                String::new(),
+            ),
+            ("compile", &[], config(Some(4), None, false), String::new()),
+            (
+                "compile",
+                &["bulk-memory"],
+                config(None, None, true),
+                removing(&format!("`wasm-features` and {import}")),
+            ),
+            (
+                "proof",
+                &[],
+                config(Some(1), Some(4), false),
+                removing(&format!("`mode = \"proof\"` and {max_pages}")),
+            ),
+            (
+                "proof",
+                &[],
+                config(Some(1), Some(4), true),
+                removing(&format!("`mode = \"proof\"`, {max_pages} and {import}")),
+            ),
+            (
+                "proof",
+                &["bulk-memory"],
+                config(Some(1), Some(4), true),
+                removing(&format!(
+                    "`mode = \"proof\"`, `wasm-features`, {max_pages} and {import}"
+                )),
+            ),
+        ];
+        for (mode, features, memory, removed) in rows {
+            let msg = clock_refusal_under(mode, features, memory);
+            let expected = format!(
+                "`env.clock_ms` is an F Prime reference host, which `infs run` provides to a \
+                 `spacewasm` build: set `target = \"spacewasm\"` under `[build]` in \
+                 Inference.toml{removed} {then}"
+            );
+            assert!(
+                msg.contains(&expected),
+                "mode {mode:?}, wasm-features {features:?}, {memory:?} must read:\n{expected}\n\
+                 got:\n{msg}"
+            );
+        }
+    }
+
+    /// The keys are asked of the manifest alone, so a memory that resolves to no
+    /// layout — which loading the manifest refuses, but a caller can still
+    /// build — is read as fixed: its `max-pages` is not named for a removal that
+    /// may not help, while its `import = true` still is, since the target
+    /// refuses that whatever the numbers. A manifest setting nothing names
+    /// nothing.
+    #[test]
+    fn an_unresolvable_memory_is_not_read_as_growable() {
+        use crate::project::manifest::MemoryConfig;
+
+        let mut manifest = InferenceToml::new("demo");
+        assert_eq!(
+            manifest_keys_a_spacewasm_build_refuses(&manifest),
+            Vec::<&str>::new()
+        );
+        for (import, expected) in [(false, &[][..]), (true, &["`[memory] import = true`"][..])] {
+            manifest.memory = MemoryConfig {
+                pages: Some(4),
+                max_pages: Some(2),
+                stack_size: None,
+                import,
+            };
+            assert!(manifest.memory.resolved_layout().is_err());
+            assert_eq!(manifest_keys_a_spacewasm_build_refuses(&manifest), expected);
+        }
+    }
+
+    /// The runner refuses a memory import as one the reference hosts do not
+    /// provide, and that refusal alone does not decide the remedy: a program
+    /// importing its memory beside reference hosts at their signatures is
+    /// offered the `spacewasm` target, while one beside a function no reference
+    /// host carries, a reference host at another signature, or a table or a
+    /// global is not. The memory is never listed or counted as a function the
+    /// embedder must supply.
+    ///
+    /// Fails if any runner refusal at all closes the `spacewasm` remedy again —
+    /// which tells every import-mode program binding only reference hosts that
+    /// they do not match — or if setting aside the memory's refusal sets aside
+    /// another kind's too.
+    #[test]
+    fn an_imported_memory_does_not_decide_which_refusal_is_offered() {
+        use wasm_encoder::{GlobalType, RefType, TableType, ValType};
+
+        let clock = reference("env", "clock_ms");
+        let command = reference("fprime_core", "command");
+        let ticks: TypedImport = ("env", "ticks", &[], &[ValType::I64]);
+        let narrow_clock: TypedImport = ("env", "clock_ms", &[], &[ValType::I32]);
+        let memory = ("env", "memory", memory_entity(2, Some(8)));
+        let unbounded = ("env", "memory", memory_entity(1, None));
+        let table = (
+            "env",
+            "table",
+            EntityType::Table(TableType {
+                element_type: RefType::FUNCREF,
+                table64: false,
+                minimum: 1,
+                maximum: None,
+                shared: false,
+            }),
+        );
+        let global = (
+            "env",
+            "global",
+            EntityType::Global(GlobalType {
+                val_type: ValType::I32,
+                mutable: false,
+                shared: false,
+            }),
+        );
+        let one_clock = "imports 1 function that its embedder must supply.\n  env.clock_ms\n";
+        let rows: [(_, &[TypedImport], bool, &str); 7] = [
+            (memory, &[clock], true, one_clock),
+            (unbounded, &[clock], true, one_clock),
+            (
+                memory,
+                &[command, clock],
+                true,
+                "imports 2 functions that its embedder must supply.\n  env.clock_ms\n  \
+                 fprime_core.command\n",
+            ),
+            (
+                memory,
+                &[ticks],
+                false,
+                "imports 1 function that its embedder must supply.\n  env.ticks\n",
+            ),
+            (memory, &[narrow_clock], false, one_clock),
+            (table, &[clock], false, one_clock),
+            (global, &[clock], false, one_clock),
+        ];
+        for (other, functions, offered, listed) in rows {
+            let module = module_with_an_import_beside(other, functions);
+            let label = format!("{}.{} beside {functions:?}", other.0, other.1);
+            assert_eq!(
+                reference_hosts_provide_every_function(&module),
+                offered,
+                "{label}"
+            );
+            let msg = refusal_text(&module, in_a_project());
+            assert!(
+                msg.contains(listed),
+                "{label}: must list\n{listed}\ngot:\n{msg}"
+            );
+            assert!(
+                !msg.contains("env.memory") && !msg.contains("env.table"),
+                "{label}: only functions are listed, got:\n{msg}"
+            );
+            assert_eq!(
+                msg.contains("set `target = \"spacewasm\"`"),
+                offered,
+                "{label}: the `spacewasm` target must {}be offered, got:\n{msg}",
+                if offered { "" } else { "not " }
+            );
+            assert_eq!(
+                msg.contains("do not all match") || msg.contains("does not match"),
+                !offered,
+                "{label}: got:\n{msg}"
+            );
+        }
+
+        let clock_only = module_with_function_imports(&[clock]);
+        let memory_only = module_with_imports(&[memory]);
+        for module in [module_with_raw_body(&[0x0b]), memory_only, clock_only] {
+            assert!(reference_hosts_provide_every_function(&module));
+        }
+    }
+
+    /// Keys join as English lists them: nothing, one alone, two with `and`, and
+    /// three or more with commas and a final `and` without a serial comma.
+    #[test]
+    fn keys_are_joined_as_an_english_list() {
+        let rows: [(&[&str], &str); 5] = [
+            (&[], ""),
+            (&["`a`"], "`a`"),
+            (&["`a`", "`b`"], "`a` and `b`"),
+            (&["`a`", "`b`", "`c`"], "`a`, `b` and `c`"),
+            (&["`a`", "`b`", "`c`", "`d`"], "`a`, `b`, `c` and `d`"),
+        ];
+        for (items, expected) in rows {
+            assert_eq!(english_list(items), expected, "{items:?}");
         }
     }
 

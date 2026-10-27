@@ -47,14 +47,16 @@
 //! # Memory layout vocabulary
 //!
 //! [`MemoryLayout`] is the linear memory a build asks for — the page count, the
-//! most pages it may grow to, and the shadow stack's share of it — together with
-//! the invariants that make those numbers a memory a module can actually
-//! declare. [`MemoryRequest`] is the same three numbers before any is filled or
-//! checked. It lives here for the
-//! same reason the feature vocabulary does: the surfaces that select a layout
-//! and the code generation that emits one must agree on which layouts exist, and
-//! a rejection has to read the same whether the numbers came from a manifest or
-//! a command line.
+//! most pages it may grow to, the shadow stack's share of it, and whether the
+//! module defines that memory or imports it from the host — together with the
+//! invariants that make those numbers a memory a module can actually declare.
+//! [`MemoryRequest`] is the same request before any number is filled or
+//! checked, and [`MemoryImport`] is the one spelling of the import an imported
+//! layout asks its host for. The vocabulary lives here for the same reason the
+//! feature vocabulary does: the surfaces that select a layout and the code
+//! generation that emits one must agree on which layouts exist, and a rejection
+//! has to read the same whether the numbers came from a manifest or a command
+//! line.
 //!
 //! [`MemoryLayout::resolve`] is the only way to name a layout other than the
 //! default, so the invariants hold by construction rather than by a check every
@@ -248,7 +250,28 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// growth failed. So the gate is on this constant, as it is for every flag
 /// minor, and it is on this minor alone: a project that sets only `pages` or
 /// `stack-size` still needs no more than minor 3.
-pub const COMPILER_ABI_MINOR: u32 = 10;
+///
+/// Minor 11 adds the additive `--import-memory` flag to `infc`, having the
+/// emitted module import its linear memory from the host as `env.memory`
+/// rather than define it ([`MemoryLayout::is_imported`], [`MemoryImport`]). It
+/// is backward compatible in the same sense as the minors above: omitting the
+/// flag defines the memory, as every earlier minor did, so a minor-10 `infs`
+/// still pairs with a minor-11 `infc` and loses nothing by it — a minor-10
+/// `infs` predates the `Inference.toml [memory] import` key, so it holds no
+/// import to drop. The pairing callers must gate on is an `infs` holding
+/// `import = true` talking to a minor-10 `infc`. A forward that reaches one
+/// fails loudly on a flag it does not parse; a dropped forward is the first of
+/// the eleven whose module runs against the host it was built for while
+/// computing on a different memory. The build succeeds with a module that
+/// defines its own memory, and an embedder that resolves imports by name, as
+/// the JavaScript API and Wasmtime's `Linker` do, ignores the `env.memory` it
+/// provides and the module does not ask for, so instantiation succeeds too;
+/// the host then reads and writes a memory the module never touches. Nothing
+/// fails: the two simply disagree. The bytes do record it, as a memory section
+/// in place of the import, but only for a reader who knows to look. So the
+/// gate is on this constant, and on this minor alone: `import = false`
+/// forwards nothing and needs no floor.
+pub const COMPILER_ABI_MINOR: u32 = 11;
 
 /// The first segment of a `use … from` clause that names the embedder rather
 /// than a linked module: `use { clock_ms } from host::env;` binds a host import
@@ -552,10 +575,10 @@ pub enum TargetName {
     /// method takes and returns the host's 64-bit tagged word — so this is the
     /// first name whose artifact is not the default's. What a build for it may
     /// contain is correspondingly narrower: no proof mode, no post-MVP
-    /// instruction family, and an exported function carrying only the scalar
-    /// types the convention can encode without a host object. Code generation
-    /// owns the last of those; the two here are the ones a front end can answer
-    /// before spawning a compiler at all.
+    /// instruction family, no imported memory, and an exported function
+    /// carrying only the scalar types the convention can encode without a host
+    /// object. Code generation owns the last of those; the rest are the ones a
+    /// front end can answer before spawning a compiler at all.
     Stellar,
 
     /// A module for the SpaceWasm flight interpreter.
@@ -569,11 +592,13 @@ pub enum TargetName {
     ///
     /// What the envelope narrows, of the things a front end holding only the
     /// name can answer: no proof mode, because the interpreter's decoder does
-    /// not define the custom `0xfc` instructions, and no post-MVP instruction
-    /// family, because it implements none of the proposals that add one. The
-    /// decode-time maxima the interpreter also enforces — parameter and local
-    /// word counts, name lengths, host arity — are properties of the finished
-    /// module rather than of the request, so nothing here can answer them.
+    /// not define the custom `0xfc` instructions; no post-MVP instruction
+    /// family, because it implements none of the proposals that add one; no
+    /// memory growth, because the interpreter is loaded with `memory.grow`
+    /// disallowed; and, for now, no imported memory (#547). The decode-time
+    /// maxima the interpreter also enforces — parameter and local word counts,
+    /// name lengths, host arity — are properties of the finished module rather
+    /// than of the request, so nothing here can answer them.
     SpaceWasm,
 }
 
@@ -662,6 +687,48 @@ impl TargetName {
         match self {
             Self::Wasm32 => true,
             Self::Stellar | Self::SpaceWasm => false,
+        }
+    }
+
+    /// Whether a build for this target may import its linear memory from the
+    /// host rather than define it.
+    ///
+    /// The same mirror rule as [`Self::supports_proof_mode`]: the emission-side
+    /// target decides, this copy exists for a front end that has only the name.
+    ///
+    /// Named `supports_*` after `Target::supports_host_imports` in
+    /// `inference-wasm-codegen`: like that predicate, and unlike the
+    /// `permits_*` ones, it is not a claim about what the decoder reads.
+    /// `Stellar` answers `false` because the value-ABI rewrite accepts no
+    /// import, and a contract that has a memory defines and exports it.
+    /// `SpaceWasm` answers `false` for now: the interpreter decodes a memory
+    /// import and can bind one its embedder registers, but this toolchain does
+    /// not build for such an embedder and the F´ reference hosts register
+    /// functions only. Issue #547 tracks lifting it.
+    #[must_use]
+    pub fn supports_imported_memory(self) -> bool {
+        match self {
+            Self::Wasm32 => true,
+            Self::Stellar | Self::SpaceWasm => false,
+        }
+    }
+
+    /// Whether this target's runtime can grow a linear memory, so a layout
+    /// whose maximum exceeds its size declares room that can actually be
+    /// reached.
+    ///
+    /// The same mirror rule as [`Self::supports_proof_mode`]: the emission-side
+    /// target decides, this copy exists for a front end that has only the name.
+    ///
+    /// `SpaceWasm` answers `false` because its interpreter is loaded with
+    /// `memory.grow` disallowed, so a maximum above the size would promise
+    /// room the module can never have; the engines behind `Wasm32` and
+    /// `Stellar` grow a memory up to its declared maximum.
+    #[must_use]
+    pub fn permits_memory_growth(self) -> bool {
+        match self {
+            Self::Wasm32 | Self::Stellar => true,
+            Self::SpaceWasm => false,
         }
     }
 
@@ -997,10 +1064,12 @@ impl MemoryLayoutSource {
 /// A memory layout as a build asked for it: every dimension a request may leave
 /// unset, before [`MemoryLayout::resolve`] fills and checks them.
 ///
-/// A struct rather than three positional arguments to the constructor: all three
-/// are `Option<u32>`, and a call that transposed two of them would compile and
-/// resolve a different memory. Naming each field at the call site is what keeps
-/// a stack size from being read as a page count.
+/// A struct rather than positional arguments to the constructor: the three
+/// numbers are all `Option<u32>`, and a call that transposed two of them would
+/// compile and resolve a different memory, while a bare `true` among them would
+/// not say what it turns on. Naming each field at the call site is what keeps a
+/// stack size from being read as a page count, and an import from being read
+/// as anything else.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MemoryRequest {
     /// Linear memory size in 64 KiB pages. Unset means one page.
@@ -1012,6 +1081,10 @@ pub struct MemoryRequest {
     /// it the program's static data needs when the memory has no other room
     /// for it (see [`MemoryLayout::with_static_data`]).
     pub stack_size: Option<u32>,
+    /// Import the memory from the host as `env.memory` instead of defining it.
+    /// Unset (false) defines it; in a change list from
+    /// [`MemoryLayout::request_to_fit`] it means the import is unchanged.
+    pub import: bool,
 }
 
 /// The linear memory a generated module declares, how far it may grow, and the
@@ -1019,9 +1092,9 @@ pub struct MemoryRequest {
 ///
 /// This is shared vocabulary rather than a code-generation detail: a project's
 /// manifest, the compiler flags that override it, and the emitter that turns the
-/// three numbers into a memory section and a `__stack_pointer` initializer all
-/// read this one type. A layout a build accepts is therefore exactly a layout that can
-/// be emitted.
+/// three numbers into a memory section, or a memory import, and a
+/// `__stack_pointer` initializer all read this one type. A layout a build
+/// accepts is therefore exactly a layout that can be emitted.
 ///
 /// It is deliberately not mirrored by a code-generation twin the way
 /// [`WasmFeatureName`] is by `EmitFeatures`. That mirror earns its place because
@@ -1032,13 +1105,14 @@ pub struct MemoryRequest {
 /// nothing but a second place for the invariants below to drift apart.
 ///
 /// The memory is fixed unless a build asks otherwise: the maximum defaults to
-/// the size, so the memory section declares `min == max` and `memory.grow` can
-/// never move the end of memory. A build may raise the maximum above the size,
-/// which lets a linked module or the host grow the memory up to it; nothing this
-/// compiler emits grows memory itself. The size is what the stack must fit in,
-/// since it is all a module is guaranteed at instantiation, and the maximum is
-/// what the overflow trap's headroom is measured against, since it is how far
-/// growth can move the end of memory.
+/// the size, so the memory section (or the memory import) declares
+/// `min == max` and `memory.grow` can never move the end of memory. A build
+/// may raise the maximum above the size, which lets a linked module or the
+/// host grow the memory up to it; nothing this compiler emits grows memory
+/// itself. The size is what the stack must fit in, since it is all a module is
+/// guaranteed at instantiation, and the maximum is what the overflow trap's
+/// headroom is measured against, since it is how far growth can move the end
+/// of memory.
 ///
 /// Code generation places the shadow stack at the bottom of memory: it spans
 /// `[0, stack_size)` and `__stack_pointer` grows downward from `stack_size`
@@ -1051,6 +1125,14 @@ pub struct MemoryRequest {
 /// than trapping, so a stack larger than the program needs is not free (see
 /// `core/wasm-linker`, which leans on an out-of-region address usually being out
 /// of bounds).
+///
+/// A build may ask for the memory to be imported from the host as `env.memory`
+/// rather than defined by the module. The import declares the same limits a
+/// defined memory would — `pages` as its minimum, `max_pages` as its maximum —
+/// and the stack and the static data are placed in it exactly as they are in a
+/// defined one, so every invariant [`Self::resolve`] checks holds unchanged.
+/// The imported memory is memory 0, the one every load and store addresses.
+/// [`Self::memory_import`] is what such a layout asks its host for.
 ///
 /// A layout [`Self::resolve`] returns places no data yet: how much the program
 /// needs is known only once it has been type-checked.
@@ -1071,12 +1153,13 @@ pub struct MemoryRequest {
 /// emitter would have to refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MemoryLayout {
-    /// Linear memory size in 64 KiB pages: the memory section's minimum, and
-    /// every page a module is guaranteed at instantiation.
+    /// Linear memory size in 64 KiB pages: the memory section's minimum, or
+    /// the memory import's, and every page a module is guaranteed at
+    /// instantiation.
     pages: u32,
-    /// The most pages the memory may grow to: the memory section's maximum.
-    /// Equal to `pages` unless the build asked for more, so by default the
-    /// memory is fixed rather than growable.
+    /// The most pages the memory may grow to: the memory section's maximum,
+    /// or the memory import's. Equal to `pages` unless the build asked for
+    /// more, so by default the memory is fixed rather than growable.
     max_pages: u32,
     /// Size of the shadow-stack region in bytes, occupying `[0, stack_size)`.
     stack_size: u32,
@@ -1087,6 +1170,10 @@ pub struct MemoryLayout {
     /// Bytes of static data placed at `[stack_size, stack_size + data_size)`.
     /// Zero until [`Self::with_static_data`] places some.
     data_size: u32,
+    /// Whether the host supplies the memory, imported as `env.memory` with
+    /// these limits, rather than the module defining it. Changes where the
+    /// memory comes from, never its shape.
+    import: bool,
 }
 
 /// Implemented by hand rather than derived: a derived `Default` would produce a
@@ -1102,6 +1189,7 @@ impl Default for MemoryLayout {
             stack_size: DEFAULT_STACK_SIZE,
             stack_requested: false,
             data_size: 0,
+            import: false,
         }
     }
 }
@@ -1154,6 +1242,7 @@ impl MemoryLayout {
             pages,
             max_pages,
             stack_size,
+            import,
         } = request;
         let defaults = Self::default();
         let pages = pages.unwrap_or(defaults.pages);
@@ -1163,6 +1252,7 @@ impl MemoryLayout {
             stack_size: stack_size.unwrap_or(defaults.stack_size),
             stack_requested: stack_size.is_some(),
             data_size: 0,
+            import,
         };
         layout
             .validate()
@@ -1170,14 +1260,16 @@ impl MemoryLayout {
         Ok(layout)
     }
 
-    /// Linear memory size in 64 KiB pages: the memory section's minimum.
+    /// Linear memory size in 64 KiB pages: the memory section's minimum, or
+    /// the memory import's.
     #[must_use]
     pub fn pages(self) -> u32 {
         self.pages
     }
 
-    /// The most pages the memory may grow to: the memory section's maximum.
-    /// Equal to [`Self::pages()`] unless the build asked for more.
+    /// The most pages the memory may grow to: the memory section's maximum,
+    /// or the memory import's. Equal to [`Self::pages()`] unless the build
+    /// asked for more.
     #[must_use]
     pub fn max_pages(self) -> u32 {
         self.max_pages
@@ -1218,13 +1310,43 @@ impl MemoryLayout {
         self.stack_size
     }
 
+    /// Whether the host supplies the memory rather than the module defining
+    /// it.
+    ///
+    /// False for every layout a build did not explicitly ask to import, the
+    /// default included.
+    #[must_use]
+    pub fn is_imported(self) -> bool {
+        self.import
+    }
+
+    /// The memory import this layout asks its host for, or `None` when the
+    /// module defines its memory.
+    ///
+    /// The limits are the layout's own: the size as the minimum and the
+    /// maximum as the maximum, the same pair a defined memory would declare.
+    #[must_use]
+    pub fn memory_import(self) -> Option<MemoryImport> {
+        self.import.then_some(MemoryImport {
+            minimum: self.pages,
+            maximum: self.max_pages,
+        })
+    }
+
     /// Whether the layout describes exactly the memory a build that configures
-    /// nothing gets: one fixed page, all of it stack, no data.
+    /// nothing gets: one fixed page, all of it stack, no data, defined by the
+    /// module.
     ///
     /// Compares the memory, not how it was asked for, so `--stack-size 65536`
     /// written out is the default memory too. Code generation reads this to
     /// decide whether a program that touches no memory still has to declare
     /// one.
+    ///
+    /// An imported memory is never the default, whatever its numbers: a
+    /// program that touches no memory still imports one, because the contract
+    /// an embedder is written to — supply `env.memory` — must not depend on
+    /// whether the program happens to touch memory. Otherwise the first edit
+    /// that did would silently change what the host has to provide.
     #[must_use]
     pub fn is_default_memory(self) -> bool {
         let default = Self::default();
@@ -1232,6 +1354,7 @@ impl MemoryLayout {
             && self.max_pages == default.max_pages
             && self.stack_size == default.stack_size
             && self.data_size == 0
+            && !self.import
     }
 
     /// The layout with `data_bytes` of static data placed directly above the
@@ -1293,8 +1416,11 @@ impl MemoryLayout {
     /// Only what has to change is set: the page count when the memory has to
     /// grow, the stack size when a default stack would not be enough or a
     /// requested one is too small, and the maximum when a growable memory's cap
-    /// is below the new size. A fixed memory stays fixed. The answer is checked
-    /// by [`Self::resolve`] and [`Self::with_static_data`] themselves, so a
+    /// is below the new size. A fixed memory stays fixed. The import is left
+    /// unset even for an imported layout: no fit needs the memory to come from
+    /// somewhere else, so it is never part of the change. The answer is checked
+    /// by [`Self::resolve`] and [`Self::with_static_data`] themselves, on the
+    /// layout the build would have after following it, import included, so a
     /// suggestion is never a layout either would refuse.
     #[must_use = "returns the request to suggest without modifying the layout"]
     pub fn request_to_fit(self, stack_bytes: u32, data_bytes: u64) -> Option<MemoryRequest> {
@@ -1318,6 +1444,7 @@ impl MemoryLayout {
                 let stack = u32::try_from(stack).ok()?;
                 (!self.stack_requested || stack > self.stack_size).then_some(stack)
             },
+            import: false,
         };
         let effective = MemoryRequest {
             pages: Some(pages),
@@ -1325,6 +1452,9 @@ impl MemoryLayout {
             stack_size: request
                 .stack_size
                 .or(self.stack_requested.then_some(self.stack_size)),
+            // The layout the build would have after following the suggestion,
+            // so the check judges the memory the build actually asks for.
+            import: self.import,
         };
         let fitted = Self::resolve(effective, MemoryLayoutSource::Flag)
             .ok()?
@@ -1359,6 +1489,9 @@ impl MemoryLayout {
             stack_size,
             stack_requested: _,
             data_size: _,
+            // An imported memory declares these same limits and import matching
+            // caps the host's at the maximum, so every bound holds unchanged.
+            import: _,
         } = self;
         let page_size = u64::from(PAGE_SIZE);
         let memory_bytes = u64::from(pages) * page_size;
@@ -1461,6 +1594,53 @@ impl MemoryLayout {
     }
 }
 
+/// The memory import an imported layout asks its host for: `env.memory`,
+/// with the layout's size as its minimum and its maximum as its maximum.
+///
+/// Spelled in one place so that code generation, which emits the import from
+/// this value, and the post-link check, which compares the finished bytes
+/// against it, cannot come to disagree about the name or the limits the way
+/// two copies of a string literal could.
+///
+/// The maximum is always present rather than left to the host. The overflow
+/// trap's headroom invariant, `max_pages × 64 KiB + stack_size <= 2^32`, is
+/// measured against the maximum, and WebAssembly import matching admits a
+/// supplied memory against a declared maximum only if the supplied one has a
+/// maximum no greater than it — so a host can never hand over more than
+/// `max_pages` pages, and the check [`MemoryLayout::resolve`] made still holds
+/// of whatever memory the module runs in. An import with no maximum would
+/// admit a memory of any size, and the trap would lose the room it needs. The
+/// minimum is the layout's size, which is what the stack and the static data
+/// are measured against: it is the least memory a host can supply.
+///
+/// `env.memory` is the name `wasm-ld --import-memory`, Zig and Emscripten
+/// import a memory under by default, so an embedder already supplying memory
+/// to one of those needs no new name for this one.
+///
+/// The fields are public because this is a plain description of an import,
+/// with no invariant of its own: the limits hold together only because a
+/// [`MemoryLayout`] produced them, and [`MemoryLayout::memory_import`] is the
+/// one source a build takes them from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemoryImport {
+    /// The fewest 64 KiB pages the supplied memory may have: the layout's
+    /// [`MemoryLayout::pages()`].
+    pub minimum: u32,
+    /// The most 64 KiB pages the supplied memory may have, now or after
+    /// growth: the layout's [`MemoryLayout::max_pages()`].
+    pub maximum: u32,
+}
+
+impl MemoryImport {
+    /// The module name the memory is imported from, the first half of the
+    /// two-level import name.
+    pub const MODULE: &'static str = "env";
+
+    /// The field name the memory is imported as, the second half of the
+    /// two-level import name.
+    pub const FIELD: &'static str = "memory";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1470,9 +1650,9 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one_dot_ten() {
+    fn abi_version_is_one_dot_eleven() {
         assert_eq!(COMPILER_ABI_MAJOR, 1);
-        assert_eq!(COMPILER_ABI_MINOR, 10);
+        assert_eq!(COMPILER_ABI_MINOR, 11);
     }
 
     #[test]
@@ -1851,6 +2031,7 @@ mod tests {
                 pages: Some(pages),
                 max_pages: Some(max_pages),
                 stack_size: Some(stack_size),
+                import: false,
             },
             MemoryLayoutSource::Flag,
         )
@@ -1867,9 +2048,84 @@ mod tests {
                 pages,
                 max_pages,
                 stack_size,
+                import: false,
             },
             MemoryLayoutSource::Manifest,
         )
+    }
+
+    /// All three dimensions stated, as a request rather than a layout, for the
+    /// tables that resolve one request both with and without the import.
+    fn stated(pages: u32, max_pages: u32, stack_size: u32) -> MemoryRequest {
+        MemoryRequest {
+            pages: Some(pages),
+            max_pages: Some(max_pages),
+            stack_size: Some(stack_size),
+            import: false,
+        }
+    }
+
+    /// `request` with the memory imported from the host instead of defined.
+    fn imported(request: MemoryRequest) -> MemoryRequest {
+        MemoryRequest {
+            import: true,
+            ..request
+        }
+    }
+
+    /// The defined layout with every number of `layout`: what an imported
+    /// layout has to equal once its one flag is cleared.
+    ///
+    /// Reaches past the checked constructor, which is sound here only because
+    /// clearing the flag changes nothing [`MemoryLayout::resolve`] judged.
+    fn defined_twin(layout: MemoryLayout) -> MemoryLayout {
+        MemoryLayout {
+            import: false,
+            ..layout
+        }
+    }
+
+    /// Resolves `request` on `surface` once defined and once imported, and
+    /// checks the two come out alike: the same refusal, or layouts that differ
+    /// in the import alone. Returns the imported verdict for the caller's own
+    /// checks.
+    fn assert_judged_alike(
+        case: &str,
+        request: MemoryRequest,
+        surface: MemoryLayoutSource,
+    ) -> Result<MemoryLayout, MemoryLayoutError> {
+        let defined = MemoryLayout::resolve(
+            MemoryRequest {
+                import: false,
+                ..request
+            },
+            surface,
+        );
+        let imported = MemoryLayout::resolve(imported(request), surface);
+        match (&defined, &imported) {
+            (Ok(defined), Ok(imported)) => {
+                assert!(
+                    imported.is_imported() && !defined.is_imported(),
+                    "{case} on {surface:?}: the flag asked for is the flag resolved"
+                );
+                assert_eq!(
+                    defined_twin(*imported),
+                    *defined,
+                    "{case} on {surface:?}: an imported layout differs from its defined twin in \
+                     the import alone"
+                );
+            }
+            (Err(defined), Err(imported)) => assert_eq!(
+                imported, defined,
+                "{case} on {surface:?}: an imported request must be refused for the reason, and \
+                 in the words, its defined twin is"
+            ),
+            _ => panic!(
+                "{case} on {surface:?}: the import changed the verdict: the defined memory \
+                 resolved to {defined:?} and the imported one to {imported:?}"
+            ),
+        }
+        imported
     }
 
     #[test]
@@ -2021,7 +2277,8 @@ mod tests {
             Some(MemoryRequest {
                 pages: Some(2),
                 max_pages: None,
-                stack_size: None
+                stack_size: None,
+                import: false
             })
         );
         // More than a default stack: the stack has to be asked for, and the
@@ -2031,7 +2288,8 @@ mod tests {
             Some(MemoryRequest {
                 pages: Some(2),
                 max_pages: None,
-                stack_size: Some(80_000)
+                stack_size: Some(80_000),
+                import: false
             })
         );
         // A requested stack that is already large enough stays unstated.
@@ -2041,7 +2299,8 @@ mod tests {
             Some(MemoryRequest {
                 pages: Some(2),
                 max_pages: None,
-                stack_size: None
+                stack_size: None,
+                import: false
             })
         );
         // A growable memory whose cap is below the new size raises the cap too.
@@ -2308,6 +2567,711 @@ mod tests {
             "the same numbers must be refused for the same reason on either surface"
         );
     }
+
+    /// Asking for an import gives an imported layout of exactly the shape the
+    /// same request gives without it, through every numeric accessor;
+    /// `is_default_memory`, which deliberately differs, is pinned by the next
+    /// test. The import changes where the memory comes from, never what it
+    /// holds or where.
+    ///
+    /// The two layouts still compare unequal: the flag is part of the value, so
+    /// a consumer comparing layouts — or hashing one into a cache key — cannot
+    /// mistake an imported memory for a defined one.
+    #[test]
+    fn an_import_request_resolves_to_an_imported_layout() {
+        fn numbers(layout: MemoryLayout) -> (u32, u32, u32, bool, u32, u32, i32) {
+            (
+                layout.pages(),
+                layout.max_pages(),
+                layout.stack_size(),
+                layout.is_stack_requested(),
+                layout.data_size(),
+                layout.data_base(),
+                layout.stack_pointer_init(),
+            )
+        }
+
+        let cases = [
+            ("the default request", MemoryRequest::default()),
+            (
+                "a size alone",
+                MemoryRequest {
+                    pages: Some(4),
+                    ..MemoryRequest::default()
+                },
+            ),
+            (
+                "a maximum alone",
+                MemoryRequest {
+                    max_pages: Some(8),
+                    ..MemoryRequest::default()
+                },
+            ),
+            (
+                "a stack alone",
+                MemoryRequest {
+                    stack_size: Some(32_768),
+                    ..MemoryRequest::default()
+                },
+            ),
+            ("all three stated", stated(2, 8, 32_768)),
+        ];
+        for (case, request) in cases {
+            for surface in [MemoryLayoutSource::Manifest, MemoryLayoutSource::Flag] {
+                let defined = MemoryLayout::resolve(request, surface)
+                    .unwrap_or_else(|err| panic!("{case}: {err}"));
+                let imported = MemoryLayout::resolve(imported(request), surface)
+                    .unwrap_or_else(|err| panic!("{case}, imported: {err}"));
+                assert!(
+                    imported.is_imported(),
+                    "{case}: asking for the import gives an imported layout"
+                );
+                assert!(
+                    !defined.is_imported(),
+                    "{case}: not asking for it gives a defined one"
+                );
+                assert_eq!(
+                    numbers(imported),
+                    numbers(defined),
+                    "{case}: importing the memory must not change its size, maximum, stack, \
+                     data or stack pointer"
+                );
+                assert_eq!(
+                    imported.is_growable(),
+                    defined.is_growable(),
+                    "{case}: an imported memory is growable exactly when its defined twin is"
+                );
+                assert_ne!(
+                    imported, defined,
+                    "{case}: the import is part of the layout's value"
+                );
+                assert_eq!(
+                    defined_twin(imported),
+                    defined,
+                    "{case}: and it is the only part that differs"
+                );
+            }
+        }
+    }
+
+    /// An imported memory is never the default memory, whatever its numbers.
+    ///
+    /// Code generation omits the default memory from a program that touches
+    /// none, so a default verdict here would drop the import too, and the
+    /// contract an embedder was written to — supply `env.memory` — would hang
+    /// on whether the program happened to touch memory. The defined twin of
+    /// every case *is* the default memory, so the flag alone decides; and the
+    /// default request and layout are both defined.
+    #[test]
+    fn an_imported_layout_is_never_the_default_memory() {
+        assert!(
+            !MemoryRequest::default().import,
+            "a request that asks for nothing defines its memory"
+        );
+        assert!(!MemoryLayout::default().is_imported());
+        assert!(
+            !MemoryLayout::resolve(MemoryRequest::default(), MemoryLayoutSource::Manifest)
+                .expect("the default request resolves")
+                .is_imported(),
+            "the default request resolves to a defined layout"
+        );
+
+        let cases = [
+            ("the default request", MemoryRequest::default()),
+            (
+                "the default stack written out",
+                MemoryRequest {
+                    pages: Some(1),
+                    stack_size: Some(65_536),
+                    ..MemoryRequest::default()
+                },
+            ),
+            (
+                "the default with its maximum written out",
+                stated(1, 1, 65_536),
+            ),
+        ];
+        for (case, request) in cases {
+            let defined = MemoryLayout::resolve(request, MemoryLayoutSource::Flag)
+                .unwrap_or_else(|err| panic!("{case}: {err}"));
+            assert!(
+                defined.is_default_memory(),
+                "{case}: the defined twin is the default memory, so only the flag can decide"
+            );
+            let imported = MemoryLayout::resolve(imported(request), MemoryLayoutSource::Flag)
+                .unwrap_or_else(|err| panic!("{case}, imported: {err}"));
+            assert!(imported.is_imported(), "{case}: the import is kept");
+            assert!(
+                !imported.is_default_memory(),
+                "{case}: an imported memory is not the default memory a program may omit"
+            );
+            assert!(
+                !imported
+                    .with_static_data(0)
+                    .expect("no data always fits")
+                    .is_default_memory(),
+                "{case}: nor is it once the program's data, here none, has been placed"
+            );
+        }
+    }
+
+    /// An imported layout asks its host for `env.memory`, with the layout's
+    /// own size as the minimum and its own maximum as the maximum: the pair a
+    /// defined memory would declare. A fixed layout asks for `minimum ==
+    /// maximum`, so a host cannot hand over room the layout never measured.
+    ///
+    /// The name is pinned as literal strings: it is the contract an embedder is
+    /// written to, and the one `wasm-ld --import-memory`, Zig and Emscripten
+    /// use, so changing either constant breaks every host rather than
+    /// refactoring anything.
+    #[test]
+    fn memory_import_names_env_memory_with_the_layouts_limits() {
+        assert_eq!(MemoryImport::MODULE, "env");
+        assert_eq!(MemoryImport::FIELD, "memory");
+
+        let cases = [
+            (
+                "a growable memory",
+                MemoryRequest {
+                    pages: Some(2),
+                    max_pages: Some(8),
+                    ..MemoryRequest::default()
+                },
+                2,
+                8,
+            ),
+            (
+                "a fixed memory",
+                MemoryRequest {
+                    pages: Some(3),
+                    ..MemoryRequest::default()
+                },
+                3,
+                3,
+            ),
+            ("the default numbers", MemoryRequest::default(), 1, 1),
+            (
+                "a maximum alone",
+                MemoryRequest {
+                    max_pages: Some(8),
+                    ..MemoryRequest::default()
+                },
+                1,
+                8,
+            ),
+            (
+                "a maximum at the headroom limit",
+                stated(1, 65_535, 65_536),
+                1,
+                65_535,
+            ),
+        ];
+        for (case, request, minimum, maximum) in cases {
+            let layout = MemoryLayout::resolve(imported(request), MemoryLayoutSource::Flag)
+                .unwrap_or_else(|err| panic!("{case}: {err}"));
+            let import = layout
+                .memory_import()
+                .unwrap_or_else(|| panic!("{case}: an imported layout asks for an import"));
+            assert_eq!(
+                import,
+                MemoryImport { minimum, maximum },
+                "{case}: the import's limits are the layout's size and maximum"
+            );
+            assert_eq!(
+                import.minimum < import.maximum,
+                layout.is_growable(),
+                "{case}: the import admits growth exactly when the layout is growable"
+            );
+        }
+    }
+
+    /// A defined layout asks its host for nothing, however it was shaped and
+    /// whether or not data has been placed in it.
+    #[test]
+    fn a_defined_layout_has_no_memory_import() {
+        let cases = [
+            ("the default layout", Ok(MemoryLayout::default())),
+            ("a growable layout", growable(2, 4, 65_536)),
+            ("a requested stack", requested(None, None, Some(32_768))),
+        ];
+        for (case, layout) in cases {
+            let layout = layout.unwrap_or_else(|err| panic!("{case}: {err}"));
+            assert!(
+                !layout.is_imported(),
+                "{case}: a defined layout is not imported"
+            );
+            assert_eq!(
+                layout.memory_import(),
+                None,
+                "{case}: a defined layout asks for no import"
+            );
+            let placed = layout
+                .with_static_data(1_024)
+                .unwrap_or_else(|err| panic!("{case}: {err}"));
+            assert_eq!(
+                placed.memory_import(),
+                None,
+                "{case}: placing data does not turn a defined memory into an import"
+            );
+        }
+    }
+
+    /// Placing the program's data keeps the import and the limits the host is
+    /// asked for, and places the data exactly as it would in a defined memory:
+    /// a requested stack is kept, a default one gives way only when the memory
+    /// is full. A refusal is the defined memory's refusal, number for number —
+    /// the data is measured against the size, which an import's minimum is.
+    #[test]
+    fn import_survives_static_data_placement() {
+        let cases = [
+            (
+                "a requested stack beside the data",
+                MemoryRequest {
+                    max_pages: Some(4),
+                    stack_size: Some(32_768),
+                    ..MemoryRequest::default()
+                },
+                32_768,
+                32_768,
+            ),
+            (
+                "a default stack giving way to the data",
+                MemoryRequest::default(),
+                2_000,
+                63_536,
+            ),
+            (
+                "a default stack kept in a larger memory",
+                MemoryRequest {
+                    pages: Some(2),
+                    ..MemoryRequest::default()
+                },
+                2_000,
+                65_536,
+            ),
+            ("no data at all", MemoryRequest::default(), 0, 65_536),
+        ];
+        for (case, request, data_bytes, stack_size) in cases {
+            let resolved = MemoryLayout::resolve(imported(request), MemoryLayoutSource::Manifest)
+                .unwrap_or_else(|err| panic!("{case}: {err}"));
+            let placed = resolved
+                .with_static_data(data_bytes)
+                .unwrap_or_else(|err| panic!("{case}: {err}"));
+            assert_eq!(
+                placed.stack_size(),
+                stack_size,
+                "{case}: the stack the data leaves"
+            );
+            assert!(
+                placed.is_imported(),
+                "{case}: placing data keeps the import"
+            );
+            assert_eq!(
+                placed.memory_import(),
+                resolved.memory_import(),
+                "{case}: placing data does not move the limits the host is asked for"
+            );
+            let defined = MemoryLayout::resolve(request, MemoryLayoutSource::Manifest)
+                .unwrap_or_else(|err| panic!("{case}: {err}"))
+                .with_static_data(data_bytes)
+                .unwrap_or_else(|err| panic!("{case}: {err}"));
+            assert_eq!(
+                defined_twin(placed),
+                defined,
+                "{case}: the data is placed in an imported memory exactly as in a defined one"
+            );
+            assert_eq!(
+                placed.with_static_data(0),
+                Ok(resolved),
+                "{case}: re-placing from a layout holding data keeps the import"
+            );
+        }
+
+        let refusals = [
+            (
+                "a requested stack that leaves no room",
+                MemoryRequest {
+                    stack_size: Some(65_536),
+                    ..MemoryRequest::default()
+                },
+                100,
+            ),
+            (
+                "data that leaves a default stack no frame",
+                MemoryRequest::default(),
+                65_530,
+            ),
+            (
+                "data measured against the size, not the maximum",
+                MemoryRequest {
+                    max_pages: Some(4),
+                    ..MemoryRequest::default()
+                },
+                65_530,
+            ),
+        ];
+        for (case, request, data_bytes) in refusals {
+            let refusal = |request| {
+                MemoryLayout::resolve(request, MemoryLayoutSource::Manifest)
+                    .unwrap_or_else(|err| panic!("{case}: {err}"))
+                    .with_static_data(data_bytes)
+                    .expect_err(case)
+            };
+            assert_eq!(
+                refusal(imported(request)),
+                refusal(request),
+                "{case}: an imported memory refuses the data with the defined memory's numbers"
+            );
+        }
+    }
+
+    /// A fit suggestion is a change list, and no stack or data needs the memory
+    /// to come from somewhere else, so the import is never on it: an imported
+    /// layout is suggested exactly what its defined twin is, with the import
+    /// left unset. A layout no request can fit stays unfittable either way.
+    ///
+    /// The cases are the ones the defined-memory suggestion is pinned on, plus
+    /// a layout that already fits and two that cannot.
+    #[test]
+    fn a_fit_suggestion_never_names_the_import() {
+        let cases = [
+            (
+                "the memory grows for the data",
+                MemoryRequest::default(),
+                64_000,
+                2_048,
+                Some(MemoryRequest {
+                    pages: Some(2),
+                    ..MemoryRequest::default()
+                }),
+            ),
+            (
+                "the stack has to be asked for",
+                MemoryRequest::default(),
+                80_000,
+                0,
+                Some(MemoryRequest {
+                    pages: Some(2),
+                    stack_size: Some(80_000),
+                    ..MemoryRequest::default()
+                }),
+            ),
+            (
+                "a requested stack large enough stays unstated",
+                MemoryRequest {
+                    stack_size: Some(32_768),
+                    ..MemoryRequest::default()
+                },
+                16_000,
+                40_000,
+                Some(MemoryRequest {
+                    pages: Some(2),
+                    ..MemoryRequest::default()
+                }),
+            ),
+            (
+                "a fixed memory stays fixed",
+                stated(1, 1, 65_536),
+                70_000,
+                0,
+                Some(MemoryRequest {
+                    pages: Some(2),
+                    stack_size: Some(70_000),
+                    ..MemoryRequest::default()
+                }),
+            ),
+            (
+                "a growable memory raises its cap",
+                stated(1, 2, 65_536),
+                65_536,
+                70_000,
+                Some(MemoryRequest {
+                    pages: Some(3),
+                    max_pages: Some(3),
+                    ..MemoryRequest::default()
+                }),
+            ),
+            (
+                "a layout that already fits changes nothing",
+                MemoryRequest::default(),
+                1_024,
+                0,
+                Some(MemoryRequest::default()),
+            ),
+            (
+                "a stack no 32-bit size can hold",
+                MemoryRequest::default(),
+                u32::MAX,
+                0,
+                None,
+            ),
+            (
+                "data past the address space",
+                MemoryRequest::default(),
+                65_536,
+                1 << 32,
+                None,
+            ),
+        ];
+        for (case, request, stack_bytes, data_bytes, expected) in cases {
+            let defined = MemoryLayout::resolve(request, MemoryLayoutSource::Flag)
+                .unwrap_or_else(|err| panic!("{case}: {err}"));
+            let imported = MemoryLayout::resolve(imported(request), MemoryLayoutSource::Flag)
+                .unwrap_or_else(|err| panic!("{case}, imported: {err}"));
+            assert!(
+                imported.is_imported(),
+                "{case}: the layout asked for a suggestion is the imported one"
+            );
+            let suggestion = imported.request_to_fit(stack_bytes, data_bytes);
+            assert!(
+                suggestion.is_none_or(|request| !request.import),
+                "{case}: a suggestion for an imported layout must not name the import"
+            );
+            assert_eq!(
+                suggestion, expected,
+                "{case}: the suggestion is the smallest change, and the import is not part of it"
+            );
+            assert_eq!(
+                suggestion,
+                defined.request_to_fit(stack_bytes, data_bytes),
+                "{case}: an imported layout is suggested exactly what its defined twin is"
+            );
+        }
+    }
+
+    /// The overflow trap's headroom rule lands on the same side of each exact
+    /// boundary for an imported memory, in the same words.
+    ///
+    /// An imported memory needs no rule of its own because its import declares
+    /// the layout's maximum, and WebAssembly import matching admits only a host
+    /// memory whose own maximum is no greater: the bound measured here is a
+    /// bound on whatever memory the module runs in. So for an accepted layout
+    /// the span is measured from the import's maximum, the most memory a host
+    /// can hand over, and must still fit in 2^32.
+    ///
+    /// The growable pair straddles the boundary at two pages. One page cannot
+    /// hold a stack one frame past it, so the one-page step is refused by the
+    /// stack-fit rule before the headroom rule is reached; it is kept, under
+    /// the rule that does fire, because the verdict must match there too.
+    #[test]
+    fn the_headroom_check_is_the_same_for_an_imported_memory() {
+        let headroom = "32-bit address space";
+        let cases = [
+            (
+                "a fixed memory exactly on the boundary",
+                stated(65_535, 65_535, 65_536),
+                Ok(1 << 32),
+            ),
+            (
+                "a fixed memory one frame past it",
+                stated(65_535, 65_535, 65_552),
+                Err((headroom, "the linear memory (65535 × 64 KiB")),
+            ),
+            (
+                "a fixed memory filling the address space",
+                stated(65_536, 65_536, 65_536),
+                Err((headroom, "the linear memory (65536 × 64 KiB")),
+            ),
+            (
+                "a fixed two-page memory with a stack one frame over a page",
+                stated(2, 2, 65_552),
+                Ok(2 * 65_536 + 65_552),
+            ),
+            (
+                "a one-page memory growable exactly to the boundary",
+                stated(1, 65_535, 65_536),
+                Ok(1 << 32),
+            ),
+            (
+                "a two-page memory growable exactly to the boundary",
+                stated(2, 65_535, 65_536),
+                Ok(1 << 32),
+            ),
+            (
+                "a two-page memory growable to one frame past it",
+                stated(2, 65_535, 65_552),
+                Err((headroom, "at its maximum (65535 × 64 KiB")),
+            ),
+            (
+                "a one-page memory too small for the stack one frame past it",
+                stated(1, 65_535, 65_552),
+                Err(("does not fit in the linear memory", "65552 bytes")),
+            ),
+        ];
+        for (case, request, expected) in cases {
+            for surface in [MemoryLayoutSource::Manifest, MemoryLayoutSource::Flag] {
+                match (assert_judged_alike(case, request, surface), expected) {
+                    (Ok(layout), Ok(span)) => {
+                        let import = layout
+                            .memory_import()
+                            .unwrap_or_else(|| panic!("{case}: the layout is imported"));
+                        let supplied = u64::from(import.maximum) * u64::from(PAGE_SIZE)
+                            + u64::from(layout.stack_size());
+                        assert_eq!(
+                            supplied, span,
+                            "{case}: the span is measured from the import's maximum"
+                        );
+                        assert!(
+                            supplied <= 1 << 32,
+                            "{case}: the largest memory a host may supply and the stack span \
+                             {supplied} bytes, past the 32-bit address space"
+                        );
+                    }
+                    (Err(err), Err((rule, value))) => {
+                        assert!(
+                            err.reason.contains(rule),
+                            "{case}: not the `{rule}` rule: {err}"
+                        );
+                        assert!(
+                            err.reason.contains(value),
+                            "{case}: does not name `{value}`: {err}"
+                        );
+                    }
+                    (verdict, _) => panic!(
+                        "{case}: the imported memory was judged {verdict:?}, but the expected \
+                         verdict is {expected:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Every request the constructor is pinned to refuse, and every extreme it
+    /// is pinned to accept, gets the same verdict with the memory imported, on
+    /// both surfaces — and a refusal reads the same, character for character.
+    /// The address-space headroom boundaries are the one exception, pinned with
+    /// the import by the headroom test above rather than in this table.
+    ///
+    /// This is what "the import adds no invariant" means as a check: a rule that
+    /// rejected an imported memory, or one that let through an imported memory
+    /// a defined one may not have, would split the two verdicts somewhere in
+    /// this table. The surface label is unchanged too, pinned by rendering one
+    /// imported refusal in full on each surface: the import is not one of the
+    /// numbers a refusal can be about.
+    #[test]
+    fn an_imported_request_is_judged_exactly_as_its_defined_twin() {
+        let cases = [
+            ("a zero-page memory", stated(0, 0, 65_536), false),
+            (
+                "more pages than 32-bit WebAssembly allows",
+                stated(65_537, 65_537, 65_536),
+                false,
+            ),
+            ("a zero-byte stack", stated(1, 1, 0), false),
+            ("a stack off the frame grid", stated(1, 1, 1_000), false),
+            (
+                "a stack larger than its memory",
+                stated(1, 1, 131_072),
+                false,
+            ),
+            (
+                "a stack past the signed 32-bit initializer",
+                stated(65_536, 65_536, 2_147_483_664),
+                false,
+            ),
+            (
+                "a memory filling the address space",
+                stated(65_536, 65_536, 65_536),
+                false,
+            ),
+            ("a maximum below the size", stated(4, 2, 65_536), false),
+            (
+                "a maximum past 32-bit WebAssembly",
+                stated(1, 65_537, 16),
+                false,
+            ),
+            (
+                "a stack that would fit only the maximum",
+                stated(1, 4, 131_072),
+                false,
+            ),
+            (
+                "a partial request completing to a stack larger than its memory",
+                MemoryRequest {
+                    stack_size: Some(131_072),
+                    ..MemoryRequest::default()
+                },
+                false,
+            ),
+            (
+                "a partial zero-page request",
+                MemoryRequest {
+                    pages: Some(0),
+                    ..MemoryRequest::default()
+                },
+                false,
+            ),
+            (
+                "the largest memory the overflow trap survives",
+                stated(65_535, 65_535, 16),
+                true,
+            ),
+            ("a stack smaller than its memory", stated(2, 2, 16), true),
+            (
+                "the same large stack in a large enough memory",
+                MemoryRequest {
+                    pages: Some(4),
+                    stack_size: Some(131_072),
+                    ..MemoryRequest::default()
+                },
+                true,
+            ),
+            (
+                "a size alone",
+                MemoryRequest {
+                    pages: Some(4),
+                    ..MemoryRequest::default()
+                },
+                true,
+            ),
+            (
+                "a maximum alone",
+                MemoryRequest {
+                    max_pages: Some(8),
+                    ..MemoryRequest::default()
+                },
+                true,
+            ),
+            (
+                "a maximum equal to the size",
+                MemoryRequest {
+                    pages: Some(2),
+                    max_pages: Some(2),
+                    ..MemoryRequest::default()
+                },
+                true,
+            ),
+            ("the default request", MemoryRequest::default(), true),
+        ];
+        for (case, request, accepted) in cases {
+            for surface in [MemoryLayoutSource::Manifest, MemoryLayoutSource::Flag] {
+                assert_eq!(
+                    assert_judged_alike(case, request, surface).is_ok(),
+                    accepted,
+                    "{case} on {surface:?}: the table records the defined memory's verdict"
+                );
+            }
+        }
+
+        let zero_pages = imported(MemoryRequest {
+            pages: Some(0),
+            ..MemoryRequest::default()
+        });
+        assert_eq!(
+            MemoryLayout::resolve(zero_pages, MemoryLayoutSource::Manifest)
+                .expect_err("a zero-page memory is refused")
+                .to_string(),
+            "Invalid `[memory] pages` / `[memory] max-pages` / `[memory] stack-size`: linear \
+             memory must be at least one 64 KiB page, but 0 pages were requested"
+        );
+        assert_eq!(
+            MemoryLayout::resolve(zero_pages, MemoryLayoutSource::Flag)
+                .expect_err("a zero-page memory is refused")
+                .to_string(),
+            "Invalid `--memory-pages` / `--max-memory-pages` / `--stack-size`: linear memory \
+             must be at least one 64 KiB page, but 0 pages were requested"
+        );
+    }
     // Compilation target vocabulary ---
 
     #[test]
@@ -2441,11 +3405,12 @@ mod tests {
         }
     }
 
-    /// The predicates a front end holding only a name can answer, pinned per
-    /// variant. Both are copies of the emission-side target's, and the mirror
-    /// test in `inference-wasm-codegen` is what holds the copies to the
-    /// originals; this pins what the copies say, so a change here is deliberate
-    /// rather than a silent widening of what a manifest may ask for.
+    /// The two instruction-set predicates a front end holding only a name can
+    /// answer, pinned per variant. Both are copies of the emission-side
+    /// target's, and the mirror test in `inference-wasm-codegen` is what holds
+    /// the copies to the originals; this pins what the copies say, so a change
+    /// here is deliberate rather than a silent widening of what a manifest may
+    /// ask for.
     ///
     /// Every conversion of a `matches!(self, Self::Wasm32)` into an exhaustive
     /// match belongs here in the same change. A new variant inherits `false`
@@ -2460,6 +3425,37 @@ mod tests {
         assert!(!TargetName::Stellar.permits_bulk_memory());
         assert!(!TargetName::SpaceWasm.supports_proof_mode());
         assert!(!TargetName::SpaceWasm.permits_bulk_memory());
+    }
+
+    /// The two memory predicates, pinned per name for the reason the ones above
+    /// are: each is a copy of the emission-side target's, and what a copy says
+    /// is what a front end holding only the name acts on.
+    ///
+    /// Driven from the vocabulary through an exhaustive match, so a name added
+    /// to it does not compile here until both answers are written down. The
+    /// two are pinned separately because they differ: `stellar` grows a memory
+    /// it may not import, so neither predicate can stand in for the other.
+    #[test]
+    fn each_target_records_whether_it_can_import_or_grow_its_memory() {
+        for target in TargetName::ALL {
+            let (imports, grows) = match target {
+                TargetName::Wasm32 => (true, true),
+                TargetName::Stellar => (false, true),
+                TargetName::SpaceWasm => (false, false),
+            };
+            assert_eq!(
+                target.supports_imported_memory(),
+                imports,
+                "`{}` changed whether a build may import its linear memory",
+                target.as_str()
+            );
+            assert_eq!(
+                target.permits_memory_growth(),
+                grows,
+                "`{}` changed whether its runtime can grow a linear memory",
+                target.as_str()
+            );
+        }
     }
 
     /// The two per-name clauses, pinned the same way and for the same reason:

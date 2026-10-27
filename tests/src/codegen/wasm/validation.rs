@@ -113,6 +113,7 @@ pub fn read_first() -> i32 {
                     pages: Some(2),
                     max_pages: None,
                     stack_size: Some(32_768),
+                    import: false,
                 },
                 MemoryLayoutSource::Flag,
             )

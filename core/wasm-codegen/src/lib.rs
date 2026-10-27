@@ -83,8 +83,8 @@ pub mod target;
 pub use output::{AbiParam, AbiReturn, AbiType, CodegenOutput, ExportSignature};
 pub use stellar_cli::{stellar_cli_flag_alias, stellar_flag_collision};
 pub use target::{
-    BoundsChecks, CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, MemoryLayoutError,
-    MemoryLayoutSource, MemoryRequest, OptLevel, Target,
+    BoundsChecks, CodegenOptions, CompilationMode, EmitFeatures, MemoryImport, MemoryLayout,
+    MemoryLayoutError, MemoryLayoutSource, MemoryRequest, OptLevel, Target,
 };
 
 /// Re-exports of the `hassert` obligation IR, so a consumer of
@@ -158,10 +158,13 @@ pub use crate::bounds_elided_section::SECTION_VERSION as BOUNDS_ELIDED_SECTION_V
 /// are private and [`MemoryLayout::resolve`] refuses anything the emitter could
 /// not lower, so a layout that reaches this function is one code generation can
 /// honor. That is a stronger guarantee than a refusal at this boundary was — it
-/// holds for every caller, including one that never passes through here. What is
-/// checked here is the one property of a layout that depends on the target:
+/// holds for every caller, including one that never passes through here.
+/// Checked here are the two properties of a layout that depend on the target:
 /// whether its runtime can grow a memory the layout declares growable (see
-/// [`Target::permits_memory_growth`]).
+/// [`Target::permits_memory_growth`]), and whether its embedder can supply a
+/// memory the layout imports (see [`Target::supports_imported_memory`]). An
+/// imported memory is also refused in `proof` mode at every target, and beside
+/// a binding it cannot be built with (see [`check_imported_memory_bindings`]).
 ///
 /// The target-specific export check runs on what [`emit`] returns rather than
 /// on a half-built module; [`emit`] carries why that position changes no
@@ -175,11 +178,13 @@ pub use crate::bounds_elided_section::SECTION_VERSION as BOUNDS_ELIDED_SECTION_V
 ///
 /// Returns an error if:
 /// - Validation fails: a feature the target does not accept, a growable memory
-///   at a target whose runtime refuses `memory.grow`, `proof` mode at a
-///   target that refuses it, a non-deterministic construct in a function that
-///   ships at a target that refuses those, a host import in a `proof` build or
-///   at a target that refuses host imports, or an export the Stellar target
-///   cannot carry (see [`check_stellar_exports`])
+///   at a target whose runtime refuses `memory.grow`, an imported memory where
+///   it cannot be carried (at a target that refuses one, in a `proof` build,
+///   or beside a linked binding or a host binding named `env.memory`), `proof`
+///   mode at a target that refuses it, a non-deterministic construct in a
+///   function that ships at a target that refuses those, a host import in a
+///   `proof` build or at a target that refuses host imports, or an export the
+///   Stellar target cannot carry (see [`check_stellar_exports`])
 /// - Code generation fails
 ///
 /// Every dynamic array access keeps its runtime bounds guard, whatever
@@ -243,14 +248,15 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
     // is emitted: a build-time refusal names the manifest entry to remove, where
     // the same module rejected at deploy time names nothing.
     //
-    // Every target name in the five configuration refusals is rendered through
+    // Every target name in the six configuration refusals is rendered through
     // `as_str()`, which is the spelling `--target` and `Inference.toml` accept.
     // A user reading one has to be able to paste the name back into the command
-    // that produced it, which the `Debug` form does not allow. Four of the five
-    // are below; the fifth is the host-import target gate in
+    // that produced it, which the `Debug` form does not allow. Five of the six
+    // are asked below; the sixth is the host-import target gate in
     // `check_host_import_target_support`, whose proof-mode sibling is
     // deliberately outside the set, because it names no target at all -- what
-    // it refuses is the mode.
+    // it refuses is the mode. The proof-mode refusal of an imported memory,
+    // asked below, is outside the set for the same reason.
     if let Some(feature) = features.first_rejected_by(target) {
         cov_mark::hit!(wasm_codegen_target_rejects_feature);
         let name = target.as_str();
@@ -263,35 +269,8 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
         ));
     }
 
-    // A growable memory is refused where the runtime cannot grow one, for the
-    // reason a feature is: the maximum is written into the memory section, and a
-    // capacity the runtime will never provide is better refused here, naming the
-    // setting to change, than shipped as a claim about the module.
-    if layout.is_growable() && !target.permits_memory_growth() {
-        cov_mark::hit!(wasm_codegen_target_rejects_growable_memory);
-        let name = target.as_str();
-        return Err(anyhow::anyhow!(
-            "The `{name}` target does not support a growable linear memory. Its runtime \
-             refuses `memory.grow`, so a maximum of {max} pages above the memory's {pages} \
-             could never be reached; leave `[memory] max-pages` / `--max-memory-pages` \
-             unset, or equal to the page count, to build for `{name}`.",
-            max = layout.max_pages(),
-            pages = layout.pages(),
-        ));
-    }
-
-    if mode == CompilationMode::Proof && !target.supports_proof_mode() {
-        cov_mark::hit!(wasm_codegen_proof_mode_rejected_non_wasm32);
-        let name = target.as_str();
-        let proof_target = Target::Wasm32.as_str();
-        return Err(anyhow::anyhow!(
-            "Proof mode requires the `{proof_target}` target. Proof mode emits custom \
-             0xfc non-deterministic instructions that only `{proof_target}` accepts; the \
-             `{name}` runtime rejects a module carrying them. Build the proof at \
-             `--target {proof_target}`: code generation is target-blind, so the module a \
-             `{name}` build starts from is the `{proof_target}` build's."
-        ));
-    }
+    check_layout_target_support(layout, target)?;
+    check_proof_mode_support(mode, target, layout)?;
 
     // The program's static data sits directly above the stack, and a stack the
     // build did not size gives up what the data needs. Placing it here, before
@@ -339,6 +318,7 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
     }
 
     check_host_import_support(typed_context, mode, target)?;
+    check_imported_memory_bindings(typed_context, layout)?;
 
     let omitted_guards = if bounds_checks.omits_proven() {
         check_proofs_name_this_program(typed_context, proven_in_bounds)?;
@@ -372,6 +352,121 @@ pub fn codegen_with_proven_in_bounds<S: BuildHasher>(
     .with_guarded_functions(emitted.guarded_functions)
     .with_export_signatures(emitted.export_signatures)
     .with_hspecs(emitted.hspecs))
+}
+
+/// Refuses a layout whose memory this target cannot carry: a growable memory
+/// where the runtime refuses `memory.grow` (see
+/// [`Target::permits_memory_growth`]), then an imported memory where nothing
+/// the artifact is handed to supplies one (see
+/// [`Target::supports_imported_memory`]).
+///
+/// Public, like [`check_host_import_target_support`], for a driver that
+/// resolves the layout before it parses the program. The answer depends on the
+/// build's settings alone, so such a driver can give it before a parse and type
+/// check the reader would have to discard, and before the refusals whose
+/// remedies lead into this one: its own of a proof artifact, told to drop the
+/// artifact, and this crate's [`check_imported_memory_bindings`], told to drop
+/// a binding, each beside an imported memory the target cannot carry whatever
+/// the build does about either. [`codegen`] still asks it, so a caller that
+/// does not is refused all the same, in the same words.
+///
+/// # Errors
+///
+/// Returns the first refusal that applies, naming the target and the setting
+/// to change.
+pub fn check_layout_target_support(layout: MemoryLayout, target: Target) -> anyhow::Result<()> {
+    // A growable memory is refused where the runtime cannot grow one, for the
+    // reason a feature is: the maximum is written into the memory section, and a
+    // capacity the runtime will never provide is better refused here, naming the
+    // setting to change, than shipped as a claim about the module.
+    if layout.is_growable() && !target.permits_memory_growth() {
+        cov_mark::hit!(wasm_codegen_target_rejects_growable_memory);
+        let name = target.as_str();
+        return Err(anyhow::anyhow!(
+            "The `{name}` target does not support a growable linear memory. Its runtime \
+             refuses `memory.grow`, so a maximum of {max} pages above the memory's {pages} \
+             could never be reached; leave `[memory] max-pages` / `--max-memory-pages` \
+             unset, or equal to the page count, to build for `{name}`.",
+            max = layout.max_pages(),
+            pages = layout.pages(),
+        ));
+    }
+
+    // An imported memory is refused where nothing the artifact is handed to
+    // would supply one, before the import is written. Each refusing target has
+    // its own reason, so the match is what makes a new one state its own
+    // rather than inherit a sentence about another runtime.
+    if layout.is_imported() && !target.supports_imported_memory() {
+        cov_mark::hit!(wasm_codegen_target_rejects_imported_memory);
+        let name = target.as_str();
+        let memory = imported_memory_name();
+        return Err(match target {
+            Target::Stellar => anyhow::anyhow!(
+                "The `{name}` target does not support an imported linear memory. A Soroban \
+                 contract defines and exports the memory it uses, and the Stellar value-ABI \
+                 rewrite every `{name}` artifact goes through accepts no import, so a contract \
+                 importing `{memory}` could not be deployed; remove `[memory] import` / \
+                 `--import-memory` to build for `{name}`."
+            ),
+            Target::SpaceWasm => anyhow::anyhow!(
+                "The `{name}` target does not support an imported linear memory yet. The \
+                 SpaceWasm interpreter can bind a memory its embedder registers, but this \
+                 toolchain does not build for one, and the F´ reference hosts that `infs run` \
+                 provides register functions only; remove `[memory] import` / \
+                 `--import-memory` to build for `{name}`. Building for an imported memory at \
+                 this target is tracked under issue #547."
+            ),
+            Target::Wasm32 => unreachable!("`{name}` supports an imported memory"),
+        });
+    }
+
+    Ok(())
+}
+
+/// Refuses a `proof` build this configuration cannot carry: the mode at a
+/// target that refuses it, then an imported memory at any target.
+///
+/// # Errors
+///
+/// Returns the first refusal that applies.
+fn check_proof_mode_support(
+    mode: CompilationMode,
+    target: Target,
+    layout: MemoryLayout,
+) -> anyhow::Result<()> {
+    if mode == CompilationMode::Proof && !target.supports_proof_mode() {
+        cov_mark::hit!(wasm_codegen_proof_mode_rejected_non_wasm32);
+        let name = target.as_str();
+        let proof_target = Target::Wasm32.as_str();
+        return Err(anyhow::anyhow!(
+            "Proof mode requires the `{proof_target}` target. Proof mode emits custom \
+             0xfc non-deterministic instructions that only `{proof_target}` accepts; the \
+             `{name}` runtime rejects a module carrying them. Build the proof at \
+             `--target {proof_target}`: code generation is target-blind, so the module a \
+             `{name}` build starts from is the `{proof_target}` build's."
+        ));
+    }
+
+    // The proof contract instantiates a module with an empty import list, so an
+    // imported memory leaves every obligation over code that touches memory a
+    // theorem nothing can discharge. Refused at every target, which is why it
+    // names none: a build reaching here in `proof` mode is at the default
+    // target, the refusal above having refused the mode everywhere else.
+    if mode == CompilationMode::Proof && layout.is_imported() {
+        cov_mark::hit!(wasm_codegen_proof_mode_rejects_imported_memory);
+        let memory = imported_memory_name();
+        return Err(anyhow::anyhow!(
+            "An imported linear memory is outside the proof contract. The contract \
+             instantiates a module on its own, with an empty import list, so a module \
+             importing `{memory}` cannot be instantiated the way an obligation over \
+             memory, globals, calls, `exists` or `unique` requires, and such an obligation \
+             would be a theorem no proof can discharge. Build the proof without \
+             `[memory] import` / `--import-memory`, or build this program with \
+             `--mode compile`."
+        ));
+    }
+
+    Ok(())
 }
 
 /// Refuses a program whose host bindings this configuration cannot carry.
@@ -506,6 +601,102 @@ fn first_host_import(typed_context: &TypedContext) -> Option<ExternOrigin> {
         .extern_origins()
         .into_iter()
         .find(|origin| origin.kind == ExternKind::Host)
+}
+
+/// Refuses a program binding an `external fn` that an imported memory cannot
+/// be built beside.
+///
+/// Two refusals, and only of a layout that imports its memory; a module that
+/// defines its memory asks nothing at all. A linked binding is refused first,
+/// wherever the program carries one: the static merge models only a memory its
+/// modules define, not one a host supplies, so no linked module can be merged
+/// into this one yet (tracked under issue #546). Only a program with no linked
+/// binding is asked the second question, whether a host binding is itself
+/// imported as `env.memory`. Core WebAssembly admits two imports under one
+/// two-level name, so the module would validate, but an embedder that resolves
+/// each import by that name alone, as the JavaScript API and Wasmtime's
+/// `Linker` do, cannot supply a function and a memory under it at once: the
+/// module would fail only when it is instantiated, with no source location to
+/// go on.
+///
+/// Public, like [`check_host_import_target_support`] and for its reason: a
+/// driver that resolves a program's externals, or holds its host bindings to a
+/// policy, before it calls [`codegen`] has refusals of its own whose remedies
+/// lead into this one. A linked binding whose library is missing is told the
+/// library cannot be found, and a host binding named `env.memory` is told to
+/// admit `env.memory` to the policy — each advice this refusal then makes
+/// void. Asked first, the reader hears the refusal that governs the build.
+/// [`codegen`] still asks it, so a caller that does not is refused all the
+/// same, in the same words. Such a driver asks [`check_layout_target_support`]
+/// before it, as [`codegen`] does: at a target that cannot carry an imported
+/// memory at all, removing the binding this names would only lead into that
+/// refusal.
+///
+/// Which binding is named is stable across runs, since
+/// [`TypedContext::extern_origins`] is already ordered, though by module and
+/// field name rather than by where the author wrote it.
+///
+/// # Errors
+///
+/// Returns the refusal when `layout` imports its memory and the program binds
+/// an `external fn` to a linked module, naming the first such binding, or, when
+/// it binds none, to the host import `env.memory`.
+pub fn check_imported_memory_bindings(
+    typed_context: &TypedContext,
+    layout: MemoryLayout,
+) -> anyhow::Result<()> {
+    if !layout.is_imported() {
+        return Ok(());
+    }
+    let origins = typed_context.extern_origins();
+    let arena = typed_context.arena();
+
+    if let Some(origin) = origins
+        .iter()
+        .find(|origin| origin.kind == ExternKind::Linked)
+    {
+        let fn_name = arena.def_name(origin.decl);
+        let clause = origin.source_spelling();
+        cov_mark::hit!(wasm_codegen_imported_memory_rejects_linked_extern);
+        return Err(anyhow::anyhow!(
+            "An imported linear memory cannot yet be combined with a linked module. \
+             `external fn {fn_name}` is bound to `{clause}`, which this build links in from \
+             a `.wasm` module (`[wasm-dependencies]` / `--wasm-dep`, `--wasm-lib-dir` or \
+             `INFERENCE_WASM_LIB_PATH`), and the static merge models only a memory its \
+             modules define, not one a host supplies. Remove the linked binding, or remove \
+             `[memory] import` / `--import-memory` to link it; linking with an imported \
+             memory is tracked under issue #546."
+        ));
+    }
+
+    if let Some(origin) = origins.iter().find(|origin| {
+        origin.kind == ExternKind::Host
+            && origin.logical_module == MemoryImport::MODULE
+            && origin.export_field == MemoryImport::FIELD
+    }) {
+        let fn_name = arena.def_name(origin.decl);
+        let clause = origin.source_spelling();
+        let memory = imported_memory_name();
+        cov_mark::hit!(wasm_codegen_imported_memory_name_taken);
+        return Err(anyhow::anyhow!(
+            "`external fn {fn_name}` is bound to `{clause}`, so the module imports a function \
+             as `{memory}`, and `[memory] import` / `--import-memory` imports its linear \
+             memory under that same name. An embedder that resolves each import by its \
+             module and field name alone, as the JavaScript API and Wasmtime's `Linker` do, \
+             cannot supply a function and a memory as `{memory}` at once, so the module \
+             could not be instantiated there; bind the function from another host module, \
+             or remove `[memory] import` / `--import-memory`."
+        ));
+    }
+
+    Ok(())
+}
+
+/// The two-level name an imported memory is imported under, `env.memory`, as a
+/// refusal spells it: off [`MemoryImport`]'s constants, so a message cannot
+/// name an import other than the one emitted.
+fn imported_memory_name() -> String {
+    format!("{}.{}", MemoryImport::MODULE, MemoryImport::FIELD)
 }
 
 /// One run of [`emit`]: the module bytes, and the metadata the traversal
@@ -792,7 +983,7 @@ fn stellar_parameter_label(name: Option<&str>, index: usize) -> String {
 /// source types off the export descriptor.
 ///
 /// Every refusal below opens with the fixed prose `Stellar target: `, rather
-/// than the interpolated `Target::as_str()` the four configuration gates in
+/// than the interpolated `Target::as_str()` the six configuration refusals in
 /// [`codegen`] render. This gate is only ever reached at that one target, so
 /// there is no variant name to hand the reader back.
 ///
@@ -1923,6 +2114,7 @@ mod memory_layout_tests {
                     pages: Some(pages),
                     max_pages: None,
                     stack_size: Some(stack_size),
+                    import: false,
                 },
                 MemoryLayoutSource::Flag,
             )
@@ -2831,6 +3023,7 @@ mod growable_memory_tests {
                 pages: Some(pages),
                 max_pages: Some(max_pages),
                 stack_size: None,
+                import: false,
             },
             MemoryLayoutSource::Flag,
         )
@@ -2906,6 +3099,499 @@ mod growable_memory_tests {
             err.to_string().contains("does not support a growable linear memory"),
             "the growth refusal must win, got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod imported_memory_tests {
+    use super::feature_validation_tests::type_check;
+    use super::{
+        CodegenOptions, CompilationMode, EmitFeatures, MemoryImport, MemoryLayout,
+        MemoryLayoutSource, MemoryRequest, Target, check_imported_memory_bindings, codegen,
+    };
+    use inf_wasmparser::{Parser, Payload, TypeRef};
+
+    /// One exported function, so the Stellar target has a contract method and
+    /// every target an ordinary module to build.
+    const ONE_EXPORT: &str = "pub fn answer() -> i32 { return 42; }";
+
+    /// A host binding whose two-level name is the one the memory import takes.
+    const HOST_ENV_MEMORY: &str = "external fn memory() -> i32; use { memory } from host::env; \
+                                   pub fn read() -> i32 { return memory(); }";
+
+    /// A host binding from `env` under another name, which an imported memory
+    /// sits beside.
+    const HOST_ENV_CLOCK: &str = "external fn clock_ms() -> i64; use { clock_ms } from host::env; \
+                                  pub fn now() -> i64 { return clock_ms(); }";
+
+    /// A function named `memory` bound from another host module: its import is
+    /// `other.memory`, which shares only the field name with `env.memory`.
+    const HOST_OTHER_MEMORY: &str = "external fn memory() -> i32; \
+                                     use { memory } from host::other; \
+                                     pub fn read() -> i32 { return memory(); }";
+
+    /// A binding a linked module supplies. Code generation needs no resolution
+    /// for it: the call lowers to a function import the linker satisfies later.
+    const LINKED: &str = "external fn sum(a: i32, b: i32) -> i32; use { sum } from arith; \
+                          pub fn add_three(x: i32) -> i32 { return sum(x, 3); }";
+
+    /// Both kinds of binding the import mode refuses, in one program.
+    const LINKED_AND_HOST_ENV_MEMORY: &str = "external fn sum(a: i32, b: i32) -> i32; \
+                                              external fn memory() -> i32; \
+                                              use { sum } from arith; \
+                                              use { memory } from host::env; \
+                                              pub fn both() -> i32 { return sum(memory(), 3); }";
+
+    /// The refusal of a linked binding beside an imported memory, for [`LINKED`]
+    /// and every program whose first linked binding is its `sum`.
+    const LINKED_REFUSAL: &str = "An imported linear memory cannot yet be combined with a \
+         linked module. `external fn sum` is bound to `arith`, which this build links in \
+         from a `.wasm` module (`[wasm-dependencies]` / `--wasm-dep`, `--wasm-lib-dir` or \
+         `INFERENCE_WASM_LIB_PATH`), and the static merge models only a memory its \
+         modules define, not one a host supplies. Remove the linked binding, or remove \
+         `[memory] import` / `--import-memory` to link it; linking with an imported \
+         memory is tracked under issue #546.";
+
+    /// The refusal of a host binding named `env.memory` beside an imported
+    /// memory, for [`HOST_ENV_MEMORY`].
+    const NAME_TAKEN_REFUSAL: &str = "`external fn memory` is bound to `host::env`, so the \
+         module imports a function as `env.memory`, and `[memory] import` / \
+         `--import-memory` imports its linear memory under that same name. An embedder \
+         that resolves each import by its module and field name alone, as the JavaScript \
+         API and Wasmtime's `Linker` do, cannot supply a function and a memory as \
+         `env.memory` at once, so the module could not be instantiated there; bind the \
+         function from another host module, or remove `[memory] import` / \
+         `--import-memory`.";
+
+    /// A layout of `pages` pages that may grow to `max_pages`, imported from
+    /// the host when `import` is set.
+    fn layout(pages: u32, max_pages: u32, import: bool) -> MemoryLayout {
+        MemoryLayout::resolve(
+            MemoryRequest {
+                pages: Some(pages),
+                max_pages: Some(max_pages),
+                stack_size: None,
+                import,
+            },
+            MemoryLayoutSource::Flag,
+        )
+        .expect("the layout is admissible")
+    }
+
+    /// The default one fixed page, imported.
+    fn imported() -> MemoryLayout {
+        layout(1, 1, true)
+    }
+
+    fn compile_source(
+        source: &str,
+        target: Target,
+        mode: CompilationMode,
+        layout: MemoryLayout,
+    ) -> anyhow::Result<crate::CodegenOutput> {
+        codegen(
+            &type_check(source),
+            "output",
+            CodegenOptions {
+                target,
+                mode,
+                opt_level: target.default_opt_level(),
+                features: EmitFeatures::default(),
+                layout,
+                bounds_checks: crate::BoundsChecks::All,
+            },
+        )
+    }
+
+    fn compile(
+        target: Target,
+        mode: CompilationMode,
+        layout: MemoryLayout,
+    ) -> anyhow::Result<crate::CodegenOutput> {
+        compile_source(ONE_EXPORT, target, mode, layout)
+    }
+
+    /// Every import of `wasm` as `(module, field, type)`, in section order.
+    fn imports(wasm: &[u8]) -> Vec<(String, String, TypeRef)> {
+        let mut found = Vec::new();
+        for payload in Parser::new(0).parse_all(wasm) {
+            if let Payload::ImportSection(reader) = payload.expect("the module parses") {
+                for import in reader {
+                    let import = import.expect("an import");
+                    found.push((
+                        import.module.to_string(),
+                        import.name.to_string(),
+                        import.ty,
+                    ));
+                }
+            }
+        }
+        found
+    }
+
+    /// The memory `layout` imports, as the first import of `wasm` must read.
+    fn memory_import_entry(layout: MemoryLayout) -> (String, String, TypeRef) {
+        let MemoryImport { minimum, maximum } = layout
+            .memory_import()
+            .expect("the layout imports its memory");
+        (
+            "env".to_string(),
+            "memory".to_string(),
+            TypeRef::Memory(inf_wasmparser::MemoryType {
+                memory64: false,
+                shared: false,
+                initial: u64::from(minimum),
+                maximum: Some(u64::from(maximum)),
+                page_size_log2: None,
+            }),
+        )
+    }
+
+    /// Pinned whole, for the reason the growth refusal is: the target is
+    /// rendered through `Target::as_str()`, and the setting to remove is what
+    /// the user acts on. Each refusing target states its own reason.
+    #[test]
+    fn spacewasm_rejects_an_imported_memory() {
+        cov_mark::check!(wasm_codegen_target_rejects_imported_memory);
+        let err = compile(Target::SpaceWasm, CompilationMode::Compile, imported())
+            .expect_err("SpaceWasm builds for no embedder that supplies a memory");
+        assert_eq!(
+            err.to_string(),
+            "The `spacewasm` target does not support an imported linear memory yet. The \
+             SpaceWasm interpreter can bind a memory its embedder registers, but this \
+             toolchain does not build for one, and the F´ reference hosts that `infs run` \
+             provides register functions only; remove `[memory] import` / \
+             `--import-memory` to build for `spacewasm`. Building for an imported memory at \
+             this target is tracked under issue #547."
+        );
+    }
+
+    #[test]
+    fn stellar_rejects_an_imported_memory() {
+        cov_mark::check!(wasm_codegen_target_rejects_imported_memory);
+        let err = compile(Target::Stellar, CompilationMode::Compile, imported())
+            .expect_err("a Soroban contract defines its memory");
+        assert_eq!(
+            err.to_string(),
+            "The `stellar` target does not support an imported linear memory. A Soroban \
+             contract defines and exports the memory it uses, and the Stellar value-ABI \
+             rewrite every `stellar` artifact goes through accepts no import, so a contract \
+             importing `env.memory` could not be deployed; remove `[memory] import` / \
+             `--import-memory` to build for `stellar`."
+        );
+    }
+
+    /// The refusal reads the layout's mode, not its numbers: a growable import
+    /// at a target that grows memory is refused as an import all the same.
+    #[test]
+    fn stellar_rejects_a_growable_imported_memory_as_an_import() {
+        cov_mark::check!(wasm_codegen_target_rejects_imported_memory);
+        cov_mark::check_count!(wasm_codegen_target_rejects_growable_memory, 0);
+        let err = compile(
+            Target::Stellar,
+            CompilationMode::Compile,
+            layout(2, 8, true),
+        )
+        .expect_err("Stellar refuses the import whatever its limits");
+        assert!(
+            err.to_string()
+                .starts_with("The `stellar` target does not support an imported linear memory."),
+            "the import refusal must be the one reported, got: {err}"
+        );
+    }
+
+    /// Accepted at the default target at every size, each build importing the
+    /// memory its layout describes as its first import, and defining none.
+    #[test]
+    fn wasm32_accepts_an_imported_memory() {
+        cov_mark::check!(wasm_codegen_emit_memory_import);
+        for requested in [imported(), layout(2, 8, true), layout(4, 4, true)] {
+            let output = compile(Target::Wasm32, CompilationMode::Compile, requested)
+                .unwrap_or_else(|e| panic!("`wasm32` supplies an imported memory: {e}"));
+            inf_wasmparser::validate(output.wasm()).expect("the module is valid");
+            assert_eq!(
+                imports(output.wasm()),
+                vec![memory_import_entry(requested)],
+                "the memory import is the module's only import, at the layout's limits"
+            );
+        }
+    }
+
+    /// The feature refusal is still the first: a build that is wrong about its
+    /// instruction set is told that before anything about its memory.
+    #[test]
+    fn the_feature_refusal_precedes_the_imported_memory_refusal() {
+        let err = codegen(
+            &type_check(ONE_EXPORT),
+            "output",
+            CodegenOptions {
+                target: Target::Stellar,
+                mode: CompilationMode::Compile,
+                opt_level: Target::Stellar.default_opt_level(),
+                features: EmitFeatures { bulk_memory: true },
+                layout: imported(),
+                bounds_checks: crate::BoundsChecks::All,
+            },
+        )
+        .expect_err("both rules refuse this build");
+        assert!(
+            err.to_string()
+                .contains("'bulk-memory' WebAssembly feature"),
+            "the feature refusal must win, got: {err}"
+        );
+    }
+
+    /// A growable imported memory at a target that grows no memory is told
+    /// about the growth first: removing the import alone would not make the
+    /// build succeed, so the import is not the refusal that governs it.
+    #[test]
+    fn the_growth_refusal_precedes_the_imported_memory_refusal() {
+        cov_mark::check!(wasm_codegen_target_rejects_growable_memory);
+        cov_mark::check_count!(wasm_codegen_target_rejects_imported_memory, 0);
+        let err = compile(
+            Target::SpaceWasm,
+            CompilationMode::Compile,
+            layout(1, 4, true),
+        )
+        .expect_err("both rules refuse this build");
+        assert_eq!(
+            err.to_string(),
+            "The `spacewasm` target does not support a growable linear memory. Its runtime \
+             refuses `memory.grow`, so a maximum of 4 pages above the memory's 1 could never \
+             be reached; leave `[memory] max-pages` / `--max-memory-pages` unset, or equal \
+             to the page count, to build for `spacewasm`."
+        );
+    }
+
+    /// A proof build at a target that refuses both the mode and the import
+    /// reads the import refusal, which sits beside the growth refusal ahead of
+    /// every mode check; the proof-target refusal is not reached.
+    #[test]
+    fn the_imported_memory_refusal_precedes_the_proof_target_refusal() {
+        cov_mark::check_count!(wasm_codegen_target_rejects_imported_memory, 2);
+        cov_mark::check_count!(wasm_codegen_proof_mode_rejected_non_wasm32, 0);
+        for target in [Target::SpaceWasm, Target::Stellar] {
+            let err = compile(target, CompilationMode::Proof, imported())
+                .expect_err("both rules refuse this build");
+            let name = target.as_str();
+            assert!(
+                err.to_string().starts_with(&format!(
+                    "The `{name}` target does not support an imported linear memory"
+                )),
+                "the imported-memory refusal must win at `{name}`, got: {err}"
+            );
+            assert!(
+                !err.to_string().contains("Proof mode requires"),
+                "the proof-target refusal must not be reached at `{name}`, got: {err}"
+            );
+        }
+    }
+
+    /// Named against the proof contract rather than a target, since it holds
+    /// at every target that admits the mode; pinned whole because the two
+    /// remedies are what the user acts on.
+    #[test]
+    fn wasm32_rejects_an_imported_memory_in_proof_mode() {
+        cov_mark::check!(wasm_codegen_proof_mode_rejects_imported_memory);
+        let err = compile(Target::Wasm32, CompilationMode::Proof, imported())
+            .expect_err("the proof contract instantiates with no imports");
+        assert_eq!(
+            err.to_string(),
+            "An imported linear memory is outside the proof contract. The contract \
+             instantiates a module on its own, with an empty import list, so a module \
+             importing `env.memory` cannot be instantiated the way an obligation over \
+             memory, globals, calls, `exists` or `unique` requires, and such an obligation \
+             would be a theorem no proof can discharge. Build the proof without \
+             `[memory] import` / `--import-memory`, or build this program with \
+             `--mode compile`."
+        );
+    }
+
+    /// The control: the refusal is of the import, not of the mode, so the same
+    /// proof build with a defined memory, configured or not, still builds.
+    #[test]
+    fn wasm32_builds_a_proof_with_a_defined_memory() {
+        cov_mark::check_count!(wasm_codegen_proof_mode_rejects_imported_memory, 0);
+        for defined in [MemoryLayout::default(), layout(2, 8, false)] {
+            let output = compile(Target::Wasm32, CompilationMode::Proof, defined)
+                .unwrap_or_else(|e| panic!("a proof with a defined memory builds: {e}"));
+            assert!(imports(output.wasm()).is_empty(), "nothing is imported");
+        }
+    }
+
+    /// A host binding imported as `env.memory` is refused beside an imported
+    /// memory, naming the binding and its clause, and builds without one.
+    #[test]
+    fn a_host_binding_named_env_memory_is_refused_beside_an_imported_memory() {
+        cov_mark::check!(wasm_codegen_imported_memory_name_taken);
+        let err = compile_source(
+            HOST_ENV_MEMORY,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            imported(),
+        )
+        .expect_err("a function and a memory cannot share `env.memory`");
+        assert_eq!(err.to_string(), NAME_TAKEN_REFUSAL);
+    }
+
+    #[test]
+    fn a_host_binding_named_env_memory_builds_with_a_defined_memory() {
+        cov_mark::check_count!(wasm_codegen_imported_memory_name_taken, 0);
+        for defined in [MemoryLayout::default(), layout(2, 8, false)] {
+            let output = compile_source(
+                HOST_ENV_MEMORY,
+                Target::Wasm32,
+                CompilationMode::Compile,
+                defined,
+            )
+            .unwrap_or_else(|e| panic!("`env.memory` is free when nothing imports a memory: {e}"));
+            let found = imports(output.wasm());
+            let [(module, field, TypeRef::Func(_))] = found.as_slice() else {
+                panic!("the binding is the one function import, got {found:?}");
+            };
+            assert_eq!((module.as_str(), field.as_str()), ("env", "memory"));
+        }
+    }
+
+    /// Another name from `env`, or the name `memory` from another module, is
+    /// not the memory's name, and builds beside the import, which comes first.
+    #[test]
+    fn host_bindings_under_other_names_build_beside_an_imported_memory() {
+        cov_mark::check_count!(wasm_codegen_imported_memory_name_taken, 0);
+        for (source, module, field) in [
+            (HOST_ENV_CLOCK, "env", "clock_ms"),
+            (HOST_OTHER_MEMORY, "other", "memory"),
+        ] {
+            for requested in [imported(), layout(2, 8, true)] {
+                let output =
+                    compile_source(source, Target::Wasm32, CompilationMode::Compile, requested)
+                        .unwrap_or_else(|e| {
+                            panic!("`{module}.{field}` builds beside the import: {e}")
+                        });
+                inf_wasmparser::validate(output.wasm()).expect("the module is valid");
+                let found = imports(output.wasm());
+                let [memory, (found_module, found_field, TypeRef::Func(_))] = found.as_slice()
+                else {
+                    panic!("the memory import and one function import, got {found:?}");
+                };
+                assert_eq!(*memory, memory_import_entry(requested));
+                assert_eq!(
+                    (found_module.as_str(), found_field.as_str()),
+                    (module, field)
+                );
+            }
+        }
+    }
+
+    /// A linked binding is refused beside an imported memory, naming the
+    /// binding and the module it is linked from.
+    #[test]
+    fn a_linked_binding_is_refused_beside_an_imported_memory() {
+        cov_mark::check!(wasm_codegen_imported_memory_rejects_linked_extern);
+        for requested in [imported(), layout(2, 8, true)] {
+            let err = compile_source(LINKED, Target::Wasm32, CompilationMode::Compile, requested)
+                .expect_err("the static merge models no imported memory");
+            assert_eq!(err.to_string(), LINKED_REFUSAL);
+        }
+    }
+
+    /// The control: with a defined memory the same program builds, its linked
+    /// binding a function import the linker satisfies later. Code generation
+    /// resolves nothing, so no library is needed to show it.
+    #[test]
+    fn a_linked_binding_builds_with_a_defined_memory() {
+        cov_mark::check_count!(wasm_codegen_imported_memory_rejects_linked_extern, 0);
+        let output = compile_source(
+            LINKED,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            MemoryLayout::default(),
+        )
+        .unwrap_or_else(|e| panic!("a linked binding builds with a defined memory: {e}"));
+        let found = imports(output.wasm());
+        let [(module, field, TypeRef::Func(_))] = found.as_slice() else {
+            panic!("the binding is the one function import, got {found:?}");
+        };
+        assert_eq!((module.as_str(), field.as_str()), ("arith", "sum"));
+    }
+
+    /// A program carrying both refused bindings is told about the linked one:
+    /// renaming the host binding would leave the build refused, so it is not
+    /// the refusal that governs it.
+    #[test]
+    fn the_linked_refusal_precedes_the_name_refusal() {
+        cov_mark::check!(wasm_codegen_imported_memory_rejects_linked_extern);
+        cov_mark::check_count!(wasm_codegen_imported_memory_name_taken, 0);
+        let err = compile_source(
+            LINKED_AND_HOST_ENV_MEMORY,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            imported(),
+        )
+        .expect_err("both bindings are refused");
+        assert_eq!(err.to_string(), LINKED_REFUSAL);
+    }
+
+    /// The proof-mode refusal of the import is asked before any binding: a
+    /// proof build of a program that also binds `env.memory` reads the mode's
+    /// refusal, since the binding would not be the last thing to fix.
+    #[test]
+    fn the_proof_mode_refusal_precedes_the_binding_refusals() {
+        cov_mark::check!(wasm_codegen_proof_mode_rejects_imported_memory);
+        cov_mark::check_count!(wasm_codegen_imported_memory_name_taken, 0);
+        cov_mark::check_count!(wasm_codegen_imported_memory_rejects_linked_extern, 0);
+        for source in [HOST_ENV_MEMORY, LINKED, LINKED_AND_HOST_ENV_MEMORY] {
+            let err = compile_source(source, Target::Wasm32, CompilationMode::Proof, imported())
+                .expect_err("the proof contract instantiates with no imports");
+            assert!(
+                err.to_string()
+                    .starts_with("An imported linear memory is outside the proof contract."),
+                "the proof-mode refusal must win, got: {err}"
+            );
+        }
+    }
+
+    /// The public check asks nothing of a layout that defines its memory,
+    /// whatever the program binds, and refuses an imported one exactly as code
+    /// generation does, so a driver asking it first hears the same words.
+    #[test]
+    fn the_binding_check_reads_only_an_imported_layout() {
+        for source in [
+            ONE_EXPORT,
+            HOST_ENV_MEMORY,
+            HOST_ENV_CLOCK,
+            HOST_OTHER_MEMORY,
+            LINKED,
+            LINKED_AND_HOST_ENV_MEMORY,
+        ] {
+            let typed = type_check(source);
+            for defined in [MemoryLayout::default(), layout(2, 8, false)] {
+                assert!(
+                    check_imported_memory_bindings(&typed, defined).is_ok(),
+                    "a defined memory leaves every binding free: {source}"
+                );
+            }
+        }
+        for (source, expected) in [
+            (ONE_EXPORT, None),
+            (HOST_ENV_CLOCK, None),
+            (HOST_OTHER_MEMORY, None),
+            (HOST_ENV_MEMORY, Some(NAME_TAKEN_REFUSAL)),
+            (LINKED, Some(LINKED_REFUSAL)),
+            (LINKED_AND_HOST_ENV_MEMORY, Some(LINKED_REFUSAL)),
+        ] {
+            let typed = type_check(source);
+            for requested in [imported(), layout(2, 8, true)] {
+                let found = check_imported_memory_bindings(&typed, requested)
+                    .err()
+                    .map(|e| e.to_string());
+                assert_eq!(
+                    found.as_deref(),
+                    expected,
+                    "the check must answer as code generation does: {source}"
+                );
+            }
+        }
     }
 }
 

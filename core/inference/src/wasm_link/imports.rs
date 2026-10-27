@@ -1,20 +1,31 @@
 //! What a compiled module's import section declares, and whether it declares
-//! exactly the host imports the program's `external fn` bindings did.
+//! exactly the host imports the program's `external fn` bindings did, and the
+//! memory import the build's layout asked for when it asked for one.
 //!
 //! Every other module here runs *before* any bytes exist. This one runs after:
 //! it reads the artifact codegen produced and holds it to the declarations the
 //! [driver](super::driver) collected. That pairing is the whole reason a host
 //! import can ship without a link step — the linker's guarantee is that no
 //! import survives it, and what replaces that guarantee is the check below,
-//! which says every import that survived is one this program declared and no
-//! declaration was lost on the way.
+//! which says every import that survived is one this build asked for and
+//! nothing it asked for was lost on the way.
 //!
-//! The two sets are produced by entirely separate walks over separate data —
-//! the driver's over the type checker's extern provenance, codegen's over the
-//! same declarations through its own lowering — so their agreement is a real
-//! check and not a restatement.
+//! The two sets of function imports are produced by entirely separate walks
+//! over separate data — the driver's over the type checker's extern
+//! provenance, codegen's over the same declarations through its own lowering —
+//! so their agreement is a real check and not a restatement.
+//!
+//! The memory import is held to something the driver never sees: the
+//! [`MemoryImport`] the caller passes in, which is the build's memory
+//! configuration and the value codegen wrote the import from. A build that
+//! asked to import its memory may leave exactly that one memory import for an
+//! embedder, under that name and at those limits, and a build that did not may
+//! leave none.
 
-use inf_wasmparser::{CompositeInnerType, FuncType, Parser, Payload, RecGroup, TypeRef};
+use inf_wasmparser::{
+    CompositeInnerType, FuncType, MemoryType, Parser, Payload, RecGroup, TypeRef,
+};
+use inference_wasm_codegen::MemoryImport;
 
 use super::driver::{host_import_label, HostImport};
 use super::validate::{DeclaredSignature, WasmValType};
@@ -35,18 +46,25 @@ pub(crate) enum ImportShape {
     /// `None` when that signature uses a value type no `external fn`
     /// declaration can name, which is a shape no declaration can match either.
     Function(Option<DeclaredSignature>),
-    /// A memory, table, global or tag, named for a diagnostic.
+    /// A memory, with the type the entry declares for it, which the check
+    /// compares against the memory import the build's layout asked for.
+    Memory(MemoryType),
+    /// A table, global or tag, named for a diagnostic.
     NonFunction(&'static str),
 }
 
-/// Why an artifact's imports and a program's host declarations could not be
-/// reconciled, or why the two halves of a resolution could not be linked.
+/// Why an artifact's imports could not be reconciled with a program's host
+/// declarations and the memory import its build's layout asked for, or why the
+/// parts a caller assembled — the two halves of a resolution, or resolved
+/// modules and a layout that imports its memory — could not be linked.
 #[derive(Debug)]
 pub enum HostImportError {
     /// The module's bytes do not decode.
     Parse(String),
-    /// The module imports something that is not a function. No `external fn`
-    /// declaration can describe one, so nothing in the program accounts for it.
+    /// The module imports something that is not a function and not the memory
+    /// its build's layout asked to import: a table, a global, a tag, or a
+    /// memory when the layout asked for none. No `external fn` declaration can
+    /// describe one, so nothing in the program accounts for it.
     NonFunctionImport {
         module: String,
         field: String,
@@ -70,10 +88,37 @@ pub enum HostImportError {
         declared: Box<DeclaredSignature>,
         emitted: Option<Box<DeclaredSignature>>,
     },
-    /// The module imports one two-level name twice. One declaration cannot
-    /// account for two import entries, and an embedder cannot satisfy one name
+    /// The module imports one two-level name twice: as two functions, or, in a
+    /// build whose layout imports its memory, as two memories or as the memory
+    /// and a function. One declaration cannot account for two import entries,
+    /// nor one layout for two memories, and an embedder cannot satisfy one name
     /// twice.
     Duplicated { module: String, field: String },
+    /// The module, in a build whose layout imports its memory, imports a
+    /// memory other than the one the layout asked for — under another name,
+    /// at other limits, or shared, 64-bit or at a custom page size — whether in
+    /// place of that import or beside it. `module` and `field` are the emitted
+    /// import's name, and `emitted` is its type in the text format's spelling:
+    /// `(memory 1 2)`, with no maximum when it has none (`(memory 1)`), `i64`
+    /// ahead of a 64-bit memory's limits (`(memory i64 1 2)`), `shared` after
+    /// the limits (`(memory 1 2 shared)`), and a custom page size last, in
+    /// bytes (`(memory 1 2 (pagesize 1))`), or as the power of two it declares
+    /// when that is too large to count in a `u64` (`(pagesize 2^64)`).
+    ///
+    /// The emitted type is carried as that text and not as the decoder's own
+    /// value so that the decoder stays out of this crate's public API: the
+    /// text is everything the report needs, and the report is all a reader
+    /// gets.
+    MemoryImportMismatch {
+        module: String,
+        field: String,
+        expected: MemoryImport,
+        emitted: String,
+    },
+    /// The build's layout asked to import its memory and the module imports
+    /// no memory at all. `module` and `field` are the name the layout asked
+    /// for, [`MemoryImport::MODULE`] and [`MemoryImport::FIELD`].
+    MissingMemoryImport { module: String, field: String },
     /// Resolution produced both merged modules and host imports. The driver
     /// refuses that program before it resolves anything, so reaching here means
     /// the two were assembled by something other than one resolution.
@@ -81,16 +126,28 @@ pub enum HostImportError {
         modules: usize,
         host_imports: usize,
     },
+    /// Resolution produced merged modules for a build whose layout imports its
+    /// memory. Code generation refuses every linked binding in such a build, so
+    /// reaching here means the two were assembled by something other than one
+    /// build. The static merge models only a memory its modules define, so
+    /// linking would leave the memory the layout asked for unread: an artifact
+    /// that imports none would ship a module the host's memory never reaches.
+    ModulesWithImportedMemory { modules: usize },
 }
 
-/// What every arm below but [`HostImportError::MixedResolution`] adds after the
-/// detail it carries.
+/// What every arm below but [`HostImportError::MixedResolution`] and
+/// [`HostImportError::ModulesWithImportedMemory`] adds after the detail it
+/// carries.
 ///
 /// Every arm here reaches a terminal through `infc`'s `Link step failed: {e}`,
-/// and none of the six can be caused by anything an author wrote. Each is the
-/// driver's walk over the type checker's extern provenance disagreeing with code
-/// generation's walk over the same declarations — two derivations of one set,
-/// which cannot part company unless the compiler is wrong. Without the marker,
+/// and none of the eight can be caused by anything an author wrote.
+/// [`HostImportError::Parse`] is code generation writing bytes that do not
+/// decode. Each of the others is two derivations of one set parting company,
+/// which cannot happen unless the compiler is wrong. For the function imports
+/// the two are the driver's walk over the type checker's extern provenance and
+/// code generation's walk over the same declarations. For the memory import
+/// they are the build's memory layout and the import code generation emitted
+/// from it. Without the marker,
 /// "the compiled module imports `env`.`entropy`, which this program declares no
 /// host binding for" sends a reader hunting their source for an `entropy` that
 /// is not in it.
@@ -98,10 +155,12 @@ pub enum HostImportError {
 /// The detail stays where it was, ahead of this: it is the only description of
 /// the disagreement that exists, so it is what a report has to carry.
 ///
-/// [`HostImportError::MixedResolution`] is left without it because it is the one
-/// arm about the *value* a caller assembled rather than about the bytes, and its
-/// own body already says so — that the two were not produced by one resolution
-/// is both the diagnosis and the place to look.
+/// [`HostImportError::MixedResolution`] and
+/// [`HostImportError::ModulesWithImportedMemory`] are left without it because
+/// they are the two arms about the *value* a caller assembled rather than about
+/// the bytes, and each body already says so — that the parts were not produced
+/// by one resolution, or by one build, is both the diagnosis and the place to
+/// look.
 const COMPILER_BUG: &str = "This is a compiler bug; please report it, quoting the detail above";
 
 impl std::fmt::Display for HostImportError {
@@ -118,8 +177,9 @@ impl std::fmt::Display for HostImportError {
             } => write!(
                 f,
                 "internal error: the compiled module imports a {kind}, {}, which no `external \
-                 fn` declaration can describe; only function imports may be left for an embedder \
-                 to satisfy. {COMPILER_BUG}",
+                 fn` declaration can describe; only function imports, and the memory of a build \
+                 whose layout asks to import it, may be left for an embedder to satisfy. \
+                 {COMPILER_BUG}",
                 host_import_label(module, field)
             ),
             HostImportError::Undeclared { module, field } => write!(
@@ -158,9 +218,33 @@ impl std::fmt::Display for HostImportError {
             }
             HostImportError::Duplicated { module, field } => write!(
                 f,
-                "internal error: the compiled module imports {} twice; one declaration cannot \
-                 account for two entries, and no embedder can satisfy one name twice. \
-                 {COMPILER_BUG}",
+                "internal error: the compiled module imports {} twice; one declaration, or the \
+                 one memory a layout imports, cannot account for two entries, and no embedder \
+                 can satisfy one name twice. {COMPILER_BUG}",
+                host_import_label(module, field)
+            ),
+            HostImportError::MemoryImportMismatch {
+                module,
+                field,
+                expected,
+                emitted,
+            } => write!(
+                f,
+                "internal error: this build's memory layout asks to import its memory as {} with \
+                 type `{}`, but the compiled module imports a memory as {} with type `{emitted}`. \
+                 An embedder provides the memory this build's configuration describes, and the \
+                 stack and data were laid out in it, so an import that disagrees either asks for \
+                 a memory the embedder was not told to provide or admits one the program was not \
+                 laid out for. {COMPILER_BUG}",
+                host_import_label(MemoryImport::MODULE, MemoryImport::FIELD),
+                memory_type_text(&expected_memory_type(*expected)),
+                host_import_label(module, field)
+            ),
+            HostImportError::MissingMemoryImport { module, field } => write!(
+                f,
+                "internal error: this build's memory layout asks to import its memory as {}, \
+                 which the compiled module does not import. The layout and the artifact have to \
+                 agree, or an embedder provides a memory the program never uses. {COMPILER_BUG}",
                 host_import_label(module, field)
             ),
             HostImportError::MixedResolution {
@@ -171,6 +255,14 @@ impl std::fmt::Display for HostImportError {
                 "internal error: {modules} resolved external module(s) arrived together with \
                  {host_imports} host import(s); resolution refuses that combination, so these \
                  were not produced by one resolution"
+            ),
+            HostImportError::ModulesWithImportedMemory { modules } => write!(
+                f,
+                "internal error: {modules} resolved external module(s) arrived with a memory \
+                 layout that imports its memory as {}; code generation refuses a linked module \
+                 in a build that imports its memory, so these were not produced by one build, \
+                 and the static merge cannot carry a memory a host supplies",
+                host_import_label(MemoryImport::MODULE, MemoryImport::FIELD)
             ),
         }
     }
@@ -208,7 +300,7 @@ pub(crate) fn module_imports(wasm: &[u8]) -> Result<Vec<ModuleImport>, HostImpor
                             ImportShape::Function(signature_at(&types, type_idx))
                         }
                         TypeRef::Table(_) => ImportShape::NonFunction("table"),
-                        TypeRef::Memory(_) => ImportShape::NonFunction("memory"),
+                        TypeRef::Memory(ty) => ImportShape::Memory(ty),
                         TypeRef::Global(_) => ImportShape::NonFunction("global"),
                         TypeRef::Tag(_) => ImportShape::NonFunction("tag"),
                     };
@@ -260,7 +352,8 @@ fn collect_types(group: &RecGroup, out: &mut Vec<Option<FuncType>>) {
 }
 
 /// Holds `main_wasm`'s import section to exactly `declared`, comparing
-/// `(module, field, params, results)`.
+/// `(module, field, params, results)`, and to exactly the memory import
+/// `memory` describes, if it describes one.
 ///
 /// Set **equality**, in both directions, and on the signature rather than the
 /// name alone. Each direction catches a different thing and neither is a
@@ -279,18 +372,69 @@ fn collect_types(group: &RecGroup, out: &mut Vec<Option<FuncType>>) {
 /// into an acceptance: a binary search over one either finds an equal entry or
 /// finds nothing, so the worst it can do is refuse an artifact that agreed.
 ///
+/// `memory` is the caller's and not the driver's: the memory import the
+/// build's layout asked for, which is the value codegen emitted the import
+/// from, and which no `external fn` declaration could describe. With `None`,
+/// a memory import is refused like a table, global or tag import. With
+/// `Some`, the artifact must import exactly one memory, under the name
+/// [`MemoryImport::MODULE`] and [`MemoryImport::FIELD`] spell, 32-bit,
+/// unshared, at the default page size, and with `memory`'s minimum and
+/// maximum, the type codegen emits it at.
+///
+/// With `Some`, a function import under the memory's name, in an artifact that
+/// also imports a memory under it, is refused as a duplicate of that memory
+/// whether it comes before or after it, and whether or not `declared` names
+/// it. Like every refusal here it is reported where it stands in artifact
+/// order, so a function after a memory under that name at the wrong type is
+/// never reached: the mismatch comes first. With no memory under that name the
+/// function is checked like any other, and the absent memory is reported once
+/// the section has been read, so that neither refusal says the module carries
+/// an entry it does not.
+///
 /// # Errors
 ///
-/// [`HostImportError`] naming the first disagreement found, in artifact order
-/// and then in declaration order.
+/// [`HostImportError`] naming the first disagreement found, in artifact order.
+/// Absences are reported after every entry has been examined: first a memory
+/// `memory` describes and the artifact does not import, since codegen emits
+/// the memory ahead of every function import, then a declaration no import
+/// covers, in declaration order.
 pub(crate) fn check_declared_host_imports(
     main_wasm: &[u8],
     declared: &[HostImport],
+    memory: Option<MemoryImport>,
 ) -> Result<(), HostImportError> {
+    let imports = module_imports(main_wasm)?;
+    let memory_name_imports_a_memory = memory.is_some()
+        && imports.iter().any(|import| {
+            matches!(import.shape, ImportShape::Memory(_))
+                && is_memory_import_name(&import.module, &import.field)
+        });
     let mut matched = vec![false; declared.len()];
-    for import in module_imports(main_wasm)? {
+    let mut memory_seen = false;
+    for import in imports {
         let emitted = match import.shape {
+            ImportShape::Function(_)
+                if memory_name_imports_a_memory
+                    && is_memory_import_name(&import.module, &import.field) =>
+            {
+                return Err(HostImportError::Duplicated {
+                    module: import.module,
+                    field: import.field,
+                })
+            }
             ImportShape::Function(signature) => signature,
+            ImportShape::Memory(ty) => {
+                let Some(expected) = memory else {
+                    return Err(HostImportError::NonFunctionImport {
+                        module: import.module,
+                        field: import.field,
+                        kind: "memory",
+                    });
+                };
+                check_memory_import(import.module, import.field, ty, expected, memory_seen)?;
+                memory_seen = true;
+                continue;
+            }
             ImportShape::NonFunction(kind) => {
                 return Err(HostImportError::NonFunctionImport {
                     module: import.module,
@@ -324,6 +468,12 @@ pub(crate) fn check_declared_host_imports(
         }
     }
 
+    if memory.is_some() && !memory_seen {
+        return Err(HostImportError::MissingMemoryImport {
+            module: MemoryImport::MODULE.to_string(),
+            field: MemoryImport::FIELD.to_string(),
+        });
+    }
     if let Some(position) = matched.iter().position(|seen| !seen) {
         return Err(HostImportError::Missing {
             module: declared[position].module.clone(),
@@ -331,4 +481,76 @@ pub(crate) fn check_declared_host_imports(
         });
     }
     Ok(())
+}
+
+/// Holds one memory import entry to the memory `expected` describes, given
+/// whether a memory under that name has already been accepted.
+///
+/// The name is checked for a repeat before the type is compared, so a second
+/// memory under the memory's name is [`HostImportError::Duplicated`] whatever
+/// its type, while a memory under any other name is
+/// [`HostImportError::MemoryImportMismatch`] however many there are.
+fn check_memory_import(
+    module: String,
+    field: String,
+    emitted: MemoryType,
+    expected: MemoryImport,
+    already_accepted: bool,
+) -> Result<(), HostImportError> {
+    let named_as_expected = is_memory_import_name(&module, &field);
+    if named_as_expected && already_accepted {
+        return Err(HostImportError::Duplicated { module, field });
+    }
+    if !named_as_expected || emitted != expected_memory_type(expected) {
+        return Err(HostImportError::MemoryImportMismatch {
+            module,
+            field,
+            expected,
+            emitted: memory_type_text(&emitted),
+        });
+    }
+    Ok(())
+}
+
+/// Whether `(module, field)` is the two-level name a build imports its memory
+/// under.
+fn is_memory_import_name(module: &str, field: &str) -> bool {
+    module == MemoryImport::MODULE && field == MemoryImport::FIELD
+}
+
+/// The type an import of `expected` declares: 32-bit, unshared, at the default
+/// page size, with both limits present — the one shape codegen emits it at.
+fn expected_memory_type(expected: MemoryImport) -> MemoryType {
+    MemoryType {
+        memory64: false,
+        shared: false,
+        initial: u64::from(expected.minimum),
+        maximum: Some(u64::from(expected.maximum)),
+        page_size_log2: None,
+    }
+}
+
+/// Renders a memory type in the text format's spelling, `(memory 1 2)`: `i64`
+/// ahead of a 64-bit memory's limits, the maximum only when there is one,
+/// `shared` after the limits, and a custom page size last as
+/// `(pagesize N)`, `N` in bytes.
+///
+/// That is `wasmprinter`'s order, with the page size in decimal rather than
+/// hexadecimal. A page size too large to count in a `u64` is written as the
+/// power of two the bytes declare, `(pagesize 2^K)`, which no valid module
+/// declares but a decoded one can.
+fn memory_type_text(ty: &MemoryType) -> String {
+    let index = if ty.memory64 { "i64 " } else { "" };
+    let maximum = ty
+        .maximum
+        .map_or_else(String::new, |maximum| format!(" {maximum}"));
+    let shared = if ty.shared { " shared" } else { "" };
+    let page_size = match ty.page_size_log2 {
+        None => String::new(),
+        Some(log2) => match 1_u64.checked_shl(log2) {
+            Some(bytes) => format!(" (pagesize {bytes})"),
+            None => format!(" (pagesize 2^{log2})"),
+        },
+    };
+    format!("(memory {index}{}{maximum}{shared}{page_size})", ty.initial)
 }

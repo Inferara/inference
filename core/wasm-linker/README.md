@@ -765,9 +765,9 @@ their original addresses are mutually exclusive, see the module documentation of
 Clearing the tier gate is necessary for linking stock toolchain output, not
 sufficient. A `wasm32-unknown-unknown` artifact also declares a multi-page linear
 memory, and reconciliation never relaxes the anchor module's declared bound — so
-against an Inference main, which emits a fixed one-page `(memory 1 1)`, such an
-artifact now passes tier classification and fails at memory reconciliation
-instead:
+against an Inference main whose memory is the default, a fixed one-page
+`(memory 1 1)`, such an artifact now passes tier classification and fails at
+memory reconciliation instead:
 
 ```text
 error: cannot reconcile linear memory for `sum`: the reconciled minimum
@@ -914,8 +914,18 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
   so this limit does not affect Inference-generated main modules.
 - The main module must not declare a start function, a table section, element
   segments, or non-function imports — the static merge does not preserve these sections, so
-  each is rejected up front rather than silently dropped. Inference codegen emits none of
-  them; the guards apply to hand-built or third-party main modules fed to the public `link()`.
+  each is rejected up front rather than silently dropped. Inference codegen emits a start
+  function, a table section or an element segment in none of its output, and a non-function
+  import in one case only: the memory import `(import "env" "memory" …)` of a layout that
+  asks to import its memory (`[memory] import = true`, `infc --import-memory`; see
+  [Importing the memory](../../book/src/memory-allocation-in-wasm-codegen.md#importing-the-memory)).
+  The merge models only a memory its modules define, not one a host supplies, so a main module
+  that imports its memory is still rejected as `UnsupportedConstruct`. The Inference compiler
+  does not rely on that guard: it refuses an imported memory beside a linked module before the
+  linker is reached (tracked under issue #546), and an imported-memory build that links no
+  module ships its bytes without a merge, once its import section is checked to hold exactly
+  the memory import the layout asked for. The guards otherwise apply to hand-built or
+  third-party main modules fed to the public `link()`.
 - The main module's data segments are carried only in the shape Inference codegen emits:
   active, over memory 0, at a lone `i32.const` offset, with no main body naming a segment
   through `memory.init`/`data.drop`. A passive segment, a segment over another memory, or a

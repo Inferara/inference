@@ -9143,6 +9143,993 @@ fn project_build_refuses_a_growable_memory_at_spacewasm() {
     );
 }
 
+// [memory] import
+//
+// `import = true` makes the module import its memory from the host as
+// `env.memory` instead of defining it. The key reaches `infc` as the bare
+// `--import-memory`, gated on its own ABI minor and echoed with the name the
+// memory is imported under; the artifact carries the import and no memory of
+// its own; and `infs run`, whose wasmtime supplies no memory, preloads a module
+// exporting one at the import's limits and removes it once wasmtime exits. The
+// targets and the proof contract that cannot take an imported memory refuse it.
+
+/// A `[memory]` table importing two fixed pages with a 32 KiB stack.
+const IMPORTED_MEMORY_TABLE: &str = "[memory]\npages = 2\nstack-size = 32768\nimport = true\n";
+
+/// The `memory:` line `forward_memory_layout` echoes for [`IMPORTED_MEMORY_TABLE`].
+const IMPORTED_MEMORY_ECHO: &str =
+    "memory: 2 page(s), maximum 2, 32768-byte stack, imported from env.memory";
+
+/// A `[memory]` table importing one page growable to four.
+const GROWABLE_IMPORTED_MEMORY_TABLE: &str = "[memory]\npages = 1\nmax-pages = 4\nimport = true\n";
+
+/// The `memory:` line echoed for [`GROWABLE_IMPORTED_MEMORY_TABLE`].
+const GROWABLE_IMPORTED_MEMORY_ECHO: &str =
+    "memory: 1 page(s) growable to 4, 65536-byte stack, imported from env.memory";
+
+/// A `[memory]` table that asks for the import and nothing else: every number
+/// is the default, so only the import makes it a request at all.
+const IMPORT_ONLY_MEMORY_TABLE: &str = "[memory]\nimport = true\n";
+
+/// The `memory:` line echoed for [`IMPORT_ONLY_MEMORY_TABLE`].
+const IMPORT_ONLY_MEMORY_ECHO: &str =
+    "memory: 1 page(s), maximum 1, 65536-byte stack, imported from env.memory";
+
+/// A `main` that allocates an array frame and reads a module constant, so the
+/// value it returns — `arr[2] + 3 * SQUARES[3]`, 57 — is computed from the
+/// stack and from the data segment, both of which live in whatever memory the
+/// module is instantiated against.
+const PROJECT_FRAME_AND_CONSTANT_SRC: &str = "const SQUARES: [i32; 4] = [0, 1, 4, 9];\n\n\
+     pub fn main() -> i32 {\n    let arr: [i32; 4] = [10, 20, 30, 40];\n    \
+     return arr[2] + 3 * SQUARES[3];\n}\n";
+
+/// What wasmtime prints for [`PROJECT_FRAME_AND_CONSTANT_SRC`]'s `main`.
+const FRAME_AND_CONSTANT_RESULT: &str = "57";
+
+/// A `main` that traps on an overflowed `+` after allocating its frame, and a
+/// `div` that traps on a zero divisor, so a run under an imported memory can end
+/// in a trap from either route: the analyzer accepts both, and wasmtime traps
+/// only once the module has instantiated against the memory it was handed.
+const PROJECT_TRAPPING_SRC: &str = "pub fn main() -> i32 {\n    \
+     let arr: [i32; 4] = [1, 2, 3, 4];\n    let big: i32 = 2147483647;\n    \
+     return big + arr[0];\n}\n\n\
+     pub fn div(a: i32, b: i32) -> i32 {\n    return a / b;\n}\n";
+
+/// Asserts `echo` is printed exactly once, as its own whole line.
+fn assert_echoes_once(stdout: &str, echo: &str) {
+    let lines = stdout.lines().filter(|line| line.trim() == echo).count();
+    assert_eq!(
+        lines, 1,
+        "`{echo}` must be echoed exactly once, got stdout:\n{stdout}"
+    );
+}
+
+/// A memory import as `(module, field, minimum, maximum)`.
+type ImportedMemory = (String, String, u64, Option<u64>);
+
+/// The memories `wasm` imports and how many it defines.
+///
+/// Counted from the bytes rather than read off the printed text because the
+/// failure a count catches prints innocuously: a memory defined beside the
+/// import is memory 1, which multi-memory validation and execution both accept.
+fn memories_of(wasm: &[u8]) -> (Vec<ImportedMemory>, usize) {
+    use inf_wasmparser::{Parser, Payload, TypeRef};
+
+    let mut imported = Vec::new();
+    let mut defined = 0;
+    for payload in Parser::new(0).parse_all(wasm) {
+        match payload.expect("the artifact parses") {
+            Payload::ImportSection(reader) => {
+                for import in reader {
+                    let import = import.expect("an import");
+                    if let TypeRef::Memory(ty) = import.ty {
+                        imported.push((
+                            import.module.to_string(),
+                            import.name.to_string(),
+                            ty.initial,
+                            ty.maximum,
+                        ));
+                    }
+                }
+            }
+            Payload::MemorySection(reader) => defined += reader.count(),
+            _ => {}
+        }
+    }
+    (
+        imported,
+        defined.try_into().expect("a memory count fits a usize"),
+    )
+}
+
+/// Asserts `wasm` validates, imports its one memory as `env.memory` at exactly
+/// `minimum` and `maximum` pages ahead of any other import, defines no memory,
+/// re-exports the imported one as `memory`, and starts its stack pointer at
+/// `stack_pointer`.
+fn assert_artifact_imports_its_memory(wasm: &[u8], minimum: u64, maximum: u64, stack_pointer: u32) {
+    assert!(
+        inf_wasmparser::Validator::new().validate_all(wasm).is_ok(),
+        "the artifact must validate"
+    );
+    assert_eq!(
+        memories_of(wasm),
+        (
+            vec![(
+                "env".to_string(),
+                "memory".to_string(),
+                minimum,
+                Some(maximum)
+            )],
+            0
+        ),
+        "the artifact must import exactly one memory and define none"
+    );
+    let wat = wasmprinter::print_bytes(wasm).expect("the artifact must be printable");
+    let first_import = wat
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("(import "));
+    let expected = format!("(import \"env\" \"memory\" (memory (;0;) {minimum} {maximum}))");
+    assert_eq!(
+        first_import,
+        Some(expected.as_str()),
+        "the memory must be the artifact's first import:\n{wat}"
+    );
+    assert!(
+        !wat.lines()
+            .any(|line| line.trim_start().starts_with("(memory")),
+        "the artifact must define no memory of its own:\n{wat}"
+    );
+    assert!(
+        wat.contains("(export \"memory\" (memory 0))"),
+        "the imported memory must be re-exported as `memory`:\n{wat}"
+    );
+    assert!(
+        wat.contains(&format!(
+            "(global (;0;) (mut i32) i32.const {stack_pointer})"
+        )),
+        "the artifact's stack pointer must start at {stack_pointer}:\n{wat}"
+    );
+}
+
+/// Asserts the module `infs run` wrote to supply the memory beside the
+/// artifact in `out/` is gone, and nothing but the artifact is left there.
+fn assert_no_memory_provider_is_left(temp: &assert_fs::TempDir) {
+    assert_eq!(
+        sorted_names(temp.child("out").path()),
+        ["main.wasm"],
+        "the memory provider must be removed once wasmtime exits"
+    );
+}
+
+/// The paths of every file under `dir` whose extension is `extension`.
+fn files_with_extension(dir: &std::path::Path, extension: &str) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension() == Some(std::ffi::OsStr::new(extension)) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// A project build imports the memory its table asks to import, at the
+/// table's limits — fixed, growable, and the defaults of a table holding the
+/// import alone — and echoes it once with its maximum and the name it is
+/// imported under.
+///
+/// The import-only row is the one a forward keyed on the numbers misses: with
+/// every number at its default the table would read as declaring nothing, no
+/// flag would be sent, and the artifact would define its memory.
+#[test]
+fn project_build_imports_the_memory_when_declared() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let rows = [
+        (IMPORTED_MEMORY_TABLE, IMPORTED_MEMORY_ECHO, (2, 2), 32_768),
+        (
+            "[memory]\npages = 2\nmax-pages = 8\nstack-size = 32768\nimport = true\n",
+            "memory: 2 page(s) growable to 8, 32768-byte stack, imported from env.memory",
+            (2, 8),
+            32_768,
+        ),
+        (
+            IMPORT_ONLY_MEMORY_TABLE,
+            IMPORT_ONLY_MEMORY_ECHO,
+            (1, 1),
+            65_536,
+        ),
+    ];
+    for (table, echo, (minimum, maximum), stack_pointer) in rows {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, table);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("build");
+        assert_echoes_once(&stdout_of(&cmd.assert().success()), echo);
+
+        assert_artifact_imports_its_memory(
+            &read_project_artifact(&temp),
+            minimum,
+            maximum,
+            stack_pointer,
+        );
+    }
+}
+
+/// Single-file `run` by path builds with the enclosing table's import and
+/// executes the artifact: wasmtime instantiates it against the memory `infs
+/// run` preloads, and a `main` computing from its frame and a module constant
+/// returns its value. The provider is gone afterwards.
+///
+/// This is the route whose compiler handshake is skipped unless the manifest
+/// asks for something, so the import-only row also pins that a table holding
+/// only `import = true` counts as asking.
+#[test]
+fn single_file_run_supplies_the_imported_memory_and_executes() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    for (table, echo, (minimum, maximum), stack_pointer) in [
+        (IMPORTED_MEMORY_TABLE, IMPORTED_MEMORY_ECHO, (2, 2), 32_768),
+        (
+            IMPORT_ONLY_MEMORY_TABLE,
+            IMPORT_ONLY_MEMORY_ECHO,
+            (1, 1),
+            65_520,
+        ),
+    ] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(&temp, "demo", PROJECT_FRAME_AND_CONSTANT_SRC, table);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("run")
+            .arg(joined(&["src", "main.inf"]));
+        let stdout = stdout_of(&cmd.assert().success());
+        assert_echoes_once(&stdout, echo);
+        assert_eq!(
+            stdout.lines().last(),
+            Some(FRAME_AND_CONSTANT_RESULT),
+            "`main` must run to completion against the supplied memory, got stdout:\n{stdout}"
+        );
+
+        let artifact = std::fs::read(temp.child("out").child("main.wasm").path()).unwrap();
+        assert_artifact_imports_its_memory(&artifact, minimum, maximum, stack_pointer);
+        assert_no_memory_provider_is_left(&temp);
+    }
+}
+
+/// Project `run` supplies the imported memory too, fixed and growable: the
+/// provider's maximum is the import's, which wasmtime requires of a memory
+/// supplied to an import that declares one.
+#[test]
+fn project_run_supplies_the_imported_memory_and_executes() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    for (table, echo, (minimum, maximum), stack_pointer) in [
+        (IMPORTED_MEMORY_TABLE, IMPORTED_MEMORY_ECHO, (2, 2), 32_768),
+        (
+            GROWABLE_IMPORTED_MEMORY_TABLE,
+            GROWABLE_IMPORTED_MEMORY_ECHO,
+            (1, 4),
+            65_520,
+        ),
+    ] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(&temp, "demo", PROJECT_FRAME_AND_CONSTANT_SRC, table);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("run");
+        let stdout = stdout_of(&cmd.assert().success());
+        assert_echoes_once(&stdout, echo);
+        assert_eq!(
+            stdout.lines().last(),
+            Some(FRAME_AND_CONSTANT_RESULT),
+            "`main` must run to completion against the supplied memory, got stdout:\n{stdout}"
+        );
+
+        assert_artifact_imports_its_memory(
+            &read_project_artifact(&temp),
+            minimum,
+            maximum,
+            stack_pointer,
+        );
+        assert_no_memory_provider_is_left(&temp);
+    }
+}
+
+/// A run that traps still removes the provider: wasmtime's failure ends the
+/// run, and the trap itself is the proof the module instantiated against the
+/// supplied memory, since nothing executes before instantiation does. Project
+/// mode traps in `main`, and single-file mode in an export handed a zero
+/// divisor.
+#[test]
+fn a_trapping_run_still_removes_the_supplied_memory() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let entry = joined(&["src", "main.inf"]);
+    let rows: [(Vec<&str>, &str); 2] = [
+        (vec!["run"], "wasm `unreachable` instruction executed"),
+        (
+            vec![
+                "run",
+                entry.to_str().unwrap(),
+                "--entry-point",
+                "div",
+                "7",
+                "0",
+            ],
+            "integer divide by zero",
+        ),
+    ];
+    for (args, trap) in rows {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(&temp, "demo", PROJECT_TRAPPING_SRC, IMPORTED_MEMORY_TABLE);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .args(&args);
+        let output = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            !output.status.success(),
+            "`infs {}` must fail with the trap, got stdout:\n{stdout}",
+            args.join(" ")
+        );
+        assert!(
+            stderr.contains(trap),
+            "`infs {}` must end in wasmtime's trap, not a failed instantiation, got:\n{stderr}",
+            args.join(" ")
+        );
+        assert!(
+            !stderr.contains("unknown import") && !stderr.contains("incompatible import type"),
+            "the supplied memory must satisfy the import, got:\n{stderr}"
+        );
+        assert_no_memory_provider_is_left(&temp);
+    }
+}
+
+/// The wire spelling: `import = true` reaches `infc` as the bare
+/// `--import-memory`, one argv entry with no value, exactly once and right
+/// after the numeric flags, from every route that builds a project — `build`
+/// and single-file `build`, and, where wasmtime lets them reach the build,
+/// `run` and single-file `run`. Beside it, a table holding the import alone
+/// forwards nothing else, and `import = false` forwards nothing for itself
+/// and echoes the defined form.
+#[cfg(unix)]
+#[test]
+fn an_import_flag_reaches_infc_as_its_own_argv_entry() {
+    let entry = joined(&["src", "main.inf"]);
+    let entry = entry.to_str().unwrap();
+    let mut routes = vec![vec!["build"], vec!["build", entry]];
+    if is_wasmtime_available() {
+        routes.extend([vec!["run"], vec!["run", entry]]);
+    }
+    let growable = "[memory]\npages = 2\nmax-pages = 8\nstack-size = 32768\nimport = true\n";
+    let rows: [(&str, &str, &[&str]); 3] = [
+        (
+            growable,
+            "memory: 2 page(s) growable to 8, 32768-byte stack, imported from env.memory",
+            &[
+                "--memory-pages",
+                "2",
+                "--max-memory-pages",
+                "8",
+                "--stack-size",
+                "32768",
+                "--import-memory",
+            ],
+        ),
+        (
+            IMPORT_ONLY_MEMORY_TABLE,
+            IMPORT_ONLY_MEMORY_ECHO,
+            &["--import-memory"],
+        ),
+        (
+            "[memory]\npages = 2\nstack-size = 32768\nimport = false\n",
+            MEMORY_ECHO,
+            &["--memory-pages", "2", "--stack-size", "32768"],
+        ),
+    ];
+    for (table, echo, forwarded) in rows {
+        for args in &routes {
+            let temp = assert_fs::TempDir::new().unwrap();
+            scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, table);
+            let argv_log = temp.child("argv.log");
+            let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+            let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+            cmd.env("INFC_PATH", &stub)
+                .current_dir(temp.path())
+                .args(args);
+            let output = cmd.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            if args[0] == "build" {
+                assert!(
+                    output.status.success(),
+                    "`infs {}`: {stderr}",
+                    args.join(" ")
+                );
+            } else {
+                assert!(
+                    stderr.contains("Compilation succeeded but WASM file not found at:"),
+                    "`infs {}` must reach the build and find no artifact, got:\n{stderr}",
+                    args.join(" ")
+                );
+            }
+            assert_echoes_once(&stdout, echo);
+
+            let logged = logged_argv(argv_log.path());
+            let argv: Vec<&str> = logged.lines().collect();
+            let memory_flags: Vec<&str> = argv
+                .iter()
+                .enumerate()
+                .filter(|(index, entry)| {
+                    entry.starts_with("--memory-pages")
+                        || entry.starts_with("--max-memory-pages")
+                        || entry.starts_with("--stack-size")
+                        || entry.starts_with("--import-memory")
+                        || index
+                            .checked_sub(1)
+                            .and_then(|previous| argv.get(previous))
+                            .is_some_and(|previous| {
+                                ["--memory-pages", "--max-memory-pages", "--stack-size"]
+                                    .contains(previous)
+                            })
+                })
+                .map(|(_, entry)| *entry)
+                .collect();
+            assert_eq!(
+                memory_flags,
+                forwarded,
+                "`infs {}` with\n{table}must forward the memory flags in this order, got argv: \
+                 {argv:?}",
+                args.join(" ")
+            );
+        }
+    }
+}
+
+/// An `infc` one minor short of the import is refused with remediation naming
+/// the flag, minor 11 and the key, and is never asked to compile — on the
+/// project route and the single-file one. The same `infc` still builds a project
+/// that sets only the numbers, maximum included: the import is gated on its own
+/// minor and raises no other key's floor.
+#[cfg(unix)]
+#[test]
+fn project_build_old_infc_with_an_imported_memory_hard_errors() {
+    let entry = joined(&["src", "main.inf"]);
+    for args in [vec!["build"], vec!["build", entry.to_str().unwrap()]] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(
+            &temp,
+            "demo",
+            PROJECT_MAIN_ARRAY_SRC,
+            IMPORTED_MEMORY_TABLE,
+        );
+        let argv_log = temp.child("argv.log");
+        let stub = write_infc_stub_reporting(&temp, "infc_stub", argv_log.path(), None, "nope", 10);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &stub)
+            .current_dir(temp.path())
+            .args(&args);
+        let assert = cmd.assert().failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        for fragment in [
+            "the resolved infc does not support `--import-memory` (requires infc ABI ≥ 1.11)",
+            "update the toolchain",
+            "remove `import` from the `[memory]` table of",
+            "Inference.toml",
+        ] {
+            assert!(
+                stderr.contains(fragment),
+                "`infs {}` must carry `{fragment}`, got:\n{stderr}",
+                args.join(" ")
+            );
+        }
+        assert!(
+            !argv_log.path().exists(),
+            "`infs {}` must refuse before asking the old infc to compile",
+            args.join(" ")
+        );
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_ARRAY_SRC,
+        "[memory]\npages = 2\nmax-pages = 8\n",
+    );
+    let argv_log = temp.child("argv.log");
+    let stub = write_infc_stub_reporting(&temp, "infc_stub", argv_log.path(), None, "nope", 10);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build");
+    let assert = cmd.assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(!stderr.contains("--import-memory"), "got:\n{stderr}");
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+    assert_eq!(argv_values_after(&argv, "--max-memory-pages"), [Some("8")]);
+    assert!(
+        !argv.contains(&"--import-memory"),
+        "a project that imports no memory must not be sent the flag, got argv: {argv:?}"
+    );
+}
+
+/// The targets whose runtime cannot supply a memory refuse a project that
+/// imports one, in code generation's words, before any artifact is written:
+/// `spacewasm`, whose refusal points at the issue tracking it, through `build`
+/// and through `run`, which builds first; and `stellar`, whose contracts define
+/// their memory.
+#[test]
+fn an_imported_memory_is_refused_at_spacewasm_and_stellar() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let rows: [(&str, &str, &[&str], &str); 3] = [
+        (
+            SPACEWASM_BUILD_TABLE,
+            PROJECT_MAIN_SRC,
+            &["build"],
+            "The `spacewasm` target does not support an imported linear memory yet.",
+        ),
+        (
+            SPACEWASM_BUILD_TABLE,
+            PROJECT_MAIN_SRC,
+            &["run"],
+            "The `spacewasm` target does not support an imported linear memory yet.",
+        ),
+        (
+            STELLAR_BUILD_TABLE,
+            PROJECT_CONTRACT_SRC,
+            &["build"],
+            "The `stellar` target does not support an imported linear memory.",
+        ),
+    ];
+    for (build_table, source, args, refusal) in rows {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(
+            &temp,
+            "demo",
+            source,
+            &format!("{build_table}\n{IMPORT_ONLY_MEMORY_TABLE}"),
+        );
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .args(args);
+        let assert = cmd.assert().failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains(refusal)
+                && stderr.contains("remove `[memory] import` / `--import-memory`"),
+            "`infs {}` under\n{build_table}must be refused with:\n{refusal}\ngot:\n{stderr}",
+            args.join(" ")
+        );
+        if build_table == SPACEWASM_BUILD_TABLE {
+            assert!(stderr.contains("issue #547"), "got:\n{stderr}");
+        }
+        assert!(
+            !temp.child("out").child("main.wasm").path().exists(),
+            "a refused build must write no artifact"
+        );
+    }
+}
+
+/// A proof artifact cannot be built for a module that imports its memory, so
+/// every way a project build asks `infc` for one is refused with the proof
+/// contract's reason, before a `.wasm` or a `.v` is written: `-v`, `--mode
+/// proof`, a manifest whose `[build] mode` is `"proof"`, and `-v` on the
+/// single-file route. The refusal's own advice then builds: `--mode compile`
+/// overrides the manifest's mode, and the module imports its memory.
+#[test]
+fn a_proof_request_for_an_imported_memory_is_refused() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let entry = joined(&["src", "main.inf"]);
+    let proof_mode = format!("[build]\nmode = \"proof\"\n\n{IMPORTED_MEMORY_TABLE}");
+    let rows: [(&str, Vec<&str>); 4] = [
+        (IMPORTED_MEMORY_TABLE, vec!["build", "-v"]),
+        (IMPORTED_MEMORY_TABLE, vec!["build", "--mode", "proof"]),
+        (proof_mode.as_str(), vec!["build"]),
+        (
+            IMPORTED_MEMORY_TABLE,
+            vec!["build", entry.to_str().unwrap(), "-v"],
+        ),
+    ];
+    for (manifest, args) in rows {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, manifest);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .args(&args);
+        let assert = cmd.assert().failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains(
+                "Error: An imported linear memory is outside the proof contract. The contract \
+                 instantiates a module on its own, with an empty import list, so a module \
+                 importing `env.memory` cannot be instantiated"
+            ),
+            "`infs {}` under\n{manifest}must be refused with the proof contract's reason, \
+             got:\n{stderr}",
+            args.join(" ")
+        );
+        for extension in ["wasm", "v"] {
+            let written = files_with_extension(temp.path(), extension);
+            assert!(
+                written.is_empty(),
+                "`infs {}` must write no .{extension}, wrote: {written:?}",
+                args.join(" ")
+            );
+        }
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, &proof_mode);
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .args(["build", "--mode", "compile"]);
+    assert_echoes_once(&stdout_of(&cmd.assert().success()), IMPORTED_MEMORY_ECHO);
+    assert_artifact_imports_its_memory(&read_project_artifact(&temp), 2, 2, 32_768);
+    assert_eq!(
+        files_with_extension(temp.path(), "v"),
+        Vec::<std::path::PathBuf>::new()
+    );
+}
+
+/// `src/main.inf` binding and calling `env.clock_ms`, the F´ reference clock,
+/// at its reference signature.
+const PROJECT_MAIN_CLOCK_SRC: &str = "external fn clock_ms() -> i64;\n\
+     use { clock_ms } from host::env;\n\n\
+     pub fn main() -> i32 {\n    let now: i64 = clock_ms();\n    return 0;\n}\n";
+
+/// A `wasm32` project that imports its memory and binds only a reference host
+/// is told to switch to the target that provides the host, and to remove the
+/// `[memory]` keys that target refuses — `import = true` always, and
+/// `max-pages` when the memory is growable — from project mode and from a file
+/// inside the project alike. The artifact the refusal was asked about really
+/// imports its memory beside the host function, and wasmtime never ran it.
+///
+/// Following the advice runs the program: the edited manifest builds for
+/// `spacewasm` and the interpreter executes it.
+///
+/// Fails if the runner's refusal of the memory import closes the remedy —
+/// which tells every import-mode program that its reference hosts do not
+/// match — or if the remedy leaves a key the target then refuses.
+#[test]
+fn infs_run_tells_an_imported_memory_project_to_remove_the_memory_keys() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let entry = joined(&["src", "main.inf"]);
+    let rows = [
+        (
+            GROWABLE_IMPORTED_MEMORY_TABLE,
+            "`[memory] max-pages` and `[memory] import = true`",
+            (1, 4),
+        ),
+        (IMPORT_ONLY_MEMORY_TABLE, "`[memory] import = true`", (1, 1)),
+    ];
+    for (table, removed, (minimum, maximum)) in rows {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_CLOCK_SRC, table);
+        let remedy = format!(
+            "`env.clock_ms` is an F Prime reference host, which `infs run` provides to a \
+             `spacewasm` build: set `target = \"spacewasm\"` under `[build]` in Inference.toml, \
+             remove {removed}, which that target refuses, and run it again to execute the \
+             program under the SpaceWasm interpreter."
+        );
+        for args in [vec!["run"], vec!["run", entry.to_str().unwrap()]] {
+            let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+            cmd.env("INFC_PATH", &infc_path)
+                .current_dir(temp.path())
+                .args(&args);
+            let assert = cmd.assert().code(1);
+            let stdout = stdout_of(&assert);
+            let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+            assert!(
+                stderr.contains(
+                    "imports 1 function that its embedder must supply.\n  \
+                                 env.clock_ms\n"
+                ),
+                "`infs {}` must list the host function alone, got:\n{stderr}",
+                args.join(" ")
+            );
+            assert!(
+                stderr.contains(&remedy),
+                "`infs {}` under\n{table}must read:\n{remedy}\ngot:\n{stderr}",
+                args.join(" ")
+            );
+            assert!(
+                !stdout.contains("Invoking 'main'"),
+                "wasmtime must never be invoked on the refused artifact, got:\n{stdout}"
+            );
+
+            let artifact = read_project_artifact(&temp);
+            let (memories, defined) = memories_of(&artifact);
+            assert_eq!(
+                (memories, defined),
+                (
+                    vec![(
+                        "env".to_string(),
+                        "memory".to_string(),
+                        minimum,
+                        Some(maximum)
+                    )],
+                    0
+                ),
+                "the refusal must have been asked about an artifact importing its memory"
+            );
+            assert_no_memory_provider_is_left(&temp);
+        }
+
+        temp.child("Inference.toml")
+            .write_str(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n\n\
+                 [build]\ntarget = \"spacewasm\"\n",
+            )
+            .unwrap();
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("run");
+        cmd.assert().success();
+    }
+}
+
+/// The manifest `[build.wasm-opt]` and an imported memory of two pages
+/// growable to eight with a 32 KiB stack: the first row's manifest in the
+/// discard test below, and the one its landing twin builds under.
+const OPTIMIZED_IMPORTED_MEMORY_MANIFEST: &str = "[build.wasm-opt]\nlevel = \"s\"\n\n\
+     [memory]\npages = 2\nmax-pages = 8\nstack-size = 32768\nimport = true\n";
+
+/// Optimized bytes whose memory import is not the compiler's are refused
+/// before they land, naming both imports, and the original `out/main.wasm` is
+/// left exactly as `infc` wrote it: an import whose limits changed, one added
+/// to an artifact that defines its memory, and one removed from an artifact
+/// that imports it — the last at the one-page default, which is named in the
+/// singular.
+///
+/// The original is compared byte for byte against a `--no-wasm-opt` build of
+/// the same project, since the refused module is valid too. `infs run` builds
+/// before it runs, so it is refused by the same step, before wasmtime is
+/// invoked and before any memory is supplied, and it too leaves the original
+/// in place.
+///
+/// Fails if the landing check lets a changed memory import through — which
+/// would ship a module whose contract with its host is not the layout the
+/// build echoed — or names either import wrongly.
+#[test]
+fn wasm_opt_output_that_changes_the_memory_import_is_discarded() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let two_to_eight = "`env.memory` with a minimum of 2 pages and a maximum of 8";
+    let three_to_five = "`env.memory` with a minimum of 3 pages and a maximum of 5";
+    let rows: [(String, &str, &str, &str, Vec<ImportedMemory>); 3] = [
+        (
+            OPTIMIZED_IMPORTED_MEMORY_MANIFEST.to_string(),
+            "FAKE_WASM_OPT_MEMORY_IMPORT",
+            three_to_five,
+            two_to_eight,
+            vec![("env".to_string(), "memory".to_string(), 2, Some(8))],
+        ),
+        (
+            "[build.wasm-opt]\nlevel = \"s\"\n".to_string(),
+            "FAKE_WASM_OPT_MEMORY_IMPORT",
+            three_to_five,
+            "no memory",
+            Vec::new(),
+        ),
+        (
+            format!("[build.wasm-opt]\nlevel = \"s\"\n\n{IMPORT_ONLY_MEMORY_TABLE}"),
+            "FAKE_WASM_OPT_NO_IMPORTS",
+            "no memory",
+            "`env.memory` with a minimum of 1 page and a maximum of 1",
+            vec![("env".to_string(), "memory".to_string(), 1, Some(1))],
+        ),
+    ];
+    for (manifest, role, landed, compiled, original_memory) in rows {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, &manifest);
+        let infs = |args: &[&str]| {
+            let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+            cmd.env("INFC_PATH", &infc_path)
+                .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+                .env(role, "1")
+                .current_dir(temp.path())
+                .args(args);
+            cmd
+        };
+
+        infs(&["build", "--no-wasm-opt"]).assert().success();
+        let original = read_project_artifact(&temp);
+        assert_eq!(
+            memories_of(&original).0,
+            original_memory,
+            "{role} under\n{manifest}"
+        );
+
+        let expected = format!(
+            "`[build.wasm-opt]` produced an artifact that imports {landed}, where the artifact \
+             it was given imports {compiled}. The optimizer may not change the memory import, \
+             so the optimized output is discarded and {} is left as the compiler wrote it; try \
+             `--no-wasm-opt`, or a different Binaryen version.",
+            temp.path()
+                .canonicalize()
+                .unwrap()
+                .join("out")
+                .join("main.wasm")
+                .display()
+        );
+        for args in [&["build"][..], &["run"][..]] {
+            let assert = infs(args).assert().code(1);
+            let stdout = stdout_of(&assert);
+            let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+            assert!(
+                stderr.contains(&expected),
+                "`infs {}` with {role} under\n{manifest}must read:\n{expected}\ngot:\n{stderr}",
+                args.join(" ")
+            );
+            assert!(
+                !stdout.lines().any(|line| line.starts_with("wasm-opt")),
+                "a refused optimization must report no size, got:\n{stdout}"
+            );
+            assert!(
+                !stdout.contains("Invoking"),
+                "wasmtime must never be invoked on a refused build, got:\n{stdout}"
+            );
+            assert_eq!(
+                read_project_artifact(&temp),
+                original,
+                "`infs {}` must leave the artifact infc wrote in place",
+                args.join(" ")
+            );
+            assert_eq!(
+                sorted_names(temp.child("out").path()),
+                ["main.wasm"],
+                "`infs {}` must leave neither the optimizer's temp file nor a memory provider",
+                args.join(" ")
+            );
+        }
+    }
+}
+
+/// Optimized bytes that keep the compiler's memory import land, and `infs run`
+/// supplies that memory and executes them: the landing check compares the
+/// import, it does not refuse every optimized artifact that has one. The fake
+/// optimizer copies its input, so the landed import is the compiler's exactly.
+#[test]
+fn wasm_opt_output_that_keeps_the_memory_import_lands_and_runs() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_FRAME_AND_CONSTANT_SRC,
+        OPTIMIZED_IMPORTED_MEMORY_MANIFEST,
+    );
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .current_dir(temp.path())
+        .arg("run");
+    let stdout = stdout_of(&cmd.assert().success());
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("wasm-opt -Os: main.wasm ")),
+        "the optimized output must have landed, got stdout:\n{stdout}"
+    );
+    assert_eq!(
+        stdout.lines().last(),
+        Some(FRAME_AND_CONSTANT_RESULT),
+        "`main` must run against the supplied memory, got stdout:\n{stdout}"
+    );
+    assert_eq!(
+        memories_of(&read_project_artifact(&temp)),
+        (
+            vec![("env".to_string(), "memory".to_string(), 2, Some(8))],
+            0
+        ),
+        "the landed artifact must keep the compiler's import"
+    );
+    assert_no_memory_provider_is_left(&temp);
+}
+
+/// Real-binary end-to-end: Binaryen keeps the imported memory at the declared
+/// limits and its constant data in place — it is never told the memory starts
+/// zeroed — so the optimized artifact still imports `env.memory` and `infs run`
+/// still executes it to the value the unoptimized one returns. Gated on a real
+/// `wasm-opt` and wasmtime.
+#[test]
+fn wasm_opt_keeps_an_imported_memory_and_the_run_still_works() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+    if !require_wasm_opt() {
+        return;
+    }
+
+    for level in ["z", "3"] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project_with_manifest(
+            &temp,
+            "demo",
+            PROJECT_FRAME_AND_CONSTANT_SRC,
+            &format!(
+                "[build.wasm-opt]\nlevel = \"{level}\"\n\n\
+                 [memory]\npages = 2\nmax-pages = 8\nstack-size = 32768\nimport = true\n"
+            ),
+        );
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("run");
+        let stdout = stdout_of(&cmd.assert().success());
+        assert!(
+            stdout.contains(&format!("wasm-opt -O{level}: main.wasm")),
+            "level {level}: the optimizer must have run and landed its output, got:\n{stdout}"
+        );
+        assert_eq!(
+            stdout.lines().last(),
+            Some(FRAME_AND_CONSTANT_RESULT),
+            "level {level}: the optimized `main` must still compute its value, got:\n{stdout}"
+        );
+
+        let (memories, defined) = memories_of(&read_project_artifact(&temp));
+        assert_eq!(
+            (memories, defined),
+            (
+                vec![("env".to_string(), "memory".to_string(), 2, Some(8))],
+                0
+            ),
+            "level {level}: the optimized artifact must keep the import at its limits"
+        );
+        assert_no_memory_provider_is_left(&temp);
+    }
+}
+
 // Adoption of a linked library's proof obligations
 
 /// A `[verification]` table that asks for adoption, for projects whose build

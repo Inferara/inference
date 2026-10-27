@@ -87,9 +87,9 @@ During `lower_statement()` and `lower_expression()`, arrays are lowered to:
 
 ### Phase 3: Module Assembly
 
-In `finish()`, if any function uses arrays (`self.has_memory == true`):
+In `finish()`, when the module declares a memory (some function needs one, or the layout is configured or imported):
 
-1. **Memory Section** - Declares the linear memory, with minimum and maximum both set to the configured page count (one 64 KB page by default), so the memory is fixed rather than growable
+1. **Memory Section** - Declares the linear memory, with the configured page count as the minimum (one 64 KB page by default) and the layout's maximum as the maximum, which equals the page count unless `[memory] max-pages` raised it, so by default the memory is fixed rather than growable. A layout that imports its memory emits no Memory Section: the module instead imports `env.memory` with the same limits, as the first entry of the Import Section, and that import is memory 0
 2. **Global Section** - Exports `__stack_pointer` (mutable i32 global)
    - Initialized to the configured stack size — `0x10000` (65536) by default, the top of the stack region
    - Stack grows downward toward address 0 (stack-first layout)

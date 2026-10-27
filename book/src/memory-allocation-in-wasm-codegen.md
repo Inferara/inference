@@ -45,19 +45,114 @@ The layout above is the default, not a constant. A project sets it in the `[memo
 
 | Key | Flag | Default | Meaning |
 |---|---|---|---|
-| `pages` | `--memory-pages <N>` | `1` | Size of linear memory in 64 KiB pages: the memory section's minimum, and all a module is guaranteed at instantiation |
-| `max-pages` | `--max-memory-pages <N>` | `pages` | The most pages the memory may grow to: the memory section's maximum |
+| `pages` | `--memory-pages <N>` | `1` | Size of linear memory in 64 KiB pages: the memory's minimum (the memory section's, or the import's), and all a module is guaranteed at instantiation |
+| `max-pages` | `--max-memory-pages <N>` | `pages` | The most pages the memory may grow to: the memory's maximum (the memory section's, or the import's) |
 | `stack-size` | `--stack-size <BYTES>` | `65536`, less what constant data needs | Size of the shadow stack, which spans `[0, stack-size)`, and the budget A036 measures call chains against |
+| `import` | `--import-memory` | `false` | Import the memory from the host as `env.memory` instead of defining it; see [Importing the memory](#importing-the-memory) |
 
-Any key may be given alone; the others keep their defaults, and the three are checked together as the layout they complete to. The stack must fit in `pages`, and be a multiple of the 16-byte frame alignment. Directly above the stack lies the static data region, and above that, up to the end of memory, ordinary addressable memory that nothing the compiler emits reads or writes. The whole memory is exported, so a host reads a program's values in place — an array a program hands to a host import arrives as the address of the caller's copy, inside the stack region.
+Any key may be given alone; the others keep their defaults, and the three numbers are checked together as the layout they complete to. The stack must fit in `pages`, and be a multiple of the 16-byte frame alignment. Directly above the stack lies the static data region, and above that, up to the end of memory, ordinary addressable memory that nothing the compiler emits reads or writes. The whole memory is exported, so a host reads a program's values in place — an array a program hands to a host import arrives as the address of the caller's copy, inside the stack region.
 
-The memory is **fixed** unless a build sets `max-pages` above `pages`: the memory section declares `min == max`, so `memory.grow` can never move the end of memory. Nothing the compiler emits grows memory; a larger maximum is room for a linked module or the host to grow into, and the linker refuses a module that grows memory against a fixed one. The maximum is always a number — there is no unbounded memory — and the `spacewasm` target refuses a growable one outright, because its interpreter is loaded with `memory.grow` disallowed.
+The memory is **fixed** unless a build sets `max-pages` above `pages`: the memory section (or the memory import) declares `min == max`, so `memory.grow` can never move the end of memory. Nothing the compiler emits grows memory; a larger maximum is room for the host to grow into or, in a module that defines its memory, for a linked module to, and the linker refuses a module that grows memory against a fixed one. The maximum is always a number — there is no unbounded memory — and the `spacewasm` target refuses a growable one outright, because its interpreter is loaded with `memory.grow` disallowed.
 
-A configured layout is declared even by a program whose own code touches no memory. Otherwise the module would have no memory for the layout to describe, and a linked module that addresses memory would bring its own: the linker adopts a memoryless program's external memory as that module declared it, so the size and maximum the build asked for — a bound included — would silently give way to the library's. The default layout is still emitted only when something uses it.
+A configured layout is declared even by a program whose own code touches no memory. Otherwise the module would have no memory for the layout to describe, and a linked module that addresses memory would bring its own: the linker adopts a memoryless program's external memory as that module declared it, so the size and maximum the build asked for — a bound included — would silently give way to the library's. The default layout is still emitted only when something uses it. A layout that imports its memory is never the default, however its numbers read: every such program imports one, so what a host has to supply does not depend on what the program uses.
 
 The overflow trap constrains the maximum. A wrapped stack pointer lands at `2^32 - stack-size` or above, and must land past the end of memory to trap, so the memory at its maximum and the stack must fit the 32-bit address space together: `max-pages × 64 KiB + stack-size ≤ 2^32`. The check is made against the maximum rather than the size because growth moves the end of memory up to it. A layout that breaks it is refused when the manifest loads or the flags are read.
 
-Programs without arrays do not get a memory section, a global section, or any memory-related exports. The compiler tracks a `has_memory` flag and only emits these sections when at least one function uses arrays — or when the build configures a layout other than the default (below). Existing programs produce identical WASM output — zero regression.
+Programs without arrays do not get a memory section, a global section, or any memory-related exports. The compiler tracks a `has_memory` flag and only emits these sections when at least one function uses arrays — or when the build configures a layout other than the default, as above, or imports its memory (see [Importing the memory](#importing-the-memory)). Existing programs produce identical WASM output — zero regression.
+
+### Importing the memory
+
+By default a module defines its linear memory, and whatever runs it gets the memory the module declares. An embedder that owns the memory its modules run in can ask for the opposite. `[memory] import = true` in `Inference.toml`, or `infc --import-memory`, has the emitted module import its memory as `env.memory` instead of defining it, and the host supply it. The key is a boolean and defaults to `false`; `import = false` is the same as leaving it out. The import takes its limits from the layout above, and the stack and the static data region are placed in it exactly as they are in a defined memory. The name is fixed — no key renames it — and is the one `wasm-ld --import-memory` imports a memory under by default, so a host that already supplies memory to modules built that way needs no new name for this one.
+
+Take this program, built with `[memory] pages = 2` and `import = true`:
+
+```inference
+external fn clock_ms() -> i64;
+use { clock_ms } from host::env;
+
+const TABLE: [i32; 3] = [10, 20, 30];
+
+pub fn at(i: i32) -> i32 {
+    if i >= 0 && i < 3 { return TABLE[i]; }
+    return 0;
+}
+
+pub fn now() -> i64 {
+    return clock_ms();
+}
+```
+
+The memory declaration, the stack pointer, the exports and the data segment of the module it emits read:
+
+```wat
+(import "env" "memory" (memory (;0;) 2 2))        ;; the host's memory: memory 0
+(import "env" "clock_ms" (func (;0;) (type 0)))   ;; function imports follow it
+...
+(global (;0;) (mut i32) i32.const 65536)          ;; still defined by the module
+...
+(export "memory" (memory 0))                      ;; a re-export of the host's memory
+(export "__stack_pointer" (global 0))
+...
+(data (;0;) (i32.const 65536) "\0a\00\00\00\14\00\00\00\1e\00\00\00")
+```
+
+No `(memory …)` is defined. The data segment is the ordinary active segment of [Module Constants and the Static Data Region](#module-constants-and-the-static-data-region), and instantiation now writes `TABLE` into the host's memory.
+
+**The limits.** The import declares the layout's `pages` as its minimum and `max-pages` as its maximum, which is `pages` unless the build raised it, as a defined memory would. The maximum is always declared, and the memory is 32-bit and unshared. WebAssembly import matching then admits a host memory only if it has at least `pages` pages and declares a maximum of its own that is at most `max-pages`: a memory with no maximum, and a shared memory, do not match, and instantiation fails. That is what keeps the overflow-trap rule of [Configuring the layout](#configuring-the-layout) true of a memory the module did not create. The headroom `max-pages × 64 KiB + stack-size ≤ 2^32` is measured against the maximum because growth moves the end of memory up to it, and a host can never hand over more than `max-pages` pages; an import without a maximum would admit a memory of any size, and a wrapped stack pointer could then land inside it instead of trapping. The minimum is `pages`, the least a host can supply, which is what the stack and the static data region are placed in and what A058 checks them against.
+
+**What else changes, and what does not.** The memory import is the first import, ahead of every function import. Imported memories precede defined ones, so it is memory 0, the memory every load and store addresses, and the function index space counts function imports only, so no function index moves. `__stack_pointer` is still a defined global, initialized to the stack size and exported as `__stack_pointer`, and `memory` is still exported as memory 0, now a re-export of the host's own memory object. It follows that whenever the defined-memory build of the same program declares a memory, every section but Import and Memory is the same bytes in both builds: the import-mode Import section is the memory entry followed by the defined build's entries, and no function, global or custom-section index differs. `tests/src/codegen/wasm/memory_import.rs` holds the two builds to that relation across array, struct, constant, host-import, overflow-checked and omitted-guard programs, at the default, a growable and a small-stack layout, and then runs the builds under wasmtime against a memory the test creates.
+
+One program is the exception. A program that touches no memory, at the default layout, has a defined build with no memory, no stack pointer and neither export. In import mode it still imports `env.memory` and defines and exports the stack pointer and `memory`, because a layout that imports its memory is never the default; the type, function, code and custom sections are still the defined build's.
+
+**A runnable example.** [inference-host-memory-demo](https://github.com/Inference-Global-Software/inference-host-memory-demo) is a small project built with `import = true` and `max-pages = 4`. Its browser walkthrough creates the memory, hands an Inference program sensor readings through host functions, and reads the two arrays the program reports in place, at addresses inside that memory. It then grows the memory up to the program's four pages while the program runs, shows the engine refusing a fifth, and lets the reader offer memories the import does not admit. It also embeds the module in a second WebAssembly program that shares the memory: that program keeps to the pages above the module's, answers its host calls itself, and reads its results by address, with no JavaScript between the two. Two Node.js scripts run the replay and the embedding from a terminal and check their results.
+
+#### The embedder contract
+
+WebAssembly import matching checks the memory's type — its limits, and that it is unshared, 32-bit and of the default page size — and nothing about its contents or how the host uses it. The first rule below is enforced by that check; the others are rules the embedder keeps, because the module cannot check them when it is instantiated.
+
+1. **Supply a memory the import admits.** It has at least `pages` pages and a maximum of its own no greater than `max-pages`. For the program above, which imports `(memory 2 2)`, a JavaScript host writes:
+
+   ```javascript
+   const memory = new WebAssembly.Memory({ initial: 2, maximum: 2 });
+   const { instance } = await WebAssembly.instantiate(bytes, {
+     env: { memory, clock_ms: () => BigInt(Date.now()) },
+   });
+   ```
+
+   and a Rust host using wasmtime's API writes:
+
+   ```rust,ignore
+   use wasmtime::{Engine, Linker, Memory, MemoryType, Module, Store};
+
+   let engine = Engine::default();
+   let module = Module::from_file(&engine, "out/main.wasm")?;
+   let mut store = Store::new(&engine, ());
+
+   let memory = Memory::new(&mut store, MemoryType::new(2, Some(2)))?;
+   let mut linker = Linker::new(&engine);
+   linker.define(&store, "env", "memory", memory)?;
+   linker.func_wrap("env", "clock_ms", || -> i64 { /* read the clock */ 0 })?;
+   let instance = linker.instantiate(&mut store, &module)?;
+   ```
+
+   The memory is registered as `env.memory`, beside the host functions the program binds. A memory with no maximum, a shared memory, one with fewer than `pages` pages, or one whose maximum exceeds `max-pages` makes the engine refuse the instantiation with an incompatible-import error that names the import. The default layout imports `(memory 1 1)`, so its host supplies exactly one page with a maximum of one.
+
+2. **Leave the module's pages alone, except where a call hands you an address.** The module owns the first `pages` pages: its shadow stack occupies `[0, stack-size)` and its constants lie directly above it. In the program above the stack fills the first page and the twelve bytes of `TABLE` start the second. The host may read these pages — a struct or array argument reaches a host function as the address of the caller's copy, inside them — but writes nothing there, with one exception: during a call to one of the host's functions, it may write through an argument declared `mut`, at the address it is handed, and through no other. Every struct or array the host itself places in memory lives above the module's pages: a struct or array a host function returns, which it returns as an address the module reads the value from, and the addresses it passes to an exported function that takes a struct or array or returns one. That memory exists only when `max-pages` exceeds `pages`: the host supplies a memory with more than `pages` pages up front, or grows it. The default one-page layout therefore leaves the host nothing, and so does the program above, whose maximum is its two pages; under such a layout the contract admits only exports that take and return scalars, and only host functions that return scalars. The rest of the first `pages` pages is memory the compiled code does not touch today, but the layout does not set it aside for the host either.
+
+3. **Do not write the constants.** Instantiation writes the static data region into the host's memory, over whatever the memory held there, and nothing the program does writes it again. A later host write into the region changes the program's constants: `TABLE[i]` is a load from that address. A host need not zero the memory first: today the module reads no byte of its region that it has not written, which [An Imported Memory Has No Proof Artifact](#an-imported-memory-has-no-proof-artifact) says more about.
+
+4. **Give each instance a memory of its own.** Every instance puts its shadow stack at address 0 and its constants directly above it. Two instances on one memory — two instantiations of one module, two Inference modules, or a host-import callback that calls into a second instance on the same memory — overwrite each other's stack and constants.
+
+5. **Leave `__stack_pointer` alone.** It is exported, which is useful to a test harness, and it is the module's own state: every frame is carved from it, so a host write relocates the next frame to an address the host chose.
+
+6. **Expect no layout negotiation.** The layout is stack-first at address 0, so the module claims the bottom of the memory. Inference has no counterpart of `wasm-ld`'s `--global-base`, so the base cannot be moved. Sharing one memory between several modules is not a goal of this mode.
+
+#### Targets, proof mode, linking and tooling
+
+- **Targets.** `wasm32` only; every other target refuses it before the program is parsed. `stellar` never supports it: a Soroban contract defines and exports the memory it uses, and the value-ABI rewrite every `stellar` artifact goes through accepts no import, so a contract importing `env.memory` could not be deployed (see [Stellar](compilation_targets.md#stellar)). `spacewasm` does not support it yet: the interpreter can bind a memory its embedder registers, but this toolchain does not build for one, and the F´ reference hosts `infs run` provides register functions only; building for an imported memory at that target is tracked under issue #547 (see [SpaceWasm](compilation_targets.md#spacewasm)). Both refusals name the setting to remove, and `Target::supports_imported_memory()` is the predicate they share.
+- **Proof mode.** A module that imports its memory has no proof artifact. Every build that writes a `.v` is refused — `infc --mode proof`, `-v` and `--mode compile -v`, and `infs build` with `-v`, `--mode proof` or a manifest's `[build] mode = "proof"`, which `infs build --mode compile` overrides — because the proof contract instantiates a module on its own, with an empty import list. [An Imported Memory Has No Proof Artifact](#an-imported-memory-has-no-proof-artifact) says what a proof of the defined-memory build does and does not cover.
+- **Linking.** A program that binds a module through `[wasm-dependencies]` (or `--wasm-dep`, `--wasm-lib-dir` or `INFERENCE_WASM_LIB_PATH`) cannot import its memory: the static merge models only a memory its modules define, not one a host supplies, and the build is refused before external resolution (tracked under issue #546; see [The WASM Linker](the-wasm-linker.md) and [The Link Step](external-functions-and-wasm-linking.md#the-link-step)). Host imports are a different matter and work beside the memory import, with one exception: a host binding imported as `env.memory`, which the build refuses, because an embedder that resolves each import by its module and field name alone, as the JavaScript API and wasmtime's `Linker` do, cannot supply a function and a memory under one name. Bind that function from another host module (see [Host Imports](external-functions-and-wasm-linking.md#host-imports)).
+- **The toolchain.** `infs build` echoes the layout as `memory: 2 page(s), maximum 2, 65536-byte stack, imported from env.memory` or, when the maximum exceeds the size, `memory: 1 page(s) growable to 4, 65536-byte stack, imported from env.memory`, and refuses an `infc` older than ABI 1.11 when the manifest sets `import = true`; `import = false` forwards nothing and gates nothing. `[build.wasm-opt]` output that adds, removes, renames or changes the limits of the memory import fails the build, leaving the compiler's artifact in place, and `infs` never passes Binaryen `--zero-filled-memory`, since a host memory is not zero-filled. `infs run` supplies the memory itself, because the `wasmtime` CLI supplies none, and still refuses an artifact that imports a function (see [`infs run`](projects-and-the-infs-toolchain.md#infs-run)).
 
 ## Module Constants and the Static Data Region
 
@@ -607,20 +702,22 @@ Zig also uses `--stack-first` layout when targeting WASM, placing the stack at l
 
 ## WASM Section Layout
 
-When `has_memory` is true, or the build configured a non-default layout, the compiler emits three additional sections in the WASM module, and a fourth when the program reads a compound module constant:
+When `has_memory` is true, or the build configured a non-default layout or imports its memory, the compiler emits three additional sections in the WASM module, and a fourth when the program reads a compound module constant:
 
 | Section | Contents |
 |---|---|
-| Memory | `pages` minimum, `max-pages` maximum; by default `(memory 1 1)` |
+| Memory | `pages` minimum, `max-pages` maximum; by default `(memory 1 1)`. A layout that imports its memory has no Memory section: the same limits sit on the first entry of the Import section, `(import "env" "memory" (memory pages max-pages))` |
 | Global | `__stack_pointer`: mutable i32, initialized to the stack size; by default `(global (mut i32) i32.const 65536)` |
-| Export | `"memory"` (memory 0), `"__stack_pointer"` (global 0) |
-| Data | one active segment over memory 0 at `i32.const <stack size>`, holding the static data region |
+| Export | `"memory"` (memory 0, a re-export of the host's memory when it is imported), `"__stack_pointer"` (global 0) |
+| Data | one active segment over memory 0 at `i32.const <stack size>`, holding the static data region; in a module that imports its memory it writes into the host's memory at instantiation |
 
-These sections are ordered according to the WASM specification: Type, Function, Memory, Global, Export, Code, Data, Name. The ordering is mandatory — a misordered module fails validation. No `DataCount` section is emitted: it is required only by `memory.init` and `data.drop`, which nothing emits, and the SpaceWasm interpreter cannot decode one.
+These sections are ordered according to the WASM specification: Type, Import, Function, Memory, Global, Export, Code, Data, Name, where the Import section is present only when the module imports something and the Memory section only when it defines a memory. The ordering is mandatory — a misordered module fails validation. No `DataCount` section is emitted: it is required only by `memory.init` and `data.drop`, which nothing emits, and the SpaceWasm interpreter cannot decode one.
 
-When no function uses arrays and the layout is the default, these sections are omitted entirely. The output is byte-identical to what the compiler produced before array support was added.
+When no function uses arrays and the layout is the default, these sections are omitted entirely. The output is byte-identical to what the compiler produced before array support was added. A layout that imports its memory is never the default, so it emits its memory import, its stack pointer and both exports even for a program with no arrays; see [Importing the memory](#importing-the-memory).
 
 ## Formal Verification Implications
+
+This section is about a module that defines its memory. A module that imports it has no proof artifact: see [An Imported Memory Has No Proof Artifact](#an-imported-memory-has-no-proof-artifact) at the end of the section.
 
 ### Modeling Arrays in Rocq
 
@@ -678,6 +775,17 @@ Two elisions have been proposed, and they are not the same proposal. Issue #215 
 
 The full statement lives in `core/wasm-to-v/ROCQ_CONTRACT.md`.
 
+### An Imported Memory Has No Proof Artifact
+
+A layout that imports its memory ([Importing the memory](#importing-the-memory)) is refused in proof mode, at every target, and `infc` writes no `.v` for it. The Rocq contract gives an obligation over memory, globals, calls, `exists` or `unique` a runtime to speak about by instantiating the module on its own, with an empty import list (see [Obligations only an import-free module can discharge](../../core/wasm-to-v/ROCQ_CONTRACT.md#obligations-only-an-import-free-module-can-discharge)). A module importing `env.memory` cannot be instantiated that way, so every such obligation over it would be a theorem no proof can discharge, and the build refuses to write the `.v` rather than hand a prover an unprovable goal.
+
+A project that wants a proof and an imported memory builds the proof from the defined-memory build of the same program, at the same numbers, and ships the other. This is open only to a program that binds no host import: `infc` refuses a `.v` for every host-import program, whichever way it holds its memory, so for one there is no proof to carry over. `infs build` has no per-build override for `[memory] import`, so a project builds the proof with the key set to `false` (or removed), or runs `infc` without `--import-memory`. Whenever the defined-memory build declares a memory, the two modules differ only in their Import and Memory sections, but a proof of the first is a statement about that module running alone, in a memory it created, and the second is not run that way. The proof carries over only if both of these hold:
+
+- **The host writes nothing in the module's region** — its stack and its constants — for as long as the instance exists. The proof's memory is written by the module and by nothing else; a host that writes the region is a writer the proof does not contain. [The embedder contract](#the-embedder-contract) states the rule from the host's side.
+- **Compiled code never reads a byte of its region before its instance has written it.** The proof starts from a memory the module created and the semantics zeroed, while a host memory holds whatever the host left in it. Today this holds because the prologue zero-fills every frame unconditionally and the data segment covers its whole region, padding included, and the module tests run their programs against a memory filled with `0xAA` as well as a zeroed one.
+
+Neither premise is a theorem. Both are documented here and not proved, and if either fails, the proof of the defined-memory build says nothing about the module that ships.
+
 ## Current Implementation
 
 The memory infrastructure is in `core/wasm-codegen/src/memory.rs` (constants, data structures, store/load helpers, prologue/epilogue emission, parameter copy). Frame layout computation and array lowering methods are in `core/wasm-codegen/src/compiler.rs`, including the body scan that decides whether a compound parameter is written or forwarded to an external and therefore needs a frame slot at all. That decision is made in one place, when the frame layout is computed: the entry-copy loop emits a copy exactly when a slot exists, so the two cannot disagree.
@@ -686,7 +794,8 @@ The implementation uses coverage marks to verify that each code path is exercise
 
 | Coverage Mark | What It Tracks |
 |---|---|
-| `wasm_codegen_emit_memory_section` | Memory/Global section emission in `finish()` |
+| `wasm_codegen_emit_memory_section` | The Memory section, emitted in `finish_and_take()` when the module defines its memory |
+| `wasm_codegen_emit_memory_import` | The memory import, first among the imports, in place of the Memory section when the layout imports its memory |
 | `wasm_codegen_emit_stack_prologue` | Frame allocation at function entry |
 | `wasm_codegen_emit_stack_epilogue` | Frame deallocation at all exit points |
 | `wasm_codegen_emit_array_literal` | Element stores for array initialization |

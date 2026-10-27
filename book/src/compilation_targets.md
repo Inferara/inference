@@ -42,6 +42,7 @@ At `--target spacewasm` only the first of those is refused. `--mode proof` and a
 | wasm-opt | Never applied to proof-mode output | `[build.wasm-opt]` (`infs`'s opt-in Binaryen post-build step) explicitly skips proof/`-v` builds — Binaryen has no lowering for the non-det opcode family a spec function may carry |
 | Code inclusion | All (spec + executable) | Spec code defines properties; execution code is the verification target |
 | Host imports | None: `infc` refuses every build that writes a `.v` for a program binding `use { f } from host::<module>;`, at every target | The body is the embedder's, outside the artifact a proof is written about, and the translation has no way to state an assumption about it; see [Host Imports](external-functions-and-wasm-linking.md#host-imports) |
+| Imported memory | None: `infc` refuses every build that writes a `.v` for a layout that imports its memory (`[memory] import = true`, `--import-memory`), at every target | The proof contract instantiates a module on its own, with an empty import list, so an obligation over a module importing `env.memory` could not be discharged; see [An Imported Memory Has No Proof Artifact](memory-allocation-in-wasm-codegen.md#an-imported-memory-has-no-proof-artifact) |
 | No non_det output | Identical to compile mode release | Nothing to formalize structurally |
 | Determinism | Bitwise reproducible | Same source must produce same `.v` file |
 
@@ -77,9 +78,9 @@ Purpose: general WASM execution and verification of Inference code.
 | Target | `wasm32-unknown-unknown` |
 | Instruction set | WebAssembly 1.0. `proof` mode may additionally emit the custom 0xfc non-deterministic instructions, which only this target permits, and `--wasm-features bulk-memory` opts into `memory.copy`/`memory.fill` |
 | WASM proposals the module uses | `mutable-globals` only — a module with linear memory exports its mutable `__stack_pointer` global — unless a build opts into `bulk-memory` above |
-| Linear memory | One fixed 64 KiB page, all stack, by default; `[memory]` sets the size, a maximum it may grow to, and the stack's share — see [Configuring the layout](memory-allocation-in-wasm-codegen.md#configuring-the-layout) |
+| Linear memory | One fixed 64 KiB page, all stack, by default; `[memory]` sets the size, a maximum it may grow to, and the stack's share — see [Configuring the layout](memory-allocation-in-wasm-codegen.md#configuring-the-layout). The module may instead import its memory from the host as `env.memory` (`[memory] import = true`, `infc --import-memory`), which only this target permits — see [Importing the memory](memory-allocation-in-wasm-codegen.md#importing-the-memory) |
 | Recorded `OptLevel` (compile) | `O3` under `release`, `O0` under `debug` — no optimization pass currently acts on either |
-| Proof mode output | Byte-identical to compile mode's, plus structurally 1:1 spec functions |
+| Proof mode output | Byte-identical to compile mode's, plus structurally 1:1 spec functions. A build that imports its memory has none: `infc` refuses every build that writes a `.v` for one |
 
 ### Stellar
 
@@ -399,6 +400,10 @@ before it emitted them — the same CLI panics on `info interface` and offers
 - **`--wasm-features`.** `permits_bulk_memory()` is `false` for this target, so
   the one post-MVP family the compiler can emit is refused before a byte is
   emitted.
+- **An imported linear memory.** `[memory] import = true` and
+  `infc --import-memory` are refused before the program is parsed, for the
+  reason given under *Module shape* below: a contract defines and exports its
+  own memory.
 - **`[build.wasm-opt]`.** Declaring it alongside `target = "stellar"` is a
   load-time manifest error. Whether an external Binaryen preserves the
   wrappers and `contractenvmetav0` depends on which version is installed, and
@@ -491,7 +496,10 @@ are therefore properties of code generation:
   it, written by one active data segment at instantiation. Its size is one fixed 64 KiB
   page by default and is set through `[memory]` / `--memory-pages` / `--stack-size`, not by a
   link-time flag. `[memory] max-pages` / `--max-memory-pages` lets the contract's memory grow up
-  to a declared bound.
+  to a declared bound. The contract defines that memory and exports it; it never imports one.
+  `[memory] import` / `--import-memory` is refused at this target, because the value-ABI rewrite
+  every artifact goes through accepts no import, so a contract importing `env.memory` could not be
+  deployed.
 
 ### SpaceWasm
 
@@ -506,7 +514,7 @@ nothing to the module. There is no marshalling shell, none of the contract
 sections a Stellar build appends, and no rewrite: the artifact a SpaceWasm
 build writes is, byte for byte, the artifact a `wasm32` build writes from the
 same source. What the target does is narrow what a build may *contain* — the
-instruction set, and nothing else.
+instruction set and the shape of its linear memory, and nothing else.
 
 | Setting | Value | Source |
 |---------|-------|--------|
@@ -514,7 +522,7 @@ instruction set, and nothing else.
 | Instruction set | WebAssembly 1.0, with no opt-in available | `Target::permits_bulk_memory()` is `false`, so the one post-MVP family the compiler can emit is unreachable here |
 | WASM proposals the module uses | `mutable-globals` only — a module with linear memory exports its mutable `__stack_pointer` global — and no instruction outside WebAssembly 1.0 | See "What the interpreter decodes" below |
 | Compilation mode | `compile` only | Proof mode emits the custom 0xfc non-deterministic instructions, which the interpreter's decoder does not define |
-| Linear memory | Fixed: `[memory] max-pages` / `--max-memory-pages` above the page count fails the build | `Target::permits_memory_growth()` is `false`: the interpreter is loaded with `memory.grow` disallowed, as `spacewasm_std` and `infs run` load it, so room above the size could never be reached |
+| Linear memory | Fixed and defined by the module: `[memory] max-pages` / `--max-memory-pages` above the page count fails the build, and so does `[memory] import` / `--import-memory`, for now | `Target::permits_memory_growth()` is `false`: the interpreter is loaded with `memory.grow` disallowed, as `spacewasm_std` and `infs run` load it, so room above the size could never be reached. `Target::supports_imported_memory()` is `false`: the interpreter can bind a memory its embedder registers, but this toolchain does not build for one, and the F´ reference hosts `infs run` provides register functions only; building for an imported memory here is tracked under issue #547 |
 | Recorded `OptLevel` (compile) | `Os` under `release`, `O0` under `debug` — no optimization pass currently acts on either | `Os` is the target's `default_opt_level`: size is the scarce resource on a flight computer |
 | Floats | Impossible — no float instruction can be emitted, at any target | The language has no floating-point type: `SimpleTypeKind` (`core/ast`) admits the unit type `()`, `bool` and the eight integer widths and nothing else |
 | Emitted bytes | Identical to a `wasm32` compile-mode build of the same source | Nothing on the emission path reads a target; see the procedure below |

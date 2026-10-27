@@ -56,8 +56,8 @@ use crate::project::ProjectContext;
 use crate::project::manifest::{HostImports, MANIFEST_FILE_NAME, MemoryConfig, VerificationConfig};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
 use inference_compiler_interface::{
-    BoundsChecks, COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, TargetName, WasmFeatureName,
-    render_feature_list,
+    BoundsChecks, COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, MemoryImport, MemoryLayout, TargetName,
+    WasmFeatureName, render_feature_list,
 };
 
 /// Compiles the entry point of a discovered project (project mode).
@@ -377,6 +377,22 @@ impl CompilerCompat {
         self.supports_abi_minor(10)
     }
 
+    /// Whether the resolved `infc` is known to support the additive
+    /// `--import-memory` flag, which landed at ABI minor 11.
+    ///
+    /// Separate from [`Self::supports_memory_layout`] and
+    /// [`Self::supports_max_memory_pages`] because each flag names its own
+    /// minor: a project that sets only the numbers must keep building against
+    /// the `infc` those need. A dropped forward would build a module that
+    /// defines its own memory. An embedder that resolves imports by name still
+    /// instantiates it against a host that supplies `env.memory`, and the
+    /// module then computes on a different memory than its host — nothing
+    /// fails, and nothing the host writes reaches the program — so an
+    /// unhonorable request refuses the build rather than degrading it.
+    pub fn supports_import_memory(self) -> bool {
+        self.supports_abi_minor(11)
+    }
+
     /// Whether the resolved `infc` is known to have the additive feature
     /// introduced at `minor`: either it is the same build (`commit_matched`, the
     /// strongest signal) or it advertises at least that minor within the
@@ -552,9 +568,10 @@ pub(crate) fn forward_bounds_checks(
     Ok(())
 }
 
-/// Appends `--memory-pages` / `--max-memory-pages` / `--stack-size` to `cmd` for
-/// the keys the project actually declared, after confirming the resolved `infc`
-/// can honor them, and echoes the resolved layout to stdout.
+/// Appends `--memory-pages` / `--max-memory-pages` / `--stack-size` /
+/// `--import-memory` to `cmd` for the keys the project actually declared, after
+/// confirming the resolved `infc` can honor them, and echoes the resolved layout
+/// to stdout.
 ///
 /// Every path that spawns `infc` on behalf of a project routes through here, for
 /// the same reason [`forward_wasm_features`] exists once: a project must get the
@@ -567,8 +584,11 @@ pub(crate) fn forward_bounds_checks(
 /// forwarded is therefore the request, not its resolution — and since `infc`
 /// fills an omitted flag from the same default, the layout it resolves is the one
 /// echoed here. Each key is gated on the minor its own flag landed at, for the
-/// same reason: `max-pages` asks for minor 10, and a project that does not set it
-/// must not be held to that floor.
+/// same reason: `max-pages` asks for minor 10 and `import = true` for minor 11,
+/// and a project that does not set them must not be held to those floors.
+/// `import = false` is no request at all, so it forwards nothing and gates
+/// nothing; `import = true` is forwarded as the bare `--import-memory`, after the
+/// numeric flags.
 ///
 /// The declared-nothing check lives inside rather than at the call sites so no
 /// caller can reach the ABI gate on behalf of a project that asked for nothing.
@@ -617,20 +637,15 @@ pub(crate) fn forward_memory_layout(
             manifest()
         );
     }
-    if layout.is_growable() {
-        println!(
-            "memory: {} page(s) growable to {}, {}-byte stack",
-            layout.pages(),
-            layout.max_pages(),
-            layout.stack_size()
-        );
-    } else {
-        println!(
-            "memory: {} page(s), {}-byte stack",
-            layout.pages(),
-            layout.stack_size()
+    if memory.import && !compat.supports_import_memory() {
+        bail!(
+            "the resolved infc does not support `--import-memory` (requires infc \
+             ABI ≥ 1.11); update the toolchain or remove `import` from the \
+             `[memory]` table of {}.",
+            manifest()
         );
     }
+    println!("memory: {}", layout_echo(layout));
     if let Some(pages) = memory.pages {
         cmd.arg("--memory-pages").arg(pages.to_string());
     }
@@ -640,7 +655,37 @@ pub(crate) fn forward_memory_layout(
     if let Some(stack_size) = memory.stack_size {
         cmd.arg("--stack-size").arg(stack_size.to_string());
     }
+    if memory.import {
+        cmd.arg("--import-memory");
+    }
     Ok(())
+}
+
+/// The layout [`forward_memory_layout`] echoes, after its `memory: ` prefix.
+///
+/// A defined memory reads `2 page(s), 32768-byte stack`, or `2 page(s)
+/// growable to 8, 32768-byte stack`, and leaves a fixed memory's maximum
+/// unsaid: only the module constructs that memory, and its maximum is its
+/// size. An imported one states the maximum in both forms and closes with the
+/// name it is imported under — `2 page(s), maximum 2, 32768-byte stack,
+/// imported from env.memory` — because the host constructs it, and a host
+/// memory with no maximum, or a larger one, does not match the import.
+fn layout_echo(layout: MemoryLayout) -> String {
+    let (pages, max_pages) = (layout.pages(), layout.max_pages());
+    let size = if layout.is_growable() {
+        format!("{pages} page(s) growable to {max_pages}")
+    } else if layout.is_imported() {
+        format!("{pages} page(s), maximum {max_pages}")
+    } else {
+        format!("{pages} page(s)")
+    };
+    let stack_size = layout.stack_size();
+    if layout.is_imported() {
+        let (module, field) = (MemoryImport::MODULE, MemoryImport::FIELD);
+        format!("{size}, {stack_size}-byte stack, imported from {module}.{field}")
+    } else {
+        format!("{size}, {stack_size}-byte stack")
+    }
 }
 
 /// Appends `--adopt-external-specs` to `cmd` when the project asked for it and
@@ -1442,6 +1487,7 @@ mod project_tests {
                 pages: Some(4),
                 max_pages: None,
                 stack_size: None,
+                import: false,
             },
             None,
         )
@@ -1456,6 +1502,7 @@ mod project_tests {
                 pages: None,
                 max_pages: None,
                 stack_size: Some(32_768),
+                import: false,
             },
             None,
         )
@@ -1470,6 +1517,7 @@ mod project_tests {
                 pages: Some(2),
                 max_pages: None,
                 stack_size: Some(32_768),
+                import: false,
             },
             None,
         )
@@ -1497,6 +1545,7 @@ mod project_tests {
                 pages: Some(2),
                 max_pages: None,
                 stack_size: None,
+                import: false,
             },
             Some(&manifest),
         )
@@ -1736,6 +1785,7 @@ mod project_tests {
                 pages: Some(0),
                 max_pages: None,
                 stack_size: None,
+                import: false,
             },
             None,
         )
@@ -1816,6 +1866,7 @@ mod project_tests {
                 pages: Some(2),
                 max_pages: Some(8),
                 stack_size: Some(32_768),
+                import: false,
             },
             None,
         )
@@ -1840,6 +1891,7 @@ mod project_tests {
                 pages: None,
                 max_pages: Some(8),
                 stack_size: None,
+                import: false,
             },
             None,
         )
@@ -1866,6 +1918,7 @@ mod project_tests {
                 pages: Some(4),
                 max_pages: None,
                 stack_size: None,
+                import: false,
             },
             None,
         )
@@ -1880,6 +1933,7 @@ mod project_tests {
                     pages: Some(4),
                     max_pages: Some(8),
                     stack_size: None,
+                    import: false,
                 },
             ),
             (
@@ -1888,6 +1942,7 @@ mod project_tests {
                     pages: None,
                     max_pages: Some(8),
                     stack_size: None,
+                    import: false,
                 },
             ),
         ] {
@@ -1911,6 +1966,312 @@ mod project_tests {
                 args_of(&cmd).is_empty(),
                 "minor {minor}: a refused request must leave no flag on the command"
             );
+        }
+    }
+
+    /// `--import-memory` landed at minor 11, so a minor-10 `infc` — which has
+    /// `--max-memory-pages` and every older flag — must not be sent it, and a
+    /// same-build one always may.
+    #[test]
+    fn supports_import_memory_capability_matrix() {
+        assert!(
+            CompilerCompat {
+                commit_matched: true,
+                abi: None,
+            }
+            .supports_import_memory(),
+            "a same-build infc supports every flag this infs knows"
+        );
+        for minor in [11, 12] {
+            assert!(
+                CompilerCompat {
+                    commit_matched: false,
+                    abi: Some((COMPILER_ABI_MAJOR, minor)),
+                }
+                .supports_import_memory(),
+                "minor {minor} must support --import-memory"
+            );
+        }
+        let minor_ten = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 10)),
+        };
+        assert!(
+            !minor_ten.supports_import_memory(),
+            "minor 10 predates --import-memory"
+        );
+        assert!(
+            minor_ten.supports_max_memory_pages() && minor_ten.supports_memory_layout(),
+            "minor 10 still supports the older memory flags; only the newer one is gated out"
+        );
+        for compat in [
+            CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR + 1, 11)),
+            },
+            CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR - 1, 99)),
+            },
+            CompilerCompat {
+                commit_matched: false,
+                abi: None,
+            },
+        ] {
+            assert!(
+                !compat.supports_import_memory(),
+                "a foreign major or an unknown ABI must not be sent the flag: {compat:?}"
+            );
+        }
+    }
+
+    /// `import = true` is forwarded as the bare `--import-memory`, exactly once
+    /// and after every numeric flag, beside any combination of them and alone;
+    /// `import = false` forwards nothing for itself, whatever else is declared.
+    ///
+    /// The import-only row is the one whose numbers are all unset: a forward
+    /// that keyed on the numbers, or a declared-nothing check that ignored the
+    /// import, sends nothing for it, and `infc` defines the memory.
+    #[test]
+    fn forward_memory_layout_forwards_an_import_last_and_only_when_asked() {
+        let same_build = CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        };
+        let memory = |pages, max_pages, stack_size, import| MemoryConfig {
+            pages,
+            max_pages,
+            stack_size,
+            import,
+        };
+        let rows: [(MemoryConfig, &[&str]); 6] = [
+            (memory(None, None, None, true), &["--import-memory"]),
+            (
+                memory(Some(2), None, None, true),
+                &["--memory-pages", "2", "--import-memory"],
+            ),
+            (
+                memory(None, Some(8), None, true),
+                &["--max-memory-pages", "8", "--import-memory"],
+            ),
+            (
+                memory(Some(2), Some(8), Some(32_768), true),
+                &[
+                    "--memory-pages",
+                    "2",
+                    "--max-memory-pages",
+                    "8",
+                    "--stack-size",
+                    "32768",
+                    "--import-memory",
+                ],
+            ),
+            (
+                memory(Some(2), None, Some(32_768), false),
+                &["--memory-pages", "2", "--stack-size", "32768"],
+            ),
+            (
+                memory(Some(2), Some(8), Some(32_768), false),
+                &[
+                    "--memory-pages",
+                    "2",
+                    "--max-memory-pages",
+                    "8",
+                    "--stack-size",
+                    "32768",
+                ],
+            ),
+        ];
+        for (memory, expected) in rows {
+            let mut cmd = Command::new("infc");
+            forward_memory_layout(&mut cmd, same_build, &memory, None)
+                .expect("a same-build infc supports the flags");
+            let args = args_of(&cmd);
+            assert_eq!(args, expected, "{memory:?}");
+            let forwarded = args.iter().filter(|arg| *arg == "--import-memory").count();
+            assert_eq!(
+                forwarded,
+                usize::from(memory.import),
+                "{memory:?}: {args:?}"
+            );
+        }
+    }
+
+    /// The import is gated on its own minor. A minor-10 `infc` builds a project
+    /// that sets every number and no import, and refuses one that also sets
+    /// `import = true` — naming the flag, minor 11, the key and the manifest,
+    /// not an older floor — with the command left untouched. An import alone is
+    /// refused at minor 3 for minor 11 as well, not sent to the older floor its
+    /// absent numbers would ask for.
+    #[test]
+    fn forward_memory_layout_gates_the_import_on_its_own_minor() {
+        let minor_ten = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 10)),
+        };
+        let numbers = MemoryConfig {
+            pages: Some(2),
+            max_pages: Some(8),
+            stack_size: Some(32_768),
+            import: false,
+        };
+        let mut cmd = Command::new("infc");
+        forward_memory_layout(&mut cmd, minor_ten, &numbers, None)
+            .expect("a project that imports no memory needs only minor 10");
+        assert!(
+            !args_of(&cmd).contains(&"--import-memory".to_string()),
+            "{:?}",
+            args_of(&cmd)
+        );
+
+        let manifest = Path::new("/projects/demo").join(MANIFEST_FILE_NAME);
+        let imported = |pages| MemoryConfig {
+            pages,
+            max_pages: None,
+            stack_size: None,
+            import: true,
+        };
+        for (minor, memory) in [
+            (10, imported(Some(2))),
+            (10, imported(None)),
+            (3, imported(None)),
+            (
+                10,
+                MemoryConfig {
+                    import: true,
+                    ..numbers
+                },
+            ),
+        ] {
+            let compat = CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR, minor)),
+            };
+            let mut cmd = Command::new("infc");
+            let err = forward_memory_layout(&mut cmd, compat, &memory, Some(&manifest))
+                .expect_err("the import needs minor 11");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("`--import-memory`") && msg.contains("ABI ≥ 1.11"),
+                "minor {minor}, {memory:?}: the error must name the flag and its ABI, got: {msg}"
+            );
+            assert!(
+                msg.contains("update the toolchain")
+                    && msg.contains("remove `import` from the `[memory]` table")
+                    && msg.contains(&manifest.display().to_string()),
+                "minor {minor}, {memory:?}: the error must offer both remediations and name \
+                 the manifest, got: {msg}"
+            );
+            assert!(
+                !msg.contains("1.3)") && !msg.contains("1.10)"),
+                "minor {minor}, {memory:?}: the import must not be sent to an older floor, \
+                 got: {msg}"
+            );
+            assert!(
+                args_of(&cmd).is_empty(),
+                "minor {minor}, {memory:?}: a refused request must leave no flag on the command"
+            );
+        }
+
+        let minor_eleven = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 11)),
+        };
+        let mut cmd = Command::new("infc");
+        forward_memory_layout(&mut cmd, minor_eleven, &imported(Some(2)), Some(&manifest))
+            .expect("minor 11 supports --import-memory");
+        assert_eq!(args_of(&cmd), ["--memory-pages", "2", "--import-memory"]);
+    }
+
+    /// An unusable memory is reported ahead of the import's gate too, so a user
+    /// whose `infc` predates the flag and whose table is wrong anyway is told
+    /// about the value first: a zero size at minor 2, and a maximum below the
+    /// size at minor 10.
+    #[test]
+    fn forward_memory_layout_reports_a_bad_value_ahead_of_the_import_gate() {
+        for (minor, memory, diagnosis) in [
+            (
+                2,
+                MemoryConfig {
+                    pages: Some(0),
+                    max_pages: None,
+                    stack_size: None,
+                    import: true,
+                },
+                "at least one 64 KiB page",
+            ),
+            (
+                10,
+                MemoryConfig {
+                    pages: Some(4),
+                    max_pages: Some(2),
+                    stack_size: None,
+                    import: true,
+                },
+                "is below its size",
+            ),
+        ] {
+            let compat = CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR, minor)),
+            };
+            let mut cmd = Command::new("infc");
+            let err = forward_memory_layout(&mut cmd, compat, &memory, None)
+                .expect_err("the layout is unusable");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(diagnosis) && !msg.contains("--import-memory"),
+                "{memory:?}: the value must be diagnosed, not the toolchain, got: {msg}"
+            );
+            assert_eq!(args_of(&cmd), Vec::<String>::new(), "{memory:?}");
+        }
+    }
+
+    /// The echo after `memory: ` in each of its four forms. A defined memory
+    /// keeps the form it had before an import was possible, so every existing
+    /// project's build log reads as it did; an imported one states its maximum
+    /// even when fixed, since the host builds that memory and has to match it,
+    /// and closes with the name it is imported under.
+    #[test]
+    fn the_layout_echo_states_an_imported_memorys_maximum_and_name() {
+        let resolved = |pages, max_pages, stack_size, import| {
+            MemoryConfig {
+                pages,
+                max_pages,
+                stack_size,
+                import,
+            }
+            .resolved_layout()
+            .expect("a usable layout")
+        };
+        for (layout, echo) in [
+            (
+                resolved(Some(2), None, Some(32_768), false),
+                "2 page(s), 32768-byte stack",
+            ),
+            (
+                resolved(Some(2), Some(8), Some(32_768), false),
+                "2 page(s) growable to 8, 32768-byte stack",
+            ),
+            (
+                resolved(Some(2), None, Some(32_768), true),
+                "2 page(s), maximum 2, 32768-byte stack, imported from env.memory",
+            ),
+            (
+                resolved(Some(2), Some(8), Some(32_768), true),
+                "2 page(s) growable to 8, 32768-byte stack, imported from env.memory",
+            ),
+            (
+                resolved(Some(2), Some(2), Some(32_768), true),
+                "2 page(s), maximum 2, 32768-byte stack, imported from env.memory",
+            ),
+            (
+                resolved(None, None, None, true),
+                "1 page(s), maximum 1, 65536-byte stack, imported from env.memory",
+            ),
+            (MemoryLayout::default(), "1 page(s), 65536-byte stack"),
+        ] {
+            assert_eq!(layout_echo(layout), echo, "{layout:?}");
         }
     }
 

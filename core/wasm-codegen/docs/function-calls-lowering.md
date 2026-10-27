@@ -302,8 +302,11 @@ local index `1`. The generated WAT:
 The import section is emitted in `finish_and_take` between the Type section and
 the Function section (the WASM section ordering mandate). It is guarded by
 `cov_mark::hit!(wasm_codegen_emit_import_section)` and omitted entirely when
-there are no externs. Each entry carries the logical module name, the export
-field name, and the type index from `intern_type`.
+there are no externs and the layout defines its memory. Each function entry
+carries the logical module name, the export field name, and the type index from
+`intern_type`. A layout that imports its memory puts one more entry first,
+`env.memory` with the layout's limits, which occupies memory index 0 and shifts
+no function index, since the function index space counts function imports only.
 
 ### Type Deduplication
 
@@ -409,7 +412,7 @@ position supplies none.
 | `wasm_codegen_self_escapes_to_extern` | varies | That escaping parameter was an immutable `self` receiver |
 | `wasm_codegen_param_reaches_read_only_extern` | varies | A compound parameter or receiver reaches an `external fn` argument, but every declaration it reaches marks nothing `mut` — the link then admits only a merged body that stores nowhere, so no slot is allocated |
 | `wasm_codegen_param_by_reference` | varies | A compound parameter or receiver is neither assigned through nor forwarded to an `external fn` that declares a `mut` parameter, so it gets no frame slot and no entry copy |
-| `wasm_codegen_emit_import_section` | 1+ | Import section emitted (fires whenever at least one `external fn` is present) |
+| `wasm_codegen_emit_import_section` | 1+ | Import section emitted (fires whenever at least one bound `external fn` is present, or the layout imports its memory) |
 | `wasm_codegen_emit_extern_call` | 1+ | Extern call lowered to `call <import_idx>` (fires in `single_import_test`) |
 | `wasm_codegen_extern_out_of_scope` | varies | A callee name that is a bound `external fn` elsewhere in the program is not one in the calling scope, so the call resolves as a local function instead |
 

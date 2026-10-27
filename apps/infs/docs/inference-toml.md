@@ -45,6 +45,7 @@ auto-install = false    # download wasm-opt automatically if it is missing
 pages = 1               # 64 KiB pages; fixed at this size unless max-pages is set
 max-pages = 1           # the most pages it may grow to; defaults to pages
 stack-size = 65536      # shadow stack bytes, at the bottom of that memory
+import = false          # true: the host supplies the memory, as env.memory (wasm32 only)
 
 [host-imports]          # optional: the host functions the program may bind
 env = ["clock_ms"]      # import module -> the fields of it admitted
@@ -56,10 +57,10 @@ output-dir = "proofs/"   # honored only in proof mode
 ## Unknown Keys
 
 Every table with a fixed set of fields — the manifest root (which table names it
-accepts), `[package]`, `[build]`, `[build.wasm-opt]`, `[verification]`, and each
-`[wasm-dependencies]` entry — rejects a key it does not recognize. A misspelled
-key is a load error naming the offending key, its line and column, and the fields
-that table accepts:
+accepts), `[package]`, `[build]`, `[build.wasm-opt]`, `[memory]`,
+`[verification]`, and each `[wasm-dependencies]` entry — rejects a key it does
+not recognize. A misspelled key is a load error naming the offending key, its
+line and column, and the fields that table accepts:
 
 ```
 TOML parse error at line 7, column 1
@@ -128,8 +129,9 @@ ABI gate as project mode. This is deliberate rather than incidental: `infs build
 set, the artifact you ship would depend on which command last touched it.
 `[build] target` and `[memory]` are honored by both for the same reason, with
 the same validation and ABI gates as project mode: the first decides which
-runtime the artifact is built for, the second its linear memory and the shadow
-stack's share of it.
+runtime the artifact is built for, the second its linear memory, the shadow
+stack's share of it, and whether the module defines that memory or imports it
+from its host.
 
 `[wasm-dependencies]` is resolved identically everywhere: project `infs build`,
 project `infs run`, single-file `infs build <path>`, and single-file `infs run
@@ -237,7 +239,9 @@ The `[build]` section configures compilation settings.
     The first three are refused by the manifest itself, at load time, in a
     message naming both keys, so they are invalid for every command rather than
     skipped by some; the last is enforced by the compiler, where the exports
-    are. `infs run` also refuses such a project: a contract is invoked by a
+    are. The compiler also refuses `[memory] import = true` here, since a
+    contract defines the memory it uses (see [`[memory]`](#memory)).
+    `infs run` also refuses such a project: a contract is invoked by a
     Soroban host, which encodes each argument into that tagged word, and by
     nothing else. See the book's Compilation Targets chapter for the full rule
     set.
@@ -246,7 +250,9 @@ The `[build]` section configures compilation settings.
     wrappers, none of the contract sections a Stellar build appends, and no
     rewrite. What it narrows is what a build may contain — no `mode = "proof"`
     and no `wasm-features`, both refused by the manifest on load in a message
-    naming both keys. `[build.wasm-opt]` stays available, unlike at
+    naming both keys, and no growable memory or `[memory] import = true`, both
+    refused by the compiler when the build runs (see [`[memory]`](#memory)).
+    `[build.wasm-opt]` stays available, unlike at
     `"stellar"`: what that refusal protects is a contract's value-ABI wrappers
     and its `contractenvmetav0` section, and this target's module has
     neither. `infs run` is available too, and executes the module in process
@@ -406,7 +412,9 @@ wasm-opt -Oz: main.wasm 300 -> 202 bytes
 wasm-opt removed 1 host import the program never calls: env.clock_ms; the artifact now imports fprime_core.command, fprime_core.telemetry
 ```
 
-A build whose imports the optimizer left alone prints no such line. The [`[host-imports]`](#host-imports) allowlist still bounds what ships, by construction: the optimizer may only remove imports, and optimized bytes importing a function the artifact `infc` wrote did not import are refused, leaving that artifact in place. `infs run` asks its import question of the optimized bytes, so a program whose host imports are all uncalled runs once they are optimized away.
+A build whose imports the optimizer left alone prints no such line. The [`[host-imports]`](#host-imports) allowlist still bounds what ships, by construction: the optimizer may only remove function imports, and optimized bytes importing a function the artifact `infc` wrote did not import are refused, leaving that artifact in place. `infs run` asks its import question of the optimized bytes, so a program whose host imports are all uncalled runs once they are optimized away.
+
+The memory import that [`[memory] import = true`](#memory) asks for is held tighter than a function import. It is not an interface the program may narrow but the contract with the host that supplies the memory. Optimized bytes that add a memory import, remove it, rename it or change either of its limits (a different minimum, or a maximum that moved, appeared or vanished) are therefore discarded too: the build fails naming the import that would have landed and the one the artifact `infc` wrote, and leaves that artifact in place. `infs` never passes `--zero-filled-memory` to `wasm-opt`, which keeps the data segment of a module that imports its memory intact: a memory the host supplies is not zero-filled, and the flag would let the optimizer drop the segment's zero bytes as already there.
 
 #### Disabling optimization for one invocation
 
@@ -444,19 +452,26 @@ The resolved binary must report **Binaryen 116 or newer** (`wasm-opt --version`)
 ### [memory]
 
 The `[memory]` table sets the linear memory the emitted module declares, how far
-it may grow, and the share of it the shadow stack occupies. Every key is
-optional, and an absent table is identical to one with no keys: one fixed page,
-entirely stack — less whatever the program's constant data needs at its top.
+it may grow, the share of it the shadow stack occupies, and whether the module
+defines that memory or imports it from its host. Every key is optional, and an
+absent table is identical to one with no keys: one fixed page the module
+defines, entirely stack — less whatever the program's constant data needs at its
+top.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `pages` | integer | `1` | Size of linear memory in 64 KiB pages: the memory section's minimum, and all the module is guaranteed at instantiation |
-| `max-pages` | integer | `pages` | The most pages the memory may grow to: the memory section's maximum |
+| `pages` | integer | `1` | Size of linear memory in 64 KiB pages: the memory section's minimum, or the memory import's when `import` is `true`, and all the module is guaranteed at instantiation |
+| `max-pages` | integer | `pages` | The most pages the memory may grow to: the memory section's maximum, or the memory import's when `import` is `true` |
 | `stack-size` | integer | `65536`, less what constant data needs | Size of the shadow stack in bytes, occupying `[0, stack-size)`; also the budget analysis rule A036 measures call chains against |
+| `import` | boolean | `false` | `true` makes the module import its memory from the host as `env.memory`, at the limits above, instead of defining it; `wasm32` only, and not in a build that writes a `.v` (see below). `false` is the same as leaving the key out |
 
-Any key may be given alone; the others keep their defaults. The three are
-validated on load as the layout they complete to, with the same rules and
-wording `infc` applies to its flags:
+Any key may be given alone; the others keep their defaults. All four are
+validated on load. `import` must be a boolean: a value of any other type — `1`,
+or the string `"true"` — is refused as the manifest loads, naming the key's line
+and what it takes (`expected a boolean`), rather than read as either answer. The
+three numbers are validated as the layout they complete to, with the same rules
+and wording `infc` applies to its flags; a memory that is imported is held to
+the same rules as one the module defines:
 
 - `pages` is at least 1 and at most 65536; `max-pages` is at least `pages` and
   at most 65536.
@@ -478,22 +493,85 @@ constants and the `pages` (or smaller `stack-size`) that holds them.
 A table that sets anything other than the defaults is declared by the module
 even when the program's own code uses no memory, so a linked module that
 addresses memory merges onto the memory the table describes instead of
-bringing its own.
+bringing its own. A table that sets `import = true` is declared likewise, as an
+import, but no linked module can meet it (see below).
 
 The memory is **fixed** unless `max-pages` exceeds `pages`. Nothing the
 compiler emits grows memory: a larger maximum is room for a linked module or
-the host to grow into, and a linked module that grows memory is refused against
-a fixed one, with a message naming `max-pages`. The `spacewasm` target refuses a
-growable memory, because its interpreter is loaded with `memory.grow`
-disallowed.
+the host to grow into (a module that imports its memory has no linked module,
+so the room is the host's alone), and a linked module that grows memory is
+refused against a fixed one, with a message naming `max-pages`. The `spacewasm`
+target refuses a growable memory, because its interpreter is loaded with
+`memory.grow` disallowed.
 
-Each declared key is forwarded to `infc` as its flag — `--memory-pages`,
+With `import = true` the module does not define its linear memory but imports
+it, as `(import "env" "memory" (memory N M))`, and the host that instantiates
+the module supplies and owns the memory. `N` is `pages` and `M` is `max-pages`
+(which defaults to `pages`), so the maximum is always declared. WebAssembly
+import matching admits only a host memory of at least `pages` pages whose own
+maximum is present and at most `max-pages`, so a host can never hand over more
+than the `max-pages` that the headroom rule above is measured against. The
+imported memory is memory 0 and the module still exports it as `memory`, beside
+`__stack_pointer`; a program that touches no memory imports one all the same.
+
+The module owns the first `pages` pages of that memory: its shadow stack at
+address 0 and its constants directly above it, which its data segment writes
+into the host's memory at instantiation. The host may read them, but writes
+nothing there except through a `mut` struct or array argument, at the address a
+call to one of its functions hands it. Compound values the host places itself
+live above those pages: a struct or array a host function returns (as an
+address the module reads the value from), and the value and result addresses
+the host passes to an exported function that takes or returns one. That memory
+exists only when `max-pages` exceeds `pages`, so the default one-page layout
+leaves the host none: its exports must take and return scalars, and its host
+functions return them. The book's
+[embedder contract](../../../book/src/memory-allocation-in-wasm-codegen.md#the-embedder-contract)
+states in full what a host has to supply and keep out of, and
+[Importing the memory](../../../book/src/memory-allocation-in-wasm-codegen.md#importing-the-memory)
+the rest of the mode. `infs run` plays the host for a `wasm32` program that
+imports its memory (see [Running a program that binds host
+imports](#running-a-program-that-binds-host-imports)).
+
+The mode is refused, before a byte is emitted, where it cannot be honored:
+
+- Only `wasm32` builds it. `stellar` is refused for good: a Soroban contract
+  defines and exports its memory, and the value-ABI rewrite every such artifact
+  goes through accepts no import. `spacewasm` is refused for now (tracked under
+  issue #547).
+- A build that writes a `.v` is refused — `infs build -v`, `infs build --mode
+  proof`, and a manifest with `[build] mode = "proof"` — because the proof
+  contract instantiates a module with an empty import list, so a module that
+  imports its memory has no proof artifact. `infs build --mode compile`
+  overrides the manifest's proof mode and builds, and `infs run` always builds
+  in compile mode. What a proof of the same program built with a defined
+  memory says about the imported build rests on premises that are documented
+  and not proved, and only for a program that binds no host import, since one
+  that does gets no `.v` in either memory mode; see [An Imported Memory Has No
+  Proof Artifact](../../../book/src/memory-allocation-in-wasm-codegen.md#an-imported-memory-has-no-proof-artifact).
+- A linked module is refused beside it — a `[wasm-dependencies]` entry (or
+  `--wasm-dep`, `--wasm-lib-dir` or `INFERENCE_WASM_LIB_PATH`) that a `use … from`
+  clause binds — because the static merge models only a memory its modules
+  define (tracked under issue #546). So is a host function bound as
+  `env.memory`: an embedder that resolves each import by its module and field
+  name alone cannot supply a function and a memory under one name.
+
+Each declared number is forwarded to `infc` as its flag — `--memory-pages`,
 `--max-memory-pages`, `--stack-size` — and gated on the ABI minor that flag
-landed at: 1.3 for `pages` and `stack-size`, 1.10 for `max-pages`. An
-undeclared key is never forwarded, so a project that sets no maximum puts no
-1.10 floor under its compiler. `infs` echoes the resolved layout, as
+landed at: 1.3 for `pages` and `stack-size`, 1.10 for `max-pages`. `import = true`
+is forwarded as the bare `--import-memory`, after those flags, and is gated on
+ABI 1.11 on its own, so a project that sets only the numbers still builds
+against the compiler it needed before. An older compiler is refused with
+remediation rather than handed the build without the flag, which would define
+the memory the manifest asked to import. Nothing else is forwarded: an
+undeclared key never is, so a project that sets no maximum puts no 1.10 floor
+under its compiler, and `import = false` is no request at all, forwarding
+nothing and gating nothing. `infs` echoes the resolved layout, as
 `memory: 2 page(s), 32768-byte stack`, or as
 `memory: 2 page(s) growable to 8, 32768-byte stack` when the memory may grow.
+An imported memory is echoed with its maximum in both forms and the name it is
+imported under, as
+`memory: 2 page(s), maximum 2, 32768-byte stack, imported from env.memory`, or as
+`memory: 2 page(s) growable to 8, 32768-byte stack, imported from env.memory`.
 
 #### Example
 
@@ -501,6 +579,17 @@ undeclared key is never forwarded, so a project that sets no maximum puts no
 [memory]
 pages = 4           # 256 KiB of linear memory
 stack-size = 131072 # half of it is shadow stack; constant data goes above it
+```
+
+A module that a host instantiates against a memory of its own imports that
+memory instead. This one asks the host for a memory of at least two pages whose
+maximum is at most four, the first two pages being the module's:
+
+```toml
+[memory]
+pages = 2           # the import's minimum: the module owns these 128 KiB
+max-pages = 4       # the import's maximum: the host's memory may not exceed it
+import = true       # the host supplies the memory, as env.memory (wasm32 only)
 ```
 
 ### [host-imports]
@@ -581,10 +670,11 @@ one the table had policed.
 host functions, at the signature the reference embedder registers it with: it
 runs under the SpaceWasm interpreter with those hosts, and any other import is
 refused before a byte is decoded. At `wasm32` it builds the program and then
-refuses to execute it: it registers no host function under wasmtime and does
-not let wasmtime stand in for the embedder the program is written for — not
-even for the WASI functions the wasmtime CLI provides on its own. That refusal
-names each imported function, and the `spacewasm` target when every one is an
+refuses to execute one that imports a function: it registers no host function
+under wasmtime and does not let wasmtime stand in for the embedder the program
+is written for — not even for the WASI functions the wasmtime CLI provides on
+its own. That refusal names each imported function, and the `spacewasm` target
+when every one is an
 F´ reference host at its reference signature; otherwise, run the program from
 the embedder that supplies them. Either way the question is decided from the
 built artifact rather than from this table, which is an allowlist and not a
@@ -594,6 +684,21 @@ the optimized one, which at any level but `"0"` no longer imports a host
 function the program never calls. The book's [Running a program that binds host
 imports](../../../book/src/external-functions-and-wasm-linking.md#running-a-program-that-binds-host-imports)
 section shows how an embedder registers the functions a program imports.
+
+A memory import is a different matter from a function import. At `wasm32`
+`infs run` still registers no host function, but it supplies an imported memory
+(see [`[memory]`](#memory)): the wasmtime CLI supplies none, so `infs run` writes
+a small module that exports one memory at exactly the limits the built
+artifact's own import declares, beside the artifact under a name of its own
+run's (`out/main.wasm.<pid>-0.memory` in a project, so two runs of one artifact
+that overlap never share or remove each other's), runs wasmtime with that module
+preloaded under the import's module name, and removes the file once the run
+ends, whether it succeeded or not. A `wasm32` program that imports its memory and no function
+therefore runs; one that imports a function as well is refused for the
+function, and when every one is an F´ reference host the memory import does not
+stop the refusal from naming the `spacewasm` target. Where the manifest sets
+them, that refusal also names `[memory] import = true`, and a growable memory's
+`[memory] max-pages`, among the keys to remove, since that target refuses both.
 
 #### Example
 
@@ -682,6 +787,10 @@ replacement is needed.
 - `[memory] max-pages`: the most pages the linear memory may grow to (see
   [`[memory]`](#memory)). Requires an `infc` with ABI 1.10 or newer; an older
   compiler is refused rather than handed the flag.
+- `[memory] import`: whether the module imports its linear memory from the host
+  as `env.memory` instead of defining it (see [`[memory]`](#memory)). Requires an
+  `infc` with ABI 1.11 or newer; an older compiler is refused rather than handed
+  the flag. `import = false` asks for nothing and has no such requirement.
 - `[host-imports]`: the host-import allowlist, one array of field names per
   import module (see [`[host-imports]`](#host-imports)). An `infs` that predates
   the table but has the unknown-key refusal rejects a manifest carrying it; one

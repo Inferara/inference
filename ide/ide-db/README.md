@@ -98,9 +98,23 @@ shared target vocabulary, with an absent or unknown name leaving the default
 Analysis rules run for that target, which is what lets a rule that measures a
 program against its runtime report in the editor what `infs build` would: A055
 refuses a function over SpaceWasm's 255 parameter words, and underlines it in a
-`spacewasm` project only. The other artifact settings are the defaults; A036
-measures against the default shadow stack even in a project whose manifest
-configures a `[memory]` layout.
+`spacewasm` project only.
+
+The memory layout travels with the target through the same tiers: the
+manifest's `[memory]` keys (`pages`, `max-pages`, `stack-size` and `import`),
+resolved as `infs` and `infc` resolve them with an absent key taken from the
+default layout; the donor entry's own layout; the default layout for the
+own-directory tier. A036 measures a call chain against the shadow stack that
+layout gives, and A058 the stack and the program's constants against its
+pages, so a project that enlarges its stack is not flagged in the editor for a
+chain its build accepts, and one that shrinks it is flagged for a chain its
+build rejects. A `[memory]` table `infs` would refuse to load — an unknown key,
+a size that is not an integer a `u32` can hold, an `import` that is not a
+boolean — or that describes no memory a build could emit is unusable as a
+whole, and the file is analyzed against the default layout instead, since there
+is no build for the editor to agree with. `import` moves no stack: it is carried
+so that the layout is the one a build resolves. The other artifact settings are
+the defaults.
 
 A manifest or donor root is cached for the document until it is closed, and
 there is no filesystem watch in v1, so a manifest edited while the document is

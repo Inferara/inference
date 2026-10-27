@@ -313,7 +313,14 @@ alone prints no such line. The allowlist still bounds what ships, by
 construction: the optimizer may only remove imports, and optimized bytes
 importing a function the artifact `infc` wrote did not import are refused,
 leaving that artifact in place, so every import that ships is one `infc`
-admitted. `infs run` judges the final bytes, so a program whose host imports
+admitted. The memory import of a build that imports its memory (`[memory]
+import = true`; see [Importing the
+memory](memory-allocation-in-wasm-codegen.md#importing-the-memory)) is held
+tighter still, because it is a contract with the embedder rather than an
+interface the program may narrow: it must survive unchanged, so optimized bytes
+that remove, rename or re-limit it, or add one the artifact did not have, are
+refused the same way.
+`infs run` judges the final bytes, so a program whose host imports
 are all uncalled runs under it once they are optimized away (see [Running a
 program that binds host imports](#running-a-program-that-binds-host-imports)).
 
@@ -330,7 +337,8 @@ program that binds host imports](#running-a-program-that-binds-host-imports)).
 | A host import at a target that does not bind the host-call convention (`stellar`) | `infc`, before external resolution, in code generation's words; code generation itself for any other caller |
 | A host import no embedder could register — a module or field name over 31 bytes, or more than nine parameters — at `--target spacewasm` | `infc` over the declarations, after external resolution and before the allowlist; the post-link conformance check over the bytes |
 | A host import the build's allowlist does not admit | `infc`, after external resolution |
-| Executing an artifact that imports a function — at `wasm32` any function; at `spacewasm` any function outside the F´ reference hosts or at another signature | `infs run`, after the build, from the artifact's import section |
+| A linked module (`[wasm-dependencies]` / `--wasm-dep`), or a host import named `env.memory`, in a build that imports its memory (`[memory] import = true`) | `infc`, before external resolution, in code generation's words; code generation itself for any other caller. The linked case is tracked under issue #546 |
+| Executing an artifact that imports a function — at `wasm32` any function; at `spacewasm` any function outside the F´ reference hosts or at another signature | `infs run`, after the build, from the artifact's import section. The memory an artifact imports is not refused: at `wasm32` `infs run` supplies it |
 
 The proof refusal is raised before external resolution deliberately. A program
 that is both mixed and a proof build would otherwise hear the mixed-program
@@ -351,7 +359,11 @@ otherwise ask for an entry admitting an import the target refuses anyway. The
 SpaceWasm registration caps come before the allowlist because an allowlist
 entry has to spell the import's final name: asked the other way round, the
 allowlist asks the reader to admit a name no embedder can register, and the
-rename the caps then ask for leaves that entry matching nothing.
+rename the caps then ask for leaves that entry matching nothing. The
+imported-memory refusal of a binding is raised before external resolution too:
+a linked binding whose library is missing would first read "External module
+resolution failed", and a host import named `env.memory` would be told by the
+allowlist to admit `env.memory`, and each remedy only leads into that refusal.
 
 ### The allowlist
 
@@ -511,9 +523,10 @@ one that imports anything else, or a reference host at another signature, is
 refused with nothing executed, naming each such import and the declaration that
 would match.
 
-A `wasm32` build runs under `wasmtime`, where `infs run` registers no host
-function, and it does not let wasmtime stand in for an embedder either — not
-even for the WASI functions the wasmtime CLI provides on its own, which a
+A `wasm32` build runs under `wasmtime`. There `infs run` registers no host
+function, though it does supply the linear memory of a program built to import
+its own (below), and it does not let wasmtime stand in for an embedder either —
+not even for the WASI functions the wasmtime CLI provides on its own, which a
 program importing them could otherwise run against. Which host functions happen
 to be at hand is a property of the runtime, not of the program. `infs run`
 therefore builds such a program and then refuses to execute it, naming each
@@ -529,12 +542,21 @@ A `wasm32` build runs under wasmtime, where `infs run` registers no host functio
 ```
 
 A project whose manifest sets `mode = "proof"` or a `wasm-features` list, which
-a manifest naming the `spacewasm` target may not, is told to remove them as well
-as to set the target. A file outside any project is told to run `infs init`
+a manifest naming the `spacewasm` target may not, or a `[memory]` that target
+refuses when the build runs — a `max-pages` above `pages`, or `import = true` —
+is told to remove them as well as to set the target.
+A file outside any project is told to run `infs init`
 first, since it has no manifest to name a target in. A program with any other
 import is told only that `infs run` provides host functions to a `spacewasm`
 build alone, and only the F´ reference set at its reference signatures, and to
 run it from the embedder that supplies them.
+
+A program built to import its linear memory (`[memory] import = true`) is not
+refused on that account. `infs run` supplies the memory, one defined at exactly
+the limits the artifact's own import declares, and runs the program against it;
+an artifact that imports a function as well as its memory is refused for the
+function. See [`infs run`](projects-and-the-infs-toolchain.md#infs-run) for how
+the memory is supplied.
 
 The refusal is decided from the artifact rather than from the manifest, because
 a `[host-imports]` table is an allowlist and not a declaration: a project can
@@ -579,6 +601,20 @@ linker.func_wrap(
 linker.func_wrap("env", "clock_ms", || -> i64 { /* read the mission clock */ 0 })?;
 let instance = linker.instantiate(&mut store, &module)?;
 ```
+
+A program built with `[memory] import = true` imports its memory too, as
+`env.memory` ahead of these functions, so an embedder like this one also
+defines that memory before it instantiates. For `pages = 2`, whose maximum is
+then also 2, the host builds a memory with exactly those limits:
+
+```rust,ignore
+let memory = wasmtime::Memory::new(&mut store, wasmtime::MemoryType::new(2, Some(2)))?;
+linker.define(&store, "env", "memory", memory)?;
+```
+
+What the embedder may supply, and what it must leave alone once the module is
+instantiated in it, is stated in [The embedder
+contract](memory-allocation-in-wasm-codegen.md#the-embedder-contract).
 
 An embedder of the SpaceWasm interpreter registers through `spacewasm`'s host
 API instead: one `HostModule` per import module name, handed to the engine
@@ -710,11 +746,14 @@ Tier C — so the `__stack_pointer` global lld puts in every
 `wasm32-unknown-unknown` artifact no longer rejects it on sight.
 
 That is a necessary step toward linking stock toolchain output, not a sufficient
-one. Such an artifact also declares a multi-page linear memory, and the merge
-never relaxes the anchor module's declared bound, so against an Inference main —
-which emits a fixed one-page `(memory 1 1)` — it now clears the tier gate and
-fails at memory reconciliation instead. Configurable linear memory is a separate
-change.
+one. Such an artifact also declares a multi-page linear memory. The merge widens
+the main module's minimum to cover it but never relaxes the main module's
+declared maximum, so a closure that addresses memory, merged into an Inference
+main whose memory is the default — a fixed one-page `(memory 1 1)` — clears the
+tier gate and fails at memory reconciliation instead. The layout is
+configurable: a main whose `[memory]` maximum (`max-pages`, which defaults to
+`pages`) reaches the external's declared minimum reconciles; see [Configuring
+the layout](memory-allocation-in-wasm-codegen.md#configuring-the-layout).
 
 A Tier-C function produces a clear error at link time:
 
@@ -730,6 +769,12 @@ Tier-C support in a future release.
 
 - External functions that themselves import their host environment (memory, globals)
   are rejected with a clear error: a static merge cannot reconstruct that environment.
+- A main module that imports its own memory (`[memory] import = true`) cannot
+  link `[wasm-dependencies]` modules yet. The static merge models only a memory
+  its modules define, not one a host supplies, so `infc` refuses a program that
+  binds a linked module in that mode, before external resolution, and the
+  merge itself refuses a main module with a non-function import should one
+  reach it. Linking with an imported memory is tracked under issue #546.
 - Analysis rule A024 (`ExternFunctionCall`) is scope-aware: a call to a *bound*
   external (one named by a `use { … } from <module>;` in scope) is allowed and
   flows through the codegen + link path. Only a call to an *unbound* bare
@@ -764,6 +809,11 @@ restrictions of its own:
   to it; see [`mut` on a host
   parameter](#mut-on-a-host-parameter-is-an-assertion-not-a-contract).
 - It cannot build at `stellar`, which refuses host imports; see [What is
+  refused, and by which layer](#what-is-refused-and-by-which-layer).
+- In a build that imports its memory (`[memory] import = true`), no host import
+  can be named `env.memory`, the name the memory is imported under: an embedder
+  that resolves each import by its module and field name alone cannot supply a
+  function and a memory under one name, so `infc` refuses the build; see [What is
   refused, and by which layer](#what-is-refused-and-by-which-layer).
 - An import module or field name has to be an Inference identifier, and nothing
   maps a declaration onto any other import string: `wasi_snapshot_preview1` can
