@@ -836,8 +836,9 @@ pub struct ImportWriteSet {
 /// extend as far as the output does.
 ///
 /// A warning is never a defect the linker found in the merged program. It states
-/// where the merge's own proofs stop, at a point where the emitted artifact
-/// makes that limit reachable.
+/// where the merge's own proofs stop, or where a linked module's own declaration
+/// no longer holds in the output, at a point where the emitted artifact makes
+/// that reachable.
 ///
 /// Every variant so far concerns a **merged external**, and a wrapper in the
 /// `inference` crate leans on that: its no-externals fast path returns an empty
@@ -900,6 +901,143 @@ pub enum LinkWarning {
         adopted: usize,
         obligations: Vec<String>,
     },
+
+    /// The main module's own memory replaced the declared maximum of one or
+    /// more linked modules whose merged closures grow memory.
+    ///
+    /// When the main module declares a memory, its maximum is the linked
+    /// memory's, and it governs `memory.grow` in every merged body. That is how
+    /// a program links two growing libraries whose maxima disagree, so the link
+    /// goes ahead; this names each growing import whose module declared a
+    /// different maximum, so the author sees where growth now stops.
+    ///
+    /// - It arises only from a satisfied import whose closure grows memory, so
+    ///   it concerns a merged external like every other variant, and
+    ///   `core/inference`'s no-externals fast path stays equivalent.
+    /// - It cannot arise under a pinned main (`max == min`): the link refuses
+    ///   every growing import first. Nor under a memoryless main: there the
+    ///   linked memory's maximum is the smallest one declared, unbounded when
+    ///   none is, and the link refuses every growing import whose own maximum
+    ///   differs from it.
+    /// - It changes no emitted byte. The linked memory, and so the machine the
+    ///   paired `.v` describes, is main's maximum over the reconciled minimum
+    ///   with or without it.
+    /// - An obligation adopted with `--adopt-external-specs` that relied on
+    ///   growth failing at the library's own maximum is still discharged
+    ///   against the merged module, whose maximum is main's. At worst it becomes
+    ///   unprovable, never unsound.
+    ///
+    /// A module that only reads or writes memory is never named: only
+    /// `memory.grow` observes the maximum.
+    MemoryMaximumOverridden {
+        /// The linked memory's maximum, which is main's, in pages. `None` only
+        /// for a main declaring an unbounded memory, which Inference codegen
+        /// never emits.
+        program_maximum: Option<u64>,
+        /// One entry per distinct growing `(module, field)` import, sorted by
+        /// module and then field.
+        overridden: Vec<OverriddenMaximum>,
+    },
+}
+
+/// A growing import whose module's declared maximum the program's own memory
+/// replaced; see [`LinkWarning::MemoryMaximumOverridden`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverriddenMaximum {
+    /// Logical module the import was bound under (`use … from <module>`,
+    /// `--wasm-dep <module>=…`).
+    pub module: String,
+    /// Export field the import names.
+    pub field: String,
+    /// The maximum that module declares, in pages; `None` when it declares
+    /// none.
+    pub declared_maximum: Option<u64>,
+}
+
+/// Which way the program's maximum moved one growing module's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaximumMove {
+    Raised,
+    Lowered,
+    /// The two maxima are equal. The linker never names such a module; the
+    /// variant keeps `Display` total over the public payload.
+    Kept,
+}
+
+impl MaximumMove {
+    fn word(self) -> &'static str {
+        match self {
+            MaximumMove::Raised => "raised",
+            MaximumMove::Lowered => "lowered",
+            MaximumMove::Kept => "kept",
+        }
+    }
+}
+
+/// A page count with the noun agreeing: "1 page", "N pages".
+fn render_pages(count: u64) -> String {
+    if count == 1 {
+        "1 page".to_string()
+    } else {
+        format!("{count} pages")
+    }
+}
+
+/// One entry's clause in [`LinkWarning::MemoryMaximumOverridden`]'s message,
+/// with the way the program's maximum moved that module's.
+///
+/// Decided by an explicit match on the two maxima, never by `Option`'s order:
+/// that puts `None` first, so comparing the options would read "declares no
+/// maximum" as the smallest maximum rather than the absence of one.
+fn render_overridden_clause(
+    entry: &OverriddenMaximum,
+    program_maximum: Option<u64>,
+) -> (MaximumMove, String) {
+    let name = inference_fn_key::merged_name::root(&entry.module, &entry.field);
+    let (verdict, effect) = match (entry.declared_maximum, program_maximum) {
+        (Some(declared), Some(program)) if declared != program => {
+            let verdict = if program > declared {
+                MaximumMove::Raised
+            } else {
+                MaximumMove::Lowered
+            };
+            let declared_pages = render_pages(declared);
+            let program_pages = render_pages(program);
+            (
+                verdict,
+                format!(
+                    "declares a maximum of {declared_pages}, so `memory.grow` there now stops at \
+                     {program_pages} instead of {declared}"
+                ),
+            )
+        }
+        (None, Some(program)) => {
+            let program_pages = render_pages(program);
+            (
+                MaximumMove::Lowered,
+                format!(
+                    "declares no maximum, so `memory.grow` there now stops at {program_pages} \
+                     instead of growing without bound"
+                ),
+            )
+        }
+        (Some(declared), None) => {
+            let declared_pages = render_pages(declared);
+            (
+                MaximumMove::Raised,
+                format!(
+                    "declares a maximum of {declared_pages}, so `memory.grow` there now grows \
+                     without bound instead of stopping at {declared_pages}"
+                ),
+            )
+        }
+        (Some(_), Some(_)) | (None, None) => {
+            (MaximumMove::Kept, "declares the same maximum".to_string())
+        }
+    };
+    let word = verdict.word();
+    let clause = format!("{word} for the module providing `{name}`, which {effect}");
+    (verdict, clause)
 }
 
 impl fmt::Display for LinkWarning {
@@ -999,6 +1137,69 @@ impl fmt::Display for LinkWarning {
                      would name a function this module does not contain, and the proof \
                      translation would reject the artifact outright. {closing}",
                     obligations.join(", ")
+                )
+            }
+            LinkWarning::MemoryMaximumOverridden {
+                program_maximum,
+                overridden,
+            } => {
+                let lead = match program_maximum {
+                    Some(program) => format!(
+                        "the program's linear memory has a maximum of {}, which governs \
+                         `memory.grow` in every linked module",
+                        render_pages(*program)
+                    ),
+                    None => "the program's linear memory declares no maximum, which leaves \
+                             `memory.grow` unbounded in every linked module"
+                        .to_string(),
+                };
+                let rendered: Vec<(MaximumMove, String)> = overridden
+                    .iter()
+                    .map(|entry| render_overridden_clause(entry, *program_maximum))
+                    .collect();
+                let clauses = if rendered.is_empty() {
+                    "none".to_string()
+                } else {
+                    rendered
+                        .iter()
+                        .map(|(_, clause)| clause.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
+                let moved = |direction: MaximumMove| {
+                    rendered.iter().any(|&(verdict, _)| verdict == direction)
+                };
+                let consequence = match (moved(MaximumMove::Lowered), moved(MaximumMove::Raised)) {
+                    (true, false) => {
+                        " Under a lowered maximum, `memory.grow` can return -1 where the module \
+                         alone would succeed."
+                    }
+                    (false, true) => {
+                        " Under a raised maximum, `memory.grow` can succeed where the module \
+                         alone would return -1."
+                    }
+                    (true, true) => {
+                        " Under a lowered maximum, `memory.grow` can return -1 where the module \
+                         alone would succeed; under a raised one, it can succeed where the \
+                         module alone would return -1."
+                    }
+                    (false, false) => "",
+                };
+                // No setting produces an unbounded memory, so only a bounded
+                // program's maximum names the knob it comes from.
+                let setting = match program_maximum {
+                    Some(_) => {
+                        "; the program's maximum is set by `max-pages` in the `[memory]` table \
+                         of `Inference.toml`, or by `infc --max-memory-pages <N>`."
+                    }
+                    None => ".",
+                };
+                write!(
+                    f,
+                    "{lead} and replaces the maximum a growing module declares where the two \
+                     differ: {clauses}.{consequence} The program decides the maximum by design, \
+                     which is what lets libraries whose maximums differ link together. This is \
+                     not a fault found in the program or the library{setting}"
                 )
             }
         }
@@ -1337,6 +1538,217 @@ mod tests {
                 message.contains("1 reachability obligation was left behind"),
                 "every render names what it left behind, got: {message}"
             );
+        }
+    }
+
+    /// A maximum-override warning under `program_maximum` naming `entries`,
+    /// each as `(module, field, declared maximum)`, rendered.
+    fn maximum_override(
+        program_maximum: Option<u64>,
+        entries: &[(&str, &str, Option<u64>)],
+    ) -> String {
+        LinkWarning::MemoryMaximumOverridden {
+            program_maximum,
+            overridden: entries
+                .iter()
+                .map(|&(module, field, declared_maximum)| OverriddenMaximum {
+                    module: module.to_string(),
+                    field: field.to_string(),
+                    declared_maximum,
+                })
+                .collect(),
+        }
+        .to_string()
+    }
+
+    /// #553's case, whole: the one template, rendered for a single raised
+    /// entry, so a change to any part of the wording shows here.
+    #[test]
+    fn the_raised_override_renders_exactly() {
+        assert_eq!(
+            maximum_override(Some(10), &[("b", "growB", Some(2))]),
+            "the program's linear memory has a maximum of 10 pages, which governs `memory.grow` \
+             in every linked module and replaces the maximum a growing module declares where the \
+             two differ: raised for the module providing `b::growB`, which declares a maximum of \
+             2 pages, so `memory.grow` there now stops at 10 pages instead of 2. Under a raised \
+             maximum, `memory.grow` can succeed where the module alone would return -1. The \
+             program decides the maximum by design, which is what lets libraries whose maximums \
+             differ link together. This is not a fault found in the program or the library; the \
+             program's maximum is set by `max-pages` in the `[memory]` table of \
+             `Inference.toml`, or by `infc --max-memory-pages <N>`."
+        );
+    }
+
+    /// The lowered case, whole: one library under a lower maximum, so the text
+    /// states the rule rather than claiming two linked libraries differ.
+    #[test]
+    fn the_lowered_override_renders_exactly() {
+        assert_eq!(
+            maximum_override(Some(5), &[("a", "growA", Some(10))]),
+            "the program's linear memory has a maximum of 5 pages, which governs `memory.grow` \
+             in every linked module and replaces the maximum a growing module declares where the \
+             two differ: lowered for the module providing `a::growA`, which declares a maximum \
+             of 10 pages, so `memory.grow` there now stops at 5 pages instead of 10. Under a \
+             lowered maximum, `memory.grow` can return -1 where the module alone would succeed. \
+             The program decides the maximum by design, which is what lets libraries whose \
+             maximums differ link together. This is not a fault found in the program or the \
+             library; the program's maximum is set by `max-pages` in the `[memory]` table of \
+             `Inference.toml`, or by `infc --max-memory-pages <N>`."
+        );
+    }
+
+    #[test]
+    fn a_raised_maximum_says_growth_the_module_would_refuse_can_succeed() {
+        let message = maximum_override(Some(10), &[("b", "growB", Some(2))]);
+        for part in [
+            "raised for the module providing `b::growB`",
+            "declares a maximum of 2 pages",
+            "now stops at 10 pages instead of 2",
+            "Under a raised maximum, `memory.grow` can succeed where the module alone would \
+             return -1.",
+            "set by `max-pages` in the `[memory]` table of `Inference.toml`",
+            "or by `infc --max-memory-pages <N>`",
+        ] {
+            assert!(message.contains(part), "missing {part:?} in: {message}");
+        }
+        assert!(
+            !message.contains("lowered") && !message.contains("Under a lowered maximum"),
+            "a warning with no lowered entry does not talk about one: {message}"
+        );
+    }
+
+    #[test]
+    fn a_lowered_maximum_says_growth_the_module_would_allow_can_fail() {
+        let message = maximum_override(Some(5), &[("a", "growA", Some(10))]);
+        for part in [
+            "lowered for the module providing `a::growA`",
+            "declares a maximum of 10 pages",
+            "now stops at 5 pages instead of 10",
+            "Under a lowered maximum, `memory.grow` can return -1 where the module alone would \
+             succeed.",
+        ] {
+            assert!(message.contains(part), "missing {part:?} in: {message}");
+        }
+        assert!(
+            !message.contains("raised") && !message.contains("Under a raised maximum"),
+            "a warning with no raised entry does not talk about one: {message}"
+        );
+    }
+
+    #[test]
+    fn a_module_that_declares_no_maximum_has_it_lowered() {
+        // "No maximum" is the top, not the bottom: bounding it lowers it.
+        let message = maximum_override(Some(10), &[("memlib", "grow_by", None)]);
+        for part in [
+            "lowered for the module providing `memlib::grow_by`, which declares no maximum",
+            "now stops at 10 pages instead of growing without bound",
+            "Under a lowered maximum",
+        ] {
+            assert!(message.contains(part), "missing {part:?} in: {message}");
+        }
+        assert!(!message.contains("raised"), "nothing was raised: {message}");
+    }
+
+    #[test]
+    fn an_unbounded_program_raises_a_bounded_module_and_names_no_setting() {
+        // No setting produces an unbounded memory, so the message does not
+        // send the reader to one.
+        let message = maximum_override(None, &[("b", "growB", Some(2))]);
+        for part in [
+            "the program's linear memory declares no maximum, which leaves `memory.grow` \
+             unbounded in every linked module",
+            "raised for the module providing `b::growB`, which declares a maximum of 2 pages",
+            "now grows without bound instead of stopping at 2 pages",
+            "Under a raised maximum, `memory.grow` can succeed where the module alone would \
+             return -1.",
+            "This is not a fault found in the program or the library.",
+        ] {
+            assert!(message.contains(part), "missing {part:?} in: {message}");
+        }
+        for absent in ["governs", "max-pages", "--max-memory-pages", "lowered"] {
+            assert!(
+                !message.contains(absent),
+                "an unbounded program's warning must not say {absent:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_page_is_singular() {
+        let message = maximum_override(Some(3), &[("s", "grow", Some(1))]);
+        assert!(
+            message.contains("declares a maximum of 1 page, so")
+                && message.contains("now stops at 3 pages instead of 1."),
+            "got: {message}"
+        );
+        assert!(!message.contains("1 pages"), "got: {message}");
+        let message = maximum_override(Some(1), &[("s", "grow", None)]);
+        assert!(
+            message.contains("has a maximum of 1 page, which governs")
+                && message.contains("now stops at 1 page instead of growing without bound"),
+            "got: {message}"
+        );
+        assert!(!message.contains("1 pages"), "got: {message}");
+    }
+
+    #[test]
+    fn several_entries_render_in_payload_order_with_both_consequences() {
+        let message = maximum_override(
+            Some(10),
+            &[
+                ("a", "growA", Some(2)),
+                ("b", "grow", None),
+                ("c", "growC", Some(20)),
+            ],
+        );
+        let expected_clauses = "raised for the module providing `a::growA`, which declares a \
+             maximum of 2 pages, so `memory.grow` there now stops at 10 pages instead of 2; \
+             lowered for the module providing `b::grow`, which declares no maximum, so \
+             `memory.grow` there now stops at 10 pages instead of growing without bound; \
+             lowered for the module providing `c::growC`, which declares a maximum of 20 pages, \
+             so `memory.grow` there now stops at 10 pages instead of 20. Under a lowered \
+             maximum, `memory.grow` can return -1 where the module alone would succeed; under a \
+             raised one, it can succeed where the module alone would return -1. The program \
+             decides";
+        assert!(
+            message.contains(expected_clauses),
+            "missing the clauses {expected_clauses:?} in: {message}"
+        );
+    }
+
+    #[test]
+    fn the_payloads_the_linker_never_builds_still_render() {
+        // `Display` is total over the public type: an equal entry reads as
+        // kept, and an empty list as none, and neither adds a consequence.
+        let kept = maximum_override(Some(10), &[("a", "growA", Some(10))]);
+        assert!(
+            kept.contains(
+                "differ: kept for the module providing `a::growA`, which declares the same \
+                 maximum. The program decides"
+            ),
+            "got: {kept}"
+        );
+        let kept_unbounded = maximum_override(None, &[("u", "growU", None)]);
+        assert!(
+            kept_unbounded.contains("kept for the module providing `u::growU`"),
+            "got: {kept_unbounded}"
+        );
+        let empty = maximum_override(Some(10), &[]);
+        assert!(
+            empty.contains("differ: none. The program decides"),
+            "got: {empty}"
+        );
+        for message in [&kept, &kept_unbounded, &empty] {
+            for consequence in [
+                "Under a raised maximum",
+                "Under a lowered maximum",
+                "return -1",
+            ] {
+                assert!(
+                    !message.contains(consequence),
+                    "no consequence for a warning that moves nothing: {message}"
+                );
+            }
         }
     }
 }
