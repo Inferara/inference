@@ -160,14 +160,40 @@ in, which is the order the program wrote its `external fn` declarations in — a
 swapping two declaration lines would then change the emitted memory, what
 `memory.grow` returns, and the machine the `.v` describes.
 
-If your program has its own memory, its maximum governs every linked module.
+If your program has its own memory, its maximum governs every linked module, and
+the linker warns about each growing module whose own maximum it replaces.
 Otherwise the linked memory is the tightest fit to the modules' own declarations,
 which relaxes no module's bound, and a link that no memory fits, or that would
 move where any module's `memory.grow` stops, is refused.
 
 - **A main module with a memory** keeps its maximum, whatever the externals'
   own caps, and widens its minimum to the largest any module declares. An
-  external minimum above main's maximum is refused.
+  external minimum above main's maximum is refused. A module that grows memory
+  under a different maximum of its own is linked all the same, and the link
+  raises one `LinkWarning::MemoryMaximumOverridden` naming each such import as
+  `module::field` and saying whether the program's maximum raised or lowered the
+  module's, so you can see where `memory.grow` there now stops. A program built
+  with `infc --max-memory-pages 10` that links `b::growB`, whose module declares
+  `(memory 1 2)`, prints:
+
+  ```text
+  warning: the program's linear memory has a maximum of 10 pages, which governs
+           `memory.grow` in every linked module and replaces the maximum a
+           growing module declares where the two differ: raised for the module
+           providing `b::growB`, which declares a maximum of 2 pages, so
+           `memory.grow` there now stops at 10 pages instead of 2. Under a
+           raised maximum, `memory.grow` can succeed where the module alone
+           would return -1. The program decides the maximum by design, which is
+           what lets libraries whose maximums differ link together. This is not
+           a fault found in the program or the library; the program's maximum is
+           set by `max-pages` in the `[memory]` table of `Inference.toml`, or by
+           `infc --max-memory-pages <N>`.
+  ```
+
+  The warning is silent when the program's maximum equals the module's, and for
+  a module that never grows memory, since only `memory.grow` observes the
+  maximum. A module that declares no maximum is named under any growable
+  program, because its `memory.grow` is now bounded.
 - **A memoryless main** gets the largest declared minimum and the smallest
   declared maximum, unbounded only when no external declares one — the memory
   WebAssembly import matching would accept for every external's declaration. One
