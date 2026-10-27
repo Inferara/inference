@@ -4942,8 +4942,8 @@ fn memory64_external_onto_a_memoryless_main_is_rejected_at_the_feature_gate() {
     // C-4 / feature gate: a `memory64` external forwarded by a *memoryless* main.
     // The memory64 proposal is outside the supported subset, so the gate's feature
     // pass rejects the external up front, naming memory64 — before the
-    // reconciler's `None => ext` adopt-path shape guard (the backstop, still
-    // tested directly in `merge.rs`) would reach it.
+    // reconciler's per-memory shape guard (the backstop, still tested directly
+    // in `merge.rs`) would reach it.
     let main = wasm(
         r#"
         (module
@@ -4980,7 +4980,7 @@ fn bare_shared_external_onto_a_memoryless_main_is_rejected_at_the_feature_gate()
     // memoryless main. A `shared` memory is a threads-proposal construct, outside
     // the supported WASM 1.0 subset, so the gate's feature pass rejects the
     // external up front, naming the threads requirement — before the reconciler's
-    // adopt-path shape guard (the backstop, still tested directly in `merge.rs`)
+    // per-memory shape guard (the backstop, still tested directly in `merge.rs`)
     // would reach it.
     let main = wasm(
         r#"
@@ -5357,11 +5357,7 @@ fn external_minimum_is_reconciled_so_no_out_of_bounds() {
         initial, 10,
         "reconciled minimum is the max of both module minimums"
     );
-    assert_eq!(
-        maximum,
-        Some(20),
-        "reconciled maximum widens to admit both ranges"
-    );
+    assert_eq!(maximum, Some(20), "the main module's maximum is kept");
 }
 
 #[test]
@@ -5495,6 +5491,283 @@ fn custom_page_size_mismatch_is_rejected_cleanly() {
     assert!(
         mentions_page_size,
         "expected a clean rejection mentioning the custom page size, got {err:?}"
+    );
+}
+
+// -- Memory reconciliation in either import order ------------------------------
+//
+// The main module's imports are its `external fn` declarations, in the order
+// they were written. Swapping two of those lines must not change the linked
+// memory, the verdict, or the diagnostic, so every case below links the same two
+// providers in both import orders — with the externals slice fixed, so the
+// import order is the only thing that moves — and asserts the two links agree
+// before checking what they agree on.
+
+/// One memory-declaring provider of a two-module link: the logical module it is
+/// bound under, the field it exports, its memory's limits as WAT, and whether
+/// that export grows memory by its argument or loads from memory at it.
+struct Provider {
+    module: &'static str,
+    field: &'static str,
+    limits: &'static str,
+    grows: bool,
+}
+
+impl Provider {
+    fn wasm(&self) -> Vec<u8> {
+        let (field, limits) = (self.field, self.limits);
+        let op = if self.grows {
+            "memory.grow"
+        } else {
+            "i32.load"
+        };
+        wasm(&format!(
+            r#"
+            (module
+              (type (;0;) (func (param i32) (result i32)))
+              (memory (;0;) {limits})
+              (func (;0;) (type 0) (param i32) (result i32)
+                local.get 0
+                {op})
+              (export "{field}" (func 0)))
+            "#
+        ))
+    }
+}
+
+/// A main that imports `first`'s field and then `second`'s, and exports `run`
+/// calling both on its argument. With `memory` it declares (and exports) that
+/// memory of its own; without, it is memoryless.
+fn main_importing(first: &Provider, second: &Provider, memory: Option<&str>) -> Vec<u8> {
+    let memory = memory.map_or(String::new(), |limits| {
+        format!(r#"(memory (;0;) {limits}) (export "memory" (memory 0))"#)
+    });
+    wasm(&format!(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (import "{}" "{}" (func (;0;) (type 0)))
+          (import "{}" "{}" (func (;1;) (type 0)))
+          {memory}
+          (func (;2;) (type 0) (param i32) (result i32)
+            local.get 0
+            call 0
+            local.get 0
+            call 1
+            i32.add)
+          (export "run" (func 2)))
+        "#,
+        first.module, first.field, second.module, second.field
+    ))
+}
+
+/// Links `a` and `b` behind a main importing them in both orders, asserts the
+/// two links agree, and returns what they agree on: the output's memory limits
+/// (after validating the module), or the rendered rejection.
+fn link_in_both_orders(
+    a: &Provider,
+    b: &Provider,
+    main_memory: Option<&str>,
+) -> Result<Option<(u64, Option<u64>)>, String> {
+    let (a_wasm, b_wasm) = (a.wasm(), b.wasm());
+    let externals: [(&str, &[u8]); 2] = [(a.module, &a_wasm), (b.module, &b_wasm)];
+    let outcome = |main: Vec<u8>| {
+        raw_link(&main, &externals, None)
+            .map(|linked| {
+                assert_valid(&linked);
+                memory_limits(&linked)
+            })
+            .map_err(|e| e.to_string())
+    };
+    let forward = outcome(main_importing(a, b, main_memory));
+    let reverse = outcome(main_importing(b, a, main_memory));
+    assert_eq!(
+        forward, reverse,
+        "swapping the imports of `{}` and `{}` changed the link",
+        a.field, b.field
+    );
+    forward
+}
+
+/// Asserts `outcome` is a memory rejection for `field` mentioning every one of
+/// `parts`.
+fn assert_memory_rejected(
+    outcome: &Result<Option<(u64, Option<u64>)>, String>,
+    field: &str,
+    parts: &[&str],
+) {
+    let Err(message) = outcome else {
+        panic!("expected a memory rejection for `{field}`, got {outcome:?}");
+    };
+    assert!(
+        message.starts_with(&format!("cannot reconcile linear memory for `{field}`: ")),
+        "the rejection names `{field}`: {message}"
+    );
+    for part in parts {
+        assert!(message.contains(part), "missing {part:?} in: {message}");
+    }
+}
+
+const GROW_A: Provider = Provider {
+    module: "a",
+    field: "growA",
+    limits: "1 10",
+    grows: true,
+};
+const GROW_B: Provider = Provider {
+    module: "b",
+    field: "growB",
+    limits: "1 2",
+    grows: true,
+};
+const PEEK_C: Provider = Provider {
+    module: "c",
+    field: "peek",
+    limits: "5 5",
+    grows: false,
+};
+const PEEK_D: Provider = Provider {
+    module: "d",
+    field: "peekD",
+    limits: "10 10",
+    grows: false,
+};
+const PEEK_E: Provider = Provider {
+    module: "e",
+    field: "peekE",
+    limits: "1 10",
+    grows: false,
+};
+const PEEK_Q: Provider = Provider {
+    module: "q",
+    field: "peekQ",
+    limits: "1 2",
+    grows: false,
+};
+
+#[test]
+fn two_growers_with_different_caps_are_rejected_in_either_order() {
+    // The reported case: onto a memoryless main, `growA` may grow to ten pages
+    // and `growB` to two. Whichever was imported first used to set the shared
+    // maximum, so swapping the declarations flipped `growB(2)` between growing
+    // and failing. One memory cannot give both their own cap, so the link is
+    // refused — the same refusal in either order.
+    let outcome = link_in_both_orders(&GROW_A, &GROW_B, None);
+    assert_memory_rejected(
+        &outcome,
+        "growA",
+        &[
+            "grows linear memory up to 10 pages",
+            "`b::growB`",
+            "would stop at 2 pages instead of 10",
+            "`max-pages` in the `[memory]` table",
+            "--max-memory-pages",
+        ],
+    );
+}
+
+#[test]
+fn a_grower_keeps_its_own_cap_beside_a_wider_reader() {
+    // `growB` grows to two pages and `peekE` only reads a memory declared up to
+    // ten. The shared memory takes the tighter cap: `growB` stops where its own
+    // module says, and `peekE` cannot observe the lower maximum. Imported first,
+    // `peekE` used to impose its ten pages on `growB`.
+    assert_eq!(
+        link_in_both_orders(&GROW_B, &PEEK_E, None),
+        Ok(Some((1, Some(2))))
+    );
+}
+
+#[test]
+fn a_grower_capped_below_its_own_maximum_by_a_reader_is_rejected() {
+    // `peek` pins its memory at five pages; `growA` may grow to ten. Imported
+    // first, `growA` set a growable `5..10` memory; second, the link was
+    // refused. Either way the shared cap would differ from `growA`'s own.
+    assert_memory_rejected(
+        &link_in_both_orders(&GROW_A, &PEEK_C, None),
+        "growA",
+        &[
+            "up to 10 pages",
+            "`c::peek`",
+            "would stop at 5 pages instead of 10",
+        ],
+    );
+}
+
+#[test]
+fn growth_against_a_memory_a_later_import_pins_is_rejected_onto_a_memoryless_main() {
+    // `peekD` raises the shared minimum to its pinned ten pages, which is also
+    // `growA`'s maximum, so `memory.grow` could never succeed. Checked as each
+    // import was folded, growth passed when `growA` came first and the module
+    // shipped with a `memory.grow` that always returns -1.
+    assert_memory_rejected(
+        &link_in_both_orders(&GROW_A, &PEEK_D, None),
+        "growA",
+        &[
+            "maximum (10 pages) does not exceed its minimum (10 pages)",
+            "`max-pages`",
+        ],
+    );
+}
+
+#[test]
+fn growth_against_a_memory_a_later_import_pins_is_rejected_under_mains_own_memory() {
+    // The same pinning under a main that declares a growable `1..10` memory:
+    // main's maximum is kept, `peekD` widens the minimum to it, and growth is
+    // checked against that final memory rather than the one before `peekD`.
+    assert_memory_rejected(
+        &link_in_both_orders(&GROW_A, &PEEK_D, Some("1 10")),
+        "growA",
+        &["maximum (10 pages) does not exceed its minimum (10 pages)"],
+    );
+}
+
+#[test]
+fn declarations_no_one_memory_satisfies_are_rejected_in_either_order() {
+    // Neither export grows memory, but `peek` needs five pages and `peekQ`'s
+    // module allows at most two. No memory matches both declarations, so the
+    // link is refused rather than relaxing `peekQ`'s cap — which is what
+    // happened when `peek` was imported first.
+    assert_memory_rejected(
+        &link_in_both_orders(&PEEK_C, &PEEK_Q, None),
+        "peek",
+        &[
+            "needs at least 5 pages",
+            "`q::peekQ`",
+            "declares a maximum of 2 pages",
+            "maximum of at least 5 pages, which then governs every linked module",
+        ],
+    );
+}
+
+#[test]
+fn mains_own_maximum_governs_two_growers_in_either_order() {
+    // The remedy the rejections name: a main with its own growable memory. Its
+    // maximum is the one bound, kept whatever the providers declare, so both
+    // orders link to main's `1..10`.
+    assert_eq!(
+        link_in_both_orders(&GROW_A, &GROW_B, Some("1 10")),
+        Ok(Some((1, Some(10))))
+    );
+}
+
+#[test]
+fn an_unbounded_reader_takes_the_bounded_readers_cap_in_either_order() {
+    let unbounded = Provider {
+        module: "u",
+        field: "peekU",
+        limits: "1",
+        grows: false,
+    };
+    let bounded = Provider {
+        module: "v",
+        field: "peekV",
+        limits: "1 5",
+        grows: false,
+    };
+    assert_eq!(
+        link_in_both_orders(&unbounded, &bounded, None),
+        Ok(Some((1, Some(5))))
     );
 }
 
