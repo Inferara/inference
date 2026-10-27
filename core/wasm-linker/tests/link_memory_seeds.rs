@@ -1,6 +1,7 @@
 //! The stable half of the `link_memory` fuzz target: a hand-pinned seed table,
-//! a totality probe of the input format, and a deterministic sweep, all run
-//! through the target's own generator and checks.
+//! the seed corpus committed from it, a totality probe of the input format,
+//! and a deterministic sweep, all run through the target's own generator and
+//! checks.
 //!
 //! The libFuzzer harness in `core/wasm-linker/fuzz/fuzz_targets/link_memory.rs`
 //! needs `cargo-fuzz` and nightly, and CI fuzzes it only on Linux. This file
@@ -14,6 +15,14 @@
 //!   linker share still goes red here.
 //! - [`the_seed_table_covers_every_rule_branch`] keeps the table from
 //!   regressing to vacuity.
+//! - [`committed_link_memory_seeds_are_current`] holds the corpus at
+//!   `core/wasm-linker/fuzz/seeds/link_memory/`, which the fuzzer and
+//!   ClusterFuzzLite start from, to the table: each seed's file is the `encode`
+//!   of its spec and decodes back to it, and no other file rides along.
+//! - [`regenerate::regenerate_link_memory_seeds`] (`#[ignore]`d) rewrites the
+//!   corpus from the table, so the files are reproducible rather than opaque.
+//!   Run it with:
+//!   `cargo test -p inference-wasm-linker --test link_memory_seeds regenerate -- --ignored`.
 //! - [`decoding_is_total`] sets each byte of an input whose every slot is in
 //!   use to each of its 256 values, and checks that every result decodes to a
 //!   spec the generator builds, and that each byte changes the spec for some
@@ -26,7 +35,9 @@
 mod link_memory;
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
 
 use inference_wasm_linker::LinkWarning;
 use link_memory::Body::{Grow, GrowViaHelper, Load, Pure, Size};
@@ -604,6 +615,101 @@ fn the_seed_table_covers_every_rule_branch() {
     );
 }
 
+/// The command that rewrites the committed seed corpus from the seed table.
+const REGENERATE: &str =
+    "cargo test -p inference-wasm-linker --test link_memory_seeds regenerate -- --ignored";
+
+/// The committed seed corpus: one file per seed, named after it.
+fn seed_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fuzz")
+        .join("seeds")
+        .join("link_memory")
+}
+
+/// The entries in `dir` other than the seeds' files: a file a renamed or
+/// removed seed leaves behind, or anything else put there, a subdirectory
+/// included. ClusterFuzzLite packs every file under the directory into the
+/// target's seed corpus, so an orphan would ship in it while it stays
+/// committed.
+fn orphans(dir: &Path, seeds: &[Seed]) -> Vec<PathBuf> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => panic!("cannot list {}: {e}", dir.display()),
+    };
+    let mut orphans = Vec::new();
+    for entry in entries {
+        let entry = entry.expect("a directory entry can be read");
+        let kind = entry.file_type().expect("an entry has a type");
+        let name = entry.file_name();
+        if !(kind.is_file() && seeds.iter().any(|seed| name == *seed.name)) {
+            orphans.push(entry.path());
+        }
+    }
+    orphans.sort();
+    orphans
+}
+
+/// Every file is checked before the test fails, so a stale corpus reports
+/// every file the regenerate test would rewrite or remove, not only the first.
+///
+/// A seed's name is its file's, so no two names may match, ignoring case as
+/// the macOS and Windows file systems do. Two seeds that share a file cannot
+/// both be current, and regenerating leaves one of them stale.
+#[test]
+fn committed_link_memory_seeds_are_current() {
+    let dir = seed_dir();
+    assert!(
+        dir.is_dir(),
+        "the committed seed corpus is missing at {}; regenerate it with `{REGENERATE}`",
+        dir.display()
+    );
+    let seeds = seeds();
+    let mut names = BTreeSet::new();
+    for seed in &seeds {
+        assert!(
+            names.insert(seed.name.to_ascii_lowercase()),
+            "two seeds are named `{}`, ignoring case, so they share one file; rename one",
+            seed.name
+        );
+    }
+    let mut failures = Vec::new();
+    for seed in &seeds {
+        let committed = match fs::read(dir.join(seed.name)) {
+            Ok(committed) => committed,
+            Err(e) => {
+                failures.push(format!(
+                    "`{}`: the seed's file cannot be read ({e})",
+                    seed.name
+                ));
+                continue;
+            }
+        };
+        let decoded = decode(&committed);
+        if decoded != seed.spec {
+            failures.push(format!(
+                "`{}`: the committed file decodes to a spec other than the table's: {decoded:?}",
+                seed.name
+            ));
+        } else if committed != encode(&seed.spec) {
+            failures.push(format!(
+                "`{}`: the committed file decodes to the table's spec, but is not its encoding",
+                seed.name
+            ));
+        }
+    }
+    for orphan in orphans(&dir, &seeds) {
+        failures.push(format!("{}: not the file of any seed", orphan.display()));
+    }
+    assert!(
+        failures.is_empty(),
+        "the seed corpus at {} does not match the seed table:\n\n{}\n\n\
+         regenerate it with `{REGENERATE}`",
+        dir.display(),
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn decoding_is_total() {
     assert_eq!(
@@ -698,4 +804,45 @@ fn a_deterministic_sweep_upholds_every_property() {
     assert!(warned, "the sweep never raised a warning");
     assert!(with_main_memory, "the sweep never gave main a memory");
     assert!(without_main_memory, "the sweep never left main memoryless");
+}
+
+/// Rewrites the committed seed corpus from the seed table.
+mod regenerate {
+    use super::{encode, orphans, seed_dir, seeds};
+    use std::fs;
+
+    /// Removes every file that is not a seed's, then writes every seed's file,
+    /// so that a run leaves `committed_link_memory_seeds_are_current` green.
+    /// Removing first matters on a case-insensitive file system: a seed renamed
+    /// only in case would otherwise be written into its old file, which the
+    /// removal would then delete. Anything it cannot remove as a file, such as
+    /// a subdirectory, it reports once the seeds are written.
+    #[test]
+    #[ignore = "writes the committed seed corpus; run with --ignored to regenerate"]
+    fn regenerate_link_memory_seeds() {
+        let dir = seed_dir();
+        if let Err(e) = fs::create_dir_all(&dir) {
+            panic!("cannot create {}: {e}", dir.display());
+        }
+        let seeds = seeds();
+        let mut kept = Vec::new();
+        for orphan in orphans(&dir, &seeds) {
+            match fs::remove_file(&orphan) {
+                Ok(()) => eprintln!("removed {}", orphan.display()),
+                Err(e) => kept.push(format!("{} ({e})", orphan.display())),
+            }
+        }
+        for seed in &seeds {
+            let path = dir.join(seed.name);
+            if let Err(e) = fs::write(&path, encode(&seed.spec)) {
+                panic!("cannot write {}: {e}", path.display());
+            }
+        }
+        assert!(
+            kept.is_empty(),
+            "the seeds are written, but these entries could not be removed; remove them by \
+             hand:\n{}",
+            kept.join("\n")
+        );
+    }
 }

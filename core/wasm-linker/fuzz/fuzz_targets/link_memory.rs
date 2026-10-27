@@ -23,12 +23,23 @@
 //!
 //! `cargo-fuzz` and a nightly toolchain are required and are intentionally *not*
 //! part of the default workspace (this crate declares its own `[workspace]`).
-//! From the repository root:
+//! A committed seed corpus, one input per seed of the stable replay's seed
+//! table, lives at `core/wasm-linker/fuzz/seeds/link_memory/`. From the
+//! repository root, start the fuzzer from it, after a corpus directory the
+//! fuzzer may write to:
 //!
 //! ```text
 //! cargo install cargo-fuzz
-//! cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link_memory
+//! mkdir -p ~/.cache/inference-fuzz/link_memory
+//! cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link_memory \
+//!     ~/.cache/inference-fuzz/link_memory core/wasm-linker/fuzz/seeds/link_memory
 //! ```
+//!
+//! Those seeds are reproducible: each is the `encode` of a spec in the seed
+//! table of `core/wasm-linker/tests/link_memory_seeds.rs`, where
+//! `committed_link_memory_seeds_are_current` (run on every stable
+//! `cargo test`) holds the files to the table, and the `#[ignore]`d
+//! `regenerate_link_memory_seeds` rewrites them from it.
 //!
 //! A crash prints the violated property, the spec, and each run's import order
 //! and outcome. `cargo fuzz fmt` prints the spec of a saved crash input, in the

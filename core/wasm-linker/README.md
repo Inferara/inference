@@ -877,7 +877,7 @@ different things at once:
 
 - **`None`** — merge mechanics only; [Declared Write-Set Check](#declared-write-set-check)
   does not run. The mode for a caller with no Inference declaration behind the
-  main module: hand-written `.wasm` fixtures, the fuzz target, and this
+  main module: hand-written `.wasm` fixtures, the fuzz targets, and this
   crate's own integration tests.
 - **`Some(list)`** — every satisfied import is held to a declared write set.
   An import `list` does not mention is treated as declaring **no** `mut`
@@ -1087,19 +1087,26 @@ Test coverage includes:
 
 ## Fuzzing
 
-A coverage-guided `cargo-fuzz` target over `link` lives in `fuzz/`, a crate
-detached from the main workspace (so `cargo build`/`cargo test` never touch it).
-`cargo-fuzz` and nightly are not part of the default build; where they are
-available:
+Two coverage-guided `cargo-fuzz` targets live in `fuzz/`, a crate detached from
+the main workspace (so `cargo build`/`cargo test` never touch it): `link` splits
+arbitrary bytes into a main module and externals and links them, and
+`link_memory` generates links whose memories and import lists interact, links
+each in three import orders, and requires every order to give the same memory,
+refusal and warnings, and the memory rule above to predict them. `cargo-fuzz`
+and nightly are not part of the default build; where they are available, from
+the repository root:
 
 ```bash
 cargo install cargo-fuzz
-cargo +nightly fuzz run link
+cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link
+cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link_memory
 ```
 
-The deterministic property test above mirrors the fuzzer's invariant and seed
-corpus, so the seam is exercised under stable `cargo test` even without
-`cargo-fuzz`. See `fuzz/README.md` for details.
+The deterministic property test above mirrors the `link` fuzzer's invariant and
+seed corpus, and `tests/link_memory_seeds.rs` replays the `link_memory`
+generator and checks over its committed seeds and a deterministic sweep, so both
+seams are exercised under stable `cargo test` even without `cargo-fuzz`. See
+`fuzz/README.md` for the corpus directories and the committed seeds.
 
 ## Related Resources
 
