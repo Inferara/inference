@@ -148,6 +148,46 @@ each satisfied export. An `unused` function that the source module exports but
 that no satisfied import calls is never pulled into the closure, so it does not
 appear in the merged output.
 
+### The Shared Linear Memory
+
+The output has one linear memory, shared by the main module and every merged
+external whose closure addresses memory; an external whose closure touches no
+memory contributes nothing, whatever its module declares. The merge records each
+satisfied import's memory and computes the output memory once, from all of them
+together. Fixing it import by import would make it depend on the order the main
+module lists its imports in, which is the order the program wrote its
+`external fn` declarations in — and swapping two declaration lines would then
+change the emitted memory, what `memory.grow` returns, and the machine the `.v`
+describes.
+
+If your program has its own memory, its maximum governs every linked module.
+Otherwise the linked memory is the tightest fit to the modules' own declarations,
+which relaxes no module's bound, and a link that no memory fits, or that would
+move where any module's `memory.grow` stops, is refused.
+
+- **A main module with a memory** keeps its maximum, whatever the externals'
+  own caps, and widens its minimum to the largest any module declares. An
+  external minimum above main's maximum is refused, as is growth when the result
+  is pinned (`max == min`), since every `memory.grow` would fail.
+- **A memoryless main** gets the largest declared minimum and the smallest
+  declared maximum, unbounded only when no external declares one — the memory
+  WebAssembly import matching would accept for every external's declaration. One
+  external's memory is therefore adopted exactly as declared. With several, two
+  outcomes are refused rather than settled by picking one module's bound over
+  another's: declarations no memory satisfies, such as one module needing five
+  pages beside one allowing at most two, and a module that grows memory under a
+  cap other than the shared one. A module whose cap is lowered but that never
+  grows memory is accepted: only `memory.grow` observes the maximum, and a
+  memoryless main exports no memory for a host to grow.
+
+Both refusals name the remedy: a `[memory]` table (`max-pages`, or
+`infc --max-memory-pages`) makes the program declare a memory of its own even
+when its code touches none, and that memory's maximum then decides. One page
+that may grow to one page is the default layout, so `max-pages = 1` alone does
+not. Contributions are counted per satisfied import rather than per call, so an
+`external fn` the program declares but never calls still brings its module's
+memory.
+
 ### The Main Module's Data Segments
 
 Module-scope compound constants (arrays and structs) live in linear memory above
@@ -293,7 +333,9 @@ A Tier-A function carries no shared-memory surface at all: it reads its paramete
 does arithmetic, and returns. Merge cost is a body copy, a type dedup, and an
 index rewrite.
 
-A Tier-B function shares the single linear memory the main module owns. No address
+A Tier-B function shares the output's single linear memory — the main module's own,
+or, for a main that declares none, one built from the linked modules' declarations
+(see [The Shared Linear Memory](#the-shared-linear-memory)). No address
 relocation is needed because every address is caller-supplied at runtime. However,
 the linker must *prove* this property — it cannot assume it from the section
 structure alone.
@@ -664,7 +706,7 @@ in for it (see
 | `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (with the exact mnemonic), a proof-only non-det or uzumaki opcode in an external body, a tail call (`return_call` / `return_call_indirect`), a segment-indexed table op (`table.init` / `elem.drop` / `table.copy`), a float or `v128` value type in a merged signature or local, multi-memory access, or a main module section the merge cannot preserve (start function, table section, non-function imports — an imported memory among them, though `infc` refuses a linked binding beside one before the merge is reached, tracked under issue #546 — element segments, and data segments other than active ones over memory 0 at a lone `i32.const` offset — see [The Main Module's Data Segments](#the-main-modules-data-segments)), or a main body naming a data segment through `memory.init` / `data.drop` |
 | `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature beyond the supported subset (floats, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls); `details` carries the validator's feature-named diagnostic |
 | `LinkError::AmbiguousImport { module, field }` | More than one supplied external exports a function of the same field name the import requests under the same logical module; the body to merge is ambiguous |
-| `LinkError::IncompatibleMemory { field, reason }` | The linear memory requirements of the main module and the Tier-B external cannot be reconciled into one shared output memory |
+| `LinkError::IncompatibleMemory { field, reason }` | The linear memory requirements of the main module and the Tier-B externals cannot be reconciled into one shared output memory: an unsupported memory shape, an external minimum above the main module's maximum, declarations no one memory satisfies onto a memoryless main, a growing external whose cap the shared memory would move, or growth against a pinned result (see [The Shared Linear Memory](#the-shared-linear-memory)) |
 | `LinkError::InvalidMergedModule(msg)` | The post-merge structural validator rejected the merged output; this is a guard against allow-list gaps — it converts a potential silent miscompile into a clean diagnostic |
 | `LinkError::UndeclaredExternWrite { module, field, param_index, param_name }` | A Tier-B closure's attributed write set is not covered by its `external fn` declaration's `mut` parameters (checked mode only — see [The Declared Write-Set Check](#the-declared-write-set-check)); the message names the offending parameter and, when the declaration uses an unnamed form, says to name it before it can be marked `mut` |
 | `LinkError::UndescribedExternWrite { module, field, param_index }` | A Tier-B closure may store through a parameter, and the checked-mode contract list supplied for this link holds no entry at all for this import — named or unnamed. An import nothing describes is held to writing nothing, so the store is refused rather than admitted unchecked |

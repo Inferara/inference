@@ -8757,12 +8757,14 @@ impl Compiler {
     ///
     /// A configured layout is declared even by a program whose own code touches
     /// no memory. Without it the module would carry no memory for the layout to
-    /// describe, and a linked module that addresses memory would supply its own —
-    /// the linker adopts a memoryless main's external memory verbatim — so the
-    /// size and maximum the build asked for would be replaced by whatever that
-    /// module declares, an unbounded maximum included. The default layout is
-    /// left to the program's use, which keeps a default build of a memoryless
-    /// program byte-identical to what it always was.
+    /// describe, and linked modules that address memory would supply their own —
+    /// the linker builds a memoryless main's memory from those modules'
+    /// declarations, one module's verbatim — so the size and maximum the build
+    /// asked for would be replaced by whatever they declare, an unbounded maximum
+    /// included. A declared memory is also what lets a program link libraries
+    /// whose own caps disagree: its maximum then governs them all. The default
+    /// layout is left to the program's use, which keeps a default build of a
+    /// memoryless program byte-identical to what it always was.
     ///
     /// An imported layout always declares its memory, by importing it, even for
     /// a program that touches none: it is never the default layout, so what its

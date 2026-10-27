@@ -754,6 +754,11 @@ tier gate and fails at memory reconciliation instead. The layout is
 configurable: a main whose `[memory]` maximum (`max-pages`, which defaults to
 `pages`) reaches the external's declared minimum reconciles; see [Configuring
 the layout](memory-allocation-in-wasm-codegen.md#configuring-the-layout).
+A program whose own code touches no memory and that configures no layout takes
+its memory from the linked modules' declarations instead, the same whichever
+order its `external fn` lines are written in, and refuses a combination no
+single memory can honor; see [The Shared Linear
+Memory](the-wasm-linker.md#the-shared-linear-memory).
 
 A Tier-C function produces a clear error at link time:
 
