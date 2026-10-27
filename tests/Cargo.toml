@@ -14,7 +14,13 @@ tempfile = "3"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11"
-wasmtime="48.0.3"
+# wasmtime's default features minus `cache`, its on-disk compiled-module cache,
+# which nothing here enables. That feature alone pulls in zstd 0.13, which has
+# open advisories (RUSTSEC-2026-0391/0398/0403) and no fixed release wasmtime 48 accepts.
+wasmtime = { version = "48.0.3", default-features = false, features = ["anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat", "profiling",
+    "parallel-compilation", "cranelift", "pooling-allocator", "demangle", "addr2line", "coredump", "debug-builtins",
+    "runtime", "component-model", "component-model-async", "threads", "stack-switching", "std", "debug",
+    "compile-time-builtins", "wit-parser"] }
 
 inference-analysis.workspace = true
 inference-ast.workspace = true
