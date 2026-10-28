@@ -85,8 +85,9 @@
 //! with the fields it may name, the numbers and the remedy its message must
 //! print, and the sets its message must name one member of: the contributors
 //! that declare the shared maximum, when the message names the module that
-//! declares it, and the caps of the growers it moves. The linker's report has
-//! to match one of them.
+//! declares it. A refusal that moves a grower's cap must also state the cap of
+//! a moved grower with the field it reports, so naming one grower with
+//! another's cap does not match. The linker's report has to match one of them.
 //!
 //! The warning rule is `LinkWarning::TierBInMultiPageMemory`'s: raised when
 //! the output has a memory whose minimum is above one page and some import is
@@ -121,7 +122,7 @@
 //! legitimately follow import order. Only the memory section, the error text
 //! and the warnings are order-independent.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use inf_wasmparser::{Parser, Payload};
@@ -330,9 +331,13 @@ pub struct Applicable {
     /// Substrings the message must contain, each with the number it prints.
     pub numbers: Vec<String>,
     /// Sets the message must contain at least one member of each: the
-    /// contributors it may name as the module declaring the shared maximum,
-    /// and the caps of the growers it may report.
+    /// contributors it may name as the module declaring the shared maximum.
     pub one_of: Vec<BTreeSet<String>>,
+    /// For a refusal that states the reported import's own declaration: per
+    /// field the error may name, the statements the message must contain one
+    /// of. A field several such imports share maps to each of theirs, since the
+    /// error's `field` cannot tell them apart.
+    pub per_field: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// What [`check`] observed, once every property held.
@@ -1024,8 +1029,10 @@ pub fn check(spec: &LinkSpec) -> Result<Outcome, Violation> {
 
 /// Finds the one applicable refusal `error` reports: its message carries that
 /// kind's wording, its remedy, every number the kind prints and a member of
-/// each set the kind names one of, and its `field` is one the kind may name.
-fn match_refusal(
+/// each set the kind names one of; its `field` is one the kind may name; and
+/// the message states a declaration of that field where the kind ties one to
+/// it.
+pub fn match_refusal(
     error: &LinkError,
     message: &str,
     applicable: &[Applicable],
@@ -1087,6 +1094,14 @@ fn match_refusal(
             "the link reports {kind:?}, but its message names none of {missing:?}"
         ));
     }
+    if let Some(stated) = applies.per_field.get(field)
+        && !stated.iter().any(|s| message.contains(s.as_str()))
+    {
+        return Err(format!(
+            "the link reports {kind:?} for `{field}`, but its message states none of \
+             {stated:?}, which the imports named `{field}` declare"
+        ));
+    }
     Ok(kind)
 }
 
@@ -1122,6 +1137,22 @@ fn render_where(
         .filter(|c| condition(c))
         .map(render)
         .collect()
+}
+
+/// Renders every contribution that meets `condition`, grouped by its field.
+fn render_by_field(
+    contributions: &[Contribution],
+    condition: impl Fn(&Contribution) -> bool,
+    render: impl Fn(&Contribution) -> String,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut by_field: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for c in contributions.iter().filter(|c| condition(c)) {
+        by_field
+            .entry(c.field.clone())
+            .or_default()
+            .insert(render(c));
+    }
+    by_field
 }
 
 /// What the documented memory rule says linking `spec` produces. See the
@@ -1171,6 +1202,7 @@ pub fn expected(spec: &LinkSpec) -> Expected {
                         format!("maximum ({max} pages)"),
                     ],
                     one_of: Vec::new(),
+                    per_field: BTreeMap::new(),
                 });
             }
             Some((min, main.max))
@@ -1195,6 +1227,7 @@ pub fn expected(spec: &LinkSpec) -> Expected {
                             format!("maximum of {max} pages"),
                         ],
                         one_of: vec![declaring.clone()],
+                        per_field: BTreeMap::new(),
                     });
                 }
                 let moved = |c: &Contribution| c.grows && c.limits.max != Some(max);
@@ -1203,10 +1236,8 @@ pub fn expected(spec: &LinkSpec) -> Expected {
                         kind: Refusal::GrowerCapMoved,
                         fields: fields_where(&moved),
                         numbers: vec![format!("maximum of {max} pages")],
-                        one_of: vec![
-                            declaring,
-                            render_where(&contributions, moved, Contribution::own_cap),
-                        ],
+                        one_of: vec![declaring],
+                        per_field: render_by_field(&contributions, moved, Contribution::own_cap),
                     });
                 }
             }
@@ -1228,6 +1259,7 @@ pub fn expected(spec: &LinkSpec) -> Expected {
                 format!("minimum ({min} pages)"),
             ],
             one_of: Vec::new(),
+            per_field: BTreeMap::new(),
         });
     }
 

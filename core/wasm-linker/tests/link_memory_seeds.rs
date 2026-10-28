@@ -39,11 +39,11 @@ use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-use inference_wasm_linker::LinkWarning;
+use inference_wasm_linker::{LinkError, LinkWarning};
 use link_memory::Body::{Grow, GrowViaHelper, Load, Pure, Size};
 use link_memory::{
-    Body, INPUT_LEN, ImportSpec, Limits, LinkSpec, MAX_IMPORTS, MAX_PROVIDERS, Outcome,
-    ProviderSpec, Refusal, check, decode, encode, generate,
+    Body, Expected, INPUT_LEN, ImportSpec, Limits, LinkSpec, MAX_IMPORTS, MAX_PROVIDERS, Outcome,
+    ProviderSpec, Refusal, check, decode, encode, expected, generate, match_refusal,
 };
 
 /// What a seed must produce.
@@ -707,6 +707,60 @@ fn committed_link_memory_seeds_are_current() {
          regenerate it with `{REGENERATE}`",
         dir.display(),
         failures.join("\n")
+    );
+}
+
+/// A refusal that moves a grower's cap must state the cap of the import it
+/// names. Naming one moved grower with another's cap is a wrong diagnostic,
+/// although both caps belong to moved growers.
+#[test]
+fn a_moved_cap_refusal_must_state_the_named_growers_own_cap() {
+    // `m0.f0` grows up to 3 pages and `m1.f1` up to 5, and `m2.f0` only
+    // reads, under a cap of 2 that moves both growers.
+    let spec = with_imports(
+        None,
+        vec![
+            provider(mem(1, Some(3)), &[Grow]),
+            provider(mem(1, Some(5)), &[Pure, Grow]),
+            provider(mem(1, Some(2)), &[Load]),
+        ],
+        vec![imp(0, 0), imp(1, 1), imp(2, 0)],
+    );
+    let Expected::Refused { applicable } = expected(&spec) else {
+        panic!("the rule refuses two growers whose caps a reader's moves");
+    };
+    let Ok(Outcome::Refused {
+        kind: Refusal::GrowerCapMoved,
+        message,
+    }) = check(&spec)
+    else {
+        panic!("the linker refuses the link as a moved cap");
+    };
+    let field = message
+        .strip_prefix("cannot reconcile linear memory for `")
+        .and_then(|rest| rest.split_once('`'))
+        .map(|(field, _)| field.to_string())
+        .expect("a memory refusal names its field");
+    let error = LinkError::IncompatibleMemory {
+        field: field.clone(),
+        reason: String::new(),
+    };
+    assert_eq!(
+        match_refusal(&error, &message, &applicable),
+        Ok(Refusal::GrowerCapMoved),
+        "the linker's own message matches"
+    );
+
+    let (own, other) = match field.as_str() {
+        "f0" => ("up to 3 pages", "up to 5 pages"),
+        "f1" => ("up to 5 pages", "up to 3 pages"),
+        _ => panic!("the refusal names `{field}`, which no growing import is"),
+    };
+    let swapped = message.replace(own, other);
+    assert_ne!(swapped, message, "the message states `{own}`");
+    assert!(
+        match_refusal(&error, &swapped, &applicable).is_err(),
+        "a refusal naming `{field}` with the other grower's cap must not match: {swapped}"
     );
 }
 
