@@ -15,7 +15,10 @@ mod memory_growth_tests {
     use std::path::Path;
 
     use inference::wasm_link::{SearchPath, resolve_external_modules};
-    use inference::{LinkOptions, analyze, link_with_options, parse, type_check};
+    use inference::{
+        LinkOptions, LinkOutput, LinkWarning, OverriddenMaximum, analyze, link_with_options, parse,
+        type_check,
+    };
     use inference_wasm_codegen::{
         CodegenOptions, CompilationMode, MemoryLayout, MemoryLayoutSource, MemoryRequest, codegen,
     };
@@ -84,18 +87,27 @@ pub fn run() -> i32 {
         layout: MemoryLayout,
         mode: CompilationMode,
     ) -> Result<Vec<u8>, String> {
+        let lib_dir = memlib_dir();
+        link_in(source, lib_dir.path(), layout, mode).map(|output| output.wasm)
+    }
+
+    /// A library search directory holding `MEMLIB_WAT` as `memlib.wasm`.
+    fn memlib_dir() -> tempfile::TempDir {
         let lib_dir = tempfile::tempdir().expect("create a library search directory");
         let lib = wat::parse_str(MEMLIB_WAT).expect("the library WAT assembles");
         std::fs::write(lib_dir.path().join("memlib.wasm"), lib).expect("write the library");
-        link_in(source, lib_dir.path(), layout, mode)
+        lib_dir
     }
 
+    /// Compiles `source` under `layout` and links it against the libraries in
+    /// `lib_dir`, returning the linker's whole output, the merged module and
+    /// its warnings, or its refusal.
     fn link_in(
         source: &str,
         lib_dir: &Path,
         layout: MemoryLayout,
         mode: CompilationMode,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<LinkOutput, String> {
         let arena = parse(source).expect("the program parses");
         let typed = type_check(arena).expect("the program type-checks");
         analyze(&typed).expect("the program passes analysis");
@@ -120,7 +132,6 @@ pub fn run() -> i32 {
             Some(&externals.contracts),
             &LinkOptions::default(),
         )
-        .map(|output| output.wasm)
         .map_err(|e| e.to_string())
     }
 
@@ -218,6 +229,40 @@ pub fn run() -> i32 {
         );
     }
 
+    /// That configured maximum replaces the library's own: `memlib` declares
+    /// no maximum, so on its own its `memory.grow` never stops, and linked
+    /// under three pages it stops at three. The link goes ahead and names
+    /// `memlib::grow_by` as a growing import whose maximum moved, recording that
+    /// its module declares none.
+    #[test]
+    fn a_library_with_no_maximum_is_named_under_a_growable_program() {
+        let lib_dir = memlib_dir();
+        let output = link_in(
+            SCALAR_MAIN_SOURCE,
+            lib_dir.path(),
+            layout_growable_to(3),
+            CompilationMode::Compile,
+        )
+        .expect("a growable main admits the library's growth");
+        assert_eq!(
+            memory_limits(&output.wasm),
+            Some((1, Some(3))),
+            "the warning must not change the linked memory"
+        );
+        assert_eq!(
+            output.warnings,
+            vec![LinkWarning::MemoryMaximumOverridden {
+                program_maximum: Some(3),
+                overridden: vec![OverriddenMaximum {
+                    module: "memlib".to_string(),
+                    field: "grow_by".to_string(),
+                    declared_maximum: None,
+                }],
+            }],
+            "the one growing import is named, with its module declaring no maximum"
+        );
+    }
+
     /// The same holds for a configured fixed memory: the build's pages are the
     /// merged module's, and a library that grows memory is refused against
     /// them rather than handed an unbounded memory of its own.
@@ -274,7 +319,7 @@ pub fn run() -> i32 {
     // maximum. Each case below compiles one program twice, with only its two
     // `external fn` lines swapped, links both against the same libraries, runs
     // both, and asserts the two programs are indistinguishable — the same memory,
-    // the same result, or the same refusal.
+    // the same result and the same linker warnings, or the same refusal.
 
     /// Libraries for the declaration-order cases, each exporting one function of
     /// `(i32) -> i32` over a memory of its own: `grow*` grows memory by its
@@ -322,20 +367,22 @@ pub fn run() -> i32 {
         None
     }
 
-    /// What one compiled-and-linked program is observably: its memory's limits
-    /// and what `run` returns, or the linker's refusal.
-    type Linked = Result<(Option<(u64, Option<u64>)>, i32), String>;
+    /// What one compiled-and-linked program is observably: its memory's limits,
+    /// what `run` returns and the warnings the link raised, or the linker's
+    /// refusal.
+    type Linked = Result<(Option<(u64, Option<u64>)>, i32, Vec<LinkWarning>), String>;
 
     fn build_link_and_run(source: &str, layout: MemoryLayout) -> Linked {
         let lib_dir = provider_dir();
-        let linked = link_in(source, lib_dir.path(), layout, CompilationMode::Compile)?;
-        inf_wasmparser::validate(&linked).expect("the merged module is valid");
-        let (mut store, instance) = instantiate(&linked);
+        let LinkOutput { wasm, warnings } =
+            link_in(source, lib_dir.path(), layout, CompilationMode::Compile)?;
+        inf_wasmparser::validate(&wasm).expect("the merged module is valid");
+        let (mut store, instance) = instantiate(&wasm);
         let run: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "run")
             .expect("the merged module exports `run`");
         let result = run.call(&mut store, ()).expect("run executes");
-        Ok((memory_limits(&linked), result))
+        Ok((memory_limits(&wasm), result, warnings))
     }
 
     /// Builds the program declaring `externs` in both orders — its `use` lines
@@ -378,7 +425,8 @@ pub fn run() -> i32 {
     /// A memoryless program calling `growB` and `peekE`: the shared memory takes
     /// `b`'s two-page cap, so `growB(2)` fails exactly as it does in `b` alone,
     /// in either order. Declared first, `peekE` used to hand `growB` its own
-    /// ten pages, and the growth succeeded.
+    /// ten pages, and the growth succeeded. No maximum was replaced, so the link
+    /// warns of nothing.
     #[test]
     fn a_growing_library_keeps_its_own_cap_in_either_declaration_order() {
         let linked = in_both_declaration_orders(
@@ -394,8 +442,9 @@ pub fn run() -> i32 {
         );
         assert_eq!(
             linked,
-            Ok((Some((1, Some(2))), -1)),
-            "growB(2) must fail as it does in b alone, and peekE(0) reads 0"
+            Ok((Some((1, Some(2))), -1, vec![])),
+            "growB(2) must fail as it does in b alone, peekE(0) reads 0, and a memoryless \
+             program never warns of a replaced maximum"
         );
     }
 
@@ -427,7 +476,9 @@ pub fn run() -> i32 {
     /// The remedy the refusal names: a program with its own growable memory.
     /// Its maximum governs both libraries — `b`'s two-page cap included, by the
     /// author's choice — so either order links to that memory and `growB(2)`
-    /// succeeds within it.
+    /// succeeds within it. The link says so in one warning that names
+    /// `b::growB`, whose two pages were raised to ten, and not `a`, which
+    /// declares ten itself.
     #[test]
     fn a_configured_maximum_governs_both_libraries_in_either_order() {
         let linked = in_both_declaration_orders(
@@ -438,8 +489,19 @@ pub fn run() -> i32 {
         );
         assert_eq!(
             linked,
-            Ok((Some((1, Some(10))), 1)),
-            "growth from one page returns 1"
+            Ok((
+                Some((1, Some(10))),
+                1,
+                vec![LinkWarning::MemoryMaximumOverridden {
+                    program_maximum: Some(10),
+                    overridden: vec![OverriddenMaximum {
+                        module: "b".to_string(),
+                        field: "growB".to_string(),
+                        declared_maximum: Some(2),
+                    }],
+                }],
+            )),
+            "growth from one page returns 1, and only b's replaced maximum is named"
         );
     }
 

@@ -39,21 +39,33 @@ use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-use inference_wasm_linker::{LinkError, LinkWarning};
+use inference_wasm_linker::{LinkError, LinkWarning, OverriddenMaximum};
 use link_memory::Body::{Grow, GrowViaHelper, Load, Pure, Size};
 use link_memory::{
     Body, Expected, INPUT_LEN, ImportSpec, Limits, LinkSpec, MAX_IMPORTS, MAX_PROVIDERS, Outcome,
     ProviderSpec, Refusal, check, decode, encode, expected, generate, match_refusal,
 };
 
+/// One entry of the maximum-override warning: the module and field of a
+/// growing import, and the maximum its provider declares.
+type Overridden = (&'static str, &'static str, Option<u64>);
+
+/// Whether a maximum-override entry's declared maximum, moved to the program's,
+/// takes one particular shape.
+type MoveShape = fn(Option<u64>, Option<u64>) -> bool;
+
 /// What a seed must produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pinned {
     /// Links with this memory. `tier_b` holds the fields the Tier-B warning
-    /// names, in order, and is empty when no warning is raised.
+    /// names, in order, and is empty when that warning is not raised.
+    /// `overridden` holds the entries the maximum-override warning names, in
+    /// order, under the memory's maximum, and is empty when that warning is not
+    /// raised.
     Linked {
         memory: Option<(u64, Option<u64>)>,
         tier_b: &'static [&'static str],
+        overridden: &'static [Overridden],
     },
     /// Is refused, reporting this kind.
     Refused(Refusal),
@@ -61,10 +73,19 @@ enum Pinned {
 
 impl Pinned {
     /// The fields the pin's Tier-B warning names: none for a refusal, or for a
-    /// link that raises no warning.
+    /// link that raises no such warning.
     fn tier_b(self) -> &'static [&'static str] {
         match self {
             Pinned::Linked { tier_b, .. } => tier_b,
+            Pinned::Refused(_) => &[],
+        }
+    }
+
+    /// The entries the pin's maximum-override warning names: none for a
+    /// refusal, or for a link that raises no such warning.
+    fn overridden(self) -> &'static [Overridden] {
+        match self {
+            Pinned::Linked { overridden, .. } => overridden,
             Pinned::Refused(_) => &[],
         }
     }
@@ -119,6 +140,7 @@ fn linked(memory: Option<(u64, Option<u64>)>) -> Pinned {
     Pinned::Linked {
         memory,
         tier_b: &[],
+        overridden: &[],
     }
 }
 
@@ -127,6 +149,21 @@ fn linked_tier_b(memory: (u64, Option<u64>), fields: &'static [&'static str]) ->
     Pinned::Linked {
         memory: Some(memory),
         tier_b: fields,
+        overridden: &[],
+    }
+}
+
+/// Links with `memory`, a Tier-B warning naming `fields` when there are any,
+/// and a maximum-override warning naming `overridden`.
+fn linked_overriding(
+    memory: (u64, Option<u64>),
+    fields: &'static [&'static str],
+    overridden: &'static [Overridden],
+) -> Pinned {
+    Pinned::Linked {
+        memory: Some(memory),
+        tier_b: fields,
+        overridden,
     }
 }
 
@@ -134,6 +171,8 @@ fn linked_tier_b(memory: (u64, Option<u64>), fields: &'static [&'static str]) ->
 /// main's memory, main's maximum over the largest contributed minimum; without
 /// it, the largest contributed minimum and the smallest declared maximum. Only
 /// an import whose body touches memory contributes, once per import entry.
+/// Under main's memory, each growing import whose provider declares a memory
+/// with a maximum other than main's is named in the maximum-override warning.
 fn seeds() -> Vec<Seed> {
     let seed = |name, spec, pinned| Seed { name, spec, pinned };
     vec![
@@ -309,6 +348,7 @@ fn seeds() -> Vec<Seed> {
         ),
         // Main's maximum governs two growers whose caps differ, as in
         // `link.rs`'s `mains_own_maximum_governs_two_growers_in_either_order`.
+        // `m1`'s two pages are raised to ten and named; `m0` declares ten.
         seed(
             "main_governs_two_growers",
             each_f0(
@@ -318,7 +358,64 @@ fn seeds() -> Vec<Seed> {
                     provider(mem(1, Some(2)), &[Grow]),
                 ],
             ),
-            linked(Some((1, Some(10)))),
+            linked_overriding((1, Some(10)), &[], &[("m1", "f0", Some(2))]),
+        ),
+        // Main's five pages lower the ten the grower's provider declares.
+        seed(
+            "main_lowers_a_growers_maximum",
+            each_f0(mem(1, Some(5)), vec![provider(mem(1, Some(10)), &[Grow])]),
+            linked_overriding((1, Some(5)), &[], &[("m0", "f0", Some(10))]),
+        ),
+        // A provider that declares no maximum is bounded by main's, here for
+        // growth reached through a helper.
+        seed(
+            "main_bounds_an_unbounded_grower",
+            each_f0(
+                mem(1, Some(10)),
+                vec![provider(mem(1, None), &[GrowViaHelper])],
+            ),
+            linked_overriding((1, Some(10)), &[], &[("m0", "f0", None)]),
+        ),
+        // An unbounded main, which only the public API builds, lifts the
+        // grower's bound.
+        seed(
+            "unbounded_main_lifts_a_growers_maximum",
+            each_f0(mem(1, None), vec![provider(mem(1, Some(3)), &[Grow])]),
+            linked_overriding((1, None), &[], &[("m0", "f0", Some(3))]),
+        ),
+        // Both warnings at once, the Tier-B one first: main's two pages are
+        // above one, and `m0`'s two-page maximum is raised to ten. `m1.f0`
+        // only loads, so its maximum moving from unbounded to ten is not
+        // reported.
+        seed(
+            "maximum_override_follows_tier_b",
+            each_f0(
+                mem(2, Some(10)),
+                vec![
+                    provider(mem(1, Some(2)), &[Grow]),
+                    provider(mem(1, None), &[Load]),
+                ],
+            ),
+            linked_overriding((2, Some(10)), &["f0"], &[("m0", "f0", Some(2))]),
+        ),
+        // `m1.f0` is imported twice, and before `m0.f1`; both growers' maxima
+        // are raised to ten. The warning names each import once, in module
+        // order, which here is not field order.
+        seed(
+            "maximum_override_names_each_import_once_in_module_order",
+            with_imports(
+                mem(1, Some(10)),
+                vec![
+                    provider(mem(1, Some(2)), &[Pure, Grow]),
+                    provider(mem(1, Some(3)), &[Grow]),
+                ],
+                vec![imp(1, 0), imp(0, 1), imp(1, 0)],
+            ),
+            linked_overriding(
+                (1, Some(10)),
+                &[],
+                &[("m0", "f1", Some(2)), ("m1", "f0", Some(3))],
+            ),
         ),
         // A later import pins main's memory under a grower, as in `link.rs`'s
         // `growth_against_a_memory_a_later_import_pins_is_rejected_under_mains_own_memory`.
@@ -441,24 +538,47 @@ fn reaches(outcome: &Outcome, pinned: Pinned) -> bool {
             Pinned::Linked {
                 memory: pin,
                 tier_b,
+                overridden,
             },
-        ) => *memory == pin && *warnings == pinned_warnings(pin, tier_b),
+        ) => *memory == pin && *warnings == pinned_warnings(pin, tier_b, overridden),
         (Outcome::Refused { kind, .. }, Pinned::Refused(pin)) => *kind == pin,
         _ => false,
     }
 }
 
-/// The warnings a `Linked` pin stands for: none when `tier_b` is empty, and
-/// otherwise one Tier-B warning naming `tier_b` at the memory's minimum.
-fn pinned_warnings(memory: Option<(u64, Option<u64>)>, tier_b: &[&str]) -> Vec<LinkWarning> {
-    if tier_b.is_empty() {
-        return Vec::new();
+/// The warnings a `Linked` pin stands for: a Tier-B warning naming `tier_b` at
+/// the memory's minimum unless `tier_b` is empty, then a maximum-override
+/// warning naming `overridden` under the memory's maximum unless `overridden`
+/// is empty.
+fn pinned_warnings(
+    memory: Option<(u64, Option<u64>)>,
+    tier_b: &[&str],
+    overridden: &[Overridden],
+) -> Vec<LinkWarning> {
+    let mut warnings = Vec::new();
+    if !tier_b.is_empty() {
+        let (pages, _) = memory.expect("a pin naming Tier-B fields links with a memory");
+        warnings.push(LinkWarning::TierBInMultiPageMemory {
+            fields: tier_b.iter().map(ToString::to_string).collect(),
+            pages,
+        });
     }
-    let (pages, _) = memory.expect("a pin naming Tier-B fields links with a memory");
-    vec![LinkWarning::TierBInMultiPageMemory {
-        fields: tier_b.iter().map(ToString::to_string).collect(),
-        pages,
-    }]
+    if !overridden.is_empty() {
+        let (_, program_maximum) =
+            memory.expect("a pin naming overridden maxima links with a memory");
+        warnings.push(LinkWarning::MemoryMaximumOverridden {
+            program_maximum,
+            overridden: overridden
+                .iter()
+                .map(|&(module, field, declared_maximum)| OverriddenMaximum {
+                    module: module.to_string(),
+                    field: field.to_string(),
+                    declared_maximum,
+                })
+                .collect(),
+        });
+    }
+    warnings
 }
 
 /// The limits each import whose body touches memory contributes, once per
@@ -474,6 +594,17 @@ fn contributed(spec: &LinkSpec) -> Vec<Limits> {
                 .then_some(limits)
         })
         .collect()
+}
+
+/// How many entries of `pinned`'s maximum-override warning name `import`.
+fn override_entries(pinned: Pinned, import: &ImportSpec) -> usize {
+    let module = format!("m{}", import.provider);
+    let field = format!("f{}", import.export);
+    pinned
+        .overridden()
+        .iter()
+        .filter(|&&(m, f, _)| m == module && f == field)
+        .count()
 }
 
 /// Every seed is checked before the test fails, so a regression reports the
@@ -568,6 +699,122 @@ fn the_seed_table_covers_every_rule_branch() {
         }),
         "no seed raises a Tier-B warning beside a pure import from a module with a memory, \
          whose field the warning must not name"
+    );
+    // The maximum-override warning, in each direction the program's maximum
+    // can move a growing provider's, and beside the Tier-B warning.
+    let moves: Vec<(Option<u64>, Option<u64>)> = pins
+        .iter()
+        .flat_map(|pin| {
+            let program = match pin {
+                Pinned::Linked {
+                    memory: Some((_, max)),
+                    ..
+                } => *max,
+                _ => None,
+            };
+            pin.overridden()
+                .iter()
+                .map(move |&(_, _, declared)| (declared, program))
+        })
+        .collect();
+    let shapes: [(&str, MoveShape); 4] = [
+        (
+            "raises a declared maximum",
+            |declared, program| matches!((declared, program), (Some(d), Some(p)) if p > d),
+        ),
+        (
+            "lowers a declared maximum",
+            |declared, program| matches!((declared, program), (Some(d), Some(p)) if p < d),
+        ),
+        (
+            "bounds a provider that declares no maximum",
+            |declared, program| matches!((declared, program), (None, Some(_))),
+        ),
+        (
+            "lifts a declared maximum under an unbounded main",
+            |declared, program| matches!((declared, program), (Some(_), None)),
+        ),
+    ];
+    for (shape, holds) in shapes {
+        assert!(
+            moves
+                .iter()
+                .any(|&(declared, program)| holds(declared, program)),
+            "no seed's maximum-override warning {shape}"
+        );
+    }
+    assert!(
+        pins.iter()
+            .any(|p| !p.tier_b().is_empty() && !p.overridden().is_empty()),
+        "no seed raises the maximum-override warning beside a Tier-B warning"
+    );
+    assert!(
+        seeds.iter().any(|s| {
+            let imports = &s.spec.imports;
+            imports
+                .iter()
+                .enumerate()
+                .any(|(i, a)| imports[i + 1..].contains(a) && override_entries(s.pinned, a) == 1)
+        }),
+        "no seed imports a growing export twice that the maximum-override warning names once"
+    );
+    assert!(
+        pins.iter().any(|p| {
+            p.overridden()
+                .windows(2)
+                .any(|pair| pair[0].0 < pair[1].0 && pair[0].1 > pair[1].1)
+        }),
+        "no seed's maximum-override warning orders by module where field order would differ"
+    );
+    // What the maximum-override warning must not name, each in a link under
+    // main's memory that could have named it.
+    assert!(
+        seeds.iter().any(|s| {
+            matches!(s.pinned, Pinned::Linked { .. })
+                && s.spec.main_memory.is_some_and(|main| {
+                    s.spec.imports.iter().any(|import| {
+                        let provider = &s.spec.providers[import.provider];
+                        provider.exports[import.export].grows()
+                            && provider
+                                .memory
+                                .is_some_and(|declared| declared.max == main.max)
+                            && override_entries(s.pinned, import) == 0
+                    })
+                })
+        }),
+        "no seed links a grower whose provider declares main's maximum, which the \
+         maximum-override warning must not name"
+    );
+    assert!(
+        seeds.iter().any(|s| {
+            matches!(s.pinned, Pinned::Linked { .. })
+                && s.spec.main_memory.is_some_and(|main| {
+                    s.spec.imports.iter().any(|import| {
+                        let provider = &s.spec.providers[import.provider];
+                        let body = provider.exports[import.export];
+                        body.uses_memory()
+                            && !body.grows()
+                            && provider
+                                .memory
+                                .is_some_and(|declared| declared.max != main.max)
+                            && override_entries(s.pinned, import) == 0
+                    })
+                })
+        }),
+        "no seed links a memory user that does not grow, whose provider declares a maximum \
+         other than main's, which the maximum-override warning must not name"
+    );
+    assert!(
+        seeds.iter().any(|s| {
+            s.spec.main_memory.is_none()
+                && matches!(s.pinned, Pinned::Linked { .. })
+                && s.pinned.overridden().is_empty()
+                && s.spec.imports.iter().any(|import| {
+                    let provider = &s.spec.providers[import.provider];
+                    provider.memory.is_some() && provider.exports[import.export].grows()
+                })
+        }),
+        "no seed links a grower onto a memoryless main, which raises no maximum-override warning"
     );
     assert!(
         seeds.iter().any(|s| s.spec.main_memory.is_some()),
@@ -827,7 +1074,8 @@ fn a_deterministic_sweep_upholds_every_property() {
     const INPUTS: usize = 4096;
     let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
     let mut refused: BTreeSet<Refusal> = BTreeSet::new();
-    let (mut linked_without, mut linked_with, mut warned) = (false, false, false);
+    let (mut linked_without, mut linked_with) = (false, false);
+    let (mut warned_tier_b, mut warned_override) = (false, false);
     let (mut with_main_memory, mut without_main_memory) = (false, false);
 
     for case in 0..INPUTS {
@@ -841,7 +1089,12 @@ fn a_deterministic_sweep_upholds_every_property() {
             Outcome::Linked { memory, warnings } => {
                 linked_without |= memory.is_none();
                 linked_with |= memory.is_some();
-                warned |= !warnings.is_empty();
+                warned_tier_b |= warnings
+                    .iter()
+                    .any(|w| matches!(w, LinkWarning::TierBInMultiPageMemory { .. }));
+                warned_override |= warnings
+                    .iter()
+                    .any(|w| matches!(w, LinkWarning::MemoryMaximumOverridden { .. }));
             }
         }
         with_main_memory |= spec.main_memory.is_some();
@@ -855,7 +1108,11 @@ fn a_deterministic_sweep_upholds_every_property() {
     }
     assert!(linked_without, "the sweep never linked without a memory");
     assert!(linked_with, "the sweep never linked with a memory");
-    assert!(warned, "the sweep never raised a warning");
+    assert!(warned_tier_b, "the sweep never raised a Tier-B warning");
+    assert!(
+        warned_override,
+        "the sweep never raised the maximum-override warning"
+    );
     assert!(with_main_memory, "the sweep never gave main a memory");
     assert!(without_main_memory, "the sweep never left main memoryless");
 }

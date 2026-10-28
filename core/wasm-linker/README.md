@@ -77,6 +77,36 @@ declarations in:
 - **The main module declares a memory.** Its maximum is kept and governs every
   linked module, whatever their own caps; the minimum widens to the largest any
   module declares. An external whose minimum exceeds main's maximum is refused.
+  A module whose merged closure grows memory under a different maximum of its
+  own is linked all the same, and the link raises one
+  `LinkWarning::MemoryMaximumOverridden` naming each such import as
+  `module::field`, sorted by module and then field whatever order the imports
+  came in. It says whether the program's maximum raised or lowered each module's
+  and where `memory.grow` there now stops; the warning changes no emitted byte.
+  A program built with `infc --max-memory-pages 10` that links `b::growB`, whose
+  module declares `(memory 1 2)`, prints:
+
+  ```text
+  warning: the program's linear memory has a maximum of 10 pages, which governs
+           `memory.grow` in every linked module and replaces the maximum a
+           growing module declares where the two differ: raised for the module
+           providing `b::growB`, which declares a maximum of 2 pages, so
+           `memory.grow` there now stops at 10 pages instead of 2. Under a
+           raised maximum, `memory.grow` can succeed where the module alone
+           would return -1. The program decides the maximum by design, which is
+           what lets libraries whose maximums differ link together. This is not
+           a fault found in the program or the library; the program's maximum is
+           set by `max-pages` in the `[memory]` table of `Inference.toml`, or by
+           `infc --max-memory-pages <N>`.
+  ```
+
+  The warning is silent when the program's maximum equals the module's, and for
+  a module whose merged closure never grows memory, because only `memory.grow`
+  observes the maximum. A module that declares no maximum is named whenever the
+  program's memory can grow but has a maximum, as every growable memory
+  Inference emits does, since its `memory.grow` is now bounded. A declared but
+  never-called `external fn` counts, by the per-import rule at the end of this
+  section.
 - **The main module is memoryless.** The memory is the tightest fit to the
   externals' own declarations: the largest declared minimum and the smallest
   declared maximum, unbounded only when none declares one. That is the memory
@@ -895,12 +925,17 @@ silently lose a proof obligation for a caller who never chose.
 `link_with_warnings` and `link_with_options` return a `LinkOutput` that keeps
 the `LinkWarning`s the merge raised alongside the bytes. A warning is never a
 defect found in the merged program: it states where the merge's own reach stops,
-at a point where the emitted artifact makes that limit visible — a Tier-B
-external merged into a memory of more than one page, where an address past the
-caller's buffer lands in valid memory instead of trapping (see
+at a point where the emitted artifact makes that limit visible, or where the
+program's own memory replaced a library's declared bound — a Tier-B external
+merged into a memory of more than one page, where an address past the caller's
+buffer lands in valid memory instead of trapping (see
 [What Tier B guarantees — and what it does not](#what-tier-b-guarantees--and-what-it-does-not),
-and issue #420); a linked library whose own proof obligations the output does
-not carry; and a library whose reachability obligations adoption left behind.
+and issue #420); a growing library whose declared maximum the program's own
+memory replaced, so its `memory.grow` follows the program's maximum instead of
+its own declaration (see
+[Linear-Memory Reconciliation](#linear-memory-reconciliation)); a linked library
+whose own proof obligations the output does not carry; and a library whose
+reachability obligations adoption left behind.
 
 Every import in the main module must be satisfiable by one of the supplied
 external modules. The match is by **both** the logical module name and the export
@@ -995,7 +1030,7 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
 
 | File | Responsibility |
 |------|---------------|
-| `src/lib.rs` | Public API (`link`, `link_with_warnings`, `link_with_options`, `LinkOptions`, `ExternalSpecPolicy`, `LinkError`, `LinkWarning`), crate-level documentation |
+| `src/lib.rs` | Public API (`link`, `link_with_warnings`, `link_with_options`, `LinkOptions`, `ExternalSpecPolicy`, `LinkError`, `LinkWarning`, `OverriddenMaximum`), crate-level documentation |
 | `src/parse.rs` | `ParsedModule` — section-by-section owned representation, including each data segment's kind, offset and bytes (`DataSegment`); `ParsedModule::parse`, and `ParsedModule::parse_external`, which decodes a library's verification sections only when adoption asks for them |
 | `src/closure.rs` | `compute` — transitive closure via BFS; `ClosureEffects` for tier classification |
 | `src/tier.rs` | `classify` — Tier A/B/C feasibility decision, plus `check_write_contract`, the declared write-set check that gates Tier-B admission |
@@ -1050,7 +1085,7 @@ Test coverage includes:
 - **Diamond closure** — two roots sharing one internal callee; merged exactly once
 - **Main globals** — main module globals and global exports survive the merge
 - **Environment import** — external module importing its host environment is rejected
-- **Memory reconciliation in either import order** — two memory-declaring providers linked behind a main importing them in both orders give the same memory, or the same refusal: the tightest fit onto a memoryless main, refusals for declarations no memory satisfies and for a growing provider whose cap would move, growth checked against a memory a later provider pins, and main's own maximum governing both. The unit tests in `src/merge.rs` check the same property over every ordering of two and three imports drawn from a pool of limits
+- **Memory reconciliation in either import order** — two memory-declaring providers linked behind a main importing them in both orders give the same memory and warnings, or the same refusal: the tightest fit onto a memoryless main, refusals for declarations no memory satisfies and for a growing provider whose cap would move, growth checked against a memory a later provider pins, and main's own maximum governing both, with the same warning from either order naming a growing provider whose declared maximum it raised in one case and lowered in another. The unit tests in `src/merge.rs` check the same property, memory and warning together, over every ordering of two and three imports drawn from a pool of limits, asserting that a memoryless or pinned main never warns, and check the warning over every ordering of eight imports
 - **Adversarial robustness** — a hand-seeded corpus of malformed/adversarial
   externals (one per confirmed Issue #9 robustness-audit defect) plus a
   deterministic byte-mutation sweep is fed through `link` by

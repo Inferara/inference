@@ -89,11 +89,18 @@
 //! a moved grower with the field it reports, so naming one grower with
 //! another's cap does not match. The linker's report has to match one of them.
 //!
-//! The warning rule is `LinkWarning::TierBInMultiPageMemory`'s: raised when
-//! the output has a memory whose minimum is above one page and some import is
-//! admitted at Tier B, which here means its body touches memory. It names the
-//! bare fields of those imports, sorted and deduplicated, and the output
-//! minimum.
+//! Two warning rules apply to an accepted link, and the warnings come in this
+//! order:
+//!
+//! - `LinkWarning::TierBInMultiPageMemory`: raised when the output has a
+//!   memory whose minimum is above one page and some import is admitted at
+//!   Tier B, which here means its body touches memory. It names the bare
+//!   fields of those imports, sorted and deduplicated, and the output minimum.
+//! - `LinkWarning::MemoryMaximumOverridden`: raised when main declares a
+//!   memory and some import's body grows memory while its provider declares a
+//!   memory with a maximum other than main's. It names each such import once,
+//!   as its module and field with its provider's maximum, sorted by module and
+//!   then field, and main's maximum. A memoryless main never raises it.
 //!
 //! ## The properties [`check`] asserts
 //!
@@ -126,7 +133,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use inf_wasmparser::{Parser, Payload};
-use inference_wasm_linker::{LinkError, LinkOutput, LinkWarning, link_with_warnings};
+use inference_wasm_linker::{
+    LinkError, LinkOutput, LinkWarning, OverriddenMaximum, link_with_warnings,
+};
 use wasm_encoder::{
     CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
     Instruction, MemArg, MemorySection, MemoryType, Module, TypeSection, ValType,
@@ -1272,10 +1281,19 @@ pub fn expected(spec: &LinkSpec) -> Expected {
     }
 }
 
+/// The warnings an accepted link with an output memory of `pages` pages
+/// raises, in the order the module documentation gives.
+fn expected_warnings(spec: &LinkSpec, pages: u64) -> Vec<LinkWarning> {
+    tier_b_warning(spec, pages)
+        .into_iter()
+        .chain(maximum_override_warning(spec))
+        .collect()
+}
+
 /// The `TierBInMultiPageMemory` rule for an output memory of `pages` pages:
 /// some import is admitted at Tier B (its body touches memory), and `pages` is
 /// above one.
-fn expected_warnings(spec: &LinkSpec, pages: u64) -> Vec<LinkWarning> {
+fn tier_b_warning(spec: &LinkSpec, pages: u64) -> Option<LinkWarning> {
     let fields: BTreeSet<String> = spec
         .imports
         .iter()
@@ -1283,10 +1301,46 @@ fn expected_warnings(spec: &LinkSpec, pages: u64) -> Vec<LinkWarning> {
         .map(|import| field_name(import.export))
         .collect();
     if pages <= 1 || fields.is_empty() {
-        return Vec::new();
+        return None;
     }
-    vec![LinkWarning::TierBInMultiPageMemory {
+    Some(LinkWarning::TierBInMultiPageMemory {
         fields: fields.into_iter().collect(),
         pages,
-    }]
+    })
+}
+
+/// The `MemoryMaximumOverridden` rule: main declares a memory, and some
+/// import's body grows memory while its provider declares a memory with a
+/// maximum other than main's.
+fn maximum_override_warning(spec: &LinkSpec) -> Option<LinkWarning> {
+    let main = spec.main_memory?;
+    let overridden: BTreeSet<(String, String, Option<u64>)> = spec
+        .imports
+        .iter()
+        .filter_map(|import| {
+            let provider = &spec.providers[import.provider];
+            let declared = provider.memory?.max;
+            (provider.exports[import.export].grows() && declared != main.max).then(|| {
+                (
+                    module_name(import.provider),
+                    field_name(import.export),
+                    declared,
+                )
+            })
+        })
+        .collect();
+    if overridden.is_empty() {
+        return None;
+    }
+    Some(LinkWarning::MemoryMaximumOverridden {
+        program_maximum: main.max,
+        overridden: overridden
+            .into_iter()
+            .map(|(module, field, declared_maximum)| OverriddenMaximum {
+                module,
+                field,
+                declared_maximum,
+            })
+            .collect(),
+    })
 }

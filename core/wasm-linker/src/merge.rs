@@ -72,7 +72,10 @@ use crate::parse::{
 };
 use crate::rewrite::{BodyOrigin, IndexMap, call_edges, reencode_body};
 use crate::tier::{self, Tier, WriteContract};
-use crate::{ExternalSpecPolicy, ImportWriteSet, LinkError, LinkOptions, LinkOutput, LinkWarning};
+use crate::{
+    ExternalSpecPolicy, ImportWriteSet, LinkError, LinkOptions, LinkOutput, LinkWarning,
+    OverriddenMaximum,
+};
 
 /// Resolves and merges every satisfiable import of `main` from the supplied
 /// external modules, returning the unified module bytes and everything the
@@ -855,7 +858,10 @@ impl Plan {
 
         // Every import has contributed its memory, so the shared memory can be
         // computed and checked against all of them at once.
-        let reconciled_memory = memory.finish()?;
+        let Reconciled {
+            memory: reconciled_memory,
+            maximum_override,
+        } = memory.finish()?;
 
         // Name every closure root after an import field it satisfies, under its
         // external's logical module (`mathlib::sum`), so the merged function
@@ -1077,8 +1083,11 @@ impl Plan {
             external_type_remap,
             out_globals,
             external_global_remap,
+            // Fixed order: Tier-B, then the maximum override, then the
+            // verification policy's warnings.
             warnings: unbounded_reach_warning(&tier_b_fields, reconciled_memory.as_ref())
                 .into_iter()
+                .chain(maximum_override)
                 .chain(policy_warnings)
                 .collect(),
             reconciled_memory,
@@ -2959,7 +2968,10 @@ fn map_val_type(ty: &inf_wasmparser::ValType) -> Result<EncValType, LinkError> {
 ///   - When it does, main's maximum is kept whatever the externals declare. It
 ///     is the bound the program was built with, and it governs every linked
 ///     module, so an external's own cap is overridden in either direction; a
-///     reserved minimum above it is rejected.
+///     reserved minimum above it is rejected. Each growing import whose module
+///     declared a different maximum is named in
+///     [`LinkWarning::MemoryMaximumOverridden`]; a module that only uses memory
+///     is not, since nothing it runs can observe the maximum.
 ///   - When main is memoryless (H24), there is no such bound, and the output is
 ///     the tightest fit to the externals' own declarations: the smallest
 ///     declared maximum. That is the memory WebAssembly import matching would
@@ -3012,6 +3024,15 @@ impl Contribution {
     fn display_name(&self) -> String {
         inference_fn_key::merged_name::root(&self.module, &self.field)
     }
+}
+
+/// What [`MemoryReconciler::finish`] decided for an accepted link.
+struct Reconciled {
+    /// The memory to emit, or `None` when no module needs one.
+    memory: Option<EncMemoryType>,
+    /// [`LinkWarning::MemoryMaximumOverridden`], when a growing module's
+    /// declared maximum differs from `memory`'s.
+    maximum_override: Option<LinkWarning>,
 }
 
 impl MemoryReconciler {
@@ -3124,11 +3145,13 @@ impl MemoryReconciler {
     }
 
     /// Returns the reconciled memory to emit, or `None` when no module needs
-    /// one, after checking it against every recorded contribution.
+    /// one, after checking it against every recorded contribution, together
+    /// with the warning owed for the growing maxima it replaced.
     ///
-    /// The contributions are sorted first, so which one a diagnostic names is
-    /// decided by the set of imports rather than by the order they arrived in.
-    fn finish(mut self) -> Result<Option<EncMemoryType>, LinkError> {
+    /// The contributions are sorted first, so which one a diagnostic names, and
+    /// the warning, are decided by the set of imports rather than by the order
+    /// they arrived in.
+    fn finish(mut self) -> Result<Reconciled, LinkError> {
         self.contributions.sort();
         let memory = match self.main {
             Some(main) => Some(self.anchor_on_main(main)?),
@@ -3146,10 +3169,56 @@ impl MemoryReconciler {
                         .to_string(),
                 });
             }
-            return Ok(None);
+            return Ok(Reconciled {
+                memory: None,
+                maximum_override: None,
+            });
         };
         self.admit_growth(&memory)?;
-        Ok(Some(memory))
+        let maximum_override = self.maximum_override_warning(&memory);
+        Ok(Reconciled {
+            memory: Some(memory),
+            maximum_override,
+        })
+    }
+
+    /// The warning owed when the linked memory's maximum differs from the one a
+    /// growing contribution's module declares, or `None` when no growing
+    /// module's maximum moved.
+    ///
+    /// Only a closure that grows memory can observe the maximum, so only a
+    /// growing contribution is compared. Which mode produced `memory` is not
+    /// consulted: under a memoryless main, [`Self::fit_externals`] has already
+    /// refused every growing contribution whose maximum differs from the shared
+    /// one, so nothing is left to name, and a check on the mode would be a
+    /// branch no input can tell apart. An unbacked import is never named: its
+    /// module declares no memory, so there is no declaration to replace.
+    ///
+    /// The map deduplicates repeated imports and orders the entries by module,
+    /// then field. `(module, field)` names one external, because the link
+    /// refuses a pair two externals could satisfy, so it names one declared
+    /// maximum.
+    fn maximum_override_warning(&self, memory: &EncMemoryType) -> Option<LinkWarning> {
+        let overridden: BTreeMap<(&str, &str), Option<u64>> = self
+            .contributions
+            .iter()
+            .filter(|c| c.grows && c.maximum != memory.maximum)
+            .map(|c| ((c.module.as_str(), c.field.as_str()), c.maximum))
+            .collect();
+        if overridden.is_empty() {
+            return None;
+        }
+        Some(LinkWarning::MemoryMaximumOverridden {
+            program_maximum: memory.maximum,
+            overridden: overridden
+                .into_iter()
+                .map(|((module, field), declared_maximum)| OverriddenMaximum {
+                    module: module.to_string(),
+                    field: field.to_string(),
+                    declared_maximum,
+                })
+                .collect(),
+        })
     }
 
     /// The output memory when the main module declares one: main's maximum,
@@ -3163,7 +3232,9 @@ impl MemoryReconciler {
     /// larger or unbounded maximum is not rejected for it: main's bound is the
     /// one the program was built with, so it governs every linked module, and
     /// a closure that actually grows memory is held to it by
-    /// [`MemoryReconciler::admit_growth`].
+    /// [`MemoryReconciler::admit_growth`]. A growing closure whose module
+    /// declared a different maximum is named in
+    /// [`LinkWarning::MemoryMaximumOverridden`].
     ///
     /// The one requirement that *cannot* be honored is a reserved minimum above
     /// main's maximum — an external's static footprint that does not fit under
@@ -3469,8 +3540,12 @@ mod tests {
     /// emitted limits, or the rendered diagnostic.
     type Outcome = Result<Option<(u64, Option<u64>)>, String>;
 
-    /// Folds `imports` in the order given onto a reconciler seeded with `main`.
-    fn reconcile(main: Option<MemoryType>, imports: &[&Import]) -> Outcome {
+    /// [`Outcome`] with the maximum-override warning an accepted link raises.
+    type Full = Result<(Option<(u64, Option<u64>)>, Option<LinkWarning>), String>;
+
+    /// Folds `imports` in the order given onto a reconciler seeded with `main`,
+    /// and returns the memory with the warning.
+    fn reconcile_full(main: Option<MemoryType>, imports: &[&Import]) -> Full {
         let mut r = MemoryReconciler::new(main.as_ref()).map_err(|e| e.to_string())?;
         for import in imports {
             r.fold(
@@ -3483,7 +3558,12 @@ mod tests {
             .map_err(|e| e.to_string())?;
         }
         r.finish()
-            .map(|memory| memory.map(|m| (m.minimum, m.maximum)))
+            .map(|reconciled| {
+                (
+                    reconciled.memory.map(|m| (m.minimum, m.maximum)),
+                    reconciled.maximum_override,
+                )
+            })
             .map_err(|e| e.to_string())
     }
 
@@ -3504,14 +3584,14 @@ mod tests {
     }
 
     /// Reconciles `imports` in every order, asserts that every order gives the
-    /// same outcome, and returns it.
-    fn reconcile_in_every_order(main: Option<MemoryType>, imports: &[Import]) -> Outcome {
+    /// same memory, diagnostic and warning, and returns them.
+    fn reconcile_full_in_every_order(main: Option<MemoryType>, imports: &[Import]) -> Full {
         let orders = permutations(imports.len());
-        let outcomes: Vec<Outcome> = orders
+        let outcomes: Vec<Full> = orders
             .iter()
             .map(|order| {
                 let ordered: Vec<&Import> = order.iter().map(|&i| &imports[i]).collect();
-                reconcile(main, &ordered)
+                reconcile_full(main, &ordered)
             })
             .collect();
         for (order, outcome) in orders.iter().zip(&outcomes) {
@@ -3521,6 +3601,39 @@ mod tests {
             );
         }
         outcomes[0].clone()
+    }
+
+    /// [`reconcile_full_in_every_order`] without the warning.
+    fn reconcile_in_every_order(main: Option<MemoryType>, imports: &[Import]) -> Outcome {
+        reconcile_full_in_every_order(main, imports).map(|(memory, _)| memory)
+    }
+
+    /// Reconciles `imports` in every order, asserts that every order is
+    /// accepted with the same warning, and returns it.
+    fn warning_in_every_order(main: Option<MemoryType>, imports: &[Import]) -> Option<LinkWarning> {
+        match reconcile_full_in_every_order(main, imports) {
+            Ok((_, warning)) => warning,
+            Err(message) => panic!("expected {imports:?} onto {main:?} to link, got: {message}"),
+        }
+    }
+
+    /// The warning naming `overridden`, each as `(module, field, declared
+    /// maximum)`, under a program maximum of `program_maximum`.
+    fn overridden(
+        program_maximum: Option<u64>,
+        overridden: &[(&str, &str, Option<u64>)],
+    ) -> Option<LinkWarning> {
+        Some(LinkWarning::MemoryMaximumOverridden {
+            program_maximum,
+            overridden: overridden
+                .iter()
+                .map(|&(module, field, declared_maximum)| OverriddenMaximum {
+                    module: module.to_string(),
+                    field: field.to_string(),
+                    declared_maximum,
+                })
+                .collect(),
+        })
     }
 
     /// Asserts `outcome` is a rejection for `field` whose text contains every
@@ -3550,7 +3663,8 @@ mod tests {
         // it; a field two modules both export, with different memories; a
         // declared memory no closure uses; and an import touching no memory at
         // all. Rejections are compared too, so the field a diagnostic names
-        // cannot depend on the order either.
+        // cannot depend on the order either, and so is the warning an accepted
+        // link raises when main's maximum replaces a growing module's.
         const LIMITS: [(u64, Option<u64>); 6] = [
             (1, None),
             (1, Some(2)),
@@ -3586,34 +3700,55 @@ mod tests {
         });
 
         let n = pool.len();
-        let mains = [None, Some(mem(1, Some(1))), Some(mem(1, Some(10)))];
-        let (mut runs, mut linked, mut rejected) = (0, 0, 0);
+        let mains = [
+            None,
+            Some(mem(1, Some(1))),
+            Some(mem(1, Some(10))),
+            Some(mem(1, None)),
+        ];
+        let (mut runs, mut linked, mut rejected, mut warned) = (0, 0, 0, 0);
         for main in mains {
             for len in 2..=3u32 {
                 for code in 0..n.pow(len) {
                     let mut seq: Vec<usize> =
                         (0..len).map(|digit| code / n.pow(digit) % n).collect();
                     let ordered: Vec<&Import> = seq.iter().map(|&i| &pool[i]).collect();
-                    let outcome = reconcile(main, &ordered);
+                    let outcome = reconcile_full(main, &ordered);
                     seq.sort_unstable();
                     let canonical: Vec<&Import> = seq.iter().map(|&i| &pool[i]).collect();
                     assert_eq!(
                         outcome,
-                        reconcile(main, &canonical),
+                        reconcile_full(main, &canonical),
                         "main {main:?}: {ordered:?} and {canonical:?} reconcile differently"
                     );
                     runs += 1;
-                    match outcome {
-                        Ok(_) => linked += 1,
+                    match &outcome {
+                        Ok((_, warning)) => {
+                            linked += 1;
+                            if let Some(warning) = warning {
+                                // A memoryless main refuses every grower whose
+                                // maximum moves, and a pinned one every grower.
+                                assert!(
+                                    main.is_some_and(|m| m.maximum != Some(m.initial)),
+                                    "only a main with a growable memory of its own warns, but \
+                                     main {main:?} with {ordered:?} gave {warning:?}"
+                                );
+                                warned += 1;
+                            }
+                        }
                         Err(_) => rejected += 1,
                     }
                 }
             }
         }
-        assert_eq!(runs, 3 * (n.pow(2) + n.pow(3)), "every sequence ran");
+        assert_eq!(runs, 4 * (n.pow(2) + n.pow(3)), "every sequence ran");
         assert!(
             linked > 0 && rejected > 0,
             "the matrix exercises both verdicts ({linked} linked, {rejected} rejected)"
+        );
+        assert!(
+            warned > 0,
+            "the matrix never raises the maximum-override warning ({linked} linked)"
         );
     }
 
@@ -3982,6 +4117,221 @@ mod tests {
         assert_eq!(
             reconcile_in_every_order(Some(mem(1, Some(1))), &[user("m", "f", mem(1, None))]),
             Ok(Some((1, Some(1))))
+        );
+    }
+
+    /// An import whose closure touches no memory, from a module that declares
+    /// none. It contributes nothing, so a case gains one only to make its import
+    /// orders differ.
+    fn pure(module: &'static str, field: &'static str) -> Import {
+        Import {
+            module,
+            field,
+            memory: None,
+            uses_memory: false,
+            grows: false,
+        }
+    }
+
+    #[test]
+    fn a_growing_module_whose_maximum_main_raises_is_named() {
+        // #553's case: `b` declares `(memory 1 2)` and grows it, and the
+        // program's own `1..10` governs, so `memory.grow` in `growB` now stops
+        // at ten pages instead of two.
+        let main = Some(mem(1, Some(10)));
+        let imports = [grower("b", "growB", mem(1, Some(2))), pure("p", "pure")];
+        assert_eq!(
+            reconcile_full_in_every_order(main, &imports),
+            Ok((
+                Some((1, Some(10))),
+                overridden(Some(10), &[("b", "growB", Some(2))])
+            ))
+        );
+    }
+
+    #[test]
+    fn a_growing_module_whose_maximum_main_lowers_is_named() {
+        // `growA`'s module allows ten pages and the program five. `peekE` only
+        // reads, so its ten pages moving to five is not reported.
+        let main = Some(mem(1, Some(5)));
+        let imports = [
+            grower("a", "growA", mem(1, Some(10))),
+            user("e", "peekE", mem(1, Some(10))),
+        ];
+        assert_eq!(
+            reconcile_full_in_every_order(main, &imports),
+            Ok((
+                Some((1, Some(5))),
+                overridden(Some(5), &[("a", "growA", Some(10))])
+            ))
+        );
+    }
+
+    #[test]
+    fn a_growing_module_that_declares_no_maximum_is_named_under_a_bounded_program() {
+        let main = Some(mem(1, Some(10)));
+        let imports = [grower("g", "expand", mem(1, None)), pure("p", "pure")];
+        assert_eq!(
+            reconcile_full_in_every_order(main, &imports),
+            Ok((
+                Some((1, Some(10))),
+                overridden(Some(10), &[("g", "expand", None)])
+            ))
+        );
+    }
+
+    #[test]
+    fn a_bounded_growing_module_is_named_under_an_unbounded_program() {
+        // Inference codegen never emits an unbounded main, but the public API
+        // takes one, and it lifts the module's bound entirely.
+        let main = Some(mem(1, None));
+        let imports = [grower("b", "growB", mem(1, Some(2))), pure("p", "pure")];
+        assert_eq!(
+            reconcile_full_in_every_order(main, &imports),
+            Ok((
+                Some((1, None)),
+                overridden(None, &[("b", "growB", Some(2))])
+            ))
+        );
+    }
+
+    #[test]
+    fn a_growing_module_whose_maximum_equals_mains_is_not_named() {
+        assert_eq!(
+            reconcile_full_in_every_order(
+                Some(mem(1, Some(10))),
+                &[grower("a", "growA", mem(1, Some(10))), pure("p", "pure")]
+            ),
+            Ok((Some((1, Some(10))), None))
+        );
+        assert_eq!(
+            reconcile_full_in_every_order(
+                Some(mem(1, None)),
+                &[grower("u", "growU", mem(1, None)), pure("p", "pure")]
+            ),
+            Ok((Some((1, None)), None))
+        );
+    }
+
+    #[test]
+    fn a_non_growing_user_is_never_named() {
+        // Both users' maxima move, to ten pages from two and from none, but
+        // neither closure runs `memory.grow`, so neither can observe it.
+        let main = Some(mem(1, Some(10)));
+        let imports = [
+            user("b", "peekB", mem(1, Some(2))),
+            user("u", "peekU", mem(1, None)),
+        ];
+        assert_eq!(
+            reconcile_full_in_every_order(main, &imports),
+            Ok((Some((1, Some(10))), None))
+        );
+    }
+
+    #[test]
+    fn several_growing_modules_share_one_warning_sorted_by_module() {
+        // One warning for the whole link, one entry per growing import whose
+        // maximum moved, in module order: `x::dup` and `y::dup` share a field
+        // name, so ordering by field would put them first. `d::growD` declares
+        // main's ten pages and is absent, and the repeated `a::growA` is named
+        // once. Eight imports: every one of the 40 320 orders is checked.
+        let main = Some(mem(1, Some(10)));
+        let imports = [
+            grower("c", "growC", mem(1, Some(20))),
+            grower("a", "growA", mem(1, Some(2))),
+            grower("a", "growA2", mem(1, Some(2))),
+            grower("b", "grow", mem(1, None)),
+            grower("d", "growD", mem(1, Some(10))),
+            grower("a", "growA", mem(1, Some(2))),
+            grower("x", "dup", mem(1, Some(3))),
+            grower("y", "dup", mem(1, Some(4))),
+        ];
+        assert_eq!(
+            warning_in_every_order(main, &imports),
+            overridden(
+                Some(10),
+                &[
+                    ("a", "growA", Some(2)),
+                    ("a", "growA2", Some(2)),
+                    ("b", "grow", None),
+                    ("c", "growC", Some(20)),
+                    ("x", "dup", Some(3)),
+                    ("y", "dup", Some(4)),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn a_memoryless_main_never_warns() {
+        // The meet takes the growers' own shared maximum, and a grower whose
+        // maximum it would move is refused instead, so an accepted link onto a
+        // memoryless main has nothing to report.
+        assert_eq!(
+            reconcile_full_in_every_order(
+                None,
+                &[
+                    grower("a", "growA", mem(1, Some(10))),
+                    grower("b", "growB", mem(1, Some(10))),
+                ]
+            ),
+            Ok((Some((1, Some(10))), None))
+        );
+        assert_eq!(
+            reconcile_full_in_every_order(
+                None,
+                &[
+                    grower("b", "growB", mem(1, Some(2))),
+                    user("e", "peekE", mem(1, Some(10))),
+                ]
+            ),
+            Ok((Some((1, Some(2))), None))
+        );
+    }
+
+    #[test]
+    fn a_pinned_main_refuses_a_grower_whose_maximum_it_would_replace() {
+        // `growB`'s module allows two pages, so main's one would replace its
+        // maximum, but a pinned memory cannot grow at all: the grower is
+        // refused rather than named.
+        assert_rejected(
+            &reconcile_in_every_order(
+                Some(mem(1, Some(1))),
+                &[grower("b", "growB", mem(1, Some(2))), pure("p", "pure")],
+            ),
+            "growB",
+            &["does not exceed its minimum"],
+        );
+    }
+
+    #[test]
+    fn an_unbacked_growing_import_is_not_named() {
+        // Its module declares no memory, so there is no maximum to replace.
+        assert_eq!(
+            reconcile_full_in_every_order(
+                Some(mem(1, Some(10))),
+                &[unbacked("g", true), pure("p", "pure")]
+            ),
+            Ok((Some((1, Some(10))), None))
+        );
+    }
+
+    #[test]
+    fn a_growing_module_is_named_when_the_minimum_widens_past_its_maximum() {
+        // `wide` raises the minimum to five pages, above the two `growB`'s
+        // module allows, and main's ten govern: growth there is raised, not
+        // refused.
+        let main = Some(mem(1, Some(10)));
+        let imports = [
+            grower("b", "growB", mem(1, Some(2))),
+            user("w", "wide", mem(5, None)),
+        ];
+        assert_eq!(
+            reconcile_full_in_every_order(main, &imports),
+            Ok((
+                Some((5, Some(10))),
+                overridden(Some(10), &[("b", "growB", Some(2))])
+            ))
         );
     }
 
