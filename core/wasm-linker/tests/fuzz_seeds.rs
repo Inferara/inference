@@ -4,9 +4,17 @@
 //! The libFuzzer harness in `core/wasm-linker/fuzz/fuzz_targets/link.rs` cannot
 //! run on the default toolchain (`cargo-fuzz` + nightly are detached from the
 //! workspace). Its seed corpus, however, *is* committed — at
-//! `core/wasm-linker/fuzz/seeds/link/` — so a developer running
-//! `cargo +nightly fuzz run link core/wasm-linker/fuzz/seeds/link` starts from
-//! the round-2 audit reproductions rather than from zero coverage.
+//! `core/wasm-linker/fuzz/seeds/link/` — so a developer who passes it after a
+//! corpus directory of their own starts from the round-2 audit reproductions
+//! rather than from zero coverage:
+//!
+//! ```text
+//! cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link \
+//!     <corpus> core/wasm-linker/fuzz/seeds/link
+//! ```
+//!
+//! libFuzzer writes new inputs into the first directory it is given, so the
+//! committed seeds go after it.
 //!
 //! Two tests keep the corpus trustworthy on every `cargo test`:
 //!

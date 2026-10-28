@@ -8,7 +8,8 @@
 # built from the crate it belongs to: `cargo fuzz` finds `fuzz/` there, and so
 # does the `cargo` wrapper of OSS-Fuzz's base image, which turns the build into
 # a plain `cargo build` for a coverage build. Every target in a crate's
-# `fuzz_targets/` is copied out, so a new target needs no change here.
+# `fuzz_targets/` is copied out, so a new target needs no change to the build
+# loop; it gets its seeds from a `seed_corpus` line below.
 
 # Cargo.lock is not tracked, so every build resolves the dependencies afresh.
 # Prefer the newest release each dependency has that the image's nightly can
@@ -49,6 +50,7 @@ seed_corpus front_end '*.inf' tests/test_data
 seed_corpus compile '*.inf' tests/test_data
 seed_corpus validate '*.wasm' tests/test_data
 seed_corpus link '*' core/wasm-linker/fuzz/seeds/link
+seed_corpus link_memory '*' core/wasm-linker/fuzz/seeds/link_memory
 
 # The source-level targets mutate with the language's tokens.
 cp core/inference/fuzz/inf.dict "$OUT/front_end.dict"

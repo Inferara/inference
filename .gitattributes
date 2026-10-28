@@ -12,3 +12,9 @@
 # checkout; exempt them from line-ending conversion so the Windows archive
 # carries the same bytes.
 /licenses/** -text
+
+# Committed fuzz seeds are byte-compared against what their generator encodes
+# (core/wasm-linker/tests/link_memory_seeds.rs, fuzz_seeds.rs). A seed need not
+# contain a NUL byte, so git could take it for text, and autocrlf on Windows
+# would rewrite its 0x0A bytes; exempt the `link` and `link_memory` seeds alike.
+/core/wasm-linker/fuzz/seeds/** -text

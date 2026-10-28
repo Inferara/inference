@@ -67,17 +67,16 @@ by the transitive closure walk, before any output index is committed.
 ### Linear-Memory Reconciliation
 
 The output has one linear memory, shared by the main module and every merged
-external whose closure addresses memory. An external whose closure touches no
-memory contributes nothing, whatever its module declares. The memory is computed
-once, from every contributing import together, so it does not depend on the order
-the main module lists its imports in — which is the order the program wrote its
-`external fn` declarations in:
+external whose closure touches memory, which a load, a store, `memory.size` and
+`memory.grow` all do. An external whose closure touches no memory contributes
+nothing, whatever its module declares. The memory is computed once, from every
+contributing import together, so it does not depend on the order the main module
+lists its imports in — which is the order the program wrote its `external fn`
+declarations in:
 
 - **The main module declares a memory.** Its maximum is kept and governs every
   linked module, whatever their own caps; the minimum widens to the largest any
-  module declares. An external whose minimum exceeds main's maximum is refused,
-  and so is one that grows memory when the result is pinned (`max == min`), since
-  its every `memory.grow` would fail.
+  module declares. An external whose minimum exceeds main's maximum is refused.
 - **The main module is memoryless.** The memory is the tightest fit to the
   externals' own declarations: the largest declared minimum and the smallest
   declared maximum, unbounded only when none declares one. That is the memory
@@ -102,6 +101,12 @@ the main module lists its imports in — which is the order the program wrote it
   A module whose cap is lowered but that never grows memory is not refused:
   nothing can observe the maximum except `memory.grow`, and a memoryless main
   exports no memory for a host to grow.
+
+In either case, an external whose closure grows memory is refused when the
+resulting memory is pinned (`max == min`), since its every `memory.grow` would
+fail. That holds for a lone external adopted as declared too: one declaring five
+pages that may grow to five, whose closure grows memory, is refused onto a
+memoryless main rather than linked with a memory it can never grow.
 
 Every refusal names the remedy on the main module's side. A configured `[memory]`
 table makes the program declare a memory of its own even when its code touches
@@ -872,7 +877,7 @@ different things at once:
 
 - **`None`** — merge mechanics only; [Declared Write-Set Check](#declared-write-set-check)
   does not run. The mode for a caller with no Inference declaration behind the
-  main module: hand-written `.wasm` fixtures, the fuzz target, and this
+  main module: hand-written `.wasm` fixtures, the fuzz targets, and this
   crate's own integration tests.
 - **`Some(list)`** — every satisfied import is held to a declared write set.
   An import `list` does not mention is treated as declaring **no** `mut`
@@ -1082,19 +1087,26 @@ Test coverage includes:
 
 ## Fuzzing
 
-A coverage-guided `cargo-fuzz` target over `link` lives in `fuzz/`, a crate
-detached from the main workspace (so `cargo build`/`cargo test` never touch it).
-`cargo-fuzz` and nightly are not part of the default build; where they are
-available:
+Two coverage-guided `cargo-fuzz` targets live in `fuzz/`, a crate detached from
+the main workspace (so `cargo build`/`cargo test` never touch it): `link` splits
+arbitrary bytes into a main module and externals and links them, and
+`link_memory` generates links whose memories and import lists interact, links
+each in three import orders, and requires every order to give the same memory,
+refusal and warnings, and the memory rule above to predict them. `cargo-fuzz`
+and nightly are not part of the default build; where they are available, from
+the repository root:
 
 ```bash
 cargo install cargo-fuzz
-cargo +nightly fuzz run link
+cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link
+cargo +nightly fuzz run --fuzz-dir core/wasm-linker/fuzz link_memory
 ```
 
-The deterministic property test above mirrors the fuzzer's invariant and seed
-corpus, so the seam is exercised under stable `cargo test` even without
-`cargo-fuzz`. See `fuzz/README.md` for details.
+The deterministic property test above mirrors the `link` fuzzer's invariant and
+seed corpus, and `tests/link_memory_seeds.rs` replays the `link_memory`
+generator and checks over its committed seeds and a deterministic sweep, so both
+seams are exercised under stable `cargo test` even without `cargo-fuzz`. See
+`fuzz/README.md` for the corpus directories and the committed seeds.
 
 ## Related Resources
 

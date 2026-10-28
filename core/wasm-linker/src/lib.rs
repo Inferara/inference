@@ -1177,7 +1177,7 @@ pub fn link_with_warnings(
 ///
 /// * `None` — **merge mechanics only.** No declaration governs these imports, so
 ///   the check does not run. This is the mode for a caller that has no Inference
-///   source behind the main module: a hand-written `.wasm`, the fuzz target, and
+///   source behind the main module: a hand-written `.wasm`, the fuzz targets, and
 ///   the tests whose subject is the merge itself.
 /// * `Some(list)` — **checked.** Every satisfied import is held to a declared
 ///   write set. An import `list` does not mention is held to the claim that it
