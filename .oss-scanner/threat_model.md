@@ -73,11 +73,12 @@ The image has every test binary prebuilt, plus `wasmtime`, `coqc` (Coq 8.20.1), 
   - `wasmlib/`: an external Rust-built library for linking.
   - `rocq/`: expected `.v` output.
   - `panic_free/`.
-- **Fuzzing**: four `cargo-fuzz` targets, which ClusterFuzzLite runs on each pull request that changes the code they build from, and every six hours on `main` (`.clusterfuzzlite/`, `.github/workflows/cflite_*.yml`):
+- **Fuzzing**: five `cargo-fuzz` targets, which ClusterFuzzLite runs on each pull request that changes the code they build from, and every six hours on `main` (`.clusterfuzzlite/`, `.github/workflows/cflite_*.yml`):
   - `front_end` (`core/inference/fuzz`): source text through parsing, type checking and every analysis rule, as the language server runs them;
   - `compile` (`core/inference/fuzz`): source text through the whole `infc` pipeline at each target, checking that the emitted Wasm validates;
   - `validate` (`tools/inf-wasmparser/fuzz`): arbitrary bytes through `inf-wasmparser`;
-  - `link` (`core/wasm-linker/fuzz`): arbitrary modules through the linker.
+  - `link` (`core/wasm-linker/fuzz`): arbitrary modules through the linker;
+  - `link_memory` (`core/wasm-linker/fuzz`): generated links through the linker, checking that the linked memory, refusal and warnings do not depend on import order and follow the documented memory rule.
 
   Each crate's README says how to run its targets. They need nightly and `cargo-fuzz`, which this image does not include.
 - **The language**: `book/src/` documents the compiler's guarantees. `book/src/compilation_targets.md` covers targets, and `book/src/external-functions-and-wasm-linking.md` covers linking and host imports.

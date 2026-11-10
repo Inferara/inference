@@ -151,24 +151,49 @@ appear in the merged output.
 ### The Shared Linear Memory
 
 The output has one linear memory, shared by the main module and every merged
-external whose closure addresses memory; an external whose closure touches no
-memory contributes nothing, whatever its module declares. The merge records each
-satisfied import's memory and computes the output memory once, from all of them
-together. Fixing it import by import would make it depend on the order the main
-module lists its imports in, which is the order the program wrote its
-`external fn` declarations in — and swapping two declaration lines would then
-change the emitted memory, what `memory.grow` returns, and the machine the `.v`
-describes.
+external whose closure touches memory, with a load, a store, `memory.size` or
+`memory.grow`; an external whose closure touches no memory contributes nothing,
+whatever its module declares. The merge records each satisfied import's memory
+and computes the output memory once, from all of them together. Fixing it import
+by import would make it depend on the order the main module lists its imports
+in, which is the order the program wrote its `external fn` declarations in — and
+swapping two declaration lines would then change the emitted memory, what
+`memory.grow` returns, and the machine the `.v` describes.
 
-If your program has its own memory, its maximum governs every linked module.
+If your program has its own memory, its maximum governs every linked module, and
+the linker warns about each growing module whose own maximum it replaces.
 Otherwise the linked memory is the tightest fit to the modules' own declarations,
 which relaxes no module's bound, and a link that no memory fits, or that would
 move where any module's `memory.grow` stops, is refused.
 
 - **A main module with a memory** keeps its maximum, whatever the externals'
   own caps, and widens its minimum to the largest any module declares. An
-  external minimum above main's maximum is refused, as is growth when the result
-  is pinned (`max == min`), since every `memory.grow` would fail.
+  external minimum above main's maximum is refused. A module that grows memory
+  under a different maximum of its own is linked all the same, and the link
+  raises one `LinkWarning::MemoryMaximumOverridden` naming each such import as
+  `module::field` and saying whether the program's maximum raised or lowered the
+  module's, so you can see where `memory.grow` there now stops. A program built
+  with `infc --max-memory-pages 10` that links `b::growB`, whose module declares
+  `(memory 1 2)`, prints:
+
+  ```text
+  warning: the program's linear memory has a maximum of 10 pages, which governs
+           `memory.grow` in every linked module and replaces the maximum a
+           growing module declares where the two differ: raised for the module
+           providing `b::growB`, which declares a maximum of 2 pages, so
+           `memory.grow` there now stops at 10 pages instead of 2. Under a
+           raised maximum, `memory.grow` can succeed where the module alone
+           would return -1. The program decides the maximum by design, which is
+           what lets libraries whose maximums differ link together. This is not
+           a fault found in the program or the library; the program's maximum is
+           set by `max-pages` in the `[memory]` table of `Inference.toml`, or by
+           `infc --max-memory-pages <N>`.
+  ```
+
+  The warning is silent when the program's maximum equals the module's, and for
+  a module that never grows memory, since only `memory.grow` observes the
+  maximum. A module that declares no maximum is named under any growable
+  program, because its `memory.grow` is now bounded.
 - **A memoryless main** gets the largest declared minimum and the smallest
   declared maximum, unbounded only when no external declares one — the memory
   WebAssembly import matching would accept for every external's declaration. One
@@ -180,13 +205,20 @@ move where any module's `memory.grow` stops, is refused.
   grows memory is accepted: only `memory.grow` observes the maximum, and a
   memoryless main exports no memory for a host to grow.
 
-Both refusals name the remedy: a `[memory]` table (`max-pages`, or
-`infc --max-memory-pages`) makes the program declare a memory of its own even
-when its code touches none, and that memory's maximum then decides. One page
-that may grow to one page is the default layout, so `max-pages = 1` alone does
-not. Contributions are counted per satisfied import rather than per call, so an
-`external fn` the program declares but never calls still brings its module's
-memory.
+Either way, an external whose closure grows memory is refused when the resulting
+memory is pinned (`max == min`), since every `memory.grow` would fail. That
+includes a lone external adopted exactly as declared: one declaring five pages
+that may grow to five, whose closure grows memory, is refused onto a memoryless
+main rather than linked with a memory it can never grow.
+
+Each refusal above names the remedy on the main module's side: `pages` (or
+`infc --memory-pages`) for a minimum larger than main's memory can hold, and
+`max-pages` (or `infc --max-memory-pages`) for the others. A `[memory]` table
+makes the program declare a memory of its own even when its code touches none,
+and that memory's maximum then decides. One page that may grow to one page is
+the default layout, so `max-pages = 1` alone does not. Contributions are counted
+per satisfied import rather than per call, so an `external fn` the program
+declares but never calls still brings its module's memory.
 
 ### The Main Module's Data Segments
 

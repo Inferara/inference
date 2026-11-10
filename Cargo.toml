@@ -62,6 +62,9 @@ wasm-fmt = { path = "./tools/wasm-fmt", version = "0.0.6" }
 wat-fmt = { path = "./tools/wat-fmt", version = "0.0.9" }
 inf-wast = { path = "./tools/inf-wast", version = "0.0.9" }
 inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
+# `core/wasm-linker/fuzz/Cargo.toml` pins the same version literally for the
+# `link_memory` fuzz target, since that crate is its own workspace and cannot
+# inherit this entry. Move the two together.
 wasm-encoder = "0.254.0"
 # Stock upstream wasmparser, held at the version `wasm-encoder` is held at.
 # Distinct from `inf-wasmparser` above and not a replacement for it: the fork

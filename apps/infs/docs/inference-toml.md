@@ -500,7 +500,9 @@ The memory is **fixed** unless `max-pages` exceeds `pages`. Nothing the
 compiler emits grows memory: a larger maximum is room for a linked module or
 the host to grow into (a module that imports its memory has no linked module,
 so the room is the host's alone), and a linked module that grows memory is
-refused against a fixed one, with a message naming `max-pages`. The `spacewasm`
+refused against a fixed one, with a message naming `max-pages`. Against a
+growable one, a linked module that grows memory and declares a different maximum
+(or none) is linked under `max-pages` and named in a warning. The `spacewasm`
 target refuses a growable memory, because its interpreter is loaded with
 `memory.grow` disallowed.
 

@@ -360,7 +360,7 @@ pub use inference_wasm_linker::LinkError;
 /// declares the imports an embedder is asked to satisfy, host functions, its
 /// memory or both, which is that path's whole purpose. A caller must not read
 /// self-containment off the type.
-pub use inference_wasm_linker::{LinkOutput, LinkWarning};
+pub use inference_wasm_linker::{LinkOutput, LinkWarning, OverriddenMaximum};
 
 /// Re-export of the static-merge linker's policy inputs, so a caller of
 /// [`link_with_options`] can say what the merge should do with the verification
@@ -965,10 +965,13 @@ pub fn link_with_options(
     // owes the user, so a variant about the reconciled memory or about main's own
     // shape would be dropped here with nothing failing. Adding one means deciding
     // whether it can arise with no externals, and moving this return if it can.
-    // The same premise is what keeps this path equivalent under every
-    // external-specification policy: both of the variants that policy raises are
-    // raised only for an external that contributed at least one merged body, and
-    // this path is taken only when there is no external at all.
+    // `MemoryMaximumOverridden` concerns the reconciled memory but still cannot
+    // arise here: it names a merged external whose closure grows memory, so it
+    // needs an external to merge. The same premise is what keeps this path
+    // equivalent under every external-specification policy: both of the
+    // variants that policy raises are raised only for an external that
+    // contributed at least one merged body, and this path is taken only when
+    // there is no external at all.
     if externals.is_empty() && module_is_import_free(main_wasm) {
         return Ok(LinkOutput {
             wasm: main_wasm.to_vec(),

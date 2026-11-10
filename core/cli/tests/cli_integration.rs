@@ -5494,6 +5494,210 @@ fn the_same_external_in_a_single_page_build_merges_without_warning() {
     );
 }
 
+// Linker warning on a program maximum that moves a growing library's maximum.
+//
+// A program built with `--max-memory-pages` declares a memory of its own, and
+// its maximum governs `memory.grow` in every linked module. A library that grows
+// memory under a different maximum of its own has that maximum raised or
+// lowered. The link goes ahead, since that is how two growing libraries whose
+// maxima differ link together, and the merge names each library it moved.
+//
+// The linker's own suite pins when the warning is raised and what it says. What
+// only a real process can show is that it is delivered: one line on stderr,
+// beside a successful build whose artifact is linked exactly as it would be
+// without the warning.
+
+/// A library whose one export grows memory by its argument, returning the page
+/// count before the growth, or -1, under a maximum of ten pages.
+const GROW_A_LIB: &str = r#"
+(module
+  (type (;0;) (func (param i32) (result i32)))
+  (memory (;0;) 1 10)
+  (func (;0;) (type 0) (param i32) (result i32)
+    local.get 0
+    memory.grow)
+  (export "growA" (func 0)))
+"#;
+
+/// The same library under a maximum of two pages, exporting `growB`.
+const GROW_B_LIB: &str = r#"
+(module
+  (type (;0;) (func (param i32) (result i32)))
+  (memory (;0;) 1 2)
+  (func (;0;) (type 0) (param i32) (result i32)
+    local.get 0
+    memory.grow)
+  (export "growB" (func 0)))
+"#;
+
+/// A program binding both growers. It has no stack frame, so its memory is the
+/// one its build configures: one page, growable to `--max-memory-pages`. That
+/// one page also keeps the Tier-B warning out of the output. `run` never calls
+/// `growA`, but a declared external is linked whether or not anything calls it.
+const CALLS_TWO_GROWERS: &str = "\
+external fn growA(n: i32) -> i32;
+external fn growB(n: i32) -> i32;
+use { growA } from a;
+use { growB } from b;
+
+pub fn run() -> i32 {
+    return growB(2);
+}
+";
+
+/// A program binding `growA` alone.
+const CALLS_GROW_A: &str = "\
+external fn growA(n: i32) -> i32;
+use { growA } from a;
+
+pub fn run() -> i32 {
+    return growA(2);
+}
+";
+
+/// Stages `source` as `main.inf` beside each `(module, wat)` library, assembled
+/// to `<module>.wasm`. Returns the temp directory, the entry path, and one
+/// `--wasm-dep` value per library binding its module name to its `.wasm`.
+fn growers_project(
+    source: &str,
+    libs: &[(&str, &str)],
+) -> (assert_fs::TempDir, std::path::PathBuf, Vec<String>) {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", source);
+    let deps = libs
+        .iter()
+        .map(|&(module, wat)| {
+            let lib = temp.child(format!("{module}.wasm"));
+            let bytes = wat::parse_str(wat).expect("the library fixture is valid WAT");
+            std::fs::write(lib.path(), bytes).unwrap();
+            format!(
+                "{module}={}",
+                lib.path().to_str().expect("temp paths are UTF-8")
+            )
+        })
+        .collect();
+    (temp, entry, deps)
+}
+
+/// A program maximum that differs from a growing library's own is reported once
+/// on stderr, and the build still succeeds with the memory linked as before.
+///
+/// Both directions use the same program and the same two libraries; only
+/// `--max-memory-pages` changes. Ten pages raises `b`'s two and matches `a`'s
+/// ten. Two pages lowers `a`'s ten and matches `b`'s two. So each case also
+/// checks that the library whose maximum the program matches is not named.
+///
+/// The `warning:` lines are counted, not just searched: the one warning names
+/// every moved library, so a second line would mean the driver printed it
+/// twice or something else warned. `Linked 2 external module(s)` and the
+/// artifact's limits make the warning attributable to the moved maximum and
+/// show that the link itself is unchanged.
+#[test]
+fn a_program_maximum_that_moves_a_growing_librarys_maximum_warns_on_stderr() {
+    let cases = [
+        ("10", "`b::growB`", "2 pages", "raised", "`a::growA`"),
+        ("2", "`a::growA`", "10 pages", "lowered", "`b::growB`"),
+    ];
+    for (max, named, declared, verb, not_named) in cases {
+        let (temp, entry, deps) =
+            growers_project(CALLS_TWO_GROWERS, &[("a", GROW_A_LIB), ("b", GROW_B_LIB)]);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path())
+            .arg(&entry)
+            .arg("--max-memory-pages")
+            .arg(max);
+        for dep in &deps {
+            cmd.arg("--wasm-dep").arg(dep);
+        }
+
+        let assert = cmd
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Linked 2 external module(s)"))
+            .stdout(predicate::str::contains("WASM generated"));
+
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        let warnings: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.starts_with("warning: "))
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "--max-memory-pages {max} must print exactly one warning, got:\n{stderr}"
+        );
+        let warning = warnings[0];
+        assert!(
+            warning.contains(&format!("{verb} for the module providing {named}")),
+            "--max-memory-pages {max}: the warning must say {named}'s maximum was {verb}, \
+             got:\n{warning}"
+        );
+        assert!(
+            warning.contains(&format!("declares a maximum of {declared}")),
+            "--max-memory-pages {max}: the warning must give {named}'s own maximum, \
+             got:\n{warning}"
+        );
+        assert!(
+            warning.contains(&format!("now stops at {max} pages")),
+            "--max-memory-pages {max}: the warning must give where growth now stops, \
+             got:\n{warning}"
+        );
+        assert!(
+            !warning.contains(not_named),
+            "--max-memory-pages {max}: {not_named} declares the program's maximum and must \
+             not be named, got:\n{warning}"
+        );
+
+        let artifact = temp.child("out").child("main.wasm");
+        let wat = wat_of(&std::fs::read(artifact.path()).unwrap());
+        assert!(
+            wat.contains(&format!("(memory (;0;) 1 {max})")),
+            "--max-memory-pages {max}: the warning must not change the linked memory:\n{wat}"
+        );
+    }
+}
+
+/// A program maximum equal to the growing library's links silently.
+///
+/// This is what makes the warning a condition rather than a constant: a driver
+/// that printed it for every growing library would pass the test above
+/// unchanged. The success, the bound library and the artifact's limits are
+/// asserted so the silence is attributable to the equal maxima, and not to a
+/// failed build or the library having dropped out of it.
+#[test]
+fn a_program_maximum_equal_to_the_growing_librarys_links_silently() {
+    let (temp, entry, deps) = growers_project(CALLS_GROW_A, &[("a", GROW_A_LIB)]);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--max-memory-pages")
+        .arg("10");
+    for dep in &deps {
+        cmd.arg("--wasm-dep").arg(dep);
+    }
+
+    let assert = cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked 1 external module(s)"))
+        .stdout(predicate::str::contains("WASM generated"));
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("warning:"),
+        "a program maximum equal to the library's must link silently, got:\n{stderr}"
+    );
+
+    let artifact = temp.child("out").child("main.wasm");
+    let wat = wat_of(&std::fs::read(artifact.path()).unwrap());
+    assert!(
+        wat.contains("(memory (;0;) 1 10)"),
+        "the silence must come from a ten-page maximum both sides declare:\n{wat}"
+    );
+}
+
 // Adoption of a linked library's own proof obligations.
 //
 // The linker's own suite pins when an obligation is carried, dropped, or

@@ -7,8 +7,9 @@
 
 use inf_wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef};
 use inference_wasm_linker::{
-    ExternalSpecPolicy, LinkError, LinkOptions, LinkOutput, LinkWarning, link as raw_link,
-    link_with_options as raw_link_with_options, link_with_warnings as raw_link_with_warnings,
+    ExternalSpecPolicy, LinkError, LinkOptions, LinkOutput, LinkWarning, OverriddenMaximum,
+    link as raw_link, link_with_options as raw_link_with_options,
+    link_with_warnings as raw_link_with_warnings,
 };
 
 /// Assembles a `.wasm` binary from WAT source, panicking with the WAT on error.
@@ -5498,10 +5499,10 @@ fn custom_page_size_mismatch_is_rejected_cleanly() {
 //
 // The main module's imports are its `external fn` declarations, in the order
 // they were written. Swapping two of those lines must not change the linked
-// memory, the verdict, or the diagnostic, so every case below links the same two
-// providers in both import orders — with the externals slice fixed, so the
-// import order is the only thing that moves — and asserts the two links agree
-// before checking what they agree on.
+// memory, the verdict, the diagnostic, or the warnings, so every case below
+// links the same two providers in both import orders — with the externals slice
+// fixed, so the import order is the only thing that moves — and asserts the two
+// links agree before checking what they agree on.
 
 /// One memory-declaring provider of a two-module link: the logical module it is
 /// bound under, the field it exports, its memory's limits as WAT, and whether
@@ -5561,21 +5562,25 @@ fn main_importing(first: &Provider, second: &Provider, memory: Option<&str>) -> 
     ))
 }
 
+/// What a two-provider link agrees on in both import orders: the output's
+/// memory limits with the warnings, or the rendered rejection.
+type LinkedInBothOrders = Result<(Option<(u64, Option<u64>)>, Vec<LinkWarning>), String>;
+
 /// Links `a` and `b` behind a main importing them in both orders, asserts the
 /// two links agree, and returns what they agree on: the output's memory limits
-/// (after validating the module), or the rendered rejection.
-fn link_in_both_orders(
+/// (after validating the module) with the warnings, or the rendered rejection.
+fn link_in_both_orders_with_warnings(
     a: &Provider,
     b: &Provider,
     main_memory: Option<&str>,
-) -> Result<Option<(u64, Option<u64>)>, String> {
+) -> LinkedInBothOrders {
     let (a_wasm, b_wasm) = (a.wasm(), b.wasm());
     let externals: [(&str, &[u8]); 2] = [(a.module, &a_wasm), (b.module, &b_wasm)];
     let outcome = |main: Vec<u8>| {
-        raw_link(&main, &externals, None)
+        raw_link_with_warnings(&main, &externals, None)
             .map(|linked| {
-                assert_valid(&linked);
-                memory_limits(&linked)
+                assert_valid(&linked.wasm);
+                (memory_limits(&linked.wasm), linked.warnings)
             })
             .map_err(|e| e.to_string())
     };
@@ -5587,6 +5592,34 @@ fn link_in_both_orders(
         a.field, b.field
     );
     forward
+}
+
+/// [`link_in_both_orders_with_warnings`] without the warnings.
+fn link_in_both_orders(
+    a: &Provider,
+    b: &Provider,
+    main_memory: Option<&str>,
+) -> Result<Option<(u64, Option<u64>)>, String> {
+    link_in_both_orders_with_warnings(a, b, main_memory).map(|(memory, _)| memory)
+}
+
+/// The warning naming each `(module, field, declared maximum)` growing import
+/// whose maximum `program_maximum` replaced.
+fn maximum_overridden(
+    program_maximum: Option<u64>,
+    overridden: &[(&str, &str, Option<u64>)],
+) -> LinkWarning {
+    LinkWarning::MemoryMaximumOverridden {
+        program_maximum,
+        overridden: overridden
+            .iter()
+            .map(|&(module, field, declared_maximum)| OverriddenMaximum {
+                module: module.to_string(),
+                field: field.to_string(),
+                declared_maximum,
+            })
+            .collect(),
+    }
 }
 
 /// Asserts `outcome` is a memory rejection for `field` mentioning every one of
@@ -5744,11 +5777,76 @@ fn declarations_no_one_memory_satisfies_are_rejected_in_either_order() {
 fn mains_own_maximum_governs_two_growers_in_either_order() {
     // The remedy the rejections name: a main with its own growable memory. Its
     // maximum is the one bound, kept whatever the providers declare, so both
-    // orders link to main's `1..10`.
+    // orders link to main's `1..10`. That raises `growB`'s two pages, which the
+    // warning names; `growA` declares ten already and is not named.
     assert_eq!(
-        link_in_both_orders(&GROW_A, &GROW_B, Some("1 10")),
-        Ok(Some((1, Some(10))))
+        link_in_both_orders_with_warnings(&GROW_A, &GROW_B, Some("1 10")),
+        Ok((
+            Some((1, Some(10))),
+            vec![maximum_overridden(Some(10), &[("b", "growB", Some(2))])]
+        ))
     );
+}
+
+#[test]
+fn mains_own_maximum_below_a_growers_is_named_in_either_order() {
+    // `growA`'s module allows ten pages, and the program five: growth there
+    // now stops at five. `peekE` only reads, so its maximum moving from ten is
+    // not reported, and a one-page memory raises no Tier-B warning.
+    assert_eq!(
+        link_in_both_orders_with_warnings(&GROW_A, &PEEK_E, Some("1 5")),
+        Ok((
+            Some((1, Some(5))),
+            vec![maximum_overridden(Some(5), &[("a", "growA", Some(10))])]
+        ))
+    );
+}
+
+#[test]
+fn the_maximum_override_follows_the_tier_b_warning() {
+    // Both memory warnings at once: the two-page memory under Tier-B closures
+    // (`memory.grow` is a memory use, so `growB` is Tier B too), and `growB`'s
+    // two pages raised to ten. They come in that order, whatever the import
+    // order.
+    assert_eq!(
+        link_in_both_orders_with_warnings(&GROW_B, &PEEK_E, Some("2 10")),
+        Ok((
+            Some((2, Some(10))),
+            vec![
+                LinkWarning::TierBInMultiPageMemory {
+                    fields: vec!["growB".to_string(), "peekE".to_string()],
+                    pages: 2,
+                },
+                maximum_overridden(Some(10), &[("b", "growB", Some(2))]),
+            ]
+        ))
+    );
+}
+
+#[test]
+fn the_maximum_override_precedes_the_verification_policys_warnings() {
+    // `growA` ships an obligation of its own, which the default policy drops
+    // and reports, and main's five pages lower its ten. The memory warning
+    // comes first, whatever the import order.
+    let a = with_hspecs(&GROW_A.wasm(), &one_hspec_referencing("growA"));
+    let e = PEEK_E.wasm();
+    let externals: [(&str, &[u8]); 2] = [("a", &a), ("e", &e)];
+    for main in [
+        main_importing(&GROW_A, &PEEK_E, Some("1 5")),
+        main_importing(&PEEK_E, &GROW_A, Some("1 5")),
+    ] {
+        let out = raw_link_with_warnings(&main, &externals, None).expect("links");
+        assert_valid(&out.wasm);
+        assert_eq!(
+            out.warnings,
+            vec![
+                maximum_overridden(Some(5), &[("a", "growA", Some(10))]),
+                LinkWarning::ExternalSpecsDropped {
+                    modules: vec!["a".to_string()],
+                },
+            ]
+        );
+    }
 }
 
 #[test]
