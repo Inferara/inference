@@ -5644,12 +5644,6 @@ fn assume_test_file() -> std::path::PathBuf {
     example_file("assume_test.inf")
 }
 
-/// Returns the path to `unique_test.inf` test file.
-#[allow(dead_code)]
-fn unique_test_file() -> std::path::PathBuf {
-    example_file("unique_test.inf")
-}
-
 // QA Test Coverage: Migrated from docs/qa-test-suite.md
 
 /// QA: TC-2.10 - Verify empty file is handled gracefully.
@@ -5832,16 +5826,16 @@ fn build_compiles_translatable_nondet_features() {
     );
 }
 
-/// QA: TC-13.7 - Verify a `-v` (proof-mode) build of a spec containing a
-/// `unique` block is rejected. `unique` has no `hassert` encoding, so codegen
-/// aborts with a fatal `P002` diagnostic. Pins that `infs` propagates a fatal
-/// hassert diagnostic from `infc` to stderr with a non-zero exit, and that no
-/// partial `.v` or `.wasm` artifact is left behind.
+/// QA: TC-13.7 - Verify a `-v` (proof-mode) build of a spec whose `unique`
+/// block draws no value of its own is rejected: with nothing to single out it
+/// claims no uniqueness, so codegen aborts with a fatal `P020` diagnostic. Pins
+/// that `infs` propagates a fatal hassert diagnostic from `infc` to stderr with
+/// a non-zero exit, and that no partial `.v` or `.wasm` artifact is left behind.
 ///
-/// **Expected behavior**: Non-zero exit, stderr names the `P002` `unique`
+/// **Expected behavior**: Non-zero exit, stderr names the `P020` `unique`
 /// rejection, and neither a `.v` nor a `.wasm` is written.
 #[test]
-fn build_v_rejects_unique_block_with_p002() {
+fn build_v_rejects_a_unique_block_that_draws_nothing() {
     let Some(infc_path) = require_infc() else {
         return;
     };
@@ -5860,11 +5854,54 @@ fn build_v_rejects_unique_block_with_p002() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("P002").and(predicate::str::contains("unique")));
+        .stderr(predicate::str::contains("P020").and(predicate::str::contains("unique")));
 
     // A fatal codegen error must leave no partial artifact behind.
     let v_output = temp.child("out").child("nondet_unique.v");
     let wasm_output = temp.child("out").child("nondet_unique.wasm");
+    assert!(
+        !v_output.path().exists(),
+        "a rejected proof-mode build must write no V file, found: {:?}",
+        v_output.path()
+    );
+    assert!(
+        !wasm_output.path().exists(),
+        "a rejected proof-mode build must write no WASM file, found: {:?}",
+        wasm_output.path()
+    );
+}
+
+/// Verify a `-v` (proof-mode) build gives a `unique` kind written on an `if`
+/// arm exactly what the nested block gets — inside an `exists`-quantified
+/// function, a refusal. A build that read the arm as a plain one would write a
+/// `.v` with the uniqueness claim silently dropped.
+///
+/// **Expected behavior**: Non-zero exit, stderr names the `P002` `unique`
+/// rejection, and neither a `.v` nor a `.wasm` is written.
+#[test]
+fn build_v_rejects_unique_if_arm_with_p002() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("nondet_unique_arm.inf");
+    let dest = temp.child("nondet_unique_arm.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path())
+        .arg("-v");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("P002").and(predicate::str::contains("unique")));
+
+    let v_output = temp.child("out").child("nondet_unique_arm.v");
+    let wasm_output = temp.child("out").child("nondet_unique_arm.wasm");
     assert!(
         !v_output.path().exists(),
         "a rejected proof-mode build must write no V file, found: {:?}",
@@ -6100,9 +6137,8 @@ fn build_v_emits_reachability_for_exists_bodied_spec() {
     }
 }
 
-/// Verify a `-v` build of a `unique`-BODIED spec function succeeds — the
-/// nested `unique` BLOCK in `build_v_rejects_unique_block_with_p002` stays a
-/// fatal P002; a unique body is the supported top-level form — and the
+/// Verify a `-v` build of a `unique`-BODIED spec function succeeds — a unique
+/// body is the top-level form, judged by running it — and the
 /// emitted `.v` selects the `ValidUniqueSpec` theorem over a `__uq_specs`
 /// partition.
 ///
@@ -6152,6 +6188,63 @@ fn build_v_emits_reachability_for_unique_bodied_spec() {
             "the emitted .v must contain `{needle}`; got:\n{v}"
         );
     }
+}
+
+/// Verify a `-v` build of a spec with a nested `unique` BLOCK succeeds and
+/// states the block as a claim inside the function's `ValidSpec` obligation: a
+/// typed value under `HA_ex`, and under it a `Hall` over a typed rival that
+/// must equal the value.
+///
+/// **Expected behavior**: Exit 0; `out/nondet_unique_block.{wasm,v}` exist and
+/// the `.v` carries both halves of the claim under a `ValidSpec` theorem.
+#[test]
+fn build_v_states_a_unique_block_as_a_value_and_its_rivals() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("nondet_unique_block.inf");
+    let dest = temp.child("nondet_unique_block.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path())
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(
+        temp.child("out")
+            .child("nondet_unique_block.wasm")
+            .path()
+            .exists(),
+        "Expected WASM file at out/nondet_unique_block.wasm"
+    );
+    let v = std::fs::read_to_string(temp.child("out").child("nondet_unique_block.v").path())
+        .expect("a build with a nested unique block must write out/nondet_unique_block.v");
+    for needle in [
+        "HA_ex (HA_and (HA_has_type (T_lvar 0) T_i32)",
+        "(Hall (Himpl (HA_and (HA_has_type (T_lvar 0) T_i32)",
+        "(term_eq (T_lvar 0) (T_lvar 1))",
+        "Theorem valid_nondet_unique_block__UniqueBlock : ValidSpec nondet_unique_block \
+         nondet_unique_block__UniqueBlock_specs.",
+    ] {
+        assert!(
+            v.contains(needle),
+            "the emitted .v must contain `{needle}`; got:\n{v}"
+        );
+    }
+    assert!(
+        !v.contains("ValidUniqueSpec"),
+        "a nested unique block selects no reachability predicate; got:\n{v}"
+    );
 }
 
 /// Verify a `-v` build of an `assume`-BODIED spec function is rejected with a

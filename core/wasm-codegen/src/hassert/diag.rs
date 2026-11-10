@@ -29,14 +29,20 @@ pub(crate) enum PCode {
     /// Spec function body is `assume`-quantified. `assume` is not a
     /// quantifier — with no enclosing `forall` there is no claim to prove.
     P001,
-    /// A construct with no assertion encoding: `loop`, `break`, a nested
-    /// `unique` block, `**`, a string literal, an array/struct literal read in
+    /// A construct with no assertion encoding: `loop`, `break`, a `unique`
+    /// block inside an `exists`/`unique`-quantified body, `**`, a string literal, an array/struct literal read in
     /// scalar term position or written at a shape outside the supported
     /// surface, or an access chain the element encoding cannot pin — one
     /// carrying more than one non-constant index, or one whose non-constant
     /// index lands on an aggregate rather than a scalar leaf.
     ///
-    /// Four of these carry their own message instead of the shared template,
+    /// A `unique` block is refused only there. In a `forall` or plain body it
+    /// translates, as an existential claim strengthened by "and every other
+    /// value that completes the block is this one"; inside a body whose
+    /// obligation is a judgment about one run, that second half would have to
+    /// single out one stretch of the run, which the judgment cannot express.
+    ///
+    /// Five of these carry their own message instead of the shared template,
     /// because the template's "this has no encoding; move the logic into an
     /// executable helper" is either false or useless for them. `loop`: a
     /// loop's purpose in a specification — saying something about every
@@ -90,9 +96,10 @@ pub(crate) enum PCode {
     P007,
     /// `@` at a compound (array/struct) type — in a reachability body, where a
     /// choice arrives as one scalar parameter of the run the obligation talks
-    /// about, or in any body at a shape outside the representable surface. A
-    /// supported-shape compound `@` in a universal body quantifies one variable
-    /// per scalar leaf instead of raising this.
+    /// about, in any body at a shape outside the representable surface, or as
+    /// the value a `unique` block singles out, which is stated one scalar at a
+    /// time. Any other supported-shape compound `@` in a universal body
+    /// quantifies one variable per scalar leaf instead of raising this.
     P008,
     /// A specification *method* carrying a proof obligation the translation
     /// cannot deliver — quantified, or plain but claiming a property. A method
@@ -108,9 +115,10 @@ pub(crate) enum PCode {
     /// choice parameters no call site supplies.
     P011,
     /// An anonymous `@` (call-argument position) in a `unique`-bodied spec
-    /// function. `unique` compares source-visible exit states, and a choice
-    /// nothing names is excluded from that face, which would silently weaken
-    /// the judgment; binding it first (`let c: i32 = @;`) makes it count.
+    /// function, or directly in a `unique` block. `unique` compares the values
+    /// it names, and a choice nothing names is excluded from that comparison,
+    /// which would silently weaken the claim; binding it first
+    /// (`let c: i32 = @;`) makes it count.
     P012,
     /// An aggregate introduction (a compound `@`, a compound parameter, or an
     /// array/struct literal) whose scalar leaves would push the specification
@@ -262,6 +270,20 @@ pub(crate) enum PCode {
     /// either way would be a claim about bytes this compiler has not seen. The
     /// linker is the sole judge of a merged body.
     P018,
+    /// A `let … = @;` inside an `if` arm, an `assume` block or a plain nested
+    /// block of a `unique` block. A `unique` block compares the values drawn
+    /// directly in it; a value drawn deeper is either unconstrained on the
+    /// path that skips it or simply left out of the comparison, and either way
+    /// the claim would say less than it reads.
+    P019,
+    /// A `unique` block that draws no value of its own. With nothing to single
+    /// out it claims no more than a plain block would, so the keyword would
+    /// promise a uniqueness the obligation does not state.
+    P020,
+    /// `unique` blocks nested deeper than the translation admits. A `unique`
+    /// block is stated twice — once for its own value and once for every rival
+    /// — so each level of nesting doubles the obligation.
+    P021,
 }
 
 impl fmt::Display for PCode {
@@ -285,6 +307,9 @@ impl fmt::Display for PCode {
             PCode::P016 => "P016",
             PCode::P017 => "P017",
             PCode::P018 => "P018",
+            PCode::P019 => "P019",
+            PCode::P020 => "P020",
+            PCode::P021 => "P021",
         };
         f.write_str(code)
     }

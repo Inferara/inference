@@ -85,14 +85,12 @@
 //! not continue along — one `And`, then one `HA_not` over a `term_eq` for an
 //! unsigned bound or an `And` of two of those for a signed one.
 //!
-//! *Existentially* that equality does not hold, and this is where the real
-//! ceiling is. A read narrow binder is emitted as `Ex(And(bound, body))` while
-//! a full-width one's `⊤` definition is absorbed and leaves a bare `Ex`, so a
-//! narrow binder costs **two** accumulating levels against one. Signedness does
-//! not change it: a signed pair's `And` of two bounds sits inside that one
-//! conjunct node. At the 64-leaf budget the deepest aggregate is therefore
-//! existential and narrow, at 192 of the 256 levels, against 128 for the
-//! full-width existential and 66–68 for any universal one.
+//! *Existentially* a leaf costs more, and this is where the real ceiling is. A
+//! read binder is emitted as `Ex(And(typing, body))` — **two** accumulating
+//! levels — whatever its width: the typing is one conjunct node, holding the
+//! class and, at a narrow width, the bound beside it. At the 64-leaf budget the
+//! deepest aggregate is therefore existential, at 192 of the 256 levels,
+//! against 66–68 for any universal one.
 //!
 //! A short-circuit `&&`/`||` costs two more levels for its pinned witness
 //! (`Ex` over `And`), plus the depth of the constraint itself. Where the

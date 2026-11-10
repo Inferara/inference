@@ -56,22 +56,14 @@ exists {
 ```";
 
 /// Hover markdown for a `unique` block.
-pub(crate) const UNIQUE_HOVER: &str = r#"**`unique` — exactly one path must succeed**
+pub(crate) const UNIQUE_HOVER: &str = r#"**`unique` — exactly one choice succeeds**
 
-A `unique` block requires **exactly one** path to reach the end successfully — no
-more, no fewer. It states that a solution both *exists* and is *the only one*.
-
-**Verification meaning.** Conceptually the counting quantifier "there is exactly
-one". The obligation has two halves: existence (at least one path succeeds) **and**
-uniqueness (no two distinct paths both succeed). Proving only that a solution
-exists is not enough — you must also rule out a second one.
+Claims **exactly one** value of its named draws (`let x: T = @;`) succeeds; every other
+value must fail, and anonymous `@` arguments are refused. As a body (`fn f(…) unique`) this
+holds for every argument; in a block, a call that traps does not rule a value out.
 
 ```inference
-unique {
-    let n: i32 = @;
-    // exactly one n survives the filter: n == 4
-    assume { assert(n * 3 == 12); }
-}
+unique { let n: i32 = @; assert(n > 3); assert(n < 5); }  // only n == 4
 ```"#;
 
 /// Hover markdown for an `assume` block.

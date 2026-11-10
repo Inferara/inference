@@ -445,8 +445,10 @@ Test fixtures are located in `tests/fixtures/`:
 |------|---------|
 | `trivial.inf` | Simple valid program |
 | `example.inf` | Complex example with multiple functions |
-| `nondet.inf` | Non-deterministic features (forall, exists, assume, unique) |
-| `nondet_unique.inf` | A nested `unique` block, which a proof-mode build refuses with `P002` |
+| `nondet.inf` | Non-deterministic features (forall, exists, assume) |
+| `nondet_unique.inf` | A `unique` block that draws no value of its own, which a proof-mode build refuses with `P020` |
+| `nondet_unique_block.inf` | A nested `unique` block in a `forall` spec function, which a proof-mode build states as a claim |
+| `nondet_unique_arm.inf` | A `unique` kind on an `if` arm inside an `exists`-quantified function, refused with `P002` like the block |
 | `nondet_assume_spec.inf` | An `assume`-bodied spec function, which a proof-mode build refuses with `P001` |
 | `nondet_exists_spec.inf` | An `exists`-bodied spec function, whose obligation a proof-mode build writes to the `.v` |
 | `nondet_unique_spec.inf` | A `unique`-bodied spec function, whose obligation a proof-mode build writes to the `.v` |
@@ -456,7 +458,6 @@ Test fixtures are located in `tests/fixtures/`:
 | `forall_test.inf` | Forall block compilation |
 | `exists_test.inf` | Exists block compilation |
 | `assume_test.inf` | Assume block compilation |
-| `unique_test.inf` | Unique block compilation |
 | `fake_wasm_opt.rs` | A stand-in for Binaryen's `wasm-opt`, compiled by the tests, so the `[build.wasm-opt]` tests run without Binaryen |
 
 ### Integration Tests

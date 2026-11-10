@@ -1,0 +1,102 @@
+// Nested `unique` blocks in specification bodies. A `unique` block claims that
+// exactly one assignment of values to the draws written directly in it
+// completes it, and in a `forall` or plain function that is a logical claim
+// inside the function's obligation: some value of the declared type completes
+// the block, and every value of that type that completes it is that one. This
+// fixture is the corpus producer for that shape, at every position the
+// language admits it.
+//
+// Every claim here is true at every argument, so the emitted obligations are
+// dischargeable rather than merely well-typed. Three things keep them so.
+//
+// The callee is total. The universal half has to rule out every rival value,
+// and a rival is ruled out only by a condition that is defined and false — a
+// rival on which a call trapped could be neither ruled out nor equated, and
+// uniqueness would be unprovable for a reason the source never states.
+// `shift` is spelled modular so that no argument traps it.
+//
+// No arithmetic here can wrap into a second value. A specification's
+// arithmetic is the machine operator, so `x * 2 == 10` at `u8` has two
+// solutions, 5 and 133; `factor_pair` bounds both factors below 6 first.
+//
+// Every value is pinned on every path that reaches it.
+fn shift(n: i32) -> i32 {
+    return wrapping(n + 1);
+}
+
+spec UniqueBlocks {
+    // The plain shape: for every `n`, exactly one `x` equals it.
+    fn pinned(n: i32) forall {
+        unique {
+            let x: i32 = @;
+            assert(x == n);
+        }
+    }
+
+    // Exactly one pre-image under a bijection, stated inside an `exists` block
+    // as the language reference writes it.
+    fn one_preimage(y: i32) forall {
+        exists {
+            unique {
+                let x: i32 = @;
+                assert(shift(x) == y);
+            }
+        }
+    }
+
+    // A uniqueness claim as a *filter*: where exactly one `x` equals both `a`
+    // and `b`, the two are equal.
+    fn filtered_by_uniqueness(a: i32, b: i32) forall {
+        assume {
+            unique {
+                let x: i32 = @;
+                assert(x == a);
+                assert(x == b);
+            }
+        }
+        assert(a == b);
+    }
+
+    // Two values, compared pairwise: 6 has exactly one factor pair with
+    // `1 < p < q < 6`.
+    fn factor_pair() {
+        unique {
+            let p: u32 = @;
+            let q: u32 = @;
+            assert(p > 1);
+            assert(p < q);
+            assert(q < 6);
+            assert(p * q == 6);
+        }
+    }
+
+    // A narrow value: both the value and its rivals are bounded to the two
+    // values the type admits.
+    fn one_flag(n: i32) forall {
+        unique {
+            let positive: bool = @;
+            assert(positive == (n > 0));
+        }
+    }
+
+    // A draw under its own quantifier belongs to that quantifier: `z` is part
+    // of what the block claims and is not one of the values compared.
+    fn dismissed_draw(n: i32) forall {
+        unique {
+            let x: i32 = @;
+            assert(x == n);
+            exists {
+                let z: i32 = @;
+                assert(z == x);
+            }
+        }
+    }
+
+    // The `if`-arm spelling is the block.
+    fn on_an_arm(n: i32) forall {
+        if n > 0 unique {
+            let x: i32 = @;
+            assert(x == n);
+        }
+    }
+}

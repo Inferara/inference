@@ -160,9 +160,9 @@ a variable nor guard one.
 
 A leaf states what its own declared *element* or *field* type says, by the table above — so a
 `[u8; 2]` bounds both of its leaves at `0..255`, a struct bounds each field at its own type,
-and a leaf of an uninhabited enum is **P015**. An *existential* leaf carries no typing guard —
-the prover chooses the value, so there is no unconstrained valuation to make denote — and
-keeps its declared bound, as a conjunct inside its own binder, wherever the claim reads it.
+and a leaf of an uninhabited enum is **P015**. An *existential* leaf states the same class and
+bound as conjuncts inside its own binder, wherever the claim reads it: the prover chooses the
+witness from every value there is, so its class is demanded of it rather than assumed.
 
 ### One Obligation, Fully Expanded
 
@@ -475,9 +475,8 @@ function.
   (**P013**). The resource being protected is assertion-tree depth, and what a leaf costs
   depends on where it comes from: a leaf of a universal `@` or parameter costs one hypothesis
   level; a leaf of a `@` inside a nested `forall` costs a hypothesis level *and* a `Hall`
-  level; a leaf of an existential `@` costs one `HA_ex` level — two where a narrow one's bound
-  rides inside it — and no typing guard at all (a prover-chosen value needs no stated
-  typing); and a literal's leaves are constants that bind
+  level; a leaf of an existential `@` costs two levels, an `HA_ex` and the `HA_and` that
+  conjoins its typing (and, at a narrow type, its bound); and a literal's leaves are constants that bind
   nothing and guard nothing, nesting only one conjunct apiece through a leafwise comparison.
   All of those accumulate across every introduction in the function until a structural
   statement drains the guards, so a per-introduction cap would not bound the resource it
@@ -496,10 +495,9 @@ function.
   | `[i32; 64]`, universal | 66 |
   | `[u8; 64]` / `[u16; 64]` / `[bool; 64]`, universal | 67 |
   | `[i8; 64]` / `[i16; 64]`, universal | 68 |
-  | `[i32; 64]`, existential | 128 |
-  | any narrow width at 64 leaves, existential | 192 |
+  | any width at 64 leaves, existential | 192 |
 
-  So the worst case is existential and narrow, at 192 of 256, leaving 64 levels for the
+  So the worst case is existential, at 192 of 256, leaving 64 levels for the
   claim. The executable unrolling's own cap is far larger; the two measure different things
   (instruction count versus obligation nesting depth).
 - **One non-constant index per access chain** (**P002**), and **none at all in an**
@@ -519,7 +517,8 @@ function.
 | --- | --- | --- |
 | P001 | an `assume`-quantified body | `assume` is not a quantifier — it only reinterprets a failing path as a filtered-out one for an enclosing `forall` — so a standalone `assume` body states no property |
 | P002 | `loop`, `break` | a loop states a property only through an invariant this translation cannot infer; quantify an index and constrain it instead |
-| P002 | `**`, string literals, nested `unique` blocks | no assertion encoding |
+| P002 | `**`, string literals | no assertion encoding |
+| P002 | a `unique` block inside an `exists`/`unique` body | that body's obligation is a judgment about one run, which cannot single out one stretch of the run as unique; in a `forall`/plain body the block translates |
 | P002 | an array/struct literal read in scalar term position, or written at an out-of-surface shape | a literal becomes one term per scalar leaf, so there is neither a whole-value term nor a leaf tree to build |
 | P002 | an access chain with two non-constant indices, or one whose non-constant index lands on an aggregate rather than a scalar leaf | one obligation carries one case split per chain, and the split has to end at a leaf |
 | P003 | reassignment | a specification names values, not storage — every name stands for one value throughout the claim |
@@ -533,13 +532,17 @@ function.
 | P009 | a specification *method* carrying a proof obligation — quantified at any kind, or plain with an `assert` at any depth | a method has no obligation channel, and dropping the claim silently is worse than refusing it; a plain method that asserts nothing stays a helper |
 | P010 | an obligation that collapses to the vacuous `HA_true` | an obligation any proof discharges without reading the program is indistinguishable from no verification at all |
 | P011 | a call from any specification body to an `exists`/`unique`-quantified spec function | such a function is the subject of a judgment about running its own body with its own choices, not a callable predicate, and its compiled form carries trailing choice parameters no call site supplies |
-| P012 | an anonymous (call-argument) `@` in a `unique` body | a choice nothing names has no source-visible face, so it cannot distinguish exit states; bind it first |
+| P012 | an anonymous (call-argument) `@` in a `unique` body, or directly in a `unique` block | a choice nothing names has no source-visible face, so it cannot distinguish exit states; bind it first |
 | P013 | an aggregate introduction whose scalar leaves pass `SPEC_FN_MAX_QUANTIFIED_LEAVES` | each leaf brings a binder and a hypothesis, so the tree grows one level per leaf and the budget is the resource |
 | P014 | a constant-folded out-of-bounds index | the same fact analysis rule A037 states, at the spelling A037 cannot see |
 | P015 | a parameter, a `@`, or an aggregate leaf at an `enum` declared with no variants | an uninhabited type has no value for the claim to range over, so the obligation would either say nothing or be unprovable for a reason unrelated to the program; A009 only *warns* about the declaration, so such an enum really does reach here |
 | P016 | a non-constant array index inside an `exists`/`unique` body | code generation guards the access with a trap, and a reachability judgment fixes the entry vector before the choices range — an entry whose index trips the guard leaves no successful run, making the claim false rather than narrowing it |
 | P017 | `checked(...)` or `wrapping(...)` in a `forall`/plain body; arithmetic whose effective mode traps in an `exists`/`unique` body | an obligation's arithmetic *is* the wrapping machine operator, so an annotation over it would be silently dropped; a reachability body is reduced, so a trap in it empties the observation set and makes the claim false. `wrapping(...)` is the remedy in the second case and the refusal in the first |
 | P018 | an `exists`/`unique` body that reaches a function carrying an overflow guard through calls | the judgment reduces callee activations too, so a guard one call deep is this body's trap; a callee code generation cannot resolve counts as carrying one, and `external fn` callees are skipped for the linker to judge |
+| P008 | an aggregate as the value a `unique` block singles out | uniqueness is stated one scalar value at a time; draw one `@` per component |
+| P019 | a `let … = @;` inside an `if` arm, an `assume` block or a plain block of a `unique` block | the block compares only the values drawn directly in it |
+| P020 | a `unique` block that draws no value of its own | with nothing to single out it claims no more than a plain block |
+| P021 | `unique` blocks nested more than three deep | each level states its block twice, so the obligation doubles per level |
 
 Memory-content assertions — addresses, points-to, iterated heaps — are out of scope entirely.
 The surface language cannot express them, and the properties this encoding *can* state are
@@ -549,7 +552,7 @@ scalar leaves express exactly.
 ## Related Documents
 
 - [`core/wasm-to-v/ROCQ_CONTRACT.md`](../../wasm-to-v/ROCQ_CONTRACT.md) — the emitted `.v`
-  contract, including the full `P001`–`P018` registry
+  contract, including the full `P001`–`P021` registry
 - [`docs/arrays-and-memory.md`](arrays-and-memory.md) — the executable lowering of the same
   aggregates, including `compute_struct_field_layout`, whose order the leaf enumeration
   shares

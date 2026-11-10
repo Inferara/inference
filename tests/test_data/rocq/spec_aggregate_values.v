@@ -100,7 +100,7 @@ Definition spec_aggregate_values__AggregateValues_hspec5 : hassert :=
 Definition spec_aggregate_values__AggregateValues_hspec6 : hassert :=
   Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_and (HA_has_type (T_local 1%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i ROI_ne) (T_local 0%N) (T_const (Vi32 3))) (T_const (Vi32 0)))))) (Hor (HA_not (term_eq (T_local 0%N) (T_const (Vi32 3)))) (HA_not (term_eq (T_local 1%N) (T_const (Vi32 4))))).
 Definition spec_aggregate_values__AggregateValues_hspec7 : hassert :=
-  Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (term_eq (T_local 0%N) (T_const (Vi32 3)))) (HA_ex (HA_ex (term_eq (T_binop T_i32 (Binop_i BOI_add) (T_lvar 1) (T_lvar 0)) (T_local 0%N)))).
+  Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (term_eq (T_local 0%N) (T_const (Vi32 3)))) (HA_ex (HA_and (HA_has_type (T_lvar 0) T_i32) (HA_ex (HA_and (HA_has_type (T_lvar 0) T_i32) (term_eq (T_binop T_i32 (Binop_i BOI_add) (T_lvar 1) (T_lvar 0)) (T_local 0%N)))))).
 Definition spec_aggregate_values__AggregateValues_specs : list hassert := (spec_aggregate_values__AggregateValues_hspec1 :: spec_aggregate_values__AggregateValues_hspec2 :: spec_aggregate_values__AggregateValues_hspec3 :: spec_aggregate_values__AggregateValues_hspec4 :: spec_aggregate_values__AggregateValues_hspec5 :: spec_aggregate_values__AggregateValues_hspec6 :: spec_aggregate_values__AggregateValues_hspec7 :: nil).
 
 Section Host.

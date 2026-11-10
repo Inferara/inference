@@ -291,14 +291,18 @@ fn every_nested_block_kind_loses_its_wrapper() {
               let n: i32 = @;
               assert(n > x);
             }
+            unique {
+              let u: i32 = @;
+              assert(u == x);
+            }
           }
         }",
     );
     assert_vanilla(&wasm);
     let wat = flat(&wat_of(&wasm));
     assert!(
-        wat.contains("(param $x i32) (param $n i32)"),
-        "the nested exists block's `@` joins the choice suffix:\n{wat}"
+        wat.contains("(param $x i32) (param $n i32) (param $u i32)"),
+        "the nested exists and unique blocks' `@`s join the choice suffix:\n{wat}"
     );
 }
 

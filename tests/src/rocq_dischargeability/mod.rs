@@ -741,7 +741,7 @@ mod tests {
         let exchange = tempfile::tempdir().expect("create exchange");
         let request = export(exchange.path()).expect("export fresh artifacts");
         let expected_hashes = [
-            "f6ea44c6d1eb9120c2982dbc2d5c1f863e5ab4d9eb426be56bc2cea50faa011f",
+            "dd92a19cf5506f829b44a2d903fa00c742589b3a0b182e6d9f6f48097b9389de",
             "9e04be474dec8f07b734bd4b89c35919951355ea8cb003e3b5cd4bdbf0718446",
             "d5f3645b4c20e48375138001923b8a9e1cd5c6b6e461b39fea0268bfc2f95400",
             "ae92490a10f79700630fcd06f5d4e483e2792c6ec18271e3d4714312a330c611",

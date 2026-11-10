@@ -170,8 +170,11 @@ spec prime_properties {
             imp(
                 teq(is_prime(), i32c(0)),
                 ex(and(
-                    and(nz(gts(m_ex(), one())), nz(lts(m_ex(), n()))),
-                    teq(rems(n(), m_ex()), i32c(0)),
+                    hastype(m_ex(), HNumType::I32),
+                    and(
+                        and(nz(gts(m_ex(), one())), nz(lts(m_ex(), n()))),
+                        teq(rems(n(), m_ex()), i32c(0)),
+                    ),
                 )),
             ),
         ),
@@ -684,20 +687,23 @@ spec Alt {
 }
 ";
     let expected = ex(and(
-        teq(lvar(0), i32c(0)),
-        all(imp(
-            hastype(lvar(0), HNumType::I32),
-            nz(rel(
-                HRelop::Eq,
-                HTerm::Binop(
-                    HNumType::I32,
-                    HBinop::Add,
-                    Box::new(lvar(0)),
-                    Box::new(lvar(1)),
-                ),
-                lvar(0),
+        hastype(lvar(0), HNumType::I32),
+        and(
+            teq(lvar(0), i32c(0)),
+            all(imp(
+                hastype(lvar(0), HNumType::I32),
+                nz(rel(
+                    HRelop::Eq,
+                    HTerm::Binop(
+                        HNumType::I32,
+                        HBinop::Add,
+                        Box::new(lvar(0)),
+                        Box::new(lvar(1)),
+                    ),
+                    lvar(0),
+                )),
             )),
-        )),
+        ),
     ));
     assert_eq!(sole_obligation(&proof_hspecs(source), "Alt"), expected);
 }
@@ -718,6 +724,46 @@ fn quantifier_alternation_fixture_emits_a_universal_binder_in_every_obligation()
         assert!(
             binds_a_universal(&entry.hassert),
             "`{}` must bind a universal logical variable: {:?}",
+            entry.fn_symbol.0,
+            entry.hassert
+        );
+    }
+}
+
+/// The nested-`unique` fixture the `coqc` corpus compiles also translates
+/// through real code generation, and every one of its obligations states both
+/// halves of a `unique` claim: a value, and a universal claim about its rivals.
+#[test]
+fn unique_blocks_fixture_states_a_value_and_its_rivals_in_every_obligation() {
+    fn binds_an_existential(a: &HAssert) -> bool {
+        match a {
+            HAssert::Ex(_) => true,
+            HAssert::Not(x) | HAssert::All(x) => binds_an_existential(x),
+            HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
+                binds_an_existential(l) || binds_an_existential(r)
+            }
+            HAssert::True
+            | HAssert::False
+            | HAssert::TermEq(_, _)
+            | HAssert::HasType(_, _)
+            | HAssert::Defined(_)
+            | HAssert::AppOk(_, _) => false,
+        }
+    }
+    let map = proof_hspecs(&read_inf("spec_unique_blocks.inf"));
+    let entries = map
+        .get("UniqueBlocks")
+        .expect("the unique-blocks spec must produce obligations");
+    assert_eq!(entries.len(), 7, "one obligation per spec free function");
+    for entry in entries {
+        assert!(
+            matches!(entry.kind, inference_hassert::SpecKind::Forall),
+            "`{}` is a claim inside a universal obligation, not a reachability one",
+            entry.fn_symbol.0
+        );
+        assert!(
+            binds_an_existential(&entry.hassert) && binds_a_universal(&entry.hassert),
+            "`{}` must bind a value and a rival: {:?}",
             entry.fn_symbol.0,
             entry.hassert
         );
@@ -886,7 +932,10 @@ spec Narrow {
   }
 }
 ";
-    let expected = ex(and(below_u(lvar(0), 256), teq(lvar(0), i32c(200))));
+    let expected = ex(and(
+        and(hastype(lvar(0), HNumType::I32), below_u(lvar(0), 256)),
+        teq(lvar(0), i32c(200)),
+    ));
     assert_eq!(sole_obligation(&proof_hspecs(source), "Narrow"), expected);
 }
 
