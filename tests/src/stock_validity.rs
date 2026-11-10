@@ -42,8 +42,8 @@
 //!   asserts about it. The *merged* artifact is gated by the linked corpus in
 //!   `rocq_typecheck.rs`.
 //!
-//! So the table's split is 42 valid and 10 rejected, where `infc --mode proof`
-//! run over the same directory reaches 35 modules and refuses 17: the seven
+//! So the table's split is 43 valid and 9 rejected, where `infc --mode proof`
+//! run over the same directory reaches 36 modules and refuses 16: the seven
 //! linked fixtures are the difference, in the direction of this gate covering
 //! more rather than less.
 
@@ -197,12 +197,6 @@ mod gate {
             stem: "rocq_spec_shapes",
             expected: StockValid(ScalarChoice),
             why: "the shape survey: inline blocks and body modifiers, each drawing a scalar",
-        },
-        Fixture {
-            stem: "rocq_unique",
-            expected: Rejected(Codegen("P002")),
-            why: "a nested `unique` block inside an `exists`-quantified body, whose obligation \
-                  cannot single out one stretch of a run as unique",
         },
         Fixture {
             stem: "rocq_unique_spec",
@@ -381,6 +375,12 @@ mod gate {
             expected: StockValid(ScalarChoice),
             why: "every arithmetic and comparison operator the obligation printer can spell, \
                   over drawn scalars",
+        },
+        Fixture {
+            stem: "spec_unique_reach",
+            expected: StockValid(AlreadyChoiceLowered),
+            why: "nested `unique` blocks inside `exists`/`unique` bodies: every draw was \
+                  already a choice parameter, and the blocks lower inline",
         },
         Fixture {
             stem: "spec_unique_blocks",

@@ -518,7 +518,6 @@ function.
 | P001 | an `assume`-quantified body | `assume` is not a quantifier — it only reinterprets a failing path as a filtered-out one for an enclosing `forall` — so a standalone `assume` body states no property |
 | P002 | `loop`, `break` | a loop states a property only through an invariant this translation cannot infer; quantify an index and constrain it instead |
 | P002 | `**`, string literals | no assertion encoding |
-| P002 | a `unique` block inside an `exists`/`unique` body | that body's obligation is a judgment about one run, which cannot single out one stretch of the run as unique; in a `forall`/plain body the block translates |
 | P002 | an array/struct literal read in scalar term position, or written at an out-of-surface shape | a literal becomes one term per scalar leaf, so there is neither a whole-value term nor a leaf tree to build |
 | P002 | an access chain with two non-constant indices, or one whose non-constant index lands on an aggregate rather than a scalar leaf | one obligation carries one case split per chain, and the split has to end at a leaf |
 | P003 | reassignment | a specification names values, not storage — every name stands for one value throughout the claim |
@@ -532,7 +531,7 @@ function.
 | P009 | a specification *method* carrying a proof obligation — quantified at any kind, or plain with an `assert` at any depth | a method has no obligation channel, and dropping the claim silently is worse than refusing it; a plain method that asserts nothing stays a helper |
 | P010 | an obligation that collapses to the vacuous `HA_true` | an obligation any proof discharges without reading the program is indistinguishable from no verification at all |
 | P011 | a call from any specification body to an `exists`/`unique`-quantified spec function | such a function is the subject of a judgment about running its own body with its own choices, not a callable predicate, and its compiled form carries trailing choice parameters no call site supplies |
-| P012 | an anonymous (call-argument) `@` in a `unique` body, or directly in a `unique` block | a choice nothing names has no source-visible face, so it cannot distinguish exit states; bind it first |
+| P012 | an anonymous (call-argument) `@` written directly in a `unique` body or a `unique` block (not under a nested `exists`) | a choice nothing names has no source-visible face, so it cannot distinguish exit states; bind it first |
 | P013 | an aggregate introduction whose scalar leaves pass `SPEC_FN_MAX_QUANTIFIED_LEAVES` | each leaf brings a binder and a hypothesis, so the tree grows one level per leaf and the budget is the resource |
 | P014 | a constant-folded out-of-bounds index | the same fact analysis rule A037 states, at the spelling A037 cannot see |
 | P015 | a parameter, a `@`, or an aggregate leaf at an `enum` declared with no variants | an uninhabited type has no value for the claim to range over, so the obligation would either say nothing or be unprovable for a reason unrelated to the program; A009 only *warns* about the declaration, so such an enum really does reach here |
@@ -540,8 +539,8 @@ function.
 | P017 | `checked(...)` or `wrapping(...)` in a `forall`/plain body; arithmetic whose effective mode traps in an `exists`/`unique` body | an obligation's arithmetic *is* the wrapping machine operator, so an annotation over it would be silently dropped; a reachability body is reduced, so a trap in it empties the observation set and makes the claim false. `wrapping(...)` is the remedy in the second case and the refusal in the first |
 | P018 | an `exists`/`unique` body that reaches a function carrying an overflow guard through calls | the judgment reduces callee activations too, so a guard one call deep is this body's trap; a callee code generation cannot resolve counts as carrying one, and `external fn` callees are skipped for the linker to judge |
 | P008 | an aggregate as the value a `unique` block singles out | uniqueness is stated one scalar value at a time; draw one `@` per component |
-| P019 | a `let … = @;` inside an `if` arm, an `assume` block or a plain block of a `unique` block | the block compares only the values drawn directly in it |
-| P020 | a `unique` block that draws no value of its own | with nothing to single out it claims no more than a plain block |
+| P019 | a `let … = @;` inside an `if` arm, an `assume` block or a plain block of a `unique` block or `unique` body | a `unique` scope compares only the values drawn directly in it |
+| P020 | a `unique` block or `unique` body that draws no value of its own | with nothing to single out it claims no more than a plain block, or an `exists` function |
 | P021 | `unique` blocks nested more than three deep | each level states its block twice, so the obligation doubles per level |
 
 Memory-content assertions — addresses, points-to, iterated heaps — are out of scope entirely.

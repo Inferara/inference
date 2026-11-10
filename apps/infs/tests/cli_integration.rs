@@ -5872,14 +5872,15 @@ fn build_v_rejects_a_unique_block_that_draws_nothing() {
 }
 
 /// Verify a `-v` (proof-mode) build gives a `unique` kind written on an `if`
-/// arm exactly what the nested block gets — inside an `exists`-quantified
-/// function, a refusal. A build that read the arm as a plain one would write a
-/// `.v` with the uniqueness claim silently dropped.
+/// arm exactly what the nested block gets: inside an `exists`-quantified
+/// function, a universal claim in the reachability payload, on the arm. A
+/// build that read the arm as a plain one would write a `.v` with the
+/// uniqueness claim silently dropped.
 ///
-/// **Expected behavior**: Non-zero exit, stderr names the `P002` `unique`
-/// rejection, and neither a `.v` nor a `.wasm` is written.
+/// **Expected behavior**: Exit 0; the `.v` carries a `Hall` inside the
+/// `ValidExistsSpec` record's payload.
 #[test]
-fn build_v_rejects_unique_if_arm_with_p002() {
+fn build_v_states_a_unique_if_arm_in_the_reachability_payload() {
     let Some(infc_path) = require_infc() else {
         return;
     };
@@ -5897,21 +5898,21 @@ fn build_v_rejects_unique_if_arm_with_p002() {
         .arg("-v");
 
     cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("P002").and(predicate::str::contains("unique")));
+        .success()
+        .stdout(predicate::str::contains("V generated"));
 
-    let v_output = temp.child("out").child("nondet_unique_arm.v");
-    let wasm_output = temp.child("out").child("nondet_unique_arm.wasm");
-    assert!(
-        !v_output.path().exists(),
-        "a rejected proof-mode build must write no V file, found: {:?}",
-        v_output.path()
-    );
-    assert!(
-        !wasm_output.path().exists(),
-        "a rejected proof-mode build must write no WASM file, found: {:?}",
-        wasm_output.path()
-    );
+    let v = std::fs::read_to_string(temp.child("out").child("nondet_unique_arm.v").path())
+        .expect("the build must write out/nondet_unique_arm.v");
+    for needle in [
+        "(Hall (Himpl (HA_and (HA_has_type (T_lvar 0) T_i32)",
+        "(term_eq (T_lvar 0) (T_local 1%N))",
+        "Theorem valid_exists_nondet_unique_arm__UniqueArm : ValidExistsSpec",
+    ] {
+        assert!(
+            v.contains(needle),
+            "the emitted .v must contain `{needle}`; got:\n{v}"
+        );
+    }
 }
 
 /// Asserts that a `-v` build was refused for applying a function declared inside

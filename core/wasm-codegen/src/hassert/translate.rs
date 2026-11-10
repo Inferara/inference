@@ -850,6 +850,9 @@ impl<'a> SpecFnTranslator<'a> {
         self.reject_untranslatable_arithmetic(body);
 
         self.bind_parameters(&args, mode);
+        if body_kind == BlockKind::Unique {
+            self.scan_unique_body(body, self.arena[def_id].location);
+        }
 
         let stmts = self.arena[body].stmts.clone();
         let raw = self.t_stmts(&stmts, mode);
@@ -1251,6 +1254,7 @@ impl<'a> SpecFnTranslator<'a> {
         if let Some(prebound) = self.prebound.get(&value_expr).copied() {
             let binding = match prebound {
                 Prebound::Level(level) => Binding::Level(level),
+                Prebound::Slot(slot) => Binding::Slot(slot),
                 Prebound::Sentinel => Binding::Aggregate(AggValue::Sentinel),
             };
             self.env.insert(name, binding);
@@ -2432,10 +2436,11 @@ impl<'a> SpecFnTranslator<'a> {
     /// correctly unprovable, and a true one has an in-domain witness whose two
     /// readings agree.
     ///
-    /// In a `unique` body an anonymous choice is rejected outright
-    /// ([`PCode::P012`]): it is excluded from the source-visible observation
-    /// the judgment compares, so distinct choices nothing names would collapse
-    /// into one observation — a silent weakening of uniqueness.
+    /// An anonymous choice written directly in a `unique` body is refused
+    /// before translation reaches it ([`PCode::P012`], raised by the scan of
+    /// the body): it is excluded from what the judgment compares, so distinct
+    /// choices nothing names would collapse into one observation. One under a
+    /// nested `exists` arrives here and is read like any other.
     fn uzumaki_argument(&mut self, arg: ExprId, mode: Mode) -> HTerm {
         let recorded = self.expr_domain(arg);
         let domain = self.admitted_domain(recorded, self.arena[arg].location, "`@`");
@@ -2455,13 +2460,12 @@ impl<'a> SpecFnTranslator<'a> {
                 self.bind_witness(move |v| typed(v, width, &domain))
             }
             Mode::Reach => {
-                let (planned, unique) = {
-                    let reach = self
-                        .reach
-                        .as_ref()
-                        .expect("Mode::Reach requires a reachability context");
-                    (reach.plan.try_choice_slot(arg), reach.unique)
-                };
+                let planned = self
+                    .reach
+                    .as_ref()
+                    .expect("Mode::Reach requires a reachability context")
+                    .plan
+                    .try_choice_slot(arg);
                 // Unlike the `let` seam, this position performs no scalarity
                 // pre-check of its own, so the plan lookup is the check: the
                 // planner plans every scalar `@`, and an unplanned one here
@@ -2470,18 +2474,6 @@ impl<'a> SpecFnTranslator<'a> {
                     self.emit_unplanned_reach_argument(arg);
                     return zero_sentinel();
                 };
-                if unique {
-                    self.error(
-                        PCode::P012,
-                        self.arena[arg].location,
-                        "anonymous `@` argument in a `unique` spec function has no \
-                         source-visible face: `unique` compares source-visible exit states, and \
-                         a choice nothing names cannot distinguish them — bind it first \
-                         (`let c: i32 = @;`) so the choice participates in uniqueness"
-                            .to_string(),
-                    );
-                    return zero_sentinel();
-                }
                 HTerm::Local(slot)
             }
         }
@@ -2814,17 +2806,19 @@ impl<'a> SpecFnTranslator<'a> {
     /// levels per `unique` while the work grows by a factor of two.
     fn unique_contribution(&mut self, block_id: BlockId, mode: Mode) -> HAssert {
         let location = self.arena[block_id].location;
-        if mode.binds_choice_slots() {
-            self.refuse_unique_in_reachability_body(location);
-            return HAssert::True;
-        }
+        // Inside a body judged by running it, the run is the existential half:
+        // the block's draws are choice parameters, its statements execute and
+        // filter as they always did, and what the payload adds is the
+        // universal half alone, about the slots the run drew into.
+        let reach = mode.binds_choice_slots();
+        let read_mode = if reach { Mode::Reach } else { Mode::Exist };
         if self.unique_nesting >= UNIQUE_NESTING_LIMIT {
             self.refuse_unique_nesting(location);
             return HAssert::True;
         }
 
         let before = self.diags.len();
-        let mut scan = UniqueScan::default();
+        let mut scan = UniqueScan::new(UniqueScope::Block, reach);
         self.scan_unique_block(block_id, None, &mut scan);
         if scan.direct_draws == 0 && self.diags.len() == before {
             self.error(
@@ -2854,23 +2848,24 @@ impl<'a> SpecFnTranslator<'a> {
         let outer_leaves = self.leaves_introduced;
         self.unique_nesting += 1;
 
+        // The values: frame slots where a run drew them, fresh logical
+        // variables at the next levels otherwise.
+        let value_terms = self.prebind_values(&scan.witnesses, outer_depth, reach);
+        let value_levels = if reach { 0 } else { count };
+        self.depth = outer_depth + value_levels;
+
         let result = if self.diags.len() > before {
-            // Already refused. The block is still read once, as an `exists`
-            // block, so that whatever else is wrong in it is reported in the
-            // same build; every draw the scan decided is pre-bound, so none is
-            // diagnosed a second time or charged to the leaf budget.
-            self.prebind(&scan.witnesses, outer_depth);
+            // Already refused. The block is still read once so that whatever
+            // else is wrong in it is reported in the same build; every draw the
+            // scan decided is pre-bound, so none is diagnosed a second time or
+            // charged to the leaf budget.
             for (draw, prebound) in &scan.rejected {
                 self.prebound.insert(*draw, *prebound);
             }
-            self.depth = outer_depth + count;
-            let _ = self.scoped_block(block_id, Mode::Exist);
+            let _ = self.scoped_block(block_id, read_mode);
             HAssert::True
         } else {
-            let value_base = outer_depth;
-            self.prebind(&scan.witnesses, value_base);
-            self.depth = value_base + count;
-            let found = self.scoped_block(block_id, Mode::Exist);
+            let found = self.scoped_block(block_id, read_mode);
             if self.diags.len() > before {
                 // The function fails either way. Returning here is also what
                 // keeps the nesting cap linear: the refusal of a too-deep
@@ -2878,20 +2873,27 @@ impl<'a> SpecFnTranslator<'a> {
                 // enclosing level then skips its second.
                 HAssert::True
             } else {
-                let rival_base = value_base + count;
+                // The rival reading is logical whatever the first was. Read as
+                // a run, a draw under a nested `exists` would be the slot the
+                // run happened to fill, and the claim would only say that no
+                // rival completes the block *with that same inner choice*.
+                let rival_base = outer_depth + value_levels;
                 self.prebind(&scan.witnesses, rival_base);
                 self.depth = rival_base + count;
                 // The two readings are sibling subtrees, so the second must not
                 // be charged against the leaf budget on top of the first.
                 self.leaves_introduced = outer_leaves;
                 let rivals = self.scoped_block(block_id, Mode::Exist);
-                debug_assert_eq!(
-                    self.diags.len(),
-                    before,
-                    "the second reading of a `unique` block differs from the first only in the \
-                     variables its draws are bound to, and no diagnostic reads those"
-                );
-                unique_claim(&scan.witnesses, value_base, rival_base, found, rivals)
+                if self.diags.len() > before {
+                    HAssert::True
+                } else {
+                    let rival = rival_half(&scan.witnesses, rival_base, &value_terms, rivals);
+                    if reach {
+                        HAssert::and(found, rival)
+                    } else {
+                        unique_claim(&scan.witnesses, outer_depth, found, rival)
+                    }
+                }
             }
         };
 
@@ -2906,24 +2908,77 @@ impl<'a> SpecFnTranslator<'a> {
         result
     }
 
-    /// A `unique` block inside a body whose obligation is a judgment about one
-    /// run. The remedy is one that works: the same claim written with blocks
-    /// in a plain body, where it translates.
-    fn refuse_unique_in_reachability_body(&mut self, location: Location) {
-        let kind = self.reach_kind();
-        let article = quantifier_article(kind);
-        let name = self.fn_name.clone();
-        self.error(
-            PCode::P002,
-            location,
-            format!(
-                "a `unique` block is not supported inside {article} `{kind}`-quantified spec \
-                 function yet: this function's obligation is judged by running its body, and \
-                 that judgment cannot single out one stretch of a run as unique — give \
-                 `{name}` a plain body and state the claim with blocks instead \
-                 (`{kind} {{ … unique {{ … }} }}`), where a nested `unique` block is supported"
-            ),
+    /// Binds a `unique` scope's values for its first reading and returns the
+    /// term each is read as: its choice parameter's slot in a body judged by
+    /// running it, a logical variable at consecutive levels from `base`
+    /// otherwise.
+    fn prebind_values(
+        &mut self,
+        witnesses: &[UniqueWitness],
+        base: u32,
+        reach: bool,
+    ) -> Vec<HTerm> {
+        if reach {
+            witnesses
+                .iter()
+                .map(|witness| {
+                    let slot = self.choice_slot(witness.draw);
+                    self.prebound.insert(witness.draw, Prebound::Slot(slot));
+                    HTerm::Local(slot)
+                })
+                .collect()
+        } else {
+            self.prebind(witnesses, base);
+            (base..)
+                .take(witnesses.len())
+                .map(HTerm::LVar)
+                .collect()
+        }
+    }
+
+    /// The values a `unique`-quantified function compares are the draws
+    /// written directly in its body, so every other draw that belongs to the
+    /// body is refused here, once, ahead of the translation — and each draw the
+    /// scan decided is bound to its choice parameter's slot so the translation
+    /// does not decide it again.
+    fn scan_unique_body(&mut self, body: BlockId, location: Location) {
+        let before = self.diags.len();
+        let mut scan = UniqueScan::new(UniqueScope::Body, true);
+        self.scan_unique_block(body, None, &mut scan);
+        if scan.direct_draws == 0 && self.diags.len() == before {
+            let name = self.fn_name.clone();
+            self.error(
+                PCode::P020,
+                location,
+                format!(
+                    "`{name}` is `unique`-quantified but draws no value of its own, so there \
+                     is nothing for it to single out and it claims no more than an `exists` \
+                     function would — draw the value it should pin down directly in the \
+                     function body (`let x: i32 = @;`), or make the function `exists` if \
+                     existence alone is the claim; a `let` bound to an expression is not a \
+                     draw, and a draw inside a nested `exists` block belongs to that block"
+                ),
+            );
+        }
+        let compared: Vec<u32> = scan
+            .witnesses
+            .iter()
+            .map(|witness| self.choice_slot(witness.draw))
+            .collect();
+        debug_assert_eq!(
+            self.reach.as_ref().map(|reach| {
+                let entry = reach.plan.entry_arity() as usize;
+                reach.plan.unique_visible_locs().split_off(entry)
+            }),
+            Some(compared),
+            "the slots a `unique` function compares are decided twice — by the choice plan, \
+             for the emitted record, and by this scan, for the diagnostics — and the two must \
+             name the same draws"
         );
+        let _ = self.prebind_values(&scan.witnesses, 0, true);
+        for (draw, prebound) in scan.rejected {
+            self.prebound.insert(draw, prebound);
+        }
     }
 
     /// A `unique` block past the nesting limit.
@@ -2979,22 +3034,22 @@ impl<'a> SpecFnTranslator<'a> {
                     if matches!(arena[value].kind, Expr::Uzumaki) {
                         self.scan_unique_draw(*name, *ty, value, nested, scan);
                     } else {
-                        self.scan_unique_expr(value);
+                        self.scan_unique_expr(value, scan.scope);
                     }
                 }
                 Stmt::Assert { expr } | Stmt::Expr(expr) | Stmt::Return { expr } => {
-                    self.scan_unique_expr(*expr);
+                    self.scan_unique_expr(*expr, scan.scope);
                 }
                 Stmt::Assign { left, right } => {
-                    self.scan_unique_expr(*left);
-                    self.scan_unique_expr(*right);
+                    self.scan_unique_expr(*left, scan.scope);
+                    self.scan_unique_expr(*right, scan.scope);
                 }
                 Stmt::If {
                     condition,
                     then_block,
                     else_block,
                 } => {
-                    self.scan_unique_expr(*condition);
+                    self.scan_unique_expr(*condition, scan.scope);
                     self.scan_unique_inner(*then_block, UniqueNesting::IfArm, scan);
                     if let Some(else_block) = else_block {
                         self.scan_unique_inner(*else_block, UniqueNesting::IfArm, scan);
@@ -3005,13 +3060,13 @@ impl<'a> SpecFnTranslator<'a> {
                 }
                 Stmt::Loop { condition, body } => {
                     if let Some(condition) = condition {
-                        self.scan_unique_expr(*condition);
+                        self.scan_unique_expr(*condition, scan.scope);
                     }
                     self.scan_unique_inner(*body, UniqueNesting::Block, scan);
                 }
                 Stmt::ConstDef(def_id) => {
                     if let Def::Constant { value, .. } = &arena[*def_id].kind {
-                        self.scan_unique_expr(*value);
+                        self.scan_unique_expr(*value, scan.scope);
                     }
                 }
                 Stmt::Break => {}
@@ -3045,19 +3100,36 @@ impl<'a> SpecFnTranslator<'a> {
         // What the refused draw is bound to while the rest of the block is
         // read for its other diagnostics: an aggregate's reads resolve
         // silently, and a scalar takes a level nothing will ever wrap.
-        let stand_in = if aggregate {
-            Prebound::Sentinel
+        let planned = if scan.reach {
+            self.reach
+                .as_ref()
+                .and_then(|reach| reach.plan.try_choice_slot(draw))
         } else {
-            Prebound::Level(self.depth)
+            None
+        };
+        let stand_in = match (aggregate, planned) {
+            (true, _) => Prebound::Sentinel,
+            (false, Some(slot)) => Prebound::Slot(slot),
+            (false, None) => Prebound::Level(self.depth),
+        };
+        // How a refusal names what the draw belongs to, and where the draw
+        // should go instead.
+        let (owner, own, place) = match scan.scope {
+            UniqueScope::Block => ("a `unique` block", "its own block", "the `unique` block"),
+            UniqueScope::Body => (
+                "a `unique`-quantified function",
+                "the function body",
+                "the function body",
+            ),
         };
         if let Some(form) = nested {
             let name = self.arena[name].name.clone();
             let message = match form {
                 UniqueNesting::IfArm => format!(
-                    "`{name}` is drawn inside an `if` branch of a `unique` block: `unique` \
-                     compares only the values drawn directly in its own block, and a value \
+                    "`{name}` is drawn inside an `if` branch of {owner}: `unique` \
+                     compares only the values drawn directly in {own}, and a value \
                      drawn on one branch is unconstrained whenever the other branch runs — \
-                     declare `let {name}: {rendered} = @;` directly in the `unique` block, \
+                     declare `let {name}: {rendered} = @;` directly in {place}, \
                      before the `if`, and constrain it in every branch; if `{name}` should not \
                      count toward uniqueness, draw it inside a nested `exists` block instead"
                 ),
@@ -3068,11 +3140,11 @@ impl<'a> SpecFnTranslator<'a> {
                         ("a nested block", "block")
                     };
                     format!(
-                        "`{name}` is drawn inside {inside} of a `unique` block: `unique` \
-                         compares only the values drawn directly in its own block, so a second \
+                        "`{name}` is drawn inside {inside} of {owner}: `unique` \
+                         compares only the values drawn directly in {own}, so a second \
                          value of `{name}` would go unnoticed and the claim would silently \
-                         weaken — declare `let {name}: {rendered} = @;` directly in the \
-                         `unique` block, before the {before}; if `{name}` should not count \
+                         weaken — declare `let {name}: {rendered} = @;` directly in \
+                         {place}, before the {before}; if `{name}` should not count \
                          toward uniqueness, draw it inside a nested `exists` block instead"
                     )
                 }
@@ -3082,6 +3154,11 @@ impl<'a> SpecFnTranslator<'a> {
             return;
         }
         scan.direct_draws += 1;
+        if aggregate && scan.scope == UniqueScope::Body {
+            // The ordinary `let` path refuses a compound choice in a body
+            // judged by running it, in the wording for that judgment.
+            return;
+        }
         if aggregate {
             self.error(
                 PCode::P008,
@@ -3113,55 +3190,61 @@ impl<'a> SpecFnTranslator<'a> {
 
     /// Refuses every `@` in an expression that belongs to a `unique` block:
     /// a draw nothing names takes no part in what the block compares.
-    fn scan_unique_expr(&mut self, expr_id: ExprId) {
+    fn scan_unique_expr(&mut self, expr_id: ExprId, scope: UniqueScope) {
         let arena = self.arena;
         match &arena[expr_id].kind {
             Expr::Binary { left, right, .. } => {
-                self.scan_unique_expr(*left);
-                self.scan_unique_expr(*right);
+                self.scan_unique_expr(*left, scope);
+                self.scan_unique_expr(*right, scope);
             }
             Expr::ArrayIndexAccess { array, index } => {
-                self.scan_unique_expr(*array);
-                self.scan_unique_expr(*index);
+                self.scan_unique_expr(*array, scope);
+                self.scan_unique_expr(*index, scope);
             }
             Expr::PrefixUnary { expr, .. }
             | Expr::Parenthesized { expr }
             | Expr::ArithMode { expr, .. }
             | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => self.scan_unique_expr(*expr),
+            | Expr::TypeMemberAccess { expr, .. } => self.scan_unique_expr(*expr, scope),
             Expr::FunctionCall { function, args, .. } => {
-                self.scan_unique_expr(*function);
+                self.scan_unique_expr(*function, scope);
                 for &(_, arg) in args {
-                    self.scan_unique_expr(arg);
+                    self.scan_unique_expr(arg, scope);
                 }
             }
             Expr::StructLiteral { fields, .. } => {
                 for &(_, value) in fields {
-                    self.scan_unique_expr(value);
+                    self.scan_unique_expr(value, scope);
                 }
             }
             Expr::ArrayLiteral { elements } => {
                 for &element in elements {
-                    self.scan_unique_expr(element);
+                    self.scan_unique_expr(element, scope);
                 }
             }
-            Expr::ArrayRepeat { value, .. } => self.scan_unique_expr(*value),
+            Expr::ArrayRepeat { value, .. } => self.scan_unique_expr(*value, scope),
             Expr::Uzumaki => {
                 let rendered = self
                     .ctx
                     .get_node_typeinfo(node_expr(expr_id))
                     .map_or_else(|| "T".to_string(), |info| info.to_string());
-                self.error(
-                    PCode::P012,
-                    arena[expr_id].location,
-                    format!(
+                let message = match scope {
+                    UniqueScope::Block => format!(
                         "anonymous `@` argument in a `unique` block: `unique` compares only the \
                          values it names, so a second choice here would go unnoticed and the \
                          claim would silently weaken — bind it first (`let c: {rendered} = @;`) \
                          directly in the `unique` block so the choice counts, or make the call \
                          inside a nested `exists` block if it should not count"
                     ),
-                );
+                    UniqueScope::Body => format!(
+                        "anonymous `@` argument in a `unique` spec function has no \
+                         source-visible face: `unique` compares source-visible exit states, and \
+                         a choice nothing names cannot distinguish them — bind it first \
+                         (`let c: {rendered} = @;`) so the choice participates in uniqueness, \
+                         or make the call inside a nested `exists` block if it should not"
+                    ),
+                };
+                self.error(PCode::P012, arena[expr_id].location, message);
             }
             Expr::Identifier(_)
             | Expr::NumberLiteral { .. }
@@ -5413,6 +5496,9 @@ enum Prebound {
     /// The logical variable at this absolute level; the block wraps the
     /// binder itself.
     Level(u32),
+    /// The frame slot of the choice parameter the run drew the value into —
+    /// what a draw is in a body judged by running it.
+    Slot(u32),
     /// A refused aggregate draw, whose reads resolve silently so one mistake
     /// stays one message.
     Sentinel,
@@ -5426,6 +5512,25 @@ enum UniqueNesting {
     Block,
 }
 
+/// What a scan for `unique` values is a scan of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UniqueScope {
+    Block,
+    Body,
+}
+
+impl UniqueScan {
+    fn new(scope: UniqueScope, reach: bool) -> Self {
+        Self {
+            scope,
+            reach,
+            witnesses: Vec::new(),
+            rejected: Vec::new(),
+            direct_draws: 0,
+        }
+    }
+}
+
 /// One value a `unique` block singles out.
 struct UniqueWitness {
     /// The `@` of its `let`.
@@ -5435,8 +5540,12 @@ struct UniqueWitness {
 }
 
 /// What a scan of a `unique` block found.
-#[derive(Default)]
 struct UniqueScan {
+    /// Whether the scan is of a `unique` block or of the body of a
+    /// `unique`-quantified function, which decides only how a refusal reads.
+    scope: UniqueScope,
+    /// Whether the draws being scanned are choice parameters of a run.
+    reach: bool,
     witnesses: Vec<UniqueWitness>,
     /// Refused `let … = @;` draws, with what each is bound to while the rest
     /// of the block is read for its other diagnostics.
@@ -5447,39 +5556,62 @@ struct UniqueScan {
     direct_draws: u32,
 }
 
-/// Assembles a `unique` block's claim from its two readings: `found` over
-/// the values at levels `value_base ..`, `rivals` over the rival values at
-/// levels `rival_base ..`, which sit inside the values' binders.
+/// What a `unique` scope's values are known to be at `terms`: each of its
+/// class, within the values its declaration admits.
+fn typed_all(witnesses: &[UniqueWitness], terms: &[HTerm]) -> HAssert {
+    conjoin(
+        witnesses
+            .iter()
+            .zip(terms)
+            .map(|(witness, term)| typed(term, witness.width, &witness.domain))
+            .collect(),
+    )
+}
+
+/// The universal half of a `unique` claim: every typed assignment of rival
+/// values that completes the scope — `rivals`, read over logical variables at
+/// levels `rival_base ..` — is the assignment `values`.
+fn rival_half(
+    witnesses: &[UniqueWitness],
+    rival_base: u32,
+    values: &[HTerm],
+    rivals: HAssert,
+) -> HAssert {
+    let rival_terms: Vec<HTerm> = (rival_base..)
+        .take(witnesses.len())
+        .map(HTerm::LVar)
+        .collect();
+    let same = conjoin(
+        rival_terms
+            .iter()
+            .zip(values)
+            .map(|(rival, value)| HAssert::TermEq(rival.clone(), value.clone()))
+            .collect(),
+    );
+    witnesses.iter().fold(
+        HAssert::imp(
+            HAssert::and(typed_all(witnesses, &rival_terms), rivals),
+            same,
+        ),
+        |acc, _| HAssert::All(Box::new(acc)),
+    )
+}
+
+/// A `unique` block's whole claim where nothing runs: the values, bound at
+/// levels `value_base ..` and typed, complete the block (`found`), and `rival`
+/// — which sits inside their binders — holds.
 fn unique_claim(
     witnesses: &[UniqueWitness],
     value_base: u32,
-    rival_base: u32,
     found: HAssert,
-    rivals: HAssert,
+    rival: HAssert,
 ) -> HAssert {
-    let typed_all = |base: u32| {
-        conjoin(
-            witnesses
-                .iter()
-                .zip(base..)
-                .map(|(witness, level)| {
-                    typed(&HTerm::LVar(level), witness.width, &witness.domain)
-                })
-                .collect(),
-        )
-    };
-    let count = level_count(witnesses.len());
-    let same = conjoin(
-        (0..count)
-            .map(|i| HAssert::TermEq(HTerm::LVar(rival_base + i), HTerm::LVar(value_base + i)))
-            .collect(),
-    );
-    let rival = (0..count).fold(
-        HAssert::imp(HAssert::and(typed_all(rival_base), rivals), same),
-        |acc, _| HAssert::All(Box::new(acc)),
-    );
-    (0..count).fold(
-        HAssert::and(typed_all(value_base), HAssert::and(found, rival)),
+    let values: Vec<HTerm> = (value_base..)
+        .take(witnesses.len())
+        .map(HTerm::LVar)
+        .collect();
+    witnesses.iter().fold(
+        HAssert::and(typed_all(witnesses, &values), HAssert::and(found, rival)),
         |acc, _| HAssert::Ex(Box::new(acc)),
     )
 }

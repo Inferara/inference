@@ -1,19 +1,17 @@
 // A `unique` kind on an `if` arm is the nested `unique` block spelled on the
 // arm, and gets exactly what the block gets. Inside an `exists`-quantified
-// function that is a refusal: the function's obligation is a judgment about
-// one run of its body, which cannot single out one stretch of the run as
-// unique. A proof-mode build (`-v`) must refuse the arm rather than read it as
-// a plain one, which would drop the uniqueness claim without a word.
+// function the run supplies the value and the obligation's payload adds that
+// it is the only one: a universal claim (`Hall`) on the arm the run takes. A
+// build that read the arm as a plain one would drop that claim without a word.
 pub fn main() -> i32 {
     return 0;
 }
 
 spec UniqueArm {
     fn only_one(n: i32) exists {
-        let k: i32 = @;
-        if k == n unique {
+        if n > 0 unique {
             let x: i32 = @;
-            assert(x == k);
+            assert(x == n);
         }
     }
 }

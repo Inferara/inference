@@ -448,7 +448,7 @@ Test fixtures are located in `tests/fixtures/`:
 | `nondet.inf` | Non-deterministic features (forall, exists, assume) |
 | `nondet_unique.inf` | A `unique` block that draws no value of its own, which a proof-mode build refuses with `P020` |
 | `nondet_unique_block.inf` | A nested `unique` block in a `forall` spec function, which a proof-mode build states as a claim |
-| `nondet_unique_arm.inf` | A `unique` kind on an `if` arm inside an `exists`-quantified function, refused with `P002` like the block |
+| `nondet_unique_arm.inf` | A `unique` kind on an `if` arm inside an `exists`-quantified function, stated in the reachability payload like the block |
 | `nondet_assume_spec.inf` | An `assume`-bodied spec function, which a proof-mode build refuses with `P001` |
 | `nondet_exists_spec.inf` | An `exists`-bodied spec function, whose obligation a proof-mode build writes to the `.v` |
 | `nondet_unique_spec.inf` | A `unique`-bodied spec function, whose obligation a proof-mode build writes to the `.v` |

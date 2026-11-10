@@ -3460,17 +3460,13 @@ fn p008_names_the_unique_quantifier_in_a_unique_body() {
     );
 }
 
-/// A nested `forall` block keeps `P007` and a nested `unique` block keeps
-/// `P002` inside a reachability body: its obligation is about one run, and
-/// neither a universal claim nor "this stretch of the run is the only one"
-/// can be stated about one run.
+/// A nested `forall` block keeps `P007` inside a reachability body: its
+/// statements would have to read as implications, and the compiled body the
+/// obligation is about reads them as filters.
 #[test]
-fn nested_forall_and_unique_blocks_keep_their_rejections_in_a_reach_body() {
+fn a_nested_forall_block_keeps_its_rejection_in_a_reach_body() {
     let forall = err("spec S { fn f() exists { let n: i32 = @; forall { assert(n > 0); } } }");
     assert!(forall.contains("error[P007]"), "{forall}");
-
-    let unique = err("spec S { fn f() exists { let n: i32 = @; unique { assert(n > 0); } } }");
-    assert!(unique.contains("error[P002]"), "{unique}");
 }
 
 /// The highest-risk invariant, checked end to end: the payload's `T_local`
@@ -6090,49 +6086,247 @@ fn an_uninhabited_unique_value_is_refused_once() {
     assert_eq!(e.matches("error[P015]").count(), 1, "{e}");
 }
 
-/// Inside a function whose obligation is a judgment about one run, a `unique`
-/// block or arm is refused, with a remedy that works: the same claim written
-/// with blocks in a plain body.
+// ----- `unique` in a body judged by running it ------------------------------
+
+/// The obligation and kind of the single spec function in `src`.
+fn reach_entry(src: &str) -> (HAssert, SpecKind) {
+    let map = ok(src);
+    let entries = map.get("S").expect("spec `S`");
+    assert_eq!(entries.len(), 1);
+    (entries[0].hassert.clone(), entries[0].kind.clone())
+}
+
+/// Inside an `exists`-quantified function the run is the existential half: the
+/// block's draw is a choice parameter and its conditions are read off the
+/// frame. The payload adds the universal half alone — every typed rival that
+/// completes the block, read logically, is the value in that slot.
 #[test]
-fn a_unique_block_inside_a_reachability_body_names_the_remedy() {
-    let cases = [
-        (
-            "spec S { fn pick(n: i32) exists { let k: i32 = @; unique { let x: i32 = @; \
-             assert(x == k); } } }",
-            "inside an `exists`-quantified spec function",
-            "(`exists { … unique { … } }`)",
-        ),
-        (
-            "spec S { fn pick(n: i32) exists { let k: i32 = @; if k == n unique { \
-             let x: i32 = @; assert(x == k); } } }",
-            "inside an `exists`-quantified spec function",
-            "(`exists { … unique { … } }`)",
-        ),
-        (
-            "spec S { fn pick(n: i32) exists { let k: i32 = @; if k == n { assert(k == n); } \
-             else unique { let x: i32 = @; assert(x == k); } } }",
-            "inside an `exists`-quantified spec function",
-            "(`exists { … unique { … } }`)",
-        ),
-        (
-            "spec S { fn pick(n: i32) unique { let k: i32 = @; assume { assert(k == n); } \
-             unique { let x: i32 = @; assert(x == k); } } }",
-            "inside a `unique`-quantified spec function",
-            "(`unique { … unique { … } }`)",
-        ),
-    ];
-    for (src, opening, remedy) in cases {
-        let e = err(src);
-        assert_eq!(e.matches("error[P002]").count(), 1, "{src}\n{e}");
+fn a_unique_block_in_a_reachability_body_adds_only_the_rival_half() {
+    let (payload, _) = reach_entry(
+        "spec S { fn f(n: i32) exists { unique { let x: i32 = @; assert(x == n); } } }",
+    );
+    assert_eq!(
+        payload,
+        and(
+            teq(local(1), local(0)),
+            all(imp(
+                and(hastype(lvar(0), HNumType::I32), teq(lvar(0), local(0))),
+                teq(lvar(0), local(1))
+            ))
+        )
+    );
+}
+
+/// A draw under a nested `exists` inside the block is a choice slot in the
+/// run's reading and a fresh existential in the rival reading. Read as a slot
+/// there too, the claim would only say that no rival completes the block with
+/// the inner choice the run happened to make.
+#[test]
+fn the_rival_reading_of_a_reach_unique_block_is_logical() {
+    let (payload, _) = reach_entry(
+        "spec S { fn f(n: i32) exists { unique { let x: i32 = @; exists { let e: i32 = @; \
+         assert(e == n); assert(x == e); } } } }",
+    );
+    assert_eq!(
+        payload,
+        and(
+            and(teq(local(2), local(0)), teq(local(1), local(2))),
+            all(imp(
+                and(
+                    hastype(lvar(0), HNumType::I32),
+                    exd(
+                        "i32",
+                        and(teq(lvar(0), local(0)), teq(lvar(1), lvar(0)))
+                    )
+                ),
+                teq(lvar(0), local(1))
+            ))
+        )
+    );
+}
+
+/// The arm spelling is the block in a reachability body too, and the clause
+/// sits on the arm: on the path that skips it nothing is claimed about the
+/// slot the run never constrained.
+#[test]
+fn a_unique_if_arm_in_a_reachability_body_reads_as_the_block() {
+    let arm = reach_entry(
+        "spec S { fn f(n: i32) exists { if n > 0 unique { let x: i32 = @; \
+         assert(x == n); } } }",
+    );
+    let block = reach_entry(
+        "spec S { fn f(n: i32) exists { if n > 0 { unique { let x: i32 = @; \
+         assert(x == n); } } } }",
+    );
+    assert_eq!(arm, block);
+    let cond = || gts(local(0), i32c(0));
+    assert_eq!(
+        arm.0,
+        or(
+            and(
+                nz(cond()),
+                and(
+                    teq(local(1), local(0)),
+                    all(imp(
+                        and(hastype(lvar(0), HNumType::I32), teq(lvar(0), local(0))),
+                        teq(lvar(0), local(1))
+                    ))
+                )
+            ),
+            eqz(cond())
+        )
+    );
+}
+
+/// A narrow value is typed and bounded on the rival side; the value itself is
+/// a parameter of the run, normalized where it is drawn.
+#[test]
+fn a_narrow_unique_value_in_a_reachability_body_bounds_its_rival() {
+    let (payload, _) = reach_entry(
+        "spec S { fn f() exists { unique { let x: u8 = @; assert(x == 44); } } }",
+    );
+    assert_eq!(
+        payload,
+        and(
+            teq(local(0), i32c(44)),
+            all(imp(
+                and(hypothesis_of("u8", &lvar(0)), teq(lvar(0), i32c(44))),
+                teq(lvar(0), local(0))
+            ))
+        )
+    );
+}
+
+/// A `unique`-quantified function compares the values drawn directly in its
+/// body. The value of a nested `unique` block is compared by that block's own
+/// claim, and a draw under a nested `exists` is dismissed with it — neither is
+/// among the slots the function compares.
+#[test]
+fn a_unique_function_compares_only_the_draws_written_directly_in_its_body() {
+    let (payload, kind) = reach_entry(
+        "spec S { fn f(seed: i32) unique { let bit: i32 = @; assume { assert(bit == seed); } \
+         unique { let x: i32 = @; assert(x == bit); } } }",
+    );
+    let SpecKind::Unique(meta) = kind else {
+        panic!("a `unique` body is a unique obligation");
+    };
+    assert_eq!(meta.visible_locs, vec![0, 1]);
+    assert_eq!(binder_counts(&payload), (0, 1));
+
+    let (_, kind) = reach_entry(
+        "spec S { fn f(seed: i32) unique { let bit: i32 = @; assume { assert(bit == seed); } \
+         exists { let w: i32 = @; assert(w == bit); } } }",
+    );
+    let SpecKind::Unique(meta) = kind else {
+        panic!("a `unique` body is a unique obligation");
+    };
+    assert_eq!(meta.visible_locs, vec![0, 1]);
+}
+
+/// An `exists`-quantified function's list is untouched: every named choice,
+/// at any depth. It is inert there, and leaving it alone keeps every emitted
+/// `exists` record as it was.
+#[test]
+fn an_exists_function_still_lists_every_named_choice() {
+    let (_, kind) = reach_entry(
+        "spec S { fn f(seed: i32) exists { let bit: i32 = @; assume { assert(bit == seed); } \
+         exists { let w: i32 = @; assert(w == bit); } } }",
+    );
+    let SpecKind::Exists(meta) = kind else {
+        panic!("an `exists` body is an exists obligation");
+    };
+    assert_eq!(meta.visible_locs, vec![0, 1, 2]);
+}
+
+/// An anonymous `@` under a nested `exists` of a `unique` function belongs to
+/// that `exists`; only one written directly in the body is refused.
+#[test]
+fn an_anonymous_choice_under_a_nested_exists_of_a_unique_function_is_accepted() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let nested = format!(
+        "{prelude} spec S {{ fn f(seed: i32) unique {{ let bit: i32 = @; \
+         assume {{ assert(bit == seed); }} exists {{ assert(g(@) == bit); }} }} }}"
+    );
+    assert!(!ok(&nested).is_empty());
+    let direct = err(&format!(
+        "{prelude} spec S {{ fn f(seed: i32) unique {{ let bit: i32 = @; \
+         assume {{ assert(bit == seed); }} assert(g(@) == bit); }} }}"
+    ));
+    assert_eq!(direct.matches("error[P012]").count(), 1, "{direct}");
+    assert!(
+        direct.contains("anonymous `@` argument in a `unique` spec function"),
+        "{direct}"
+    );
+}
+
+/// The refusals a `unique` block has, a `unique`-quantified function has too,
+/// in its own words, each raised once.
+#[test]
+fn a_unique_function_refuses_what_a_unique_block_refuses() {
+    let arm = err("spec S { fn f(c: bool) unique { let x: i32 = @; assume { assert(x == 1); } \
+                   if c { let y: i32 = @; assert(y == x); } } }");
+    assert_eq!(arm.matches("error[").count(), 1, "{arm}");
+    assert!(
+        arm.contains("error[P019]")
+            && arm.contains("`y` is drawn inside an `if` branch of a `unique`-quantified function")
+            && arm.contains("declare `let y: i32 = @;` directly in the function body"),
+        "{arm}"
+    );
+    for src in [
+        "spec S { fn only(n: i32) unique { assert(n == n); } }",
+        "spec S { fn only(n: i32) unique { exists { let z: i32 = @; assert(z == n); } } }",
+    ] {
+        let none = err(src);
+        assert_eq!(none.matches("error[").count(), 1, "{src}\n{none}");
         assert!(
-            e.contains("a `unique` block is not supported")
-                && e.contains(opening)
-                && e.contains("give `pick` a plain body")
-                && e.contains(remedy)
-                && !e.contains("executable helper"),
-            "{src}\n{e}"
+            none.contains("error[P020]")
+                && none.contains("`only` is `unique`-quantified but draws no value of its own"),
+            "{src}\n{none}"
         );
     }
+}
+
+/// The block's own refusals hold in a reachability body, each raised once.
+#[test]
+fn a_unique_block_in_a_reachability_body_keeps_its_refusals() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let none = err("spec S { fn f(n: i32) exists { let k: i32 = @; unique { \
+                    assert(k == n); } } }");
+    assert_eq!(none.matches("error[").count(), 1, "{none}");
+    assert!(none.contains("error[P020]"), "{none}");
+
+    let anonymous = err(&format!(
+        "{prelude} spec S {{ fn f(n: i32) exists {{ unique {{ let x: i32 = @; \
+         assert(g(@) == x); }} }} }}"
+    ));
+    assert_eq!(anonymous.matches("error[").count(), 1, "{anonymous}");
+    assert!(
+        anonymous.contains("error[P012]")
+            && anonymous.contains("anonymous `@` argument in a `unique` block"),
+        "{anonymous}"
+    );
+
+    let nested = err("spec S { fn f(n: i32) exists { unique { let x: i32 = @; if x > 0 { \
+                      let y: i32 = @; assert(y == x); } } } }");
+    assert_eq!(nested.matches("error[").count(), 1, "{nested}");
+    assert!(
+        nested.contains("error[P019]") && nested.contains("of a `unique` block"),
+        "{nested}"
+    );
+
+    let mut deep = String::new();
+    for level in 0..4 {
+        deep.push_str(&format!(
+            "unique {{ let v{level}: i32 = @; assert(v{level} == {level}); "
+        ));
+    }
+    deep.push_str(&"}".repeat(4));
+    let deep = err(&format!("spec S {{ fn f() exists {{ {deep} }} }}"));
+    assert_eq!(deep.matches("error[P021]").count(), 1, "{deep}");
+
+    let forall = err("spec S { fn f(n: i32) exists { unique { let x: i32 = @; \
+                      assert(x == n); forall { assert(x == n); } } } }");
+    assert!(forall.contains("error[P007]"), "{forall}");
 }
 
 /// An `assume` arm is the `assume` block: a filter, not a claim. Each spelling
@@ -7390,7 +7584,7 @@ fn no_reachability_fixture_reaches_an_overflow_guard() {
         "the corpus this sweep examines is pinned; a fixture added to it belongs in this count"
     );
     assert_eq!(
-        retained_bodies, 15,
+        retained_bodies, 23,
         "the retained `exists`/`unique` bodies are what the two rules are about, so their \
          number is what says this sweep is not passing over an empty corpus"
     );

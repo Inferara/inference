@@ -337,16 +337,21 @@ fn spec_kind(arena: &AstArena, def_id: DefId, plan: Option<reach::ReachPlan<'_>>
     let Some(plan) = plan else {
         return SpecKind::Forall;
     };
-    let meta = ReachMeta {
-        entry_arity: plan.entry_arity(),
-        visible_locs: plan.visible_locs(),
-    };
     let Def::Function { body, .. } = &arena[def_id].kind else {
         unreachable!("only functions enter the reachability view");
     };
+    let entry_arity = plan.entry_arity();
     match arena[*body].block_kind {
-        BlockKind::Exists => SpecKind::Exists(meta),
-        BlockKind::Unique => SpecKind::Unique(meta),
+        // Inert for `exists`: a locals projection cannot change whether the
+        // observation set is non-empty.
+        BlockKind::Exists => SpecKind::Exists(ReachMeta {
+            entry_arity,
+            visible_locs: plan.visible_locs(),
+        }),
+        BlockKind::Unique => SpecKind::Unique(ReachMeta {
+            entry_arity,
+            visible_locs: plan.unique_visible_locs(),
+        }),
         other => {
             unreachable!("the reachability view holds only exists/unique bodies, found {other:?}")
         }

@@ -56,10 +56,10 @@ pub(crate) mod gate {
     /// emission — the explicitly typed empty `(@nil hassert)` universal list
     /// next to non-empty `__ex_specs`/`__uq_specs` partitions — elaborates
     /// under `coqc`. A nested `unique` *block* adds no grammar of its own: in
-    /// a `forall`/plain function it is an `HA_ex` over a `Hall`, both already
-    /// produced here, and inside an `exists`/`unique`-quantified body
-    /// proof-mode codegen rejects it with a fatal `P002` (pinned by the unit
-    /// tests in `core/wasm-codegen/src/hassert/tests.rs`).
+    /// a `forall`/plain function it is an `HA_ex` over a `Hall`, and inside an
+    /// `exists`/`unique`-quantified body it is a `Hall` in the reachability
+    /// payload — `spec_unique_blocks.inf` and `spec_unique_reach.inf` produce
+    /// the two.
     ///
     /// The `Hall` universal-binder sugar is reached only by a `forall` block
     /// nested inside an existential context, so the compile below elaborates
@@ -175,6 +175,7 @@ pub(crate) mod gate {
             "spec_quantifier_alternation",
         ),
         ("spec_unique_blocks.inf", "spec_unique_blocks"),
+        ("spec_unique_reach.inf", "spec_unique_reach"),
         ("rocq_name_collisions.inf", "rocq_name_collisions"),
     ];
 
@@ -5164,6 +5165,85 @@ End Host.
         }
     }
 
+    /// The committed golden for `spec_unique_reach.inf`. Regenerate with the
+    /// `#[ignore]`d [`regenerate::regenerate_unique_reach_v`] after an
+    /// intentional emitter change.
+    fn unique_reach_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_unique_reach.v")
+    }
+
+    /// The proof-mode `.v` for the fixture of `unique` blocks inside
+    /// `exists`/`unique`-quantified functions must match a committed golden
+    /// byte-for-byte, and the golden must carry the contract shape: the value
+    /// is a frame slot of the retained body, never a binder; the payload adds
+    /// a `Hall` over a typed rival that must equal that slot; a draw under a
+    /// nested `exists` is a slot for the run and an `HA_ex` for the rival; and
+    /// a `unique` function's compared slots are its entry parameters and the
+    /// draws written directly in its body.
+    #[test]
+    fn spec_unique_reach_matches_committed_v_golden() {
+        let generated = generate_v("spec_unique_reach.inf", "spec_unique_reach");
+        let golden_path = unique_reach_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_unique_reach_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_unique_reach.inf drifted from the committed golden {}; \
+             if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_unique_reach_v -- --ignored`",
+            golden_path.display()
+        );
+
+        assert!(
+            golden.contains(
+                "reach_payload := HA_and (term_eq (T_local 1%N) (T_local 0%N)) (Hall (Himpl \
+                 (HA_and (HA_has_type (T_lvar 0) T_i32) (term_eq (T_lvar 0) (T_local 0%N))) \
+                 (term_eq (T_lvar 0) (T_local 1%N))))"
+            ),
+            "the run's value is a frame slot, and the payload adds that every typed rival \
+             completing the block equals it:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "(HA_ex (HA_and (HA_has_type (T_lvar 0) T_i32) (HA_and (term_eq (T_lvar 0) \
+                 (T_local 0%N)) (term_eq (T_lvar 1) (T_lvar 0)))))"
+            ) && golden.contains("(term_eq (T_local 2%N) (T_local 0%N))"),
+            "a draw under a nested `exists` must be a slot for the run and a fresh \
+             existential for the rival:\n{golden}"
+        );
+        assert_eq!(
+            golden.matches("Hall (").count(),
+            7,
+            "one universal binder per nested `unique` block; the last function has \
+             none:\n{golden}"
+        );
+        let unique_records: Vec<&str> = golden
+            .lines()
+            .skip_while(|line| !line.contains("_uqspec1 : reachability_spec"))
+            .filter(|line| line.contains("reach_visible_locs"))
+            .collect();
+        assert_eq!(unique_records.len(), 2, "{golden}");
+        for record in unique_records {
+            assert!(
+                record.contains("reach_visible_locs := (0%N :: 1%N :: nil);"),
+                "a `unique` function compares its entry parameter and the one draw written \
+                 directly in its body, not a nested block's value or a dismissed draw:\n{record}"
+            );
+        }
+        assert!(
+            golden.contains("ValidExistsSpec") && golden.contains("ValidUniqueSpec"),
+            "{golden}"
+        );
+    }
+
     /// The committed golden for `spec_unique_blocks.inf`. Regenerate with the
     /// `#[ignore]`d [`regenerate::regenerate_unique_blocks_v`] after an
     /// intentional emitter change.
@@ -5390,7 +5470,7 @@ End Host.
             linked_extern_golden_path, literal_ctx_golden_path, module_consts_golden_path,
             narrow_discharge_golden_path, overflow_realization_golden_path, prime_golden_path,
             quantifier_alternation_golden_path, unique_blocks_golden_path,
-            unique_spec_golden_path,
+            unique_reach_golden_path, unique_spec_golden_path,
         };
         use std::path::{Path, PathBuf};
 
@@ -5527,6 +5607,13 @@ End Host.
         fn regenerate_unique_blocks_v() {
             let v = generate_v("spec_unique_blocks.inf", "spec_unique_blocks");
             write_golden(&v, &unique_blocks_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_unique_reach_v() {
+            let v = generate_v("spec_unique_reach.inf", "spec_unique_reach");
+            write_golden(&v, &unique_reach_golden_path());
         }
     }
 }
