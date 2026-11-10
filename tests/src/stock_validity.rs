@@ -42,8 +42,8 @@
 //!   asserts about it. The *merged* artifact is gated by the linked corpus in
 //!   `rocq_typecheck.rs`.
 //!
-//! So the table's split is 43 valid and 9 rejected, where `infc --mode proof`
-//! run over the same directory reaches 36 modules and refuses 16: the seven
+//! So the table's split is 44 valid and 9 rejected, where `infc --mode proof`
+//! run over the same directory reaches 37 modules and refuses 16: the seven
 //! linked fixtures are the difference, in the direction of this gate covering
 //! more rather than less.
 
@@ -375,6 +375,12 @@ mod gate {
             expected: StockValid(ScalarChoice),
             why: "every arithmetic and comparison operator the obligation printer can spell, \
                   over drawn scalars",
+        },
+        Fixture {
+            stem: "spec_unique_reach_discharge",
+            expected: StockValid(AlreadyChoiceLowered),
+            why: "the two smallest bodies with a nested `unique` block judged by running \
+                  them, kept small so their obligations are discharged in full",
         },
         Fixture {
             stem: "spec_unique_reach",

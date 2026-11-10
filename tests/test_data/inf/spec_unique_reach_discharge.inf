@@ -1,0 +1,33 @@
+// The two smallest functions that carry a nested `unique` block inside a body
+// judged by running it — one `exists`-quantified, one `unique`-quantified —
+// kept apart from the broad survey in spec_unique_reach.inf so that their
+// obligations can be discharged in full downstream. A reachability proof
+// accounts for every reduction of the body it is about, and one theorem covers
+// every function of a kind in a spec, so the discharged fixture is the small
+// one.
+//
+// Both claims are true at every argument, and neither body calls anything or
+// does arithmetic: the proofs are about the new clause — every rival that
+// completes the block equals the value the run drew — and nothing else.
+spec UniqueReachDischarge {
+    // Some run draws an `x` equal to `n`, and every rival equals it.
+    fn pinned(n: i32) exists {
+        unique {
+            let x: i32 = @;
+            assert(x == n);
+        }
+    }
+
+    // The function compares `seed` and `bit`; the nested block's `x` is
+    // compared by the block's own claim.
+    fn both(seed: i32) unique {
+        let bit: i32 = @;
+        assume {
+            assert(bit == seed);
+        }
+        unique {
+            let x: i32 = @;
+            assert(x == bit);
+        }
+    }
+}

@@ -176,6 +176,10 @@ pub(crate) mod gate {
         ),
         ("spec_unique_blocks.inf", "spec_unique_blocks"),
         ("spec_unique_reach.inf", "spec_unique_reach"),
+        (
+            "spec_unique_reach_discharge.inf",
+            "spec_unique_reach_discharge",
+        ),
         ("rocq_name_collisions.inf", "rocq_name_collisions"),
     ];
 
@@ -5165,6 +5169,54 @@ End Host.
         }
     }
 
+    /// The committed golden for `spec_unique_reach_discharge.inf`, the small
+    /// fixture whose reachability obligations are discharged in full
+    /// downstream. Regenerate with the `#[ignore]`d
+    /// [`regenerate::regenerate_unique_reach_discharge_v`] after an intentional
+    /// emitter change.
+    fn unique_reach_discharge_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_unique_reach_discharge.v")
+    }
+
+    /// The proof-mode `.v` for the discharged reachability fixture must match
+    /// its committed golden byte-for-byte: a downstream proof is about these
+    /// exact bytes.
+    #[test]
+    fn spec_unique_reach_discharge_matches_committed_v_golden() {
+        let generated = generate_v(
+            "spec_unique_reach_discharge.inf",
+            "spec_unique_reach_discharge",
+        );
+        let golden_path = unique_reach_discharge_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with `cargo test -p inference-tests \
+                 regenerate_unique_reach_discharge_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_unique_reach_discharge.inf drifted from the committed \
+             golden {}; if the emitter change was intentional, regenerate with `cargo test -p \
+             inference-tests regenerate_unique_reach_discharge_v -- --ignored`",
+            golden_path.display()
+        );
+        assert!(
+            golden.contains(
+                "reach_visible_locs := (0%N :: 1%N :: nil); reach_payload := HA_and (term_eq \
+                 (T_local 1%N) (T_local 0%N)) (HA_and (term_eq (T_local 2%N) (T_local 1%N)) \
+                 (Hall (Himpl (HA_and (HA_has_type (T_lvar 0) T_i32) (term_eq (T_lvar 0) \
+                 (T_local 1%N))) (term_eq (T_lvar 0) (T_local 2%N)))))"
+            ),
+            "the `unique` function compares its entry parameter and its own draw, and its \
+             nested block adds the rival clause about the block's slot:\n{golden}"
+        );
+    }
+
     /// The committed golden for `spec_unique_reach.inf`. Regenerate with the
     /// `#[ignore]`d [`regenerate::regenerate_unique_reach_v`] after an
     /// intentional emitter change.
@@ -5470,7 +5522,8 @@ End Host.
             linked_extern_golden_path, literal_ctx_golden_path, module_consts_golden_path,
             narrow_discharge_golden_path, overflow_realization_golden_path, prime_golden_path,
             quantifier_alternation_golden_path, unique_blocks_golden_path,
-            unique_reach_golden_path, unique_spec_golden_path,
+            unique_reach_discharge_golden_path, unique_reach_golden_path,
+            unique_spec_golden_path,
         };
         use std::path::{Path, PathBuf};
 
@@ -5607,6 +5660,16 @@ End Host.
         fn regenerate_unique_blocks_v() {
             let v = generate_v("spec_unique_blocks.inf", "spec_unique_blocks");
             write_golden(&v, &unique_blocks_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_unique_reach_discharge_v() {
+            let v = generate_v(
+                "spec_unique_reach_discharge.inf",
+                "spec_unique_reach_discharge",
+            );
+            write_golden(&v, &unique_reach_discharge_golden_path());
         }
 
         #[test]

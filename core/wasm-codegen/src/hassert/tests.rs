@@ -2722,6 +2722,35 @@ fn an_over_deep_boolean_chain_is_rejected_by_name() {
     );
 }
 
+/// A `unique` block reads its body twice and wraps each of its values in two
+/// binders, so it reaches the payload depth cap sooner than the same draws in
+/// an `exists` block would. Past the cap it is the same named error, not a
+/// panic and not a truncated payload.
+#[test]
+fn an_over_deep_unique_block_is_rejected_by_name() {
+    fn unique_with(values: usize) -> String {
+        let mut body = String::new();
+        for k in 0..values {
+            body.push_str(&format!("let v{k}: i32 = @; assert(v{k} == {k}); "));
+        }
+        format!("spec S {{ fn f() forall {{ unique {{ {body} }} }} }}")
+    }
+    assert!(
+        proof_codegen(unique_with(40)).is_ok(),
+        "forty values fit under the cap"
+    );
+    let err = proof_codegen(unique_with(200))
+        .expect_err("a `unique` block past the payload depth cap must not be emitted");
+    assert!(
+        matches!(
+            err,
+            CodegenError::HspecTreeTooDeep { ref spec, ref function, max }
+                if spec == "S" && function == "S.f" && max == inference_hassert::MAX_TREE_DEPTH
+        ),
+        "expected the depth cap to be reported against the obligation, got: {err:?}"
+    );
+}
+
 /// The budget still covers chains of the length a specification plausibly
 /// carries: a 32-clause right-nested chain — the expensive nesting — and a
 /// 64-clause flat one, the shape source is actually written in, both compile.
@@ -7580,11 +7609,11 @@ fn no_reachability_fixture_reaches_an_overflow_guard() {
          failure rather than a narrowing"
     );
     assert_eq!(
-        examined, 50,
+        examined, 51,
         "the corpus this sweep examines is pinned; a fixture added to it belongs in this count"
     );
     assert_eq!(
-        retained_bodies, 23,
+        retained_bodies, 25,
         "the retained `exists`/`unique` bodies are what the two rules are about, so their \
          number is what says this sweep is not passing over an empty corpus"
     );
