@@ -8,7 +8,7 @@ mod direct;
 mod pin;
 mod protocol;
 
-const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=7 proved=15 refuted=1";
+const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=9 proved=21 refuted=1";
 
 pub fn export_cli(exchange: &Path) -> Result<()> {
     export(exchange)?;
@@ -741,13 +741,15 @@ mod tests {
         let exchange = tempfile::tempdir().expect("create exchange");
         let request = export(exchange.path()).expect("export fresh artifacts");
         let expected_hashes = [
-            "f6ea44c6d1eb9120c2982dbc2d5c1f863e5ab4d9eb426be56bc2cea50faa011f",
+            "dd92a19cf5506f829b44a2d903fa00c742589b3a0b182e6d9f6f48097b9389de",
             "9e04be474dec8f07b734bd4b89c35919951355ea8cb003e3b5cd4bdbf0718446",
             "d5f3645b4c20e48375138001923b8a9e1cd5c6b6e461b39fea0268bfc2f95400",
             "ae92490a10f79700630fcd06f5d4e483e2792c6ec18271e3d4714312a330c611",
             "2889e852f5e99df59f58cd72d6242f2252f3de586e14b80bf6ce46b78906b978",
             "5c3ffda731a4051c88eee2670aefddd40fbf5ba2c82ae21af328a8809c55d6d3",
             "6c8bb675c1ec5ce4fa254d1b7dcc01d23dfa0ef424865d7c1f49859b62651639",
+            "d181589dbb0097619bc1d82378bdce96e0b2e0ca947c2b2655db1f9cc7d1f799",
+            "0ba9090acd5688067161c8473dfe16d9d5c68219a27c0b49683126983a20c7e6",
         ];
 
         let entries = exchange_names(exchange.path());

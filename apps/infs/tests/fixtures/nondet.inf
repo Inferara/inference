@@ -8,8 +8,8 @@
 // compile-mode build strips the proof-only spec and emits only the executable
 // `main`.
 //
-// The `unique` block has no assertion encoding and is a fatal proof-mode error;
-// that negative path lives in `nondet_unique.inf`.
+// A `unique` block is covered apart from these, in `nondet_unique.inf`,
+// `nondet_unique_block.inf` and `nondet_unique_arm.inf`.
 pub fn main() -> i32 {
     return 0;
 }

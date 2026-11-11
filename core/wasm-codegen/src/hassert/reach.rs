@@ -111,6 +111,29 @@ impl ReachPlan<'_> {
         entry.chain(named).collect()
     }
 
+    /// The slots a `unique`-quantified function compares: entry parameters,
+    /// then the named choices drawn *directly* in the function body.
+    ///
+    /// Narrower than [`Self::visible_locs`] on purpose. A draw under a nested
+    /// `exists` block is dismissed with that block, so comparing it would
+    /// demand uniqueness of something the source says only exists; and the
+    /// values of a nested `unique` block are compared by that block's own
+    /// claim — in an `if` arm the run skips, such a slot is never constrained,
+    /// and comparing it would make the function unprovable there.
+    pub(crate) fn unique_visible_locs(self) -> Vec<u32> {
+        let entry = 0..self.plan.entry_arity;
+        let direct = self
+            .plan
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, choice)| choice.direct)
+            .map(|(k, _)| {
+                self.plan.entry_arity + u32::try_from(k).expect("more than u32::MAX choices")
+            });
+        entry.chain(direct).collect()
+    }
+
     /// The activation-frame slot of a `@` the plan covers as a scalar choice
     /// parameter, or `None` for one it does not.
     ///

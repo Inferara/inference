@@ -737,7 +737,9 @@ fingerprint_exchange() {
                 raw/spec_narrow_discharge.v \
                 raw/rocq_false_certificate.v \
                 raw/spec_linked_extern.v \
-                raw/spec_overflow_realization.v
+                raw/spec_overflow_realization.v \
+                raw/spec_unique_blocks.v \
+                raw/spec_unique_reach_discharge.v
             do
                 file=/exchange/$path
                 [ -f "$file" ] && [ ! -L "$file" ] || exit 42
@@ -921,7 +923,9 @@ copy_raw_to_staging() {
     for raw_name in \
         rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
         spec_narrow_discharge.v rocq_false_certificate.v spec_linked_extern.v \
-        spec_overflow_realization.v
+        spec_overflow_realization.v \
+        spec_unique_blocks.v \
+        spec_unique_reach_discharge.v
     do
         raw_path=$staging/raw/$raw_name
         old_umask=$(umask); umask 077
@@ -938,6 +942,8 @@ copy_raw_to_staging() {
             rocq_false_certificate.v) raw_false_object_identity=$(file_object_identity "$raw_path") ;;
             spec_linked_extern.v) raw_linked_object_identity=$(file_object_identity "$raw_path") ;;
             spec_overflow_realization.v) raw_overflow_object_identity=$(file_object_identity "$raw_path") ;;
+            spec_unique_blocks.v) raw_unique_blocks_object_identity=$(file_object_identity "$raw_path") ;;
+            spec_unique_reach_discharge.v) raw_unique_reach_object_identity=$(file_object_identity "$raw_path") ;;
         esac
     done
     validate_raw_staging 700 600
@@ -957,6 +963,8 @@ copy_raw_to_staging() {
             cat /exchange/raw/rocq_false_certificate.v > /staging/raw/rocq_false_certificate.v
             cat /exchange/raw/spec_linked_extern.v > /staging/raw/spec_linked_extern.v
             cat /exchange/raw/spec_overflow_realization.v > /staging/raw/spec_overflow_realization.v
+            cat /exchange/raw/spec_unique_blocks.v > /staging/raw/spec_unique_blocks.v
+            cat /exchange/raw/spec_unique_reach_discharge.v > /staging/raw/spec_unique_reach_discharge.v
             cmp -s /exchange/raw/rocq_prime_bounded_example.v /staging/raw/rocq_prime_bounded_example.v
             cmp -s /exchange/raw/rocq_exists_spec.v /staging/raw/rocq_exists_spec.v
             cmp -s /exchange/raw/rocq_unique_spec.v /staging/raw/rocq_unique_spec.v
@@ -964,6 +972,8 @@ copy_raw_to_staging() {
             cmp -s /exchange/raw/rocq_false_certificate.v /staging/raw/rocq_false_certificate.v
             cmp -s /exchange/raw/spec_linked_extern.v /staging/raw/spec_linked_extern.v
             cmp -s /exchange/raw/spec_overflow_realization.v /staging/raw/spec_overflow_realization.v
+            cmp -s /exchange/raw/spec_unique_blocks.v /staging/raw/spec_unique_blocks.v
+            cmp -s /exchange/raw/spec_unique_reach_discharge.v /staging/raw/spec_unique_reach_discharge.v
         '; then
         copy_status=0
     else
@@ -985,12 +995,14 @@ validate_raw_staging() {
     [ -d "$staging/raw" ] && [ ! -L "$staging/raw" ] || { staging_suspect=1; fail staging-identity 'raw staging directory changed'; }
     [ "$(path_object_identity "$staging/raw")" = "$raw_directory_object_identity" ] || { staging_suspect=1; fail staging-identity 'raw staging directory object changed'; }
     [ "$(path_mode "$staging/raw")" = "$expected_directory_mode" ] || { staging_suspect=1; fail staging-identity 'raw staging directory mode changed'; }
-    [ "$(find "$staging/raw" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 7 ] || { staging_suspect=1; fail staging-identity 'raw staging regular-file set changed'; }
-    [ "$(find "$staging/raw" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 7 ] || { staging_suspect=1; fail staging-identity 'raw staging entry set changed'; }
+    [ "$(find "$staging/raw" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 9 ] || { staging_suspect=1; fail staging-identity 'raw staging regular-file set changed'; }
+    [ "$(find "$staging/raw" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 9 ] || { staging_suspect=1; fail staging-identity 'raw staging entry set changed'; }
     for raw_name in \
         rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
         spec_narrow_discharge.v rocq_false_certificate.v spec_linked_extern.v \
-        spec_overflow_realization.v
+        spec_overflow_realization.v \
+        spec_unique_blocks.v \
+        spec_unique_reach_discharge.v
     do
         raw_path=$staging/raw/$raw_name
         case "$raw_name" in
@@ -1001,6 +1013,8 @@ validate_raw_staging() {
             rocq_false_certificate.v) expected_object=$raw_false_object_identity ;;
             spec_linked_extern.v) expected_object=$raw_linked_object_identity ;;
             spec_overflow_realization.v) expected_object=$raw_overflow_object_identity ;;
+            spec_unique_blocks.v) expected_object=$raw_unique_blocks_object_identity ;;
+            spec_unique_reach_discharge.v) expected_object=$raw_unique_reach_object_identity ;;
         esac
         [ -f "$raw_path" ] && [ ! -L "$raw_path" ] || { staging_suspect=1; fail staging-identity 'staged raw file changed type'; }
         [ "$(file_object_identity "$raw_path")" = "$expected_object" ] || { staging_suspect=1; fail staging-identity 'staged raw file object changed'; }
@@ -1015,7 +1029,7 @@ validate_staged_raw() {
 staged_raw_matches() {
     basename=$1
     case "$basename" in
-        rocq_prime_bounded_example.v|rocq_exists_spec.v|rocq_unique_spec.v|spec_narrow_discharge.v|rocq_false_certificate.v|spec_linked_extern.v|spec_overflow_realization.v) : ;;
+        rocq_prime_bounded_example.v|rocq_exists_spec.v|rocq_unique_spec.v|spec_narrow_discharge.v|rocq_false_certificate.v|spec_linked_extern.v|spec_overflow_realization.v|spec_unique_blocks.v|spec_unique_reach_discharge.v) : ;;
         *) return 1 ;;
     esac
     validate_raw_staging 700 600
@@ -1031,7 +1045,7 @@ staged_raw_matches() {
             # task4-check-staged-raw
             set -eu
             case "$1" in
-                rocq_prime_bounded_example.v|rocq_exists_spec.v|rocq_unique_spec.v|spec_narrow_discharge.v|rocq_false_certificate.v|spec_linked_extern.v|spec_overflow_realization.v) : ;;
+                rocq_prime_bounded_example.v|rocq_exists_spec.v|rocq_unique_spec.v|spec_narrow_discharge.v|rocq_false_certificate.v|spec_linked_extern.v|spec_overflow_realization.v|spec_unique_blocks.v|spec_unique_reach_discharge.v) : ;;
                 *) exit 42 ;;
             esac
             [ -f "/exchange/raw/$1" ] && [ ! -L "/exchange/raw/$1" ]
@@ -1058,11 +1072,11 @@ remove_batch_receipts() {
             set -eu
             directory=/exchange/receipts
             [ -d "$directory" ] && [ ! -L "$directory" ]
-            for case_id in prime-bounded exists unique narrow-domain false-spec linked-extern overflow; do
+            for case_id in prime-bounded exists unique narrow-domain false-spec linked-extern overflow unique-blocks unique-reach; do
                 [ -f "$directory/$case_id.json" ] && [ ! -L "$directory/$case_id.json" ]
             done
-            [ "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d " ")" -eq 7 ]
-            [ "$(find "$directory" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d " ")" -eq 7 ]
+            [ "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d " ")" -eq 9 ]
+            [ "$(find "$directory" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d " ")" -eq 9 ]
             rm -f \
                 "$directory/prime-bounded.json" \
                 "$directory/exists.json" \
@@ -1070,7 +1084,9 @@ remove_batch_receipts() {
                 "$directory/narrow-domain.json" \
                 "$directory/false-spec.json" \
                 "$directory/linked-extern.json" \
-                "$directory/overflow.json"
+                "$directory/overflow.json" \
+                "$directory/unique-blocks.json" \
+                "$directory/unique-reach.json"
             rmdir "$directory"
         '
     assert_identity
@@ -1105,7 +1121,9 @@ copy_single_receipts() {
         "$staging/receipts/narrow-domain/narrow-domain.json" \
         "$staging/receipts/false-spec/false-spec.json" \
         "$staging/receipts/linked-extern/linked-extern.json" \
-        "$staging/receipts/overflow/overflow.json"
+        "$staging/receipts/overflow/overflow.json" \
+        "$staging/receipts/unique-blocks/unique-blocks.json" \
+        "$staging/receipts/unique-reach/unique-reach.json"
     validate_receipt_staging 755 644
     if busybox_run \
         --mount "type=volume,src=$exchange_volume,dst=/exchange" \
@@ -1122,6 +1140,8 @@ copy_single_receipts() {
             cp /staging/receipts/false-spec/false-spec.json /exchange/receipts/false-spec.json
             cp /staging/receipts/linked-extern/linked-extern.json /exchange/receipts/linked-extern.json
             cp /staging/receipts/overflow/overflow.json /exchange/receipts/overflow.json
+            cp /staging/receipts/unique-blocks/unique-blocks.json /exchange/receipts/unique-blocks.json
+            cp /staging/receipts/unique-reach/unique-reach.json /exchange/receipts/unique-reach.json
         '; then
         receipt_copy_status=0
     else
@@ -1135,7 +1155,9 @@ copy_single_receipts() {
         "$staging/receipts/narrow-domain/narrow-domain.json" \
         "$staging/receipts/false-spec/false-spec.json" \
         "$staging/receipts/linked-extern/linked-extern.json" \
-        "$staging/receipts/overflow/overflow.json"
+        "$staging/receipts/overflow/overflow.json" \
+        "$staging/receipts/unique-blocks/unique-blocks.json" \
+        "$staging/receipts/unique-reach/unique-reach.json"
     validate_receipt_staging 700 600
     [ "$receipt_copy_status" -eq 0 ] || fail single "receipt copy helper failed (status $receipt_copy_status)"
     assert_identity
@@ -1149,9 +1171,9 @@ validate_receipt_staging() {
     [ -d "$staging/receipts" ] && [ ! -L "$staging/receipts" ] || { staging_suspect=1; fail staging-identity 'receipt staging root changed'; }
     [ "$(path_object_identity "$staging/receipts")" = "$receipts_directory_object_identity" ] || { staging_suspect=1; fail staging-identity 'receipt staging root object changed'; }
     [ "$(path_mode "$staging/receipts")" = "$expected_directory_mode" ] || { staging_suspect=1; fail staging-identity 'receipt staging root mode changed'; }
-    [ "$(find "$staging/receipts" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -eq 7 ] || { staging_suspect=1; fail staging-identity 'receipt staging directory set changed'; }
-    [ "$(find "$staging/receipts" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 7 ] || { staging_suspect=1; fail staging-identity 'receipt staging root has extra entries'; }
-    for case_id in prime-bounded exists unique narrow-domain false-spec linked-extern overflow; do
+    [ "$(find "$staging/receipts" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -eq 9 ] || { staging_suspect=1; fail staging-identity 'receipt staging directory set changed'; }
+    [ "$(find "$staging/receipts" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 9 ] || { staging_suspect=1; fail staging-identity 'receipt staging root has extra entries'; }
+    for case_id in prime-bounded exists unique narrow-domain false-spec linked-extern overflow unique-blocks unique-reach; do
         receipt_directory=$staging/receipts/$case_id
         receipt_file=$receipt_directory/$case_id.json
         case "$case_id" in
@@ -1162,6 +1184,8 @@ validate_receipt_staging() {
             false-spec) expected_directory_object=$false_spec_receipt_dir_object; expected_file_object=$false_spec_receipt_file_object ;;
             linked-extern) expected_directory_object=$linked_extern_receipt_dir_object; expected_file_object=$linked_extern_receipt_file_object ;;
             overflow) expected_directory_object=$overflow_receipt_dir_object; expected_file_object=$overflow_receipt_file_object ;;
+            unique-blocks) expected_directory_object=$unique_blocks_receipt_dir_object; expected_file_object=$unique_blocks_receipt_file_object ;;
+            unique-reach) expected_directory_object=$unique_reach_receipt_dir_object; expected_file_object=$unique_reach_receipt_file_object ;;
         esac
         [ -d "$receipt_directory" ] && [ ! -L "$receipt_directory" ] || { staging_suspect=1; fail staging-identity 'single receipt directory changed type'; }
         [ "$(path_object_identity "$receipt_directory")" = "$expected_directory_object" ] || { staging_suspect=1; fail staging-identity 'single receipt directory object changed'; }
@@ -1188,7 +1212,11 @@ run_single() {
     linked_extern_receipt_dir_identity= linked_extern_receipt_file_identity=
     linked_extern_receipt_dir_object= linked_extern_receipt_file_object=
     overflow_receipt_dir_identity= overflow_receipt_file_identity=
+    unique_blocks_receipt_dir_identity= unique_blocks_receipt_file_identity=
+    unique_reach_receipt_dir_identity= unique_reach_receipt_file_identity=
     overflow_receipt_dir_object= overflow_receipt_file_object=
+    unique_blocks_receipt_dir_object= unique_blocks_receipt_file_object=
+    unique_reach_receipt_dir_object= unique_reach_receipt_file_object=
     for record in \
         'prime-bounded:rocq_prime_bounded_example.v' \
         'exists:rocq_exists_spec.v' \
@@ -1196,7 +1224,9 @@ run_single() {
         'narrow-domain:spec_narrow_discharge.v' \
         'false-spec:rocq_false_certificate.v' \
         'linked-extern:spec_linked_extern.v' \
-        'overflow:spec_overflow_realization.v'
+        'overflow:spec_overflow_realization.v' \
+        'unique-blocks:spec_unique_blocks.v' \
+        'unique-reach:spec_unique_reach_discharge.v'
     do
         case_id=${record%%:*}
         basename=${record#*:}
@@ -1224,6 +1254,8 @@ run_single() {
             false-spec) false_spec_receipt_dir_identity=$receipt_identity; false_spec_receipt_file_identity=$receipt_file_identity; false_spec_receipt_dir_object=$receipt_dir_object; false_spec_receipt_file_object=$receipt_file_object ;;
             linked-extern) linked_extern_receipt_dir_identity=$receipt_identity; linked_extern_receipt_file_identity=$receipt_file_identity; linked_extern_receipt_dir_object=$receipt_dir_object; linked_extern_receipt_file_object=$receipt_file_object ;;
             overflow) overflow_receipt_dir_identity=$receipt_identity; overflow_receipt_file_identity=$receipt_file_identity; overflow_receipt_dir_object=$receipt_dir_object; overflow_receipt_file_object=$receipt_file_object ;;
+            unique-blocks) unique_blocks_receipt_dir_identity=$receipt_identity; unique_blocks_receipt_file_identity=$receipt_file_identity; unique_blocks_receipt_dir_object=$receipt_dir_object; unique_blocks_receipt_file_object=$receipt_file_object ;;
+            unique-reach) unique_reach_receipt_dir_identity=$receipt_identity; unique_reach_receipt_file_identity=$receipt_file_identity; unique_reach_receipt_dir_object=$receipt_dir_object; unique_reach_receipt_file_object=$receipt_file_object ;;
         esac
         assert_identity
     done
@@ -1234,6 +1266,8 @@ run_single() {
     validate_single_receipt false-spec "$staging/receipts/false-spec" "$false_spec_receipt_dir_identity" "$false_spec_receipt_file_identity"
     validate_single_receipt linked-extern "$staging/receipts/linked-extern" "$linked_extern_receipt_dir_identity" "$linked_extern_receipt_file_identity"
     validate_single_receipt overflow "$staging/receipts/overflow" "$overflow_receipt_dir_identity" "$overflow_receipt_file_identity"
+    validate_single_receipt unique-blocks "$staging/receipts/unique-blocks" "$unique_blocks_receipt_dir_identity" "$unique_blocks_receipt_file_identity"
+    validate_single_receipt unique-reach "$staging/receipts/unique-reach" "$unique_reach_receipt_dir_identity" "$unique_reach_receipt_file_identity"
     copy_single_receipts
     verify_exchange
 }

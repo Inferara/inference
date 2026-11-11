@@ -1,0 +1,102 @@
+// Nested `unique` blocks inside `exists`- and `unique`-quantified functions,
+// whose obligations are judged by running the body. There the run supplies
+// existence: the block's draw is a choice the run makes, and its conditions
+// filter the run as they always did. What the obligation's payload adds is
+// uniqueness alone: every value of the declared type that completes the block,
+// read as a logical claim, is the value the run drew.
+//
+// This fixture is the corpus producer for that shape, and for the rule on what
+// a `unique`-quantified function compares: the values drawn directly in its
+// body, and nothing drawn deeper.
+//
+// Every claim is true at every argument — entry parameters are quantified
+// universally by the judgment, so a claim that needed its argument narrowed
+// would be false rather than conditional. `shift` is spelled modular so that
+// it is total: a rival value on which a call trapped could be neither ruled
+// out nor equated.
+fn shift(n: i32) -> i32 {
+    return wrapping(n + 1);
+}
+
+spec UniqueReach {
+    // The plain shape: some run draws an `x`, and it is the only one.
+    fn pinned(n: i32) exists {
+        unique {
+            let x: i32 = @;
+            assert(x == n);
+        }
+    }
+
+    // The value is unique relative to an outer choice of the same run.
+    fn chosen() exists {
+        let k: i32 = @;
+        unique {
+            let x: i32 = @;
+            assert(x == k);
+        }
+    }
+
+    // Exactly one pre-image under a bijection.
+    fn one_preimage(y: i32) exists {
+        unique {
+            let x: i32 = @;
+            assert(shift(x) == y);
+        }
+    }
+
+    // The `if`-arm spelling. On the path that skips the arm nothing is claimed
+    // about a value the run never constrained.
+    fn on_an_arm(n: i32) exists {
+        if n > 0 unique {
+            let x: i32 = @;
+            assert(x == n);
+        }
+    }
+
+    // A narrow value: its rivals are bounded to the two values the type admits.
+    fn one_flag(n: i32) exists {
+        unique {
+            let positive: bool = @;
+            assert(positive == (n > 0));
+        }
+    }
+
+    // A draw under its own quantifier inside the block: a choice of the run on
+    // one side, a fresh existential for every rival on the other.
+    fn through_a_choice(n: i32) exists {
+        unique {
+            let x: i32 = @;
+            exists {
+                let e: i32 = @;
+                assert(e == n);
+                assert(x == e);
+            }
+        }
+    }
+
+    // A `unique` function compares the values drawn directly in its body. The
+    // nested block's value is compared by the block's own claim.
+    fn both(seed: i32) unique {
+        let bit: i32 = @;
+        assume {
+            assert(bit == seed % 2);
+        }
+        unique {
+            let x: i32 = @;
+            assert(x == bit);
+        }
+    }
+
+    // A draw under a nested `exists` is dismissed with it: many `w` complete
+    // the body, and the function is unique all the same.
+    fn dismissed_draw(seed: i32) unique {
+        let bit: i32 = @;
+        assume {
+            assert(bit == seed % 2);
+        }
+        exists {
+            let w: i32 = @;
+            assert(w >= bit);
+        }
+    }
+}

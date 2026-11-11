@@ -58,3 +58,12 @@ op_eq="=="
 op_ne="!="
 op_uzumaki="@"
 op_unit="()"
+
+# Whole phrases the proof-mode `compile` target needs to reach the translation
+# of quantified blocks: a draw is only a draw as a complete `let`, and a block
+# kind only matters once it opens a block.
+ph_draw="let x: i32 = @;"
+ph_unique_block="unique {"
+ph_exists_block="exists {"
+ph_forall_block="forall {"
+ph_unique_arm="if x == x unique {"

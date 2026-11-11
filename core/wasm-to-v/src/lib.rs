@@ -132,7 +132,7 @@
 //! | `forall` | `0xfc 0x3a` | Begin universal quantification block |
 //! | `exists` | `0xfc 0x3b` | Begin existential quantification block |
 //! | `assume` | `0xfc 0x3c` | Filter execution paths by constraint |
-//! | `unique` | `0xfc 0x3d` | Assert exactly one execution path exists — as a nested *block*, rejected in proof mode (no `hassert` encoding; fatal `P002` at codegen); a `unique`-quantified spec-function *body* is reachability-lowered instead and never emits this opcode |
+//! | `unique` | `0xfc 0x3d` | Assert exactly one value completes the block — in a specification neither form emits this opcode: a nested *block* becomes a logical exists-unique claim in the function's obligation, and a `unique`-quantified spec-function *body* is reachability-lowered |
 //! | `i32.uzumaki` | `0xfc 0x31` | Generate non-deterministic i32 value |
 //! | `i64.uzumaki` | `0xfc 0x32` | Generate non-deterministic i64 value |
 //!

@@ -55,11 +55,11 @@ pub(crate) mod gate {
     /// three kinds plus a spec method behind one module so the partitioned
     /// emission — the explicitly typed empty `(@nil hassert)` universal list
     /// next to non-empty `__ex_specs`/`__uq_specs` partitions — elaborates
-    /// under `coqc`. Still deliberately absent is the nested `unique` *block*:
-    /// it has no `hassert` encoding, so proof-mode codegen rejects it with a
-    /// fatal `P002` (pinned by the unit tests in
-    /// `core/wasm-codegen/src/hassert/tests.rs` and end-to-end by
-    /// `build_v_rejects_unique_block_with_p002` in `apps/infs`).
+    /// under `coqc`. A nested `unique` *block* adds no grammar of its own: in
+    /// a `forall`/plain function it is an `HA_ex` over a `Hall`, and inside an
+    /// `exists`/`unique`-quantified body it is a `Hall` in the reachability
+    /// payload — `spec_unique_blocks.inf` and `spec_unique_reach.inf` produce
+    /// the two.
     ///
     /// The `Hall` universal-binder sugar is reached only by a `forall` block
     /// nested inside an existential context, so the compile below elaborates
@@ -173,6 +173,12 @@ pub(crate) mod gate {
         (
             "spec_quantifier_alternation.inf",
             "spec_quantifier_alternation",
+        ),
+        ("spec_unique_blocks.inf", "spec_unique_blocks"),
+        ("spec_unique_reach.inf", "spec_unique_reach"),
+        (
+            "spec_unique_reach_discharge.inf",
+            "spec_unique_reach_discharge",
         ),
         ("rocq_name_collisions.inf", "rocq_name_collisions"),
     ];
@@ -948,7 +954,7 @@ pub(crate) mod gate {
     }
 
     const BOUNDED_PRIME_PAYLOADS: [&str; 1] = [
-        "Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_local 0%N) (T_const (Vi32 2000000000))) (T_const (Vi32 0))))) (Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_and (Himpl (HA_not (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0)))) (Himpl (HA_and (HA_has_type (T_local 1%N) T_i32) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_local 1%N)) (T_const (Vi32 0))) (T_const (Vi32 0)))))) (Himpl (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0))) (HA_ex (HA_and (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_lvar 0) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_lvar 0) (T_local 0%N)) (T_const (Vi32 0))))) (term_eq (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_lvar 0)) (T_const (Vi32 0)))))))).",
+        "Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_local 0%N) (T_const (Vi32 2000000000))) (T_const (Vi32 0))))) (Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_and (Himpl (HA_not (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0)))) (Himpl (HA_and (HA_has_type (T_local 1%N) T_i32) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_local 1%N)) (T_const (Vi32 0))) (T_const (Vi32 0)))))) (Himpl (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0))) (HA_ex (HA_and (HA_has_type (T_lvar 0) T_i32) (HA_and (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_lvar 0) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_lvar 0) (T_local 0%N)) (T_const (Vi32 0))))) (term_eq (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_lvar 0)) (T_const (Vi32 0))))))))).",
     ];
 
     const BOUNDED_PRIME_THEOREMS: [&str; 2] = [
@@ -4618,7 +4624,10 @@ End Host.
             "aggregate `==` must be the leafwise `term_eq` of matching leaves:\n{golden}"
         );
         assert!(
-            golden.contains("HA_ex (HA_ex"),
+            golden.contains(
+                "HA_ex (HA_and (HA_has_type (T_lvar 0) T_i32) (HA_ex (HA_and (HA_has_type \
+                 (T_lvar 0) T_i32)"
+            ),
             "an aggregate `@` in an `exists` block must bind one nested `HA_ex` \
              per leaf:\n{golden}"
         );
@@ -5160,6 +5169,210 @@ End Host.
         }
     }
 
+    /// The committed golden for `spec_unique_reach_discharge.inf`, the small
+    /// fixture whose reachability obligations are discharged in full
+    /// downstream. Regenerate with the `#[ignore]`d
+    /// [`regenerate::regenerate_unique_reach_discharge_v`] after an intentional
+    /// emitter change.
+    fn unique_reach_discharge_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_unique_reach_discharge.v")
+    }
+
+    /// The proof-mode `.v` for the discharged reachability fixture must match
+    /// its committed golden byte-for-byte: a downstream proof is about these
+    /// exact bytes.
+    #[test]
+    fn spec_unique_reach_discharge_matches_committed_v_golden() {
+        let generated = generate_v(
+            "spec_unique_reach_discharge.inf",
+            "spec_unique_reach_discharge",
+        );
+        let golden_path = unique_reach_discharge_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with `cargo test -p inference-tests \
+                 regenerate_unique_reach_discharge_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_unique_reach_discharge.inf drifted from the committed \
+             golden {}; if the emitter change was intentional, regenerate with `cargo test -p \
+             inference-tests regenerate_unique_reach_discharge_v -- --ignored`",
+            golden_path.display()
+        );
+        assert!(
+            golden.contains(
+                "reach_visible_locs := (0%N :: 1%N :: nil); reach_payload := HA_and (term_eq \
+                 (T_local 1%N) (T_local 0%N)) (HA_and (term_eq (T_local 2%N) (T_local 1%N)) \
+                 (Hall (Himpl (HA_and (HA_has_type (T_lvar 0) T_i32) (term_eq (T_lvar 0) \
+                 (T_local 1%N))) (term_eq (T_lvar 0) (T_local 2%N)))))"
+            ),
+            "the `unique` function compares its entry parameter and its own draw, and its \
+             nested block adds the rival clause about the block's slot:\n{golden}"
+        );
+    }
+
+    /// The committed golden for `spec_unique_reach.inf`. Regenerate with the
+    /// `#[ignore]`d [`regenerate::regenerate_unique_reach_v`] after an
+    /// intentional emitter change.
+    fn unique_reach_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_unique_reach.v")
+    }
+
+    /// The proof-mode `.v` for the fixture of `unique` blocks inside
+    /// `exists`/`unique`-quantified functions must match a committed golden
+    /// byte-for-byte, and the golden must carry the contract shape: the value
+    /// is a frame slot of the retained body, never a binder; the payload adds
+    /// a `Hall` over a typed rival that must equal that slot; a draw under a
+    /// nested `exists` is a slot for the run and an `HA_ex` for the rival; and
+    /// a `unique` function's compared slots are its entry parameters and the
+    /// draws written directly in its body.
+    #[test]
+    fn spec_unique_reach_matches_committed_v_golden() {
+        let generated = generate_v("spec_unique_reach.inf", "spec_unique_reach");
+        let golden_path = unique_reach_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_unique_reach_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_unique_reach.inf drifted from the committed golden {}; \
+             if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_unique_reach_v -- --ignored`",
+            golden_path.display()
+        );
+
+        assert!(
+            golden.contains(
+                "reach_payload := HA_and (term_eq (T_local 1%N) (T_local 0%N)) (Hall (Himpl \
+                 (HA_and (HA_has_type (T_lvar 0) T_i32) (term_eq (T_lvar 0) (T_local 0%N))) \
+                 (term_eq (T_lvar 0) (T_local 1%N))))"
+            ),
+            "the run's value is a frame slot, and the payload adds that every typed rival \
+             completing the block equals it:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "(HA_ex (HA_and (HA_has_type (T_lvar 0) T_i32) (HA_and (term_eq (T_lvar 0) \
+                 (T_local 0%N)) (term_eq (T_lvar 1) (T_lvar 0)))))"
+            ) && golden.contains("(term_eq (T_local 2%N) (T_local 0%N))"),
+            "a draw under a nested `exists` must be a slot for the run and a fresh \
+             existential for the rival:\n{golden}"
+        );
+        assert_eq!(
+            golden.matches("Hall (").count(),
+            7,
+            "one universal binder per nested `unique` block; the last function has \
+             none:\n{golden}"
+        );
+        let unique_records: Vec<&str> = golden
+            .lines()
+            .skip_while(|line| !line.contains("_uqspec1 : reachability_spec"))
+            .filter(|line| line.contains("reach_visible_locs"))
+            .collect();
+        assert_eq!(unique_records.len(), 2, "{golden}");
+        for record in unique_records {
+            assert!(
+                record.contains("reach_visible_locs := (0%N :: 1%N :: nil);"),
+                "a `unique` function compares its entry parameter and the one draw written \
+                 directly in its body, not a nested block's value or a dismissed draw:\n{record}"
+            );
+        }
+        assert!(
+            golden.contains("ValidExistsSpec") && golden.contains("ValidUniqueSpec"),
+            "{golden}"
+        );
+    }
+
+    /// The committed golden for `spec_unique_blocks.inf`. Regenerate with the
+    /// `#[ignore]`d [`regenerate::regenerate_unique_blocks_v`] after an
+    /// intentional emitter change.
+    fn unique_blocks_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_unique_blocks.v")
+    }
+
+    /// The proof-mode `.v` for the nested-`unique` fixture must match a
+    /// committed golden byte-for-byte, and the golden must carry the block's
+    /// contract shape: a value typed inside its own `HA_ex`, and inside that
+    /// binder a `Hall` over a typed rival whose consequent equates the two.
+    /// The obligations are plain `ValidSpec` ones — a nested `unique` block
+    /// selects no reachability predicate.
+    #[test]
+    fn spec_unique_blocks_matches_committed_v_golden() {
+        let generated = generate_v("spec_unique_blocks.inf", "spec_unique_blocks");
+        let golden_path = unique_blocks_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_unique_blocks_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_unique_blocks.inf drifted from the committed golden {}; \
+             if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_unique_blocks_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Contract shape, asserted independently of the byte compare so a
+        // future regeneration cannot launder an encoding regression into the
+        // committed file.
+        assert!(
+            golden.contains(
+                "HA_ex (HA_and (HA_has_type (T_lvar 0) T_i32) (HA_and (term_eq (T_lvar 0) \
+                 (T_local 0%N)) (Hall (Himpl (HA_and (HA_has_type (T_lvar 0) T_i32) (term_eq \
+                 (T_lvar 0) (T_local 0%N))) (term_eq (T_lvar 0) (T_lvar 1))))))"
+            ),
+            "a `unique` block must state a typed value and, inside its binder, that every \
+             typed rival completing the block equals it:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "(HA_and (term_eq (T_lvar 1) (T_lvar 3)) (term_eq (T_lvar 0) (T_lvar 2)))"
+            ),
+            "two values must be compared pairwise with their rivals:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "HA_and (HA_has_type (T_lvar 0) T_i32) (HA_not (term_eq (T_relop T_i32 \
+                 (Relop_i (ROI_lt SX_U)) (T_lvar 0) (T_const (Vi32 2))) (T_const (Vi32 0))))"
+            ),
+            "a narrow value must state its declared domain beside its class:\n{golden}"
+        );
+        assert_eq!(
+            golden.matches("Hall (").count(),
+            8,
+            "one universal binder per value of each of the seven `unique` blocks, one of \
+             which has two values:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "Theorem valid_spec_unique_blocks__UniqueBlocks : ValidSpec spec_unique_blocks \
+                 spec_unique_blocks__UniqueBlocks_specs."
+            ) && !golden.contains("ValidUniqueSpec")
+                && !golden.contains("reachability_spec"),
+            "a nested `unique` block is a claim inside `ValidSpec`, not a reachability \
+             obligation:\n{golden}"
+        );
+    }
+
     /// Committed `.v` golden for the quantifier-alternation fixture.
     /// Regenerate with the `#[ignore]`d
     /// [`regenerate::regenerate_quantifier_alternation_v`] after an intentional
@@ -5203,7 +5416,10 @@ End Host.
         // future regeneration cannot launder an encoding regression into the
         // committed file.
         assert!(
-            golden.contains("HA_ex (HA_and (term_eq (T_lvar 0) (T_const (Vi32 0))) (Hall "),
+            golden.contains(
+                "HA_ex (HA_and (HA_has_type (T_lvar 0) T_i32) (HA_and (term_eq (T_lvar 0) \
+                 (T_const (Vi32 0))) (Hall "
+            ),
             "the universal binder must sit INSIDE the existential one; the other order is \
              the alternation swap the explicit binder exists to prevent:\n{golden}"
         );
@@ -5305,7 +5521,9 @@ End Host.
             false_certificate_golden_path, generate_v, linked_corpus_entry_v,
             linked_extern_golden_path, literal_ctx_golden_path, module_consts_golden_path,
             narrow_discharge_golden_path, overflow_realization_golden_path, prime_golden_path,
-            quantifier_alternation_golden_path, unique_spec_golden_path,
+            quantifier_alternation_golden_path, unique_blocks_golden_path,
+            unique_reach_discharge_golden_path, unique_reach_golden_path,
+            unique_spec_golden_path,
         };
         use std::path::{Path, PathBuf};
 
@@ -5435,6 +5653,30 @@ End Host.
                 "spec_quantifier_alternation",
             );
             write_golden(&v, &quantifier_alternation_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_unique_blocks_v() {
+            let v = generate_v("spec_unique_blocks.inf", "spec_unique_blocks");
+            write_golden(&v, &unique_blocks_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_unique_reach_discharge_v() {
+            let v = generate_v(
+                "spec_unique_reach_discharge.inf",
+                "spec_unique_reach_discharge",
+            );
+            write_golden(&v, &unique_reach_discharge_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_unique_reach_v() {
+            let v = generate_v("spec_unique_reach.inf", "spec_unique_reach");
+            write_golden(&v, &unique_reach_golden_path());
         }
     }
 }

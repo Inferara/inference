@@ -311,6 +311,13 @@ fn hypothesis_of(decl_ty: &str, x: &HTerm) -> HAssert {
     }
 }
 
+/// An existential binder over a draw declared at `decl_ty`, read by `body` at
+/// index 0: the witness has to be a value of the declared class within the
+/// declared domain, stated as a conjunct inside its own binder.
+fn exd(decl_ty: &str, body: HAssert) -> HAssert {
+    ex(and(hypothesis_of(decl_ty, &lvar(0)), body))
+}
+
 /// The antecedent one slot declared at `decl_ty` sits under.
 fn guard_of(decl_ty: &str, n: u32) -> HAssert {
     hypothesis_of(decl_ty, &local(n))
@@ -352,10 +359,13 @@ fn rems(l: HTerm, r: HTerm) -> HTerm {
 // ----- 1. the canonical prime obligation --------------------------------
 
 /// The single most important test: the `PrimeExample` source spec must produce
-/// `prime_hspec1` (wasm-verifier's `theories/examples/PrimeExample.v`)
-/// node-for-node — including the two argument-typing guards fused into the
+/// the obligation wasm-verifier's `theories/examples/PrimeExample.v` states as
+/// `prime_hspec1` — including the two argument-typing guards fused into the
 /// antecedents the source's `assume`s already build, which is what makes the
-/// obligation dischargeable under the verifier's strictified `ValidSpec`.
+/// obligation dischargeable under the verifier's strictified `ValidSpec` — with
+/// one addition that example predates: the existential witness is typed inside
+/// its own binder, because the prover would otherwise be free to pick a witness
+/// outside the declared class.
 #[test]
 fn canonical_prime_spec_matches_prime_hspec1() {
     let source = "\
@@ -403,10 +413,13 @@ spec prime_properties {
             ),
             imp(
                 teq(is_prime(), i32c(0)),
-                ex(and(
-                    and(nz(gts(m_ex(), one())), nz(lts(m_ex(), n()))),
-                    teq(rems(n(), m_ex()), i32c(0)),
-                )),
+                exd(
+                    "i32",
+                    and(
+                        and(nz(gts(m_ex(), one())), nz(lts(m_ex(), n()))),
+                        teq(rems(n(), m_ex()), i32c(0)),
+                    ),
+                ),
             ),
         ),
     );
@@ -715,12 +728,12 @@ fn equality_is_non_strict_universally_and_strict_existentially() {
             nz(rel(HNumType::I32, HRelop::Eq, local(0), local(1)))
         )
     );
-    // Existential `==` is strict term_eq. Only the universal `n` is guarded; the
-    // witness the prover picks needs no typing hypothesis.
+    // Existential `==` is strict term_eq. The universal `n` is guarded in the
+    // antecedent; the witness is typed inside its own binder.
     let body = "forall { let n: i32 = @; exists { let m: i32 = @; assert(m == n); } }";
     assert_eq!(
         obligation_of("", body),
-        imp(guard(0), ex(teq(lvar(0), local(0))))
+        imp(guard(0), exd("i32", teq(lvar(0), local(0))))
     );
 }
 
@@ -1142,28 +1155,40 @@ fn an_existential_witness_and_a_call_argument_uzumaki_interleave_by_level() {
         obligation_of(prelude, body),
         imp(
             guard(0),
-            ex(ex(ex(and(
-                or_witness(v(), gts(app("g", vec![anon()]), i32c(0)), eqs(m(), i32c(0))),
-                teq(v(), i32c(1))
-            ))))
+            exd(
+                "i32",
+                exd(
+                    "i32",
+                    ex(and(
+                        or_witness(v(), gts(app("g", vec![anon()]), i32c(0)), eqs(m(), i32c(0))),
+                        teq(v(), i32c(1))
+                    ))
+                )
+            )
         )
     );
 
-    // Assertion position: the constraint moves into the `HA_and`'s right arm and
-    // both binders are left carrying nothing, which the wrap emits bare.
+    // Assertion position: the witness's constraint moves into the `HA_and`'s
+    // right arm, leaving its binder bare; the two draws keep their typing.
     let body = "forall { let n: i32 = @; exists { let m: i32 = @; \
                 assert(g(@) > 0 && (m == 0 || n == 0) == true); } }";
     assert_eq!(
         obligation_of(prelude, body),
         imp(
             guard(0),
-            ex(ex(ex(and(
-                nz(gts(app("g", vec![anon()]), i32c(0))),
-                and(
-                    or_witness(v(), eqs(m(), i32c(0)), eqs(local(0), i32c(0))),
-                    teq(v(), i32c(1))
+            exd(
+                "i32",
+                exd(
+                    "i32",
+                    ex(and(
+                        nz(gts(app("g", vec![anon()]), i32c(0))),
+                        and(
+                            or_witness(v(), eqs(m(), i32c(0)), eqs(local(0), i32c(0))),
+                            teq(v(), i32c(1))
+                        )
+                    ))
                 )
-            ))))
+            )
         )
     );
 }
@@ -1356,7 +1381,7 @@ fn single_existential_binds_lvar_zero() {
     let body = "forall { let n: i32 = @; exists { let m: i32 = @; assert(m > n); } }";
     assert_eq!(
         obligation_of("", body),
-        imp(guard(0), ex(nz(gts(lvar(0), local(0)))))
+        imp(guard(0), exd("i32", nz(gts(lvar(0), local(0)))))
     );
 }
 
@@ -1365,10 +1390,13 @@ fn two_existentials_with_an_assert_between_index_correctly() {
     let body =
         "forall { exists { let a: i32 = @; assert(a > 0); let b: i32 = @; assert(b > a); } }";
     // Outer binder = a (index 1 at the inner use), inner = b (index 0).
-    let expected = ex(and(
-        nz(gts(lvar(0), i32c(0))),
-        ex(nz(gts(lvar(0), lvar(1)))),
-    ));
+    let expected = exd(
+        "i32",
+        and(
+            nz(gts(lvar(0), i32c(0))),
+            exd("i32", nz(gts(lvar(0), lvar(1)))),
+        ),
+    );
     assert_eq!(obligation_of("", body), expected);
 }
 
@@ -1378,10 +1406,16 @@ fn pure_let_capturing_an_existential_reindexes_at_a_deeper_use() {
         "forall { exists { let a: i32 = @; let t: i32 = a + 1; let b: i32 = @; assert(b > t); } }";
     // b is the inner binder (index 0); a, captured by `t`, is index 1 at the
     // deeper use — the level-based reindex the finalize pass performs.
-    let expected = ex(ex(nz(gts(
-        lvar(0),
-        bin(HNumType::I32, HBinop::Add, lvar(1), i32c(1)),
-    ))));
+    let expected = exd(
+        "i32",
+        exd(
+            "i32",
+            nz(gts(
+                lvar(0),
+                bin(HNumType::I32, HBinop::Add, lvar(1), i32c(1)),
+            )),
+        ),
+    );
     assert_eq!(obligation_of("", body), expected);
 }
 
@@ -1391,7 +1425,7 @@ fn uzumaki_as_a_call_argument_in_exists_binds_a_fresh_lvar() {
     let body = "forall { exists { assert(g(@) > 0); } }";
     assert_eq!(
         obligation_of(prelude, body),
-        ex(nz(gts(app("g", vec![lvar(0)]), i32c(0))))
+        exd("i32", nz(gts(app("g", vec![lvar(0)]), i32c(0))))
     );
 }
 
@@ -1400,7 +1434,10 @@ fn assume_inside_exists_is_a_conjunct() {
     let body = "forall { exists { let m: i32 = @; assume { assert(m > 0); } assert(m < 10); } }";
     assert_eq!(
         obligation_of("", body),
-        ex(and(nz(gts(lvar(0), i32c(0))), nz(lts(lvar(0), i32c(10)))))
+        exd(
+            "i32",
+            and(nz(gts(lvar(0), i32c(0))), nz(lts(lvar(0), i32c(10))))
+        )
     );
 }
 
@@ -1436,7 +1473,10 @@ fn universal_if_else_is_a_guard_pair() {
 fn existential_if_is_a_strict_disjunction() {
     let body = "forall { exists { let n: i32 = @; if n > 0 { assert(n > 1); } } }";
     let cond = || gts(lvar(0), i32c(0));
-    let expected = ex(or(and(nz(cond()), nz(gts(lvar(0), i32c(1)))), eqz(cond())));
+    let expected = exd(
+        "i32",
+        or(and(nz(cond()), nz(gts(lvar(0), i32c(1)))), eqz(cond())),
+    );
     assert_eq!(obligation_of("", body), expected);
 }
 
@@ -2108,8 +2148,8 @@ fn p001_rejects_an_assume_bodied_spec_function() {
 fn p002_rejects_constructs_without_an_encoding() {
     let loop_src = "spec S { fn f() forall { let n: i32 = @; loop { assert(n > 0); } } }";
     assert!(err(loop_src).contains("error[P002]"));
-    let unique_src = "spec S { fn f() forall { let n: i32 = @; unique { assert(n > 0); } } }";
-    assert!(err(unique_src).contains("error[P002]"));
+    let break_src = "spec S { fn f() forall { let n: i32 = @; break; assert(n > 0); } }";
+    assert!(err(break_src).contains("error[P002]"));
 }
 
 /// `loop` has its own message: the constructs sharing `error_no_encoding` have
@@ -2131,10 +2171,10 @@ fn p002_points_a_loop_at_the_quantifier_idiom() {
 /// lifting `loop` out of it must not have reworded its neighbours.
 #[test]
 fn the_shared_no_encoding_template_is_unchanged() {
-    let e = err("spec S { fn f() forall { let n: i32 = @; unique { assert(n > 0); } } }");
+    let e = err("spec S { fn f() forall { let n: i32 = @; break; assert(n > 0); } }");
     assert!(
         e.contains(
-            "`unique` block has no encoding in the verification assertion language; remove it \
+            "`break` has no encoding in the verification assertion language; remove it \
              from the spec body or move the logic into an executable helper function"
         ),
         "{e}"
@@ -2672,6 +2712,35 @@ fn proof_codegen(source: String) -> Result<usize, CodegenError> {
 fn an_over_deep_boolean_chain_is_rejected_by_name() {
     let err = proof_codegen(nested_or_chain(80))
         .expect_err("a chain past the payload depth cap must not be emitted");
+    assert!(
+        matches!(
+            err,
+            CodegenError::HspecTreeTooDeep { ref spec, ref function, max }
+                if spec == "S" && function == "S.f" && max == inference_hassert::MAX_TREE_DEPTH
+        ),
+        "expected the depth cap to be reported against the obligation, got: {err:?}"
+    );
+}
+
+/// A `unique` block reads its body twice and wraps each of its values in two
+/// binders, so it reaches the payload depth cap sooner than the same draws in
+/// an `exists` block would. Past the cap it is the same named error, not a
+/// panic and not a truncated payload.
+#[test]
+fn an_over_deep_unique_block_is_rejected_by_name() {
+    fn unique_with(values: usize) -> String {
+        let mut body = String::new();
+        for k in 0..values {
+            body.push_str(&format!("let v{k}: i32 = @; assert(v{k} == {k}); "));
+        }
+        format!("spec S {{ fn f() forall {{ unique {{ {body} }} }} }}")
+    }
+    assert!(
+        proof_codegen(unique_with(40)).is_ok(),
+        "forty values fit under the cap"
+    );
+    let err = proof_codegen(unique_with(200))
+        .expect_err("a `unique` block past the payload depth cap must not be emitted");
     assert!(
         matches!(
             err,
@@ -3420,15 +3489,13 @@ fn p008_names_the_unique_quantifier_in_a_unique_body() {
     );
 }
 
-/// A nested `forall` block keeps `P007` and a nested `unique` block keeps
-/// `P002` inside a reachability body, exactly as inside an `exists` block.
+/// A nested `forall` block keeps `P007` inside a reachability body: its
+/// statements would have to read as implications, and the compiled body the
+/// obligation is about reads them as filters.
 #[test]
-fn nested_forall_and_unique_blocks_keep_their_rejections_in_a_reach_body() {
+fn a_nested_forall_block_keeps_its_rejection_in_a_reach_body() {
     let forall = err("spec S { fn f() exists { let n: i32 = @; forall { assert(n > 0); } } }");
     assert!(forall.contains("error[P007]"), "{forall}");
-
-    let unique = err("spec S { fn f() exists { let n: i32 = @; unique { assert(n > 0); } } }");
-    assert!(unique.contains("error[P002]"), "{unique}");
 }
 
 /// The highest-risk invariant, checked end to end: the payload's `T_local`
@@ -3678,7 +3745,10 @@ fn aggregate_uzumaki_in_an_exists_block_binds_nested_ex_binders() {
         obligation_of("", body),
         imp(
             guard(0),
-            ex(ex(and(teq(lvar(1), local(0)), teq(lvar(0), lvar(1)))))
+            exd(
+                "i32",
+                exd("i32", and(teq(lvar(1), local(0)), teq(lvar(0), lvar(1))))
+            )
         )
     );
 }
@@ -4774,7 +4844,13 @@ fn a_non_constant_index_in_an_exists_block_splits_over_lvar_leaves() {
         obligation_of("", body),
         imp(
             guard(0),
-            ex(ex(ex(ex(and(definition, teq(lvar(0), local(0)))))))
+            exd(
+                "i32",
+                exd(
+                    "i32",
+                    exd("i32", ex(and(definition, teq(lvar(0), local(0)))))
+                )
+            )
         )
     );
 }
@@ -4996,7 +5072,10 @@ fn a_non_constant_index_in_a_nested_exists_block_is_untouched() {
         sole_obligation(&ok(src), "S"),
         imp(
             guard(0),
-            ex(ex(ex(and(definition, nz(gts(lvar(0), i32c(0)))))))
+            exd(
+                "i32",
+                exd("i32", ex(and(definition, nz(gts(lvar(0), i32c(0))))))
+            )
         )
     );
 }
@@ -5208,7 +5287,9 @@ fn a_forall_block_inside_an_exists_block_binds_a_universal_variable() {
                 forall { let x: i32 = @; assert(x + k == x); } } }";
     assert_eq!(
         obligation_of("", body),
-        ex(and(
+        exd(
+            "i32",
+            and(
             teq(lvar(0), i32c(0)),
             all(imp(
                 hastype(lvar(0), HNumType::I32),
@@ -5278,7 +5359,9 @@ fn an_aggregate_uzumaki_under_the_nested_quantifier_binds_one_variable_per_leaf(
                 forall { let a: [i32; 2] = @; assert(a[0] == a[1]); } } }";
     assert_eq!(
         obligation_of("", body),
-        ex(and(
+        exd(
+            "i32",
+            and(
             teq(lvar(0), i32c(0)),
             all(all(imp(
                 and(
@@ -5311,7 +5394,9 @@ fn a_universal_variable_and_a_witness_interleave_in_one_block() {
     );
     assert_eq!(
         obligation_of("", body),
-        ex(and(
+        exd(
+            "i32",
+            and(
             teq(lvar(0), i32c(0)),
             all(imp(
                 hastype(lvar(0), HNumType::I32),
@@ -5333,7 +5418,9 @@ fn a_call_argument_uzumaki_under_the_nested_quantifier_carries_its_own_guard() {
                 forall { assert(sq(@) >= k); } } }";
     assert_eq!(
         obligation_of(prelude, body),
-        ex(and(
+        exd(
+            "i32",
+            and(
             teq(lvar(0), i32c(0)),
             all(imp(
                 hastype(lvar(0), HNumType::I32),
@@ -5382,13 +5469,16 @@ fn a_nested_forall_reads_assume_as_an_antecedent() {
                 assume { assert(x == 1); } assert(x + k == k + 1); } } }";
     assert_eq!(
         obligation_of("", body),
-        ex(all(imp(
-            and(hastype(lvar(0), HNumType::I32), teq(lvar(0), i32c(1))),
-            nz(eqs(
-                bin(HNumType::I32, HBinop::Add, lvar(0), lvar(1)),
-                bin(HNumType::I32, HBinop::Add, lvar(1), i32c(1))
+        exd(
+            "i32",
+            all(imp(
+                and(hastype(lvar(0), HNumType::I32), teq(lvar(0), i32c(1))),
+                nz(eqs(
+                    bin(HNumType::I32, HBinop::Add, lvar(0), lvar(1)),
+                    bin(HNumType::I32, HBinop::Add, lvar(1), i32c(1))
+                ))
             ))
-        )))
+        )
     );
 }
 
@@ -5404,16 +5494,19 @@ fn an_if_inside_the_nested_universal_block_reads_universally() {
                 if x > 0 { assert(k == 1); } else { assert(k == 2); } } } }";
     assert_eq!(
         obligation_of("", body),
-        ex(all(imp(
-            hastype(lvar(0), HNumType::I32),
-            and(
-                imp(nz(gts(lvar(0), i32c(0))), nz(eqs(lvar(1), i32c(1)))),
-                imp(
-                    HAssert::eqz(gts(lvar(0), i32c(0))),
-                    nz(eqs(lvar(1), i32c(2)))
+        exd(
+            "i32",
+            all(imp(
+                hastype(lvar(0), HNumType::I32),
+                and(
+                    imp(nz(gts(lvar(0), i32c(0))), nz(eqs(lvar(1), i32c(1)))),
+                    imp(
+                        HAssert::eqz(gts(lvar(0), i32c(0))),
+                        nz(eqs(lvar(1), i32c(2)))
+                    )
                 )
-            )
-        )))
+            ))
+        )
     );
 }
 
@@ -5456,6 +5549,894 @@ fn p007_names_the_reachability_quantifier_at_both_forms() {
     assert!(unique.contains(unique_opening), "{unique}");
 }
 
+/// No `i32` is both `== 0` and `!= 0`, so this `exists` claim is false. The
+/// prover picks a witness from every value there is, and a comparison between
+/// values of two classes is defined and false — so without a typing conjunct a
+/// 64-bit witness satisfies both negated comparisons and the false claim is
+/// provable. The witness must be typed inside its own binder.
+#[test]
+fn an_existential_draw_is_typed_inside_its_binder() {
+    let body = "forall { exists { let x: i32 = @; assert(!(x == 0)); assert(!(x != 0)); } }";
+    assert_eq!(
+        obligation_of("", body),
+        ex(and(
+            hastype(lvar(0), HNumType::I32),
+            and(
+                eqz(eqs(lvar(0), i32c(0))),
+                eqz(rel(HNumType::I32, HRelop::Ne, lvar(0), i32c(0)))
+            )
+        ))
+    );
+}
+
+/// The same holds at 64 bits, for an anonymous call-argument draw, and for
+/// every leaf of an aggregate draw: each is typed at its own class.
+#[test]
+fn every_kind_of_existential_draw_is_typed_at_its_class() {
+    assert_eq!(
+        obligation_of("", "forall { exists { let x: i64 = @; assert(x == 7); } }"),
+        ex(and(hastype(lvar(0), HNumType::I64), teq(lvar(0), i64c(7))))
+    );
+    let prelude = "fn g(x: i64) -> i32 { return 1; }";
+    assert_eq!(
+        obligation_of(prelude, "forall { exists { assert(g(@) == 1); } }"),
+        ex(and(
+            hastype(lvar(0), HNumType::I64),
+            teq(app("g", vec![lvar(0)]), i32c(1))
+        ))
+    );
+    let prelude = "struct Mixed { wide: i64; small: i32; }";
+    assert_eq!(
+        obligation_of(
+            prelude,
+            "forall { exists { let p: Mixed = @; assert(p.wide == 1 && p.small == 2); } }"
+        ),
+        ex(and(
+            hastype(lvar(0), HNumType::I64),
+            ex(and(
+                hastype(lvar(0), HNumType::I32),
+                and(teq(lvar(1), i64c(1)), teq(lvar(0), i32c(2)))
+            ))
+        ))
+    );
+}
+
+/// A draw nothing reads states nothing: typing a variable no claim mentions
+/// would turn a body that claims nothing into one that claims something.
+#[test]
+fn an_unread_existential_draw_carries_no_typing() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let n: i32 = @; exists { let unused: i32 = @; assert(n == n); } }"
+        ),
+        imp(guard(0), ex(teq(local(0), local(0))))
+    );
+}
+
+// ----- `unique` blocks ----------------------------------------------------
+
+/// The obligation of a `unique` block that singles out one value declared at
+/// `decl_ty`, where `phi` builds the block's own claim over that value at
+/// index 0: some value of the declared type completes the block, and every
+/// value of that type that completes it is that one. Inside the universal
+/// half the rival is index 0 and the value found index 1.
+///
+/// `phi` may read slots but no enclosing logical variable — those sit at a
+/// different index in each half, and a test that needs one spells its tree out.
+fn unique_over(decl_ty: &str, phi: impl Fn(HTerm) -> HAssert) -> HAssert {
+    let typed = || hypothesis_of(decl_ty, &lvar(0));
+    ex(and(
+        typed(),
+        and(
+            phi(lvar(0)),
+            all(imp(and(typed(), phi(lvar(0))), teq(lvar(0), lvar(1)))),
+        ),
+    ))
+}
+
+/// How many binders of each quantifier an obligation carries.
+fn binder_counts(a: &HAssert) -> (usize, usize) {
+    match a {
+        HAssert::True
+        | HAssert::False
+        | HAssert::TermEq(..)
+        | HAssert::HasType(..)
+        | HAssert::Defined(..)
+        | HAssert::AppOk(..) => (0, 0),
+        HAssert::Not(x) => binder_counts(x),
+        HAssert::Ex(x) => {
+            let (e, u) = binder_counts(x);
+            (e + 1, u)
+        }
+        HAssert::All(x) => {
+            let (e, u) = binder_counts(x);
+            (e, u + 1)
+        }
+        HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
+            let (le, lu) = binder_counts(l);
+            let (re, ru) = binder_counts(r);
+            (le + re, lu + ru)
+        }
+    }
+}
+
+/// The defining shape: a value that completes the block, typed inside its own
+/// binder, and a universal claim that every typed rival completing the block
+/// equals it.
+#[test]
+fn a_unique_block_states_existence_and_that_every_rival_is_the_same_value() {
+    let body = "forall { let n: i32 = @; unique { let x: i32 = @; assert(x == n); } }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            ex(and(
+                hastype(lvar(0), HNumType::I32),
+                and(
+                    teq(lvar(0), local(0)),
+                    all(imp(
+                        and(hastype(lvar(0), HNumType::I32), teq(lvar(0), local(0))),
+                        teq(lvar(0), lvar(1))
+                    ))
+                )
+            ))
+        )
+    );
+}
+
+/// A `unique` block reads the same in a plain body, and the statements after
+/// it read exactly as they would after an `exists` block: it exports nothing.
+#[test]
+fn a_unique_block_stands_alone_and_leaves_what_follows_untouched() {
+    assert_eq!(
+        obligation_of("", "{ unique { let x: i32 = @; assert(x == 5); } }"),
+        unique_over("i32", |x| teq(x, i32c(5)))
+    );
+    let body = "forall { let n: i32 = @; unique { let x: i32 = @; assert(x == n); } \
+                assert(n == n); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            and(
+                unique_over("i32", |x| teq(x, local(0))),
+                nz(eqs(local(0), local(0)))
+            )
+        )
+    );
+}
+
+/// Both variables state the class and the declared domain of the value: the
+/// value has to be one the type admits, and only a rival the type admits has
+/// to be ruled out.
+#[test]
+fn a_unique_value_and_its_rival_both_state_class_and_domain() {
+    assert_eq!(
+        obligation_of("", "forall { unique { let x: u8 = @; assert(x == 44); } }"),
+        unique_over("u8", |x| teq(x, i32c(44)))
+    );
+    assert_eq!(
+        obligation_of("", "forall { unique { let x: i8 = @; assert(x == 4); } }"),
+        unique_over("i8", |x| teq(x, i32c(4)))
+    );
+    assert_eq!(
+        obligation_of("", "forall { unique { let x: i64 = @; assert(x == 7); } }"),
+        unique_over("i64", |x| teq(x, i64c(7)))
+    );
+}
+
+/// Two values are bound outermost-first, compared pairwise, and the rivals sit
+/// inside both: within the universal half the rivals are indices 1 and 0 and
+/// the values found 3 and 2.
+#[test]
+fn two_unique_values_are_compared_pairwise() {
+    let body = "forall { unique { let p: i32 = @; let q: i32 = @; assert(p == 1); \
+                assert(q == p); } }";
+    let typed = || {
+        and(
+            hastype(lvar(1), HNumType::I32),
+            hastype(lvar(0), HNumType::I32),
+        )
+    };
+    let claim = || and(teq(lvar(1), i32c(1)), teq(lvar(0), lvar(1)));
+    assert_eq!(
+        obligation_of("", body),
+        ex(ex(and(
+            typed(),
+            and(
+                claim(),
+                all(all(imp(
+                    and(typed(), claim()),
+                    and(teq(lvar(1), lvar(3)), teq(lvar(0), lvar(2)))
+                )))
+            )
+        )))
+    );
+}
+
+/// Under an enclosing existential the block's binders take the next levels,
+/// so the enclosing variable is one index further out in each half than the
+/// half's own variables.
+#[test]
+fn a_unique_block_inside_an_exists_block_indexes_the_enclosing_variable() {
+    let body = "forall { exists { let k: i32 = @; unique { let x: i32 = @; \
+                assert(x == k); } } }";
+    assert_eq!(
+        obligation_of("", body),
+        exd(
+            "i32",
+            ex(and(
+                hastype(lvar(0), HNumType::I32),
+                and(
+                    teq(lvar(0), lvar(1)),
+                    all(imp(
+                        and(hastype(lvar(0), HNumType::I32), teq(lvar(0), lvar(2))),
+                        teq(lvar(0), lvar(1))
+                    ))
+                )
+            ))
+        )
+    );
+}
+
+/// Inside an `assume` the whole claim is a filter: what follows is asserted
+/// only where exactly one value completes the block.
+#[test]
+fn a_unique_block_inside_an_assume_is_an_antecedent() {
+    let body = "forall { let a: i32 = @; let b: i32 = @; assume { unique { let x: i32 = @; \
+                assert(x == a); assert(x == b); } } assert(a == b); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(
+                guard(0),
+                and(
+                    guard(1),
+                    unique_over("i32", |x| and(
+                        teq(x.clone(), local(0)),
+                        teq(x, local(1))
+                    ))
+                )
+            ),
+            nz(eqs(local(0), local(1)))
+        )
+    );
+}
+
+/// A `unique` block is its hand-written expansion: an `exists` block that
+/// goes on to claim, for every rival that passes the same conditions, that the
+/// rival is the value found. The two spell an equality differently — a
+/// claimed `==` under a universal is a non-zero comparison — and group their
+/// conjuncts differently, and agree on everything else.
+#[test]
+fn a_unique_block_is_its_exists_forall_assume_expansion() {
+    fn with_equalities_as_term_eq(a: HAssert) -> HAssert {
+        match a {
+            HAssert::Not(inner) => match *inner {
+                HAssert::TermEq(HTerm::Relop(_, HRelop::Eq, l, r), zero) if zero == i32c(0) => {
+                    HAssert::TermEq(*l, *r)
+                }
+                other => not(with_equalities_as_term_eq(other)),
+            },
+            // Conjunctions are compared flat: the block groups its own
+            // conditions ahead of the universal half, the expansion lets them
+            // run on into it.
+            HAssert::And(l, r) => {
+                fn conjuncts(a: HAssert, into: &mut Vec<HAssert>) {
+                    match a {
+                        HAssert::And(l, r) => {
+                            conjuncts(*l, into);
+                            conjuncts(*r, into);
+                        }
+                        other => into.push(with_equalities_as_term_eq(other)),
+                    }
+                }
+                let mut flat = Vec::new();
+                conjuncts(*l, &mut flat);
+                conjuncts(*r, &mut flat);
+                flat.into_iter()
+                    .rev()
+                    .reduce(|acc, conjunct| and(conjunct, acc))
+                    .expect("a conjunction has conjuncts")
+            }
+            HAssert::Imp(l, r) => imp(
+                with_equalities_as_term_eq(*l),
+                with_equalities_as_term_eq(*r),
+            ),
+            HAssert::Or(l, r) => or(
+                with_equalities_as_term_eq(*l),
+                with_equalities_as_term_eq(*r),
+            ),
+            HAssert::Ex(x) => ex(with_equalities_as_term_eq(*x)),
+            HAssert::All(x) => all(with_equalities_as_term_eq(*x)),
+            leaf => leaf,
+        }
+    }
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let pairs = [
+        (
+            "forall { let n: i32 = @; unique { let x: i32 = @; assert(x > 3); \
+             assert(x < n); } }",
+            "forall { let n: i32 = @; exists { let x: i32 = @; assert(x > 3); assert(x < n); \
+             forall { let y: i32 = @; assume { assert(y > 3); assert(y < n); } \
+             assert(y == x); } } }",
+        ),
+        (
+            "forall { let n: i32 = @; unique { let x: i32 = @; if x > 3 { assert(g(x) > n); } \
+             else { assert(x < 2); } } }",
+            "forall { let n: i32 = @; exists { let x: i32 = @; if x > 3 { assert(g(x) > n); } \
+             else { assert(x < 2); } forall { let y: i32 = @; assume { if y > 3 { \
+             assert(g(y) > n); } else { assert(y < 2); } } assert(y == x); } } }",
+        ),
+    ];
+    for (unique, expansion) in pairs {
+        assert_eq!(
+            with_equalities_as_term_eq(obligation_of(prelude, unique)),
+            with_equalities_as_term_eq(obligation_of(prelude, expansion)),
+            "{unique}"
+        );
+    }
+}
+
+/// An `if` arm marked `unique` is the `unique` block, on either arm and under
+/// either kind of enclosing quantifier.
+#[test]
+fn a_unique_if_arm_reads_as_the_unique_block() {
+    let pairs = [
+        (
+            "forall { let n: i32 = @; if n > 0 unique { let x: i32 = @; assert(x == n); } }",
+            "forall { let n: i32 = @; if n > 0 { unique { let x: i32 = @; assert(x == n); } } }",
+        ),
+        (
+            "forall { let n: i32 = @; if n > 0 { assert(n > 0); } else unique { \
+             let x: i32 = @; assert(x == n); } }",
+            "forall { let n: i32 = @; if n > 0 { assert(n > 0); } else { unique { \
+             let x: i32 = @; assert(x == n); } } }",
+        ),
+        (
+            "forall { exists { let k: i32 = @; if k == 1 unique { let x: i32 = @; \
+             assert(x == k); } } }",
+            "forall { exists { let k: i32 = @; if k == 1 { unique { let x: i32 = @; \
+             assert(x == k); } } } }",
+        ),
+    ];
+    for (arm, block) in pairs {
+        let translated = obligation_of("", arm);
+        assert_eq!(translated, obligation_of("", block), "{arm}");
+        assert_eq!(binder_counts(&translated).1, 1, "{arm}");
+    }
+}
+
+/// The claim "exactly one `bool` equals itself" is false — two do. Read as a
+/// plain arm, the `unique` arm below once compiled to `∀x: bool. x == x`,
+/// which is provable. It must state uniqueness: a value, and a universal claim
+/// that every rival is that value.
+#[test]
+fn a_false_uniqueness_claim_on_an_if_arm_states_uniqueness() {
+    let body = "forall { let n: i32 = @; if n == n unique { let x: bool = @; \
+                assert(x == x); } }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            imp(
+                nz(eqs(local(0), local(0))),
+                unique_over("bool", |x| teq(x.clone(), x))
+            )
+        )
+    );
+}
+
+/// A draw under a quantifier of its own inside the block belongs to that
+/// quantifier: it is part of what the block claims, in both halves, and is
+/// not one of the values compared.
+#[test]
+fn a_draw_under_its_own_quantifier_inside_a_unique_block_is_not_compared() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { unique { let x: i32 = @; exists { let z: i32 = @; assert(z == x); } } }"
+        ),
+        unique_over("i32", |_| exd("i32", teq(lvar(0), lvar(1))))
+    );
+    let anonymous = obligation_of(
+        prelude,
+        "forall { unique { let x: i32 = @; exists { assert(g(@) == x); } } }",
+    );
+    assert_eq!(binder_counts(&anonymous), (3, 1));
+    let universal = obligation_of(
+        "",
+        "forall { unique { let x: i32 = @; assert(x == 0); forall { let y: i32 = @; \
+         assert(y + x == y); } } }",
+    );
+    assert_eq!(binder_counts(&universal), (1, 3));
+}
+
+/// A pure `let` that captures the value is inlined in both halves, and a call
+/// is applied in both.
+#[test]
+fn a_unique_block_reads_its_whole_body_in_both_halves() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { unique { let x: i32 = @; let t: i32 = x + 1; assert(t == 5); } }"
+        ),
+        unique_over("i32", |x| teq(
+            bin(HNumType::I32, HBinop::Add, x, i32c(1)),
+            i32c(5)
+        ))
+    );
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let called = obligation_of(
+        prelude,
+        "forall { unique { let x: i32 = @; assert(g(x) == 3); } }",
+    );
+    assert_eq!(called, unique_over("i32", |x| teq(app("g", vec![x]), i32c(3))));
+}
+
+/// A `unique` block nested in another is read in both halves of the outer one,
+/// so it appears twice, each time with its own pair of binders.
+#[test]
+fn a_nested_unique_block_is_read_in_both_halves_of_the_outer_one() {
+    let nested = obligation_of(
+        "",
+        "forall { unique { let x: i32 = @; assert(x == 1); unique { let y: i32 = @; \
+         assert(y == x); } } }",
+    );
+    assert_eq!(binder_counts(&nested), (3, 3));
+}
+
+/// Nesting is capped, and the refusal is raised once however many readings
+/// enclose the block that crosses the limit.
+#[test]
+fn unique_nesting_is_capped_before_the_blocks_are_read() {
+    fn nest(depth: usize) -> String {
+        let mut source = String::new();
+        for level in 0..depth {
+            source.push_str(&format!(
+                "unique {{ let v{level}: i32 = @; assert(v{level} == {level}); "
+            ));
+        }
+        source.push_str(&"}".repeat(depth));
+        format!("spec S {{ fn f() forall {{ {source} }} }}")
+    }
+    assert!(!ok(&nest(3)).is_empty());
+    let e = err(&nest(4));
+    assert_eq!(e.matches("error[P021]").count(), 1, "{e}");
+    assert!(e.contains("nested 4 deep here, and the limit is 3"), "{e}");
+    // Far past the limit the refusal still comes back at once: each enclosing
+    // block gives up after its first reading.
+    let deep = err(&nest(40));
+    assert_eq!(deep.matches("error[P021]").count(), 1, "{deep}");
+}
+
+/// A draw the block does not name takes no part in what it compares.
+#[test]
+fn p012_rejects_an_anonymous_choice_directly_in_a_unique_block() {
+    let prelude = "fn g(x: u8) -> i32 { return 1; }";
+    let e = err(&format!(
+        "{prelude} spec S {{ fn f() forall {{ unique {{ let x: i32 = @; \
+         assert(g(@) == x); }} }} }}"
+    ));
+    assert_eq!(e.matches("error[P012]").count(), 1, "{e}");
+    assert!(
+        e.contains("anonymous `@` argument in a `unique` block")
+            && e.contains("bind it first (`let c: u8 = @;`) directly in the `unique` block"),
+        "{e}"
+    );
+}
+
+/// A draw in an `if` arm, an `assume` block or a plain block of a `unique`
+/// block is refused, each with the wording for where it sits.
+#[test]
+fn p019_rejects_a_draw_nested_below_the_unique_block() {
+    let arm = err("spec S { fn f() forall { unique { let x: i32 = @; if x > 0 { \
+                   let y: i32 = @; assert(y == x); } } } }");
+    assert_eq!(arm.matches("error[P019]").count(), 1, "{arm}");
+    assert!(
+        arm.contains("`y` is drawn inside an `if` branch of a `unique` block")
+            && arm.contains("declare `let y: i32 = @;` directly in the `unique` block"),
+        "{arm}"
+    );
+    let assume = err("spec S { fn f() forall { unique { let x: i32 = @; assume { \
+                      let y: i32 = @; assert(y == x); } } } }");
+    assert!(
+        assume.contains("error[P019]")
+            && assume.contains("`y` is drawn inside an `assume` block of a `unique` block")
+            && assume.contains("before the `assume`"),
+        "{assume}"
+    );
+    let block = err("spec S { fn f() forall { unique { let x: i32 = @; { \
+                     let y: i32 = @; assert(y == x); } } } }");
+    assert!(
+        block.contains("error[P019]")
+            && block.contains("`y` is drawn inside a nested block of a `unique` block")
+            && block.contains("before the block"),
+        "{block}"
+    );
+}
+
+/// A `unique` block with nothing of its own to single out claims no
+/// uniqueness, whatever else it holds.
+#[test]
+fn p020_rejects_a_unique_block_that_draws_nothing_of_its_own() {
+    let sources = [
+        "spec S { fn f() forall { let n: i32 = @; unique { } assert(n == n); } }",
+        "spec S { fn f() forall { let n: i32 = @; unique { assert(n > 0); } } }",
+        "spec S { fn f() forall { unique { exists { let z: i32 = @; assert(z == 0); } } } }",
+        "spec S { fn f() forall { let n: i32 = @; unique { let t: i32 = n + 1; \
+         assert(t > n); } } }",
+    ];
+    for src in sources {
+        let e = err(src);
+        assert_eq!(e.matches("error[P020]").count(), 1, "{src}\n{e}");
+        assert!(e.contains("draws no value of its own"), "{e}");
+    }
+}
+
+/// An aggregate cannot be the value a `unique` block singles out. That is one
+/// mistake and one message: the block is not also reported as drawing
+/// nothing, and reads of the refused value report nothing further.
+#[test]
+fn p008_rejects_an_aggregate_unique_value_once() {
+    let e = err("spec S { fn f() forall { unique { let a: [i32; 2] = @; \
+                 assert(a[0] == 1); assert(a[1] == a[0]); } } }");
+    assert_eq!(e.matches("error[").count(), 1, "{e}");
+    assert!(
+        e.contains("error[P008]")
+            && e.contains("cannot be a witness of a `unique` block yet")
+            && e.contains("`[i32; 2]`"),
+        "{e}"
+    );
+}
+
+/// A mistake in the block's body is reported once, though the block is read
+/// twice; and it is still reported when the block itself was refused.
+#[test]
+fn a_mistake_inside_a_unique_block_is_reported_once() {
+    let e = err("spec S { fn f() forall { unique { let x: i32 = @; break; \
+                 assert(x == 1); } } }");
+    assert_eq!(e.matches("error[").count(), 1, "{e}");
+    assert!(e.contains("`break` has no encoding"), "{e}");
+
+    let both = err("spec S { fn f() forall { let n: i32 = @; unique { break; \
+                    assert(n == 1); } } }");
+    assert_eq!(both.matches("error[P020]").count(), 1, "{both}");
+    assert_eq!(both.matches("`break` has no encoding").count(), 1, "{both}");
+}
+
+/// An uninhabited value type is refused once.
+#[test]
+fn an_uninhabited_unique_value_is_refused_once() {
+    let e = err("enum Never {} spec S { fn f() forall { unique { let x: Never = @; \
+                 assert(x == x); } } }");
+    assert_eq!(e.matches("error[P015]").count(), 1, "{e}");
+}
+
+// ----- `unique` in a body judged by running it ------------------------------
+
+/// The obligation and kind of the single spec function in `src`.
+fn reach_entry(src: &str) -> (HAssert, SpecKind) {
+    let map = ok(src);
+    let entries = map.get("S").expect("spec `S`");
+    assert_eq!(entries.len(), 1);
+    (entries[0].hassert.clone(), entries[0].kind.clone())
+}
+
+/// Inside an `exists`-quantified function the run is the existential half: the
+/// block's draw is a choice parameter and its conditions are read off the
+/// frame. The payload adds the universal half alone — every typed rival that
+/// completes the block, read logically, is the value in that slot.
+#[test]
+fn a_unique_block_in_a_reachability_body_adds_only_the_rival_half() {
+    let (payload, _) = reach_entry(
+        "spec S { fn f(n: i32) exists { unique { let x: i32 = @; assert(x == n); } } }",
+    );
+    assert_eq!(
+        payload,
+        and(
+            teq(local(1), local(0)),
+            all(imp(
+                and(hastype(lvar(0), HNumType::I32), teq(lvar(0), local(0))),
+                teq(lvar(0), local(1))
+            ))
+        )
+    );
+}
+
+/// A draw under a nested `exists` inside the block is a choice slot in the
+/// run's reading and a fresh existential in the rival reading. Read as a slot
+/// there too, the claim would only say that no rival completes the block with
+/// the inner choice the run happened to make.
+#[test]
+fn the_rival_reading_of_a_reach_unique_block_is_logical() {
+    let (payload, _) = reach_entry(
+        "spec S { fn f(n: i32) exists { unique { let x: i32 = @; exists { let e: i32 = @; \
+         assert(e == n); assert(x == e); } } } }",
+    );
+    assert_eq!(
+        payload,
+        and(
+            and(teq(local(2), local(0)), teq(local(1), local(2))),
+            all(imp(
+                and(
+                    hastype(lvar(0), HNumType::I32),
+                    exd(
+                        "i32",
+                        and(teq(lvar(0), local(0)), teq(lvar(1), lvar(0)))
+                    )
+                ),
+                teq(lvar(0), local(1))
+            ))
+        )
+    );
+}
+
+/// The arm spelling is the block in a reachability body too, and the clause
+/// sits on the arm: on the path that skips it nothing is claimed about the
+/// slot the run never constrained.
+#[test]
+fn a_unique_if_arm_in_a_reachability_body_reads_as_the_block() {
+    let arm = reach_entry(
+        "spec S { fn f(n: i32) exists { if n > 0 unique { let x: i32 = @; \
+         assert(x == n); } } }",
+    );
+    let block = reach_entry(
+        "spec S { fn f(n: i32) exists { if n > 0 { unique { let x: i32 = @; \
+         assert(x == n); } } } }",
+    );
+    assert_eq!(arm, block);
+    let cond = || gts(local(0), i32c(0));
+    assert_eq!(
+        arm.0,
+        or(
+            and(
+                nz(cond()),
+                and(
+                    teq(local(1), local(0)),
+                    all(imp(
+                        and(hastype(lvar(0), HNumType::I32), teq(lvar(0), local(0))),
+                        teq(lvar(0), local(1))
+                    ))
+                )
+            ),
+            eqz(cond())
+        )
+    );
+}
+
+/// A narrow value is typed and bounded on the rival side; the value itself is
+/// a parameter of the run, normalized where it is drawn.
+#[test]
+fn a_narrow_unique_value_in_a_reachability_body_bounds_its_rival() {
+    let (payload, _) = reach_entry(
+        "spec S { fn f() exists { unique { let x: u8 = @; assert(x == 44); } } }",
+    );
+    assert_eq!(
+        payload,
+        and(
+            teq(local(0), i32c(44)),
+            all(imp(
+                and(hypothesis_of("u8", &lvar(0)), teq(lvar(0), i32c(44))),
+                teq(lvar(0), local(0))
+            ))
+        )
+    );
+}
+
+/// A `unique`-quantified function compares the values drawn directly in its
+/// body. The value of a nested `unique` block is compared by that block's own
+/// claim, and a draw under a nested `exists` is dismissed with it — neither is
+/// among the slots the function compares.
+#[test]
+fn a_unique_function_compares_only_the_draws_written_directly_in_its_body() {
+    let (payload, kind) = reach_entry(
+        "spec S { fn f(seed: i32) unique { let bit: i32 = @; assume { assert(bit == seed); } \
+         unique { let x: i32 = @; assert(x == bit); } } }",
+    );
+    let SpecKind::Unique(meta) = kind else {
+        panic!("a `unique` body is a unique obligation");
+    };
+    assert_eq!(meta.visible_locs, vec![0, 1]);
+    assert_eq!(binder_counts(&payload), (0, 1));
+
+    let (_, kind) = reach_entry(
+        "spec S { fn f(seed: i32) unique { let bit: i32 = @; assume { assert(bit == seed); } \
+         exists { let w: i32 = @; assert(w == bit); } } }",
+    );
+    let SpecKind::Unique(meta) = kind else {
+        panic!("a `unique` body is a unique obligation");
+    };
+    assert_eq!(meta.visible_locs, vec![0, 1]);
+}
+
+/// An `exists`-quantified function's list is untouched: every named choice,
+/// at any depth. It is inert there, and leaving it alone keeps every emitted
+/// `exists` record as it was.
+#[test]
+fn an_exists_function_still_lists_every_named_choice() {
+    let (_, kind) = reach_entry(
+        "spec S { fn f(seed: i32) exists { let bit: i32 = @; assume { assert(bit == seed); } \
+         exists { let w: i32 = @; assert(w == bit); } } }",
+    );
+    let SpecKind::Exists(meta) = kind else {
+        panic!("an `exists` body is an exists obligation");
+    };
+    assert_eq!(meta.visible_locs, vec![0, 1, 2]);
+}
+
+/// An anonymous `@` under a nested `exists` of a `unique` function belongs to
+/// that `exists`; only one written directly in the body is refused.
+#[test]
+fn an_anonymous_choice_under_a_nested_exists_of_a_unique_function_is_accepted() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let nested = format!(
+        "{prelude} spec S {{ fn f(seed: i32) unique {{ let bit: i32 = @; \
+         assume {{ assert(bit == seed); }} exists {{ assert(g(@) == bit); }} }} }}"
+    );
+    assert!(!ok(&nested).is_empty());
+    let direct = err(&format!(
+        "{prelude} spec S {{ fn f(seed: i32) unique {{ let bit: i32 = @; \
+         assume {{ assert(bit == seed); }} assert(g(@) == bit); }} }}"
+    ));
+    assert_eq!(direct.matches("error[P012]").count(), 1, "{direct}");
+    assert!(
+        direct.contains("anonymous `@` argument in a `unique` spec function"),
+        "{direct}"
+    );
+}
+
+/// The refusals a `unique` block has, a `unique`-quantified function has too,
+/// in its own words, each raised once.
+#[test]
+fn a_unique_function_refuses_what_a_unique_block_refuses() {
+    let arm = err("spec S { fn f(c: bool) unique { let x: i32 = @; assume { assert(x == 1); } \
+                   if c { let y: i32 = @; assert(y == x); } } }");
+    assert_eq!(arm.matches("error[").count(), 1, "{arm}");
+    assert!(
+        arm.contains("error[P019]")
+            && arm.contains("`y` is drawn inside an `if` branch of a `unique`-quantified function")
+            && arm.contains("declare `let y: i32 = @;` directly in the function body"),
+        "{arm}"
+    );
+    for src in [
+        "spec S { fn only(n: i32) unique { assert(n == n); } }",
+        "spec S { fn only(n: i32) unique { exists { let z: i32 = @; assert(z == n); } } }",
+    ] {
+        let none = err(src);
+        assert_eq!(none.matches("error[").count(), 1, "{src}\n{none}");
+        assert!(
+            none.contains("error[P020]")
+                && none.contains("`only` is `unique`-quantified but draws no value of its own"),
+            "{src}\n{none}"
+        );
+    }
+}
+
+/// The block's own refusals hold in a reachability body, each raised once.
+#[test]
+fn a_unique_block_in_a_reachability_body_keeps_its_refusals() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let none = err("spec S { fn f(n: i32) exists { let k: i32 = @; unique { \
+                    assert(k == n); } } }");
+    assert_eq!(none.matches("error[").count(), 1, "{none}");
+    assert!(none.contains("error[P020]"), "{none}");
+
+    let anonymous = err(&format!(
+        "{prelude} spec S {{ fn f(n: i32) exists {{ unique {{ let x: i32 = @; \
+         assert(g(@) == x); }} }} }}"
+    ));
+    assert_eq!(anonymous.matches("error[").count(), 1, "{anonymous}");
+    assert!(
+        anonymous.contains("error[P012]")
+            && anonymous.contains("anonymous `@` argument in a `unique` block"),
+        "{anonymous}"
+    );
+
+    let nested = err("spec S { fn f(n: i32) exists { unique { let x: i32 = @; if x > 0 { \
+                      let y: i32 = @; assert(y == x); } } } }");
+    assert_eq!(nested.matches("error[").count(), 1, "{nested}");
+    assert!(
+        nested.contains("error[P019]") && nested.contains("of a `unique` block"),
+        "{nested}"
+    );
+
+    let mut deep = String::new();
+    for level in 0..4 {
+        deep.push_str(&format!(
+            "unique {{ let v{level}: i32 = @; assert(v{level} == {level}); "
+        ));
+    }
+    deep.push_str(&"}".repeat(4));
+    let deep = err(&format!("spec S {{ fn f() exists {{ {deep} }} }}"));
+    assert_eq!(deep.matches("error[P021]").count(), 1, "{deep}");
+
+    let forall = err("spec S { fn f(n: i32) exists { unique { let x: i32 = @; \
+                      assert(x == n); forall { assert(x == n); } } } }");
+    assert!(forall.contains("error[P007]"), "{forall}");
+}
+
+/// An `assume` arm is the `assume` block: a filter, not a claim. Each spelling
+/// pair below must translate to the same tree, on either arm and in both
+/// universal modes.
+#[test]
+fn an_assume_if_arm_reads_as_its_explicit_spelling() {
+    let pairs = [
+        (
+            "{ let n: i32 = @; if n > 0 assume { assert(n > 5); } assert(n != 3); }",
+            "{ let n: i32 = @; if n > 0 { assume { assert(n > 5); } } assert(n != 3); }",
+        ),
+        (
+            "{ let n: i32 = @; if n > 0 { assert(n > 1); } else assume { assert(n < 0); } \
+             assert(n != 3); }",
+            "{ let n: i32 = @; if n > 0 { assert(n > 1); } else { assume { assert(n < 0); } } \
+             assert(n != 3); }",
+        ),
+        (
+            "{ exists { let k: i32 = @; assume { assert(k == 0); } forall { let y: i32 = @; \
+             if y > k assume { assert(y > 5); } assert(y + k == y); } } }",
+            "{ exists { let k: i32 = @; assume { assert(k == 0); } forall { let y: i32 = @; \
+             if y > k { assume { assert(y > 5); } } assert(y + k == y); } } }",
+        ),
+    ];
+    for (arm, explicit) in pairs {
+        assert_eq!(
+            obligation_of("", &format!("forall {arm}")),
+            obligation_of("", &format!("forall {explicit}")),
+            "{arm}"
+        );
+    }
+}
+
+/// The filter an `assume` arm states is not an obligation: the arm's own
+/// condition must not appear as something to prove.
+#[test]
+fn an_assume_if_arm_states_no_obligation_of_its_own() {
+    let filtered = obligation_of(
+        "",
+        "forall { let n: i32 = @; if n > 0 assume { assert(n > 5); } assert(n != 3); }",
+    );
+    let bare = obligation_of("", "forall { let n: i32 = @; assert(n != 3); }");
+    assert_eq!(filtered, bare);
+}
+
+/// On the existential and reachability paths an `assume` is a conjunct either
+/// way, so an `assume` arm and a plain arm agree there.
+#[test]
+fn an_assume_if_arm_is_a_conjunct_on_the_existential_path() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { exists { let k: i32 = @; if k > 0 assume { assert(k == 1); } } }"
+        ),
+        obligation_of(
+            "",
+            "forall { exists { let k: i32 = @; if k > 0 { assert(k == 1); } } }"
+        ),
+    );
+    assert_eq!(
+        obligation_of(
+            "",
+            "exists { let k: i32 = @; if k > 0 assume { assert(k == 1); } }"
+        ),
+        obligation_of(
+            "",
+            "exists { let k: i32 = @; if k > 0 { assert(k == 1); } }"
+        ),
+    );
+}
+
+/// A `forall` arm in a reachability body is refused once, not once by the arm
+/// and again by the block it now goes through.
+#[test]
+fn p007_fires_once_for_a_forall_if_arm_in_a_reachability_body() {
+    let e = err("spec S { fn f(x: i32) exists { let n: i32 = @; if n > 0 forall { \
+                 assert(n > x); } } }");
+    assert_eq!(e.matches("error[P007]").count(), 1, "{e}");
+}
+
 /// The nested universal binder is a real `Hall`, never an `HA_ex`. Reading the
 /// binder off the tree rather than comparing the whole obligation keeps this
 /// pinned even if the surrounding shape changes.
@@ -5466,7 +6447,10 @@ fn the_nested_universal_binder_is_not_an_existential() {
     let HAssert::Ex(outer) = obligation_of("", body) else {
         panic!("the enclosing `exists` binds the witness");
     };
-    let HAssert::And(_, inner) = *outer else {
+    let HAssert::And(_, constrained) = *outer else {
+        panic!("the existential types its witness ahead of what it claims");
+    };
+    let HAssert::And(_, inner) = *constrained else {
         panic!("the existential conjoins its filter with the nested claim");
     };
     assert!(
@@ -5696,7 +6680,7 @@ fn an_existential_narrow_draw_bounds_its_witness_as_a_conjunct() {
     let body = "forall { exists { let a: u8 = @; assert(a == 44); } }";
     assert_eq!(
         obligation_of("", body),
-        ex(and(nz(ltu(lvar(0), i32c(256))), teq(lvar(0), i32c(44))))
+        exd("u8", teq(lvar(0), i32c(44)))
     );
     let HAssert::Ex(inner) = obligation_of("", body) else {
         panic!("the existential `@` binds a witness");
@@ -5727,7 +6711,9 @@ fn a_nested_universal_narrow_draw_states_its_domain_inside_its_hall() {
                 forall { let x: u8 = @; assert(x <= 200); } } }";
     assert_eq!(
         obligation_of("", body),
-        ex(and(
+        exd(
+            "i32",
+            and(
             teq(lvar(0), i32c(0)),
             all(imp(
                 and(hastype(lvar(0), HNumType::I32), nz(ltu(lvar(0), i32c(256)))),
@@ -5763,10 +6749,7 @@ fn an_anonymous_narrow_argument_bounds_its_existential_binder() {
     let body = "forall { exists { assert(g(@) == 1); } }";
     assert_eq!(
         obligation_of(prelude, body),
-        ex(and(
-            nz(ltu(lvar(0), i32c(256))),
-            teq(app("g", vec![lvar(0)]), i32c(1))
-        ))
+        exd("u8", teq(app("g", vec![lvar(0)]), i32c(1)))
     );
 }
 
@@ -5795,7 +6778,9 @@ fn a_nested_universal_anonymous_argument_states_its_domain_on_its_binder() {
                 forall { assert(g(@) == 1); } } }";
     assert_eq!(
         obligation_of(prelude, body),
-        ex(and(
+        exd(
+            "i32",
+            and(
             teq(lvar(0), i32c(0)),
             all(imp(
                 and(hastype(lvar(0), HNumType::I32), nz(ltu(lvar(0), i32c(256)))),
@@ -5817,7 +6802,10 @@ fn an_unread_nested_universal_binder_keeps_no_hypothesis() {
                 forall { let t: i32 = g(@) + 1; assert(k == 0); } } }";
     assert_eq!(
         obligation_of(prelude, body),
-        ex(and(teq(lvar(0), i32c(0)), all(nz(eqs(lvar(1), i32c(0))))))
+        exd(
+            "i32",
+            and(teq(lvar(0), i32c(0)), all(nz(eqs(lvar(1), i32c(0)))))
+        )
     );
 }
 
@@ -6006,10 +6994,7 @@ fn an_existential_narrow_array_bounds_each_witness_as_a_conjunct() {
     let body = "forall { exists { let a: [u8; 2] = @; assert(a[0] > 200); } }";
     assert_eq!(
         obligation_of("", body),
-        ex(and(
-            nz(ltu(lvar(0), i32c(256))),
-            ex(nz(gtu(lvar(1), i32c(200))))
-        ))
+        exd("u8", ex(nz(gtu(lvar(1), i32c(200)))))
     );
 }
 
@@ -6024,13 +7009,10 @@ fn an_existential_struct_bounds_each_witness_at_its_own_field_type() {
     let body = "forall { exists { let p: Pair = @; assert(p.small == 1 && p.signed == 2); } }";
     assert_eq!(
         obligation_of(prelude, body),
-        ex(and(
-            nz(ltu(lvar(0), i32c(256))),
-            ex(and(
-                and(nz(les(i32c(-128), lvar(0))), nz(lts(lvar(0), i32c(128)))),
-                and(teq(lvar(1), i32c(1)), teq(lvar(0), i32c(2)))
-            ))
-        ))
+        exd(
+            "u8",
+            exd("i8", and(teq(lvar(1), i32c(1)), teq(lvar(0), i32c(2))))
+        )
     );
 }
 
@@ -6044,7 +7026,7 @@ fn an_unread_existential_array_leaf_carries_no_bound() {
     let body = "forall { exists { let a: [u8; 2] = @; assert(a[1] == 1); } }";
     assert_eq!(
         obligation_of("", body),
-        ex(ex(and(nz(ltu(lvar(0), i32c(256))), teq(lvar(0), i32c(1)))))
+        ex(exd("u8", teq(lvar(0), i32c(1))))
     );
 }
 
@@ -6066,18 +7048,12 @@ fn a_witness_outside_the_declared_domain_is_bounded_at_either_nesting() {
     let scalar = "forall { exists { let a: u8 = @; assert(a > 255); } }";
     assert_eq!(
         obligation_of("", scalar),
-        ex(and(
-            nz(ltu(lvar(0), i32c(256))),
-            nz(gtu(lvar(0), i32c(255)))
-        ))
+        exd("u8", nz(gtu(lvar(0), i32c(255))))
     );
     let leaf = "forall { exists { let a: [u8; 2] = @; assert(a[0] > 255); } }";
     assert_eq!(
         obligation_of("", leaf),
-        ex(and(
-            nz(ltu(lvar(0), i32c(256))),
-            ex(nz(gtu(lvar(1), i32c(255))))
-        ))
+        exd("u8", ex(nz(gtu(lvar(1), i32c(255)))))
     );
 }
 
@@ -6633,11 +7609,11 @@ fn no_reachability_fixture_reaches_an_overflow_guard() {
          failure rather than a narrowing"
     );
     assert_eq!(
-        examined, 49,
+        examined, 51,
         "the corpus this sweep examines is pinned; a fixture added to it belongs in this count"
     );
     assert_eq!(
-        retained_bodies, 15,
+        retained_bodies, 25,
         "the retained `exists`/`unique` bodies are what the two rules are about, so their \
          number is what says this sweep is not passing over an empty corpus"
     );

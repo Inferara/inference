@@ -151,9 +151,9 @@ mod tests {
     use super::Pin;
     use std::path::Path;
 
-    const VERIFIER_B: &str = "8f485f037a270271bf2e1393c24fc0684097163b";
+    const VERIFIER_B: &str = "2b7d50ded99e3b74bba7fc288bd6e05ab0c367aa";
     const PROTECTED_CHECKOUT: &str = "actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f";
-    const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=7 proved=15 refuted=1";
+    const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=9 proved=21 refuted=1";
 
     /// The marker this module asserts the workflow contains is the one the
     /// harness prints.

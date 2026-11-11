@@ -13,8 +13,8 @@ name: Rocq real libraries (wasm-to-v)
 #   * the real-library job type-checks every gated module against the real
 #     libraries, including the PRIVATE wasm-verifier one. That needs a runner
 #     carrying those libraries, so it skips loudly where none is configured.
-#   * the selected-artifact job asks pinned verifier B to discharge seven exact
-#     fresh artifacts and requires the fifteen-proved/one-refuted result.
+#   * the selected-artifact job asks pinned verifier B to discharge nine exact
+#     fresh artifacts and requires the twenty-one-proved/one-refuted result.
 
 on:
   push:
@@ -266,13 +266,13 @@ jobs:
   # pull_request_target.
   #
   # WASM_VERIFIER_DISCHARGER must resolve to verifier B
-  # 8f485f037a270271bf2e1393c24fc0684097163b's
+  # 2b7d50ded99e3b74bba7fc288bd6e05ab0c367aa's
   # ci/discharge/run-docker-case.sh. The adapter itself requires that clean B
   # revision and implements the protocol-1 single-case executable contract.
   selected-artifact-discharge:
     name: Selected-artifact discharge
     # This job's configured adapter is verifier B
-    # 8f485f037a270271bf2e1393c24fc0684097163b ci/discharge/run-docker-case.sh.
+    # 2b7d50ded99e3b74bba7fc288bd6e05ab0c367aa ci/discharge/run-docker-case.sh.
     needs: dischargeability-gate
     if: needs.dischargeability-gate.outputs.present == 'true'
     runs-on: ${{ vars.WASM_VERIFIER_RUNNER }}
@@ -293,7 +293,7 @@ jobs:
           esac
           cargo +1.98.0 fetch --locked
 
-      - name: Discharge the seven selected fresh artifacts
+      - name: Discharge the nine selected fresh artifacts
         env:
           INFERENCE_WASM_VERIFIER_DISCHARGER: ${{ vars.WASM_VERIFIER_DISCHARGER }}
           INFERENCE_ROCQ_DISCHARGE_REQUIRED: '1'
@@ -302,7 +302,7 @@ jobs:
           cargo +1.98.0 test -p inference-tests --locked --offline --verbose \
             "rocq_dischargeability::direct::configured_dischargeability_gate" \
             -- --exact --nocapture 2>&1 | tee selected-discharge.log
-          marker='rocq-discharge: result=pass cases=7 proved=15 refuted=1'
+          marker='rocq-discharge: result=pass cases=9 proved=21 refuted=1'
           if marker_count=$(awk -v marker="$marker" \
             '$0 == marker { count++ } END { print count + 0 }' selected-discharge.log)
           then
@@ -316,13 +316,13 @@ jobs:
           esac
           if [ "$marker_count" -ne 1 ]; then
             echo "::error::selected-artifact discharge emitted $marker_count exact success \
-          markers; expected exactly one seven-case, fifteen-proved, one-refuted marker"
+          markers; expected exactly one nine-case, twenty-one-proved, one-refuted marker"
             exit 1
           fi
           {
             echo "### Selected-artifact dischargeability: CHECKED"
             echo
-            echo "Exactly seven fresh artifacts discharged: fifteen endpoints proved,"
+            echo "Exactly nine fresh artifacts discharged: twenty-one endpoints proved,"
             echo "one false-spec endpoint refuted, against pinned verifier B."
           } >> "$GITHUB_STEP_SUMMARY"
 

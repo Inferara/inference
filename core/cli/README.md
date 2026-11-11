@@ -378,7 +378,7 @@ Inference provides first-class support for non-deterministic programming pattern
 - **`forall`** - Forall block (all computation paths are reachable)
 - **`exists`** - Exists block (at least one computation path is reachable)
 - **`assume`** - Assume statement (filters execution paths inside blocks)
-- **`unique`** - Unique block (exactly one computation path is reachable)
+- **`unique`** - Unique block (exactly one value of the `let x: T = @;` draws written directly in the block completes it)
 
 ### WebAssembly Non-deterministic Instructions
 

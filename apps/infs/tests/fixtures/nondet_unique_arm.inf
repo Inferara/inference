@@ -1,0 +1,17 @@
+// A `unique` kind on an `if` arm is the nested `unique` block spelled on the
+// arm, and gets exactly what the block gets. Inside an `exists`-quantified
+// function the run supplies the value and the obligation's payload adds that
+// it is the only one: a universal claim (`Hall`) on the arm the run takes. A
+// build that read the arm as a plain one would drop that claim without a word.
+pub fn main() -> i32 {
+    return 0;
+}
+
+spec UniqueArm {
+    fn only_one(n: i32) exists {
+        if n > 0 unique {
+            let x: i32 = @;
+            assert(x == n);
+        }
+    }
+}

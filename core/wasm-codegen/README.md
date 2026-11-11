@@ -291,17 +291,32 @@ pub fn example() {
 
 ### Unique Block
 
-Uniqueness constraint - exactly one execution path is reachable inside the block.
+Uniqueness constraint - exactly one value of the draws the block declares
+completes it. The values compared are the scalar `let x: T = @;` statements
+written directly in the block; a draw under a nested `exists` or `forall`
+belongs to that quantifier.
 
 ```inference
-pub fn example() {
-    unique {
-        const a: i32 = 42;
+spec Factors {
+    // 6 has exactly one factor pair with `1 < p < q < 6`.
+    fn factor_pair() {
+        unique {
+            let p: u32 = @;
+            let q: u32 = @;
+            assert(p > 1);
+            assert(p < q);
+            assert(q < 6);
+            assert(p * q == 6);
+        }
     }
 }
 ```
 
 **Custom opcode:** `0xfc 0x3d` + `0x40` (block type) + body + `0x0b` (end)
+
+In proof mode a `unique` block inside a specification function emits no
+opcode: it becomes part of the function's obligation, as described in
+[`docs/specification-obligations.md`](./docs/specification-obligations.md).
 
 ## Type Mapping
 

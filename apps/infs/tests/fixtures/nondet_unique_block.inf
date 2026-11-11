@@ -1,0 +1,17 @@
+// A nested `unique` block in a `forall` spec function. A proof-mode build
+// (`-v`) states it as a logical claim in the function's obligation: some
+// value completes the block (`HA_ex`), and every value that completes it is
+// that one (`Hall`). The claim is true: for every `n`, exactly one `x` equals
+// it.
+pub fn main() -> i32 {
+    return 0;
+}
+
+spec UniqueBlock {
+    fn exactly_one(n: i32) forall {
+        unique {
+            let x: i32 = @;
+            assert(x == n);
+        }
+    }
+}

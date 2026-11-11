@@ -1,5 +1,4 @@
-// A `unique`-BODIED spec function (`fn f() unique { … }`). The nested `unique`
-// block in `nondet_unique.inf` stays a fatal P002; a unique BODY is
+// A `unique`-BODIED spec function (`fn f() unique { … }`). A unique BODY is
 // reachability-lowered exactly like an exists one, and its obligation selects
 // the `ValidUniqueSpec` theorem in the `.v`. The `assume` pins the named
 // choice to one value, so exactly one choice survives — the shape the unique

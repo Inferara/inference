@@ -154,6 +154,11 @@ pub(crate) struct ChoiceParam {
     /// aggregate leaf: an aggregate's `let` binds a frame pointer, not a
     /// parameter.
     pub(crate) named: bool,
+    /// Whether the `let x: T = @;` that names this parameter is a statement of
+    /// the function body itself rather than of a block nested in it. A
+    /// `unique`-quantified function compares the values drawn directly in its
+    /// body; a draw nested deeper belongs to whatever encloses it.
+    pub(crate) direct: bool,
 }
 
 /// What one `@` expression was planned as.
@@ -358,7 +363,7 @@ fn plan_function(
         module_path,
         plan: ChoicePlan::new(contract, entry_arity),
     };
-    builder.walk_block(*body);
+    builder.walk_block(*body, true);
     builder.plan
 }
 
@@ -377,14 +382,16 @@ impl PlanBuilder<'_> {
     /// nested block) are still walked: the plan must cover every `@` the
     /// compiler will lower, and the rejection is the obligation pass's to
     /// raise — duplicating it here would fork the diagnostic surface.
-    fn walk_block(&mut self, block_id: BlockId) {
+    ///
+    /// `direct` is true only for the function body's own statements.
+    fn walk_block(&mut self, block_id: BlockId, direct: bool) {
         let arena = self.arena;
         for &stmt_id in &arena[block_id].stmts {
             match &arena[stmt_id].kind {
                 Stmt::VarDef { value, .. } => {
                     if let Some(value) = *value {
                         if matches!(self.arena[value].kind, Expr::Uzumaki) {
-                            self.plan_choice(value, true);
+                            self.plan_choice(value, true, direct);
                         } else {
                             self.walk_expr(value);
                         }
@@ -405,17 +412,17 @@ impl PlanBuilder<'_> {
                     else_block,
                 } => {
                     self.walk_expr(*condition);
-                    self.walk_block(*then_block);
+                    self.walk_block(*then_block, false);
                     if let Some(else_block) = else_block {
-                        self.walk_block(*else_block);
+                        self.walk_block(*else_block, false);
                     }
                 }
-                Stmt::Block(inner) => self.walk_block(*inner),
+                Stmt::Block(inner) => self.walk_block(*inner, false),
                 Stmt::Loop { condition, body } => {
                     if let Some(condition) = condition {
                         self.walk_expr(*condition);
                     }
-                    self.walk_block(*body);
+                    self.walk_block(*body, false);
                 }
                 Stmt::ConstDef(def_id) => {
                     if let Def::Constant { value, .. } = &arena[*def_id].kind {
@@ -466,7 +473,7 @@ impl PlanBuilder<'_> {
             // The type checker refuses an `@` anywhere in a repeat's value, so
             // this finds none; it is walked so the refusal is the only reason.
             Expr::ArrayRepeat { value, .. } => self.walk_expr(*value),
-            Expr::Uzumaki => self.plan_choice(expr_id, false),
+            Expr::Uzumaki => self.plan_choice(expr_id, false, false),
             Expr::Identifier(_)
             | Expr::NumberLiteral { .. }
             | Expr::BoolLiteral { .. }
@@ -485,7 +492,7 @@ impl PlanBuilder<'_> {
     /// [`ChoicePlan::covers_every_uzumaki`], which is what keeps the
     /// compiler's end-of-body vanilla check from turning that diagnostic into
     /// a panic.
-    fn plan_choice(&mut self, expr_id: ExprId, named: bool) {
+    fn plan_choice(&mut self, expr_id: ExprId, named: bool, direct: bool) {
         let Some(type_info) = self.ctx.get_node_typeinfo(NodeId::Expr(expr_id)) else {
             self.plan.covers_every_uzumaki = false;
             return;
@@ -494,7 +501,11 @@ impl PlanBuilder<'_> {
         if let Some(class) = ChoiceClass::of_scalar(&kind) {
             let ordinal = self.next_ordinal();
             self.record(expr_id, ChoiceRun::Scalar(ordinal));
-            self.plan.params.push(ChoiceParam { class, named });
+            self.plan.params.push(ChoiceParam {
+                class,
+                named,
+                direct: named && direct,
+            });
             return;
         }
         // An aggregate `@` in an `exists`/`unique` body stays unplanned: its
@@ -520,6 +531,7 @@ impl PlanBuilder<'_> {
                 // parameter, so no leaf is the source-visible face of the
                 // binding.
                 named: false,
+                direct: false,
             }));
     }
 
