@@ -56,7 +56,7 @@ exists {
 ```";
 
 /// Hover markdown for a `unique` block.
-pub(crate) const UNIQUE_HOVER: &str = r#"**`unique` — exactly one choice succeeds**
+pub(crate) const UNIQUE_HOVER: &str = r"**`unique` — exactly one choice succeeds**
 
 Claims **exactly one** value of its named draws (`let x: T = @;`) succeeds; every other
 value must fail, and anonymous `@` arguments are refused. As a body (`fn f(…) unique`) this
@@ -64,7 +64,7 @@ holds for every argument; in a block, a call that traps does not rule a value ou
 
 ```inference
 unique { let n: i32 = @; assert(n > 3); assert(n < 5); }  // only n == 4
-```"#;
+```";
 
 /// Hover markdown for an `assume` block.
 pub(crate) const ASSUME_HOVER: &str = r"**`assume` — keep only the paths where this holds**
