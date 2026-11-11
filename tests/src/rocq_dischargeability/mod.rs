@@ -8,7 +8,7 @@ mod direct;
 mod pin;
 mod protocol;
 
-const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=7 proved=15 refuted=1";
+const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=9 proved=21 refuted=1";
 
 pub fn export_cli(exchange: &Path) -> Result<()> {
     export(exchange)?;
@@ -748,6 +748,8 @@ mod tests {
             "2889e852f5e99df59f58cd72d6242f2252f3de586e14b80bf6ce46b78906b978",
             "5c3ffda731a4051c88eee2670aefddd40fbf5ba2c82ae21af328a8809c55d6d3",
             "6c8bb675c1ec5ce4fa254d1b7dcc01d23dfa0ef424865d7c1f49859b62651639",
+            "d181589dbb0097619bc1d82378bdce96e0b2e0ca947c2b2655db1f9cc7d1f799",
+            "0ba9090acd5688067161c8473dfe16d9d5c68219a27c0b49683126983a20c7e6",
         ];
 
         let entries = exchange_names(exchange.path());

@@ -9,7 +9,7 @@ that consumes the generated `.v` files.
 
 The consumer is wasm-verifier (a private Inferara repository; this
 document is the authoritative, in-repo statement of the contract —
-verified against wasm-verifier commit `8f485f0`, and the vendored
+verified against wasm-verifier commit `2b7d50d`, and the vendored
 signature stub in `rocq-stub/` type-checks the emittable subset of it
 locally), built on **vanilla WasmCert-Coq v2.2.0** at commit `0fd83fa`
 — not the `WasmCert-Coq-Essence` fork this crate previously targeted.
@@ -71,7 +71,7 @@ collapsed:
    every normal generated theorem skeleton contains `Admitted.`, so even a
    false statement can elaborate.
 3. **Exact-artifact discharge** is the stronger, narrowly scoped claim for the
-   seven artifacts below. It requires fresh producer output to equal its
+   nine artifacts below. It requires fresh producer output to equal its
    committed golden byte-for-byte, compiles those unchanged bytes as
    `DischargeCase.Raw`, proves or refutes the exact generated theorem types in
    verifier-owned companions, rebinds those types to closed `Qed` endpoints,
@@ -80,14 +80,16 @@ collapsed:
    other raw byte may be spliced into or rewritten in the proof companion.
 
 Inference pins the independent companions, manifest, discharger, and Docker
-adapters at wasm-verifier B (`8f485f037a270271bf2e1393c24fc0684097163b`), which
-certifies all seven cases: fifteen proved endpoints and the false fixture's
-refuted one. `overflow` reached that state through a third A -> B -> C round,
-the same one `linked-extern` took before it: this repository published the
-artifact first (A), B proved it against those exact bytes and admitted it to
-its manifest, and the pin bump to B is the C that lets the configured lane
-require the seven-case marker and pass it. Nothing certified fifteen endpoints
-before that bump. Absence of the configured executable is reported as
+adapters at wasm-verifier B (`2b7d50ded99e3b74bba7fc288bd6e05ab0c367aa`), which
+certifies all nine cases: twenty-one proved endpoints and the false fixture's
+refuted one. `unique-blocks` and `unique-reach` reached that state through a
+fourth A -> B -> C round, the same one `linked-extern` and `overflow` took
+before them: this repository published the artifacts first (A), B proved them
+against those exact bytes and admitted them to its manifest, and the pin bump
+to B is the C that lets the configured lane require the nine-case marker and
+pass it. The same round re-proved `prime-bounded`, whose bytes moved when
+every existential draw gained its type guard. Nothing certified twenty-one
+endpoints before that bump. Absence of the configured executable is reported as
 `Selected-artifact dischargeability: SKIPPED`, never as proof success.
 
 The initial ordered floor is exact:
@@ -101,9 +103,11 @@ The initial ordered floor is exact:
 | `false-spec` | `rocq_false_certificate.v` | `valid_rocq_false_certificate` -> `checked_valid_module`; `valid_rocq_false_certificate__FalseCertificate` -> `checked_valid_spec_is_false` | 1 proved, 1 refuted |
 | `linked-extern` | `spec_linked_extern.v` | `valid_spec_linked_extern` -> `checked_valid_module`; `valid_spec_linked_extern__DoubleSpec` -> `checked_valid_spec` | 2 proved, 0 refuted |
 | `overflow` | `spec_overflow_realization.v` | `valid_spec_overflow_realization` -> `checked_valid_module`; `valid_spec_overflow_realization__OverflowRealization` -> `checked_valid_spec` | 2 proved, 0 refuted |
+| `unique-blocks` | `spec_unique_blocks.v` | `valid_spec_unique_blocks` -> `checked_valid_module`; `valid_spec_unique_blocks__UniqueBlocks` -> `checked_valid_spec` | 2 proved, 0 refuted |
+| `unique-reach` | `spec_unique_reach_discharge.v` | `valid_spec_unique_reach_discharge` -> `checked_valid_module`; `valid_spec_unique_reach_discharge__UniqueReachDischarge` -> `checked_valid_spec`; `valid_exists_spec_unique_reach_discharge__UniqueReachDischarge` -> `checked_valid_exists_spec`; `valid_unique_spec_unique_reach_discharge__UniqueReachDischarge` -> `checked_valid_unique_spec` | 4 proved, 0 refuted |
 
-The aggregate is exactly seven cases, fifteen proved endpoints, one refuted
-endpoint, and sixteen audited rebound endpoints. The false companion's
+The aggregate is exactly nine cases, twenty-one proved endpoints, one refuted
+endpoint, and twenty-two audited rebound endpoints. The false companion's
 endpoint name is exactly `checked_valid_spec_is_false`; the manifest names it
 directly, and `Rebind.v` uses that name directly. There is no compatibility
 alias, and the refuted endpoint has no positive twin. The historical `rocq_prime_example.inf`
@@ -121,16 +125,26 @@ separately, merges them with `core/wasm-linker`, and translates the merged
 module. So it is the only endpoint in this table proved over a body the
 compiler never emitted — `valid_spec_linked_extern__DoubleSpec` applies
 `mathlib_double`, spliced in at its post-merge `mod_funcs` ordinal — which is
-the claim the six compiled cases cannot make at all.
+the claim the single-compilation cases cannot make at all.
 
 `overflow` is appended after it for the same wire-order reason. It is the only
 case whose executable body carries an overflow guard, so it is the only one
 whose obligation is discharged over arithmetic that can trap; its envelope is
 what makes that obligation true rather than vacuous.
 
+`unique-blocks` and `unique-reach` follow. They are the only cases whose
+payloads carry a nested `unique` block: the first in seven `forall`
+functions, where each obligation is "one well-typed value satisfies the block
+and every well-typed rival equals it"; the second in an `exists`- and a
+`unique`-quantified function, where the run supplies the value and the
+payload adds the rival clause. `unique-reach` is the only case with four
+endpoints, because its one specification states both reachability kinds. The
+broader `spec_unique_reach.v` (eight functions, one with a call mid-run) is
+elaborated but not discharged.
+
 Phase A's export accepts a new empty absolute exchange directory, freshly
-generates the seven artifacts in the order above, requires byte identity with
-the seven committed goldens, and publishes exactly `request.json` plus `raw/`.
+generates the nine artifacts in the order above, requires byte identity with
+the nine committed goldens, and publishes exactly `request.json` plus `raw/`.
 The protocol-1 request is strict JSON: duplicate and unknown keys fail. It
 contains the pinned wasm-verifier revision, `coq_wasm_tag`, canonical
 `coq_wasm_revision`, `coq_series`, the assumption-allowlist ceiling, exact
@@ -154,7 +168,7 @@ shell wrapper owns the directory/file identity evidence and requires each
 receipt to remain a regular nonsymlink, single-link `0600` file. Rust
 independently requires the exact nonsymlink regular-file set, strictly parses
 each receipt, rejects duplicate and unknown JSON keys, checks every
-raw/pin/count/audit/result field, and requires the aggregate seven/fifteen/one
+raw/pin/count/audit/result field, and requires the aggregate nine/twenty-one/one
 floor. Receipt `coq_version` accepts only the whole-string grammar
 `major.minor`, `major.minor.<numeric-patch>`, or
 `major.minor+<nonempty-safe-suffix>`, and its parsed major/minor must be `8.20`;
@@ -201,9 +215,9 @@ does not enable a live lane and still names the pre-B verifier revision. B pins
 A, reads A's goldens with `git show A:<path>`, and constructs its own request
 for clean B rather than consuming A's stale request. C pins B and only then
 enables live fresh-output discharge through B's single-case adapter. Adding a
-selected artifact re-enters that sequence at A: the `overflow` case above is
-such an A, so `wasm-verifier-pin.txt` still names the previous B and the live
-lane cannot pass until its own C.
+selected artifact re-enters that sequence at A, and until its own C
+`wasm-verifier-pin.txt` still names the previous B and the live lane cannot
+pass. Every case in the table above has completed its round.
 
 ## Required Rocq context
 

@@ -326,6 +326,24 @@ pub(super) const CASES: &[CaseSpec] = &[
         2,
         0,
     ),
+    CaseSpec::new(
+        "unique-blocks",
+        "spec_unique_blocks.inf",
+        "spec_unique_blocks",
+        Linkage::SingleFile,
+        "tests/test_data/rocq/spec_unique_blocks.v",
+        2,
+        0,
+    ),
+    CaseSpec::new(
+        "unique-reach",
+        "spec_unique_reach_discharge.inf",
+        "spec_unique_reach_discharge",
+        Linkage::SingleFile,
+        "tests/test_data/rocq/spec_unique_reach_discharge.v",
+        4,
+        0,
+    ),
 ];
 
 #[cfg(test)]
@@ -420,13 +438,31 @@ mod tests {
                     2,
                     0,
                 ),
+                (
+                    "unique-blocks",
+                    "spec_unique_blocks.inf",
+                    "spec_unique_blocks",
+                    vec![],
+                    "spec_unique_blocks.v",
+                    2,
+                    0,
+                ),
+                (
+                    "unique-reach",
+                    "spec_unique_reach_discharge.inf",
+                    "spec_unique_reach_discharge",
+                    vec![],
+                    "spec_unique_reach_discharge.v",
+                    4,
+                    0,
+                ),
             ]
         );
     }
 
     #[test]
     fn selected_case_ids_and_basenames_are_unique_and_safe() {
-        assert_eq!(CASES.len(), 7, "the uniqueness checks must cover seven cases");
+        assert_eq!(CASES.len(), 9, "the uniqueness checks must cover nine cases");
         let mut ids = BTreeSet::new();
         let mut basenames = BTreeSet::new();
 
@@ -455,14 +491,14 @@ mod tests {
     }
 
     #[test]
-    fn selected_case_floor_is_seven_cases_fifteen_proved_one_refuted() {
-        assert_eq!(CASES.len(), 7);
+    fn selected_case_floor_is_nine_cases_twenty_one_proved_one_refuted() {
+        assert_eq!(CASES.len(), 9);
         assert_eq!(
             CASES
                 .iter()
                 .map(|case| case.expected_proved())
                 .sum::<usize>(),
-            15
+            21
         );
         assert_eq!(
             CASES
@@ -559,7 +595,7 @@ mod tests {
 
     #[test]
     fn selected_case_counts_agree_with_committed_golden_theorems() {
-        assert_eq!(CASES.len(), 7, "the golden checks must cover seven cases");
+        assert_eq!(CASES.len(), 9, "the golden checks must cover nine cases");
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("tests crate has a repository parent");

@@ -334,7 +334,7 @@ Inference extends WebAssembly with custom instructions for non-deterministic com
 | `forall` | `0xfc 0x3a` | Begin universal quantification block |
 | `exists` | `0xfc 0x3b` | Begin existential quantification block |
 | `assume` | `0xfc 0x3c` | Filter execution paths by constraint |
-| `unique` | `0xfc 0x3d` | Assert exactly one execution path exists |
+| `unique` | `0xfc 0x3d` | Assert exactly one value of the block's own draws completes it |
 | `i32.uzumaki` | `0xfc 0x31` | Generate non-deterministic i32 value |
 | `i64.uzumaki` | `0xfc 0x32` | Generate non-deterministic i64 value |
 

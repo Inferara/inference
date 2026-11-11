@@ -192,7 +192,7 @@ The code generator supports Inference's non-deterministic extensions via custom 
 | `forall { }` | `0xfc 0x3a` | Universal quantification block |
 | `exists { }` | `0xfc 0x3b` | Existential quantification block |
 | `assume { }` | `0xfc 0x3c` | Precondition filtering |
-| `unique { }` | `0xfc 0x3d` | Uniqueness constraint |
+| `unique { }` | `0xfc 0x3d` | Exactly one value of the block's own draws completes it |
 
 #### Example: Non-Deterministic Code
 
